@@ -751,6 +751,35 @@ def test_a_reconnect_never_touches_what_the_model_decided(tmp_path) -> None:
     assert rows_in(store)[0][2] == LOADED
 
 
+def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
+    tmp_path,
+) -> None:
+    """The `Returns:` prose a tool declared, stored beside its input schema.
+
+    **It is not in the description**, because FastMCP drops the section when it
+    has parameters to parse; the plugin reads it from the docstring and puts it
+    on `_meta`, and this is where the hub keeps it.  A tool that says nothing
+    gets the same absence sentinel the schema uses — an empty string would be a
+    value nobody wrote.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "context",
+        "plugin",
+        [tool("turn_list", returns="`entries` — one per turn.\n`total` — how many.")],
+    )
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+
+    with sqlite3.connect(store.path) as connection:
+        stored = dict(connection.execute("SELECT name, returns FROM tool"))
+    assert stored == {
+        "arxiv__search": NA,
+        "turn_list": "`entries` — one per turn.\n`total` — how many.",
+    }
+    assert store.route("turn_list")["returns"].startswith("`entries`")
+
+
 # --- loading and the budget ---------------------------------------------------
 
 

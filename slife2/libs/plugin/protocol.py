@@ -60,11 +60,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,9 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.transports.base import ClientTransport, TransportOptions
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import Tool
 from mcp import ClientSession
+from mcp import types as mt
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
@@ -221,6 +224,100 @@ def agent_or_blank(ctx: Any) -> str:
     return found[0] if found else ""
 
 
+#: The `_meta` key a tool's **return** description travels under.  Namespaced
+#: for the reason `slife2.libs.plugin.audience.AUDIENCE` is: `_meta` is shared with
+#: the protocol, FastMCP and every other reader.
+#:
+#: **It is a separate key rather than the description** because the two answer
+#: different questions: the description says what the tool is *for* and is read
+#: by a model choosing one; this says what its answer *holds* and is a fact the
+#: catalogue keeps (`slife2.plugins.toolhub.server` stores it).  `DeclareReturns` is
+#: what fills it from the docstring, and `returns_of` is the reading.
+RETURNS = "slife2/returns"
+
+
+def returns_of(fn: Any) -> str:
+    """The `Returns:` text a function's docstring declares, or `""`.
+
+    **FastMCP drops that section whenever it parsed the arguments.**  Its
+    `ParsedDocstring` keeps a description and parameter descriptions only —
+    measured against 4.0.11 — so a tool whose docstring has `Args:` (nearly
+    every tool here) arrives with no statement of what its answer holds.  The
+    section is still in the function, and this is how the process that has the
+    function reads it back.
+
+    Parsed with griffe, the parser FastMCP itself uses, in the same three styles
+    and in the same order.  `warnings=False` because a docstring with no type
+    annotations is the normal shape here, and griffe's advice is about a file
+    this system does not publish.  The Google parser's
+    `returns_multiple_items=False` keeps one `Returns:` section as one block of
+    prose rather than one entry per line, which is the shape the catalogue
+    stores and a model reads; the other two styles have no such option.
+
+    The import is inside this function for FastMCP's reason: a process that
+    never lists a tool should not pay for the parser's model graph.
+    """
+    from griffe import Docstring, DocstringSectionKind, DocstringStyle
+
+    doc = inspect.getdoc(fn) or ""
+    if not doc:
+        return ""
+    styles: tuple[tuple[DocstringStyle, dict[str, Any]], ...] = (
+        ("google", {"returns_multiple_items": False}),
+        ("numpy", {}),
+        ("sphinx", {}),
+    )
+    for parser, options in styles:
+        sections = Docstring(doc, lineno=1, parser=parser).parse(
+            warnings=False, **options
+        )
+        found: list[str] = []
+        for section in sections:
+            if section.kind != DocstringSectionKind.returns:
+                continue
+            for item in section.value:
+                text = (item.description or "").strip()
+                if text:
+                    found.append(text)
+        if found:
+            return "\n".join(found)
+    return ""
+
+
+class DeclareReturns(Middleware):
+    """Put a tool's `Returns:` section on its `_meta`, where the hub can read it.
+
+    **A plugin's own tools only.**  `tools/list` is the one place the hub sees
+    them, and it carries no function to inspect: the docstring is in the plugin
+    process, so the plugin states the answer.  A tool the operator configured
+    under `mcp:` is somebody else's and says what it wants in `_meta` itself;
+    the hub reads the same key from it without this middleware being involved.
+
+    **In `_meta` and not in the description**, because the description goes out
+    with every request the model makes (`slife2.libs.turn.tools`), while a return
+    contract is something the catalogue keeps — the model can be shown it when a
+    search result is a choice, not in every tool list.  Whether to put it in the
+    description is a display decision; losing it at `tools/list` is not.
+
+    A tool that already carries the key keeps it: an explicit statement on the
+    tool is its author's, and this is the default for a docstring that says it.
+    """
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        tools = await call_next(context)
+        for tool in tools:
+            if RETURNS in (tool.meta or {}):
+                continue
+            found = returns_of(getattr(tool, "fn", None))
+            if found:
+                tool.meta = {**(tool.meta or {}), RETURNS: found}
+        return tools
+
+
 def house_server(
     name: str,
     *,
@@ -230,7 +327,8 @@ def house_server(
 ) -> FastMCP:
     """A FastMCP server with this project's conventions applied.
 
-    One convention so far, and it is worth stating rather than defaulting:
+    One convention is a constructor option, and it is worth stating rather than
+    defaulting:
 
     * ``mask_error_details=False`` — FastMCP's default replaces an exception's
       message with a generic one.  Every server here listens on loopback and
@@ -262,6 +360,7 @@ def house_server(
         mask_error_details=False,
     )
     mcp.add_middleware(ServeTheCallersHome())
+    mcp.add_middleware(DeclareReturns())
     return mcp
 
 

@@ -166,6 +166,7 @@ _TOOL_COLUMNS = frozenset(
         "source_id",
         "remote_name",
         "schema",
+        "returns",
         "status",
         "load_status",
         "last_loaded",
@@ -251,6 +252,7 @@ CREATE TABLE IF NOT EXISTS tool (
     source_id   TEXT NOT NULL DEFAULT 'n/a',
     remote_name TEXT NOT NULL DEFAULT 'n/a',
     schema      TEXT NOT NULL DEFAULT 'n/a',
+    returns     TEXT NOT NULL DEFAULT 'n/a',
     status      TEXT NOT NULL DEFAULT 'enabled'
                 CHECK (status IN ('enabled','disabled','error')),
     load_status TEXT NOT NULL DEFAULT 'unloaded'
@@ -362,6 +364,7 @@ def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_id": str(row["source_id"]),
         "remote_name": str(row["remote_name"]),
         "schema": str(row["schema"]),
+        "returns": str(row["returns"]),
         "status": str(row["status"]),
         "load_status": str(row["load_status"]),
     }
@@ -707,6 +710,7 @@ class ToolStore:
                     "source_id": source,
                     "remote_name": str(row.get("remote_name") or name),
                     "schema": str(row.get("schema") or NA) or NA,
+                    "returns": str(row.get("returns") or NA) or NA,
                 }
                 # **A row may carry its own verdict.**  Every other row's status
                 # is the *runtime's* — `source_state` is the only writer, because
@@ -789,9 +793,9 @@ class ToolStore:
             for entry in plan["inserts"]:
                 cursor = connection.execute(
                     "INSERT INTO tool(name, description, category, source_id,"
-                    " remote_name, schema, status, load_status, last_loaded,"
-                    " last_used)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " remote_name, schema, returns, status, load_status,"
+                    " last_loaded, last_used)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         entry["name"],
                         entry["description"],
@@ -799,6 +803,7 @@ class ToolStore:
                         entry["source_id"],
                         entry["remote_name"],
                         entry["schema"],
+                        entry["returns"],
                         entry["status"],
                         entry["load_status"],
                         entry["last_loaded"],

@@ -1196,6 +1196,14 @@ effect at the next search rather than at the next restart.
 The hub's own tools are rows too. They are the set-level work that no plugin can
 answer: what exists, what the model is holding, and what the budget took back.
 
+A plugin's own tools also state what their answer holds: the `Returns:` section
+of the docstring travels in `_meta` under `slife2/returns` (`DeclareReturns` in
+`libs/plugin/protocol.py`), because FastMCP drops that section from the
+description whenever it parses the arguments. The hub stores it in the
+catalogue's `returns` column beside the input schema. An external server may
+state the same key; the hub reads it there too, and a tool that says nothing
+gets the catalogue's absence sentinel rather than an empty answer.
+
 ### 7.3 Naming
 
 Names are rewritten once, at the hub.

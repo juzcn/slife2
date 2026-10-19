@@ -27,8 +27,9 @@ from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.protocol import (
+    RETURNS,
     house_server,
     identifies,
     open_server,
@@ -133,6 +134,73 @@ def test_house_server_carries_instructions_and_omits_empty_ones() -> None:
         "Read me."
     )
     assert not house_server("slife2-test").instructions
+
+
+@pytest.mark.asyncio
+async def test_a_tools_returns_section_travels_in_meta_not_the_description() -> None:
+    """**The docstring's `Returns:` is lost by default, and this is what keeps it.**
+
+    FastMCP builds the description from the docstring's first text section and
+    its `Args`, and drops the `Returns:` section whenever it parsed parameters
+    (measured against 4.0.11) — so a tool with arguments arrives with nothing
+    saying what its answer holds.  The section is still in the function, and the
+    plugin process is the only party that has it; `DeclareReturns` puts it on
+    `_meta` for the hub to catalogue.
+
+    It stays out of the description on purpose.  The description is sent with
+    every request the model makes; the return contract is a fact the catalogue
+    keeps, and whether to show it beside a search result is a display decision.
+    """
+    mcp = house_server("slife2-test")
+
+    @mcp.tool(meta=FOR_THE_MODEL)
+    def finds(x: int) -> dict[str, Any]:
+        """Find something.
+
+        Args:
+            x: How many.
+
+        Returns:
+            `rows` — what was found.
+            `total` — how many there are.
+        """
+        return {"rows": [x], "total": 1}
+
+    async with Client(mcp) as client:
+        tool = next(one for one in await client.list_tools() if one.name == "finds")
+
+    assert tool.description == "Find something.", "Args parsed, Returns dropped"
+    assert tool.meta[RETURNS] == (
+        "`rows` — what was found.\n`total` — how many there are."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_returns_text_the_tool_states_itself_is_not_overwritten() -> None:
+    """The middleware is a default for a docstring, not a policy that wins.
+
+    A tool that already carries the key has said something deliberate about its
+    answer; replacing it with the docstring would be this layer overruling the
+    only author who can see both.
+    """
+    mcp = house_server("slife2-test")
+
+    @mcp.tool(meta={**FOR_THE_MODEL, RETURNS: "The row it wrote."})
+    def writes(x: int) -> dict[str, Any]:
+        """Write something.
+
+        Args:
+            x: What to write.
+
+        Returns:
+            A different sentence.
+        """
+        return {"x": x}
+
+    async with Client(mcp) as client:
+        tool = next(one for one in await client.list_tools() if one.name == "writes")
+
+    assert tool.meta[RETURNS] == "The row it wrote."
 
 
 # --- reading what a tool call answered ---------------------------------------

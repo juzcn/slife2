@@ -98,6 +98,12 @@ class UpstreamTool:
     tool: str
     description: str
     parameters: dict[str, Any]
+    #: What the tool's answer holds, as the tool's own `Returns:` section says
+    #: it (`slife2.libs.plugin.protocol.RETURNS`), or `""`.  Not part of the
+    #: model's tool definition — providers do not take an output contract — so
+    #: `spec()` drops it; the hub stores it in the catalogue, where a search or
+    #: a person can read it.
+    returns: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -106,6 +112,7 @@ class UpstreamTool:
             "tool": self.tool,
             "description": self.description,
             "parameters": self.parameters,
+            "returns": self.returns,
         }
 
     @classmethod
@@ -117,6 +124,7 @@ class UpstreamTool:
             tool=str(raw.get("tool") or ""),
             description=str(raw.get("description") or ""),
             parameters=parameters if isinstance(parameters, dict) else {},
+            returns=str(raw.get("returns") or ""),
         )
 
     def spec(self) -> ToolSpec:

@@ -133,6 +133,15 @@ dependencies = [
     # rather than an alternative — an installation that skipped it would size
     # every conversation by hand on every machine, not just the offline ones.
     "tiktoken>=0.14.0",
+    # The docstring parser FastMCP already uses, imported directly by
+    # `slife2.libs.plugin.protocol` for the one thing FastMCP discards: a tool's
+    # `Returns:` section, which the middleware puts on `_meta` for the catalogue.
+    # The distribution is `griffelib`; the module it installs is `griffe`.  It
+    # arrives with FastMCP's own `server` extra today, and is declared by the same
+    # rule as `httpx2` and `paho-mqtt` above: a module this project imports is a
+    # dependency this project states.  The import is inside the one function that
+    # parses, so a process that never lists a tool pays nothing.
+    "griffelib>=2.0.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

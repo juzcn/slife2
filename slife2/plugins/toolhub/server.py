@@ -209,6 +209,7 @@ from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     LIST_SOURCES,
+    RETURNS,
     house_server,
     serve_plugin,
 )
@@ -2246,6 +2247,7 @@ def _advertise(settings: ToolServerSettings, tool: Any) -> UpstreamTool:
         tool=tool.name,
         description=(tool.description or "").strip(),
         parameters=dict(tool.input_schema or {}),
+        returns=str((getattr(tool, "meta", None) or {}).get(RETURNS) or ""),
     )
 
 
@@ -2259,12 +2261,18 @@ def _row_of(server: str, tool: UpstreamTool) -> dict[str, Any]:
 
     An empty `schema` means "nothing to declare" and the store turns it into its
     own sentinel — the hub has no opinion about how a store spells absence.
+
+    **`returns` is the tool's `Returns:` prose**, which the plugin put on
+    `_meta` (`slife2.libs.plugin.protocol.DeclareReturns`).  Empty is the same
+    absence as an empty schema: most external servers say nothing, and that is a
+    fact about them rather than a reason not to store what the ones that do say.
     """
     return {
         "name": tool.name,
         "description": tool.description,
         "remote_name": tool.tool,
         "schema": json.dumps(tool.parameters) if tool.parameters else "",
+        "returns": tool.returns,
     }
 
 
@@ -2291,6 +2299,7 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
         tool=str(row.get("remote_name") or row.get("name") or ""),
         description=f"[{server}] {description}".strip() if server else description,
         parameters=_parameters(str(row.get("schema") or "")),
+        returns=str(row.get("returns") or ""),
     )
 
 
