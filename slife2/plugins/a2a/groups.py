@@ -40,7 +40,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -162,16 +162,32 @@ def clean_members(owner: str, members: Iterable[str]) -> tuple[str, ...]:
 # ── The vocabulary a group message wears ───────────────────────────────
 
 
-def group_marker(net: Net, sender: str, group: str) -> str:
+def group_marker(
+    net: Net,
+    sender: str,
+    group: str,
+    owner: str,
+    members: Sequence[str],
+) -> str:
     """The envelope a group message opens with, in *net*'s group vocabulary.
 
-    ``[PeerAgentGroup:{"from": "alice", "group": "builders", "type":
-    "group_message"}] `` or the local network's ``[SubagentGroup:…]``.  The
-    sender is ``from``; the group is a field of its own, because the marker
-    prefix no longer identifies the sender's relationship the way ``[Agent:``
-    and ``[Subagent:`` did.
+    ``[PeerAgentGroup:{"sender": "alice", "group": "builders", "owner":
+    "alice", "members": ["alice", "bob"], "type": "group_message"}] `` or the
+    local network's ``[SubagentGroup:…]``.  **The roster and the owner travel
+    with every message**: a reader that wants to answer, mention someone, or
+    know whose group this is has the names in front of it, rather than having
+    to ask `group_list` before it can use them.  The wire payload carries the
+    same fields (`mesh.group_fanout`); this is the subset a conversation sees.
+    ``sender`` is the sender, not the receiver — the word the group vocabulary
+    uses, and never ``agent_name``, which is the receiver's own identity.
     """
-    payload = {"from": sender, "group": group, "type": GROUP_MESSAGE}
+    payload = {
+        "sender": sender,
+        "group": group,
+        "owner": owner,
+        "members": list(members),
+        "type": GROUP_MESSAGE,
+    }
     return f"{net.group_marker}{json.dumps(payload, ensure_ascii=False)}] "
 
 

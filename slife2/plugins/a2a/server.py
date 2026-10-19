@@ -904,7 +904,7 @@ def _wire(session: Session) -> None:
         if not result.deliver:
             return
         session.post(
-            f"{group_store.group_marker(session.net, event.sender, event.group)}"
+            f"{group_store.group_marker(session.net, event.sender, event.group, event.owner, event.members)}"
             f"{event.text}",
             event.sender,
             f"a group message from {event.sender} in {event.group}",
@@ -2490,9 +2490,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "accept. Calling this again on a group you own replaces the roster (the\n"
         "way to add or remove someone); a member leaves with `{group_leave}`.\n"
         "\n"
-        "Members are notified with a {group_marker} of type 'group_set'. That\n"
-        "notice is fire-and-forget: a member not on the network now may miss it,\n"
-        "but the next group message carries the roster."
+        "Every member's group list learns the roster from a group-set event.\n"
+        "That notice is fire-and-forget: a member not on the network now may\n"
+        "miss it, but the next group message carries the roster."
     ),
     GROUP_LIST: (
         "List the group chats this conversation knows — ones you made and ones\n"
@@ -2523,7 +2523,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "Send a message to every other member of a group you belong to.\n"
         "\n"
         "**A reply is this call**: ending a turn sends nothing. You are never\n"
-        "one of the recipients. Address people with `@name` as in a chat group:\n"
+        "one of the recipients. The message arrives with a {group_marker}\n"
+        "naming the sender, the group, its owner and every member, so you can\n"
+        "see whom to address. Address people with `@name` as in a chat group:\n"
         "`@researcher` puts that member's name in the message, and `@all`\n"
         "addresses everyone. A mention is attention, not delivery — every other\n"
         "member still receives the message. Delivery is fire-and-forget — no\n"

@@ -844,8 +844,9 @@ agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己�
 
 群是一个带群主的有名成员名单，通过 `peer_agent_group_set` 创建，不需要邀请或
 接受。群消息作为即发即忘事件投递给其他所有成员——绝不会回送给发送者——以
-`[PeerAgentGroup:{"from": …, "group": …}]` marker 到达，频道为
-`peer_agent_group:<group>:<sender>`。每个成员把学到的内容保存在
+`[PeerAgentGroup:{"sender": …, "group": …, "owner": …,
+"members": […]}]` marker 到达，频道为 `peer_agent_group:<group>:<sender>`。
+marker 带着成员名单，因此每个成员都能看到群里还有谁、可以 @ 谁。每个成员把学到的内容保存在
 `agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
 会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或
 解散群；成员的退出方式是 `peer_agent_group_leave`。
