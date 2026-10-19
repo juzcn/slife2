@@ -110,8 +110,16 @@ dependencies = [
     # persistent `aiomqtt` client of our own, and the pre-join name probe is a
     # second, short-lived one.  Declared by the same rule as `httpx2` above: a
     # module this project imports is a dependency this project states.  It
-    # brings `paho-mqtt`, which nothing here imports.
+    # brings `paho-mqtt`, which is declared separately below for the one type
+    # `mesh.py` takes from it directly.
     "aiomqtt>=2.5.0",
+    # `aiomqtt`'s `subscribe(options=…)` takes paho's own
+    # `SubscribeOptions` and does not re-export it — and that is the only way
+    # to ask for MQTT v5's No Local, which is what keeps a member's broadcast
+    # from being delivered back to the member that published it
+    # (`slife2/plugins/a2a/mesh.py`).  So the type is imported directly from
+    # the library that defines it.
+    "paho-mqtt>=2.1.0",
     # The tokenizer `slife2.libs.turn.tokens` sizes a conversation with, and **the one
     # dependency here that is not needed to run**.  It is imported inside the
     # one function that resolves it, so a process that never estimates pays

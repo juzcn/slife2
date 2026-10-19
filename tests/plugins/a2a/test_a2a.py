@@ -1447,6 +1447,8 @@ class _OneMessageBroker:
         self._msg = msg
         self._mesh = mesh
         self.entries = 0
+        #: What the loop asked to be subscribed to: `(topic, qos, options)`.
+        self.subscriptions: list[tuple[str, int, Any]] = []
 
     async def __aenter__(self) -> _OneMessageBroker:
         self.entries += 1
@@ -1456,8 +1458,13 @@ class _OneMessageBroker:
         self._mesh._closing = True
         return False
 
-    async def subscribe(self, topic: str, qos: int = 0) -> None:
-        return None
+    async def subscribe(
+        self,
+        topic: str,
+        qos: int = 0,
+        options: Any = None,
+    ) -> None:
+        self.subscriptions.append((topic, qos, options))
 
     @property
     def messages(self) -> AsyncIterator[Any]:
@@ -1500,6 +1507,41 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
         "a2a_outbound_loop_error" in record.getMessage() and record.exc_info is not None
         for record in caplog.records
     ), "the handler bug left no trace anywhere"
+
+
+@pytest.mark.parametrize("subagent", ["", "child"])
+@pytest.mark.asyncio
+async def test_a_member_does_not_receive_its_own_broadcast(
+    monkeypatch: pytest.MonkeyPatch, subagent: str
+) -> None:
+    """**No Local is what keeps the echo off the wire; the sender check is not.**
+
+    The outbound client publishes `broadcast` and subscribes the event wildcard
+    on the same connection, so without the MQTT v5 subscription option the
+    broker hands the member back its own event — a handler call, a queue entry,
+    a channel and only then the `sender` comparison that throws it away.  No
+    Local is the promise that it never arrives, and it is asked for on the event
+    wildcard alone: the readiness card comes from the responder's *other*
+    connection, and replies come from a peer.  Both meshes are covered because
+    an agent and a subagent are one code path and two identities.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT, subagent=subagent)
+    broker = _OneMessageBroker(
+        FakeMessage("a2a/v1/event/org/unit/broadcast", b"{}"), mesh
+    )
+    monkeypatch.setattr(
+        "slife2.plugins.a2a.mesh.aiomqtt.Client", lambda **kwargs: broker
+    )
+
+    await mesh._run_outbound()
+
+    events = [sub for sub in broker.subscriptions if sub[0] == mesh._topics.event("+")]
+    assert len(events) == 1, "the event wildcard is subscribed exactly once"
+    _, qos, options = events[0]
+    assert qos == 0, "qos and options cannot be combined; the QoS rides options"
+    assert options is not None, "the event subscription carries no options"
+    assert options.noLocal is True, "the broker would echo our own broadcast"
+    assert options.QoS == 1, "the subscription's QoS moved into the options"
 
 
 @pytest.mark.asyncio

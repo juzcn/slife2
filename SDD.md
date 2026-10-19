@@ -1511,6 +1511,11 @@ Rules specific to this system:
 9. **`provider:` is a hard constraint.** Mosquitto is the only broker this build
    speaks; any other value is a configuration error, not a silently disabled
    feature.
+10. **A broadcast is not delivered to its sender.** The event subscription uses
+    MQTT v5's No Local option, so the broker never forwards a member's own
+    publication back to it. The sender named in the payload is the receiver's
+    attribution; an event that names this member but was published by somebody
+    else is refused rather than treated as its own.
 
 The five model-facing tools are:
 

@@ -85,6 +85,7 @@ from a2a_over_mqtt import (
     make_properties,
 )
 from a2a_over_mqtt.protocol import REPLY_ARTIFACT, REPLY_SUBMITTED, REPLY_TEXT
+from paho.mqtt.subscribeoptions import SubscribeOptions
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings
@@ -1002,9 +1003,26 @@ class A2AMesh:
                         self._topics.reply(self.agent_name, "+"),
                         qos=1,
                     )
+                    # **No Local, so a broadcast is not delivered to the member
+                    # that sent it.**  This client is both the publisher of our
+                    # events (`broadcast`) and the subscriber of the wildcard
+                    # they land on, and MQTT v5 otherwise forwards a client its
+                    # own publications.  The No Local subscription option is the
+                    # broker's promise not to, which is the layer that can keep
+                    # it: the event never crosses the wire into a handler, a
+                    # queue, a channel or a turn.  The payload's `sender` check
+                    # in `_handle_event` stays as the receiver's own guard: it is
+                    # what refuses an event that *names* us without this client
+                    # having published it — somebody else's claim about who
+                    # spoke, which No Local cannot see.
+                    #
+                    # The other two subscriptions are deliberately not No Local:
+                    # the card `_responder_ready` waits for is published by the
+                    # *responder's* connection, a different client id, and
+                    # replies come from a peer.
                     await client.subscribe(
                         self._topics.event("+"),
-                        qos=1,
+                        options=SubscribeOptions(qos=1, noLocal=True),
                     )
                     self._outbound = client
                     self._connected = True
@@ -1098,7 +1116,9 @@ class A2AMesh:
         sender = data.get("sender", "")
         text = data.get("text", "")
         if sender == self.agent_name:
-            return  # our own broadcast echo
+            # Not our own echo — No Local keeps that off this subscription
+            # (`_run_outbound`) — but somebody else's claim that we spoke.
+            return
         if not text:
             return
         self.on_broadcast_event(sender or "unknown", text)
@@ -1487,8 +1507,12 @@ class A2AMesh:
         """Publish a fire-and-forget event (QoS 0) on the unit's event topic.
 
         Subscribers receive it as an inbound ``[PeerAgent:…]`` event without a
-        task_id — no reply is expected, and the payload's ``sender`` lets a
-        receiver filter its own echo.
+        task_id — no reply is expected.  **The sender is not one of them**: the
+        event wildcard is subscribed with MQTT v5's No Local option
+        (`_run_outbound`), so the broker does not forward this publication back
+        to the client that made it.  The payload's ``sender`` is therefore the
+        receiver's attribution, and `_handle_event` keeps it as a guard against
+        an event naming us that somebody else published.
         """
         payload = json.dumps(
             {"sender": self.agent_name, "text": event},
