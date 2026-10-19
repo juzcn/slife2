@@ -171,18 +171,19 @@ def group_marker(
 ) -> str:
     """The envelope a group message opens with, in *net*'s group vocabulary.
 
-    ``[PeerAgentGroup:{"sender": "alice", "group": "builders", "owner":
-    "alice", "members": ["alice", "bob"], "type": "group_message"}] `` or the
-    local network's ``[SubagentGroup:…]``.  **The roster and the owner travel
-    with every message**: a reader that wants to answer, mention someone, or
-    know whose group this is has the names in front of it, rather than having
-    to ask `group_list` before it can use them.  The wire payload carries the
-    same fields (`mesh.group_fanout`); this is the subset a conversation sees.
-    ``sender`` is the sender, not the receiver — the word the group vocabulary
-    uses, and never ``agent_name``, which is the receiver's own identity.
+    ``[PeerAgentGroup:{"from": "alice", "group": "builders", "owner": "alice",
+    "members": ["alice", "bob"], "type": "group_message"}] `` or the local
+    network's ``[SubagentGroup:…]``.  **The roster and the owner travel with
+    every message**: a reader that wants to answer, mention someone, or know
+    whose group this is has the names in front of it, rather than having to ask
+    `group_list` before it can use them.  The wire payload carries the same
+    fields (`mesh.group_fanout`); this is the subset a conversation sees.
+
+    ``from`` is the sender, the same key every other marker uses, and never
+    ``agent_name``, which is the receiver's own identity.
     """
     payload = {
-        "sender": sender,
+        "from": sender,
         "group": group,
         "owner": owner,
         "members": list(members),

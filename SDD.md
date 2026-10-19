@@ -1545,11 +1545,11 @@ Rules specific to this system:
     disbanded.
 14. **Group messages have their own vocabulary.** The peer network uses the
     `PeerAgentGroup` channel and marker; the local network uses
-    `SubagentGroup`, for the maker and its subagents alike. The marker names the
-    sender, the group, its owner and every member, so a reader can answer, see
-    the group's roster and mention someone without another call. The wire
-    payload carries the same fields and adds the generation id and the kind;
-    control events use the wire only and never become a marker.
+    `SubagentGroup`, for the maker and its subagents alike. The marker carries
+    `from` (the sender), the group, its owner and every member, so a reader can
+    answer, see the group's roster and mention someone without another call.
+    The wire payload carries the same fields and adds the generation id and the
+    kind; control events use the wire only and never become a marker.
 15. **Mentions are text, not delivery.** `@name` and `@all` address members the
     way a chat group does. They are attention: every other member still
     receives the message.

@@ -941,7 +941,7 @@ with none.
 A group is a named roster with an owner, created by `peer_agent_group_set`; no
 invitation or acceptance is involved. Group messages are delivered as
 fire-and-forget events to every other member — never back to the sender — and
-arrive with a `[PeerAgentGroup:{"sender": …, "group": …, "owner": …,
+arrive with a `[PeerAgentGroup:{"from": …, "group": …, "owner": …,
 "members": […]}]` marker on the `peer_agent_group:<group>:<sender>` channel.
 The marker carries the roster, so every member can see who else is in the group
 and whom to mention. Each member keeps what it has

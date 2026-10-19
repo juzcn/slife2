@@ -1906,7 +1906,9 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     assert "every other member" in group_send.description
     assert LOCAL.group_marker in group_send.description
     assert REMOTE.group_marker not in group_send.description
-    assert "sender, the group, its owner and every member" in group_send.description
+    assert "`from` (the sender), the group, its owner and every member" in (
+        group_send.description
+    )
 
 
 @pytest.mark.asyncio
@@ -3383,12 +3385,12 @@ def test_group_vocabulary_is_the_networks_own() -> None:
 
     text = group_store.group_marker(REMOTE, PEER, GROUP, PEER, (PEER, AGENT))
     assert text == (
-        '[PeerAgentGroup:{"sender": "jill", "group": "builders", '
+        '[PeerAgentGroup:{"from": "jill", "group": "builders", '
         '"owner": "jill", "members": ["jill", "jack"], '
         '"type": "group_message"}] '
     )
     assert group_store.group_marker_payload(text, REMOTE) == {
-        "sender": PEER,
+        "from": PEER,
         "group": GROUP,
         "owner": PEER,
         "members": [PEER, AGENT],
@@ -3691,7 +3693,7 @@ async def test_a_group_message_arrives_on_the_group_channel(window: Window) -> N
     handed = window.handed[-1]
     assert handed["channel"] == "peer_agent_group:builders:jill"
     assert handed["text"].startswith(
-        '[PeerAgentGroup:{"sender": "jill", "group": "builders", '
+        '[PeerAgentGroup:{"from": "jill", "group": "builders", '
         '"owner": "jill", "members": ["jill", "jack"], '
         '"type": "group_message"}] '
     )
@@ -3728,7 +3730,7 @@ async def test_a_local_group_message_wears_subagent_group_from_the_maker(
     assert turn["subagent"] == "tester"
     assert turn["channel"] == "subagent_group:builders:jack"
     assert turn["prompt"].startswith(
-        '[SubagentGroup:{"sender": "jack", "group": "builders", '
+        '[SubagentGroup:{"from": "jack", "group": "builders", '
         '"owner": "jack", "members": ["jack", "tester"], '
         '"type": "group_message"}] '
     )
@@ -3951,7 +3953,7 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
     assert "@all" in description
     assert "A mention is attention, not delivery" in description
     assert "still receives the message" in description
-    assert "sender, the group, its owner and every member" in description
+    assert "`from` (the sender), the group, its owner and every member" in description
 
 
 @pytest.mark.asyncio

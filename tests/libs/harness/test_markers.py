@@ -192,7 +192,7 @@ def test_a_group_message_names_its_sender_and_its_group() -> None:
     assert LOCAL.group_marker in MARKERS
     assert (
         markers.strip(
-            '[PeerAgentGroup:{"sender": "alice", "group": "builders", '
+            '[PeerAgentGroup:{"from": "alice", "group": "builders", '
             '"owner": "alice", "members": ["alice", "bob"], '
             '"type": "group_message"}] hi',
             *MARKERS,
@@ -201,7 +201,7 @@ def test_a_group_message_names_its_sender_and_its_group() -> None:
     )
     assert (
         markers.strip(
-            '[SubagentGroup:{"sender": "jack", "group": "builders", '
+            '[SubagentGroup:{"from": "jack", "group": "builders", '
             '"owner": "jack", "members": ["jack", "tester"], '
             '"type": "group_message"}] hi',
             *MARKERS,
