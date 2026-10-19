@@ -407,6 +407,13 @@ model-facing descriptions grew from about 5,500 to about 7,500 words, almost all
 of it `Returns:` sections naming the keys of the object. That is the price of a
 model being able to use an answer without inspecting it first.
 
+**Two answers are text rather than JSON, and both are the thing itself.**
+`_check_new_input` hands over a person's message; `skill_use` hands over the
+skill's `SKILL.md`. Neither is data *about* something, so neither is wrapped. A
+long playbook is not paged here: it is an ordinary oversized result, and the
+dump discriminator chooses the lines the conversation carries — the same
+backstop every tool result has.
+
 ### 4.6 Meta-parameters
 
 **Rule:** SDD §7.7.

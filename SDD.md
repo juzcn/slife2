@@ -1233,20 +1233,24 @@ first would drop rows the filter would have kept.
 Everything the model reads is a surface. A tool's answer is as important as its
 schema.
 
-- **The answer is a JSON object.** `llm.server_common.render_tool_result` renders
-  a `dict` as JSON text on every backend. A tool that answers a sentence invents
-  a second format.
+- **The answer is a JSON object, with the two exceptions below.**
+  `llm.server_common.render_tool_result` renders a `dict` as JSON text on every
+  backend. A tool that answers a sentence invents a second format.
 - **A listing is a page:** `{"<noun>": [...], "total": N, "limit": L, "offset": O}`.
   `total` is the whole answer to "is there more" and counts what the filters
   match.
 - **A refusal or a miss raises `ToolError`**, one sentence saying what is wrong
   and what to do instead. The failure is the call's status: the hub answers
   `ok: false`, the loop marks the call failed, and the window draws it as failed.
-- **`_check_new_input` is the one exception.** It hands over a person's message
-  mid-turn, so what it answers is the thing itself, not data about something.
+- **Two tools answer with text rather than JSON, because the text is the thing.**
+  `_check_new_input` hands over a person's message mid-turn; `skill_use` hands
+  over the skill's whole `SKILL.md`. Neither is data *about* something, so
+  neither is wrapped in an object.
 - **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 128). A
   listing pages; an output that cannot be bounded is the harness's dump, and
-  `dump_read` is a searching reader within the same budget.
+  `dump_read` is a searching reader within the same budget. A long playbook is
+  bounded by that path too: `skill_use` returns the document whole, and the dump
+  discriminator chooses the lines the conversation carries.
 
 A field may contain a sentence, because a person reads some answers too. The
 rule is that the envelope is one shape, so a reader that knows one tool knows

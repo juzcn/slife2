@@ -53,11 +53,9 @@ from slife2.libs.plugin.family import (
     Homes,
     build_document_server,
     listed,
-    page_of,
 )
 from slife2.libs.plugin.protocol import SKILLS_SOURCE as _SOURCE
 from slife2.libs.plugin.protocol import serve_plugin
-from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.skills import playbooks as skills
 
 logger = logging.getLogger(__name__)
@@ -170,55 +168,6 @@ DESCRIPTION = (
     "data directory's `skills/`."
 )
 
-#: What a playbook's page leaves room for inside the token budget: the answer's
-#: own keys and numbers, and the escaping a document pays for once it is a JSON
-#: string — every newline in it becomes two characters on the wire.
-#:
-#: **A reserve and not a measurement**, and that is the honest description: the
-#: budget is `tool_result.tokens`' and the page is filled against
-#: `estimate_text_tokens`, which weighs the document's lines and not the answer
-#: around them.  A page that came out a few dozen tokens over would be a result
-#: the harness shortens, which is our own reader feeding our own shortening.
-_ENVELOPE_TOKENS = 128
-
-
-def _fit(lines: list[str], offset: int, room: int) -> int:
-    """How many of *lines*, from *offset*, come in under *room* tokens.
-
-    Greedy and announced: the caller echoes both the count and the offset, so a
-    model that got a page can ask for the next one.  At least one line is always
-    taken when there is one — a page that could never advance would leave a long
-    single-line playbook unreadable rather than merely over budget.
-    """
-    used = 0
-    fits = 0
-    for line in lines[offset:]:
-        used += estimate_text_tokens(line) + 1
-        if used > room:
-            break
-        fits += 1
-    return max(fits, 1 if lines[offset:] else 0)
-
-
-def _playbook_page(
-    lines: list[str], limit: int, offset: int, *, budget: int
-) -> tuple[list[str], int, int]:
-    """One page of a playbook — the lines, and the numbers that describe it.
-
-    The page is filled against the budget and then capped by the caller's own
-    `limit`, so neither a stated size nor a default one can hand over more than
-    `tool_result.tokens` holds.  `page_of` is what answers the size back, for the
-    reason it states: a caller pages by `offset`, and a `limit` that is not the
-    one applied makes its own arithmetic skip lines.
-    """
-    start = max(0, int(offset))
-    return page_of(
-        lines,
-        limit,
-        offset,
-        cap=_fit(lines, start, max(budget - _ENVELOPE_TOKENS, 1)),
-    )
-
 
 def build_server(
     config: Config, *, source: Callable[[], Config] | None = None
@@ -239,17 +188,16 @@ def build_server(
     """
 
     def management(mcp: FastMCP, homes: Homes[Documents]) -> None:
-        """Register this family's tools, with the budget they must answer within.
+        """Register this family's tools.
 
-        **The budget is the config's and not a constant here.**
-        `tool_result.tokens` is how much of one result a model is handed, and
-        `skill_use` is the one tool in these four families whose answer is a
-        *document* — so it is the one that has to be measured, and against the
-        number this build was configured with rather than a second copy of the
-        default.  It travels as a closure because a tool's body is defined below
-        and the builder passes only the server and the families.
+        **`skill_use` answers with the document itself, not a measured page.**
+        A playbook is a procedure to follow, and a result cut at
+        `tool_result.tokens` would stop in the middle of a step.  Its size is the
+        installed skill's — the operator's decision — so the full document is
+        the answer; one too large for a conversation is the harness's dump path
+        like any other oversized result, not a shorter answer invented here.
         """
-        register_tools(mcp, homes, budget=config.tool_result.tokens)
+        register_tools(mcp, homes)
 
     return build_document_server(
         config,
@@ -266,7 +214,7 @@ def build_server(
     )
 
 
-def register_tools(mcp: FastMCP, homes: Homes[Documents], *, budget: int) -> None:
+def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     """The `skill_*` tools — and `skill_use`, which no other family has.
 
     **Every body resolves the home the call is for** (`home_entries`), because
@@ -274,10 +222,6 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents], *, budget: int) -> Non
     once when this process started would be that home's, served to every other —
     which for a skill is the operator's `env`, the credentials a playbook is run
     with.
-
-    `budget` is `tool_result.tokens`, and only `skill_use` spends it: a playbook
-    is arbitrarily long, and every other tool here answers with rows a page
-    bounds by count.
     """
 
     def home_entries() -> dict[str, SkillSettings]:
@@ -289,30 +233,27 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents], *, budget: int) -> Non
         return {one: dict(settings.env) for one, settings in home_entries().items()}
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
-    async def skill_use(name: str, limit: int = 0, offset: int = 0) -> dict[str, Any]:
+    async def skill_use(name: str) -> str:
         """Read a skill: a playbook to follow rather than a tool to call.
 
-        Read the one for a job before starting it. A playbook can be longer than
-        one answer holds, so `content` is a page of it and the lines it left
-        behind are the next call's `offset`.
+        Read the one for a job before starting it. The answer is the skill's
+        whole `SKILL.md`, preceded by the root its paths are relative to. It is
+        the document itself rather than JSON, and it is not shortened here: a
+        playbook cut at the result budget would stop in the middle of a step.
+        One too large for a conversation is the harness's oversized result,
+        whose selection is chosen from the document's own lines.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
-            limit: The most lines this page may hold. `0` holds as many as the
-                budget has room for.
-            offset: The first line of the playbook to read; `0` is the first.
 
         Returns:
-            `name`, the skill's own name for it; `content`, this page of the
-            playbook — its first lines name the root the paths in it are
-            relative to, and say whether what it requires is at hand; `total`,
-            how many lines the whole playbook has; and `limit` and `offset`.
-            A page that stopped short of `total` is one there is more of.
+            The skill's whole `SKILL.md` as text, preceded by the root the paths
+            in it are relative to and a note saying whether what it requires is
+            at hand.
         """
-        # Found here to read the switch off it, and to answer with the skill's own
-        # name: a skill may be filed under either its own name or its directory's,
-        # and only the folder knows which, so this is the same both-names lookup
-        # `catalogue` makes.
+        # Found here to read the switch off it: a skill may be filed under either
+        # its own name or its directory's, and only the folder knows which, so
+        # this is the same both-names lookup `catalogue` makes.
         skill = skills.find(name.strip())
         if skill is not None:
             found = skills.entry_for(skill, home_entries())
@@ -335,15 +276,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents], *, budget: int) -> Non
             # value and not a crash: `slife2.plugins.toolhub.server` reads a peer's refusal as
             # the model's answer rather than as a broken server.
             raise ToolError(text)
-        lines = text.splitlines()
-        page, size, start = _playbook_page(lines, limit, offset, budget=budget)
-        return {
-            "name": skill.name if skill is not None else name.strip(),
-            "content": "\n".join(page),
-            "total": len(lines),
-            "limit": size,
-            "offset": start,
-        }
+        return text
 
     # ── The management tools ─────────────────────────────────────────────
     # v1's `skill_*` set, and the half DESIGN.md §10 named as next: a skill is a

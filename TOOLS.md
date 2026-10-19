@@ -1694,29 +1694,28 @@ row of `skill_list` carries.
 
 ### `skill_use`
 
-[`slife2/plugins/skills/server.py:292`](slife2/plugins/skills/server.py#L292)
+[`slife2/plugins/skills/server.py:236`](slife2/plugins/skills/server.py#L236)
 
 Read a skill: a playbook to follow rather than a tool to call.
 
-Read the one for a job before starting it. A playbook can be longer than
-one answer holds, so `content` is a page of it and the lines it left
-behind are the next call's `offset`.
+Read the one for a job before starting it. The answer is the skill's
+whole `SKILL.md`, preceded by the root its paths are relative to. It is
+the document itself rather than JSON, and it is not shortened here: a
+playbook cut at the result budget would stop in the middle of a step.
+One too large for a conversation is the harness's oversized result,
+whose selection is chosen from the document's own lines.
 
 **Parameters**
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `name` | `string` | yes | — | The skill's name, e.g. `browser-harness`. |
-| `limit` | `integer` | no | `0` | The most lines this page may hold. `0` holds as many as the budget has room for. |
-| `offset` | `integer` | no | `0` | The first line of the playbook to read; `0` is the first. |
 
 **Returns**
 
-`name`, the skill's own name for it; `content`, this page of the
-playbook — its first lines name the root the paths in it are
-relative to, and say whether what it requires is at hand; `total`,
-how many lines the whole playbook has; and `limit` and `offset`.
-A page that stopped short of `total` is one there is more of.
+The skill's whole `SKILL.md` as text, preceded by the root the paths
+in it are relative to and a note saying whether what it requires is
+at hand.
 
 ## Subagent network
 

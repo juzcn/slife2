@@ -105,6 +105,7 @@ async def test_the_schema_is_read_off_the_signature(isolated_runtime: Path) -> N
         listed = {tool.name: tool for tool in await client.list_tools()}
 
     schema = listed[USE_TOOL].input_schema
+    assert set(schema["properties"]) == {"name"}
     assert schema["properties"]["name"]["type"] == "string"
     assert schema["required"] == ["name"]
     assert "playbook" in (listed[USE_TOOL].description or "")
@@ -115,50 +116,42 @@ async def test_the_schema_is_read_off_the_signature(isolated_runtime: Path) -> N
 
 @pytest.mark.asyncio
 async def test_skill_use_reads_the_document(isolated_runtime: Path) -> None:
-    """A page of the playbook, and the numbers that say it is a page.
+    """**The whole `SKILL.md`, as text, rather than a JSON answer about it.**
 
-    Every model-facing tool answers with JSON (`turn_list`'s rule), and a
-    playbook can be longer than one answer holds — so what comes back is the
-    page, how many lines there are in all, and where this one started.
+    `skill_use` is one of the two tools whose answer is the thing itself: a
+    playbook is a procedure to follow, so what the model reads is the document —
+    with the skills root in front of it — and not a page or a set of fields.
     """
     skill(isolated_runtime, "one", body="Do it.")
     async with Client(build_server(default_config())) as client:
         result = await client.call_tool(USE_TOOL, {"name": "one"})
 
     answer = result.data
-    assert answer["name"] == "one", "the skill's own name, not the one asked with"
-    assert answer["content"].rstrip().endswith("Do it.")
-    assert answer["offset"] == 0
-    assert answer["total"] == len(answer["content"].splitlines()), "all of it fits"
-    assert answer["limit"] >= answer["total"]
+    assert isinstance(answer, str)
+    assert answer.rstrip().endswith("Do it.")
+    assert "Skills root:" in answer
 
 
 @pytest.mark.asyncio
-async def test_skill_use_pages_a_playbook_that_will_not_fit(
+async def test_skill_use_returns_a_long_playbook_whole(
     isolated_runtime: Path,
 ) -> None:
-    """**A playbook longer than one answer holds is read in pages, not clipped.**
+    """**A playbook longer than one answer holds is returned whole, not paged.**
 
-    `tool_result.tokens` is how much of one result a model is handed, and a
-    shortened playbook is a procedure that stops in the middle of a step — worse
-    than one the model knows to ask for the rest of.  So the page is filled
-    against that budget, `total` says how much there is, and `offset` reaches it.
+    The document is the answer.  A result too large for the conversation is the
+    harness's oversized-result path, which stores it and lets the dump
+    discriminator choose the lines the conversation carries; a shorter answer
+    invented here would stop a procedure in the middle of a step.
     """
     skill(isolated_runtime, "long", body="\n".join(f"step {n}" for n in range(20000)))
     async with Client(build_server(default_config())) as client:
-        first = (await client.call_tool(USE_TOOL, {"name": "long"})).data
-        rest = (
-            await client.call_tool(
-                USE_TOOL, {"name": "long", "offset": first["offset"] + first["limit"]}
-            )
-        ).data
+        result = await client.call_tool(USE_TOOL, {"name": "long"})
 
-    assert first["total"] > first["limit"], "the whole playbook does not fit a page"
-    assert first["offset"] == 0
-    assert first["limit"] < 20000, "the budget decided the page, not the document"
-    assert 0 < len(first["content"].splitlines()) <= first["limit"]
-    assert rest["offset"] == first["offset"] + first["limit"], "the next page"
-    assert rest["content"] != first["content"]
+    answer = result.data
+    assert isinstance(answer, str)
+    assert "step 0" in answer
+    assert "step 19999" in answer
+    assert len(answer.splitlines()) > 20000
 
 
 @pytest.mark.asyncio
@@ -175,7 +168,7 @@ async def test_a_skill_dropped_in_later_is_readable_at_once(
         skill(isolated_runtime, "two", body="Second body.")
         result = await client.call_tool(USE_TOOL, {"name": "two"})
 
-    assert result.data["content"].rstrip().endswith("Second body.")
+    assert result.data.rstrip().endswith("Second body.")
 
 
 @pytest.mark.asyncio
@@ -236,7 +229,7 @@ async def test_the_two_names_read_one_entry_and_agree(
         read = await client.call_tool(USE_TOOL, {"name": "the-name"})
         listed = await client.call_tool("skill_list", {})
 
-    assert "are met" in read.data["content"], "the declared name's entry wins"
+    assert "are met" in read.data, "the declared name's entry wins"
     (row,) = listed.data["skills"]
     assert "are met" in row["requirements"], "and the listing reads the same entry"
 
@@ -276,8 +269,8 @@ async def test_a_declared_key_is_read_here_and_reported_before_the_model_acts(
     async with Client(build_server(default_config())) as client:
         without = await client.call_tool(USE_TOOL, {"name": "one"})
 
-    assert "are met" in with_key.data["content"]
-    assert "not configured" in without.data["content"]
+    assert "are met" in with_key.data
+    assert "not configured" in without.data
 
 
 # --- declaring rows -----------------------------------------------------------

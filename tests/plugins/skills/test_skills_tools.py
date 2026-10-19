@@ -71,6 +71,13 @@ async def ask(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
     return result.data
 
 
+async def ask_text(client: Client, tool: str, **arguments: Any) -> str:
+    """`skill_use` answers with the document itself, which is also what it reads."""
+    result = await client.call_tool(tool, arguments)
+    assert isinstance(result.data, str), result
+    return result.data
+
+
 # --- installing ---------------------------------------------------------------
 
 
@@ -96,7 +103,7 @@ async def test_installing_a_skill_writes_the_folder_and_reads_at_once(
             ),
         )
         declared = await client.call_tool(LIST_SOURCES, {})
-        read = await ask(client, USE_TOOL, name="note-taking")
+        read = await ask_text(client, USE_TOOL, name="note-taking")
 
     folder = isolated_runtime / "skills" / "note-taking"
     assert answer == {"name": "note-taking", "state": "on", "files": 2}
@@ -106,7 +113,7 @@ async def test_installing_a_skill_writes_the_folder_and_reads_at_once(
     )
     rows = {row["name"]: row for row in declared.data["sources"][0]["rows"]}
     assert rows["skill:note-taking"]["description"] == "Keep notes."
-    assert "Keep notes." in read["content"]
+    assert "Keep notes." in read
 
 
 @pytest.mark.asyncio
@@ -306,13 +313,11 @@ async def test_replacing_a_skill_leaves_no_half_written_one(
             name="one",
             files=files(manifest("one"), **{"scripts/new.py": "print(1)\n"}),
         )
-        read = await ask(client, USE_TOOL, name="one")
+        read = await ask_text(client, USE_TOOL, name="one")
 
     folders = {path.name for path in (isolated_runtime / "skills").iterdir()}
     assert folders == {"one"}, "no staging or replaced directory left behind"
-    assert "The old body." not in read["content"], (
-        "the manifest is the one just written"
-    )
+    assert "The old body." not in read, "the manifest is the one just written"
     assert (isolated_runtime / "skills" / "one" / "scripts" / "new.py").is_file()
 
 

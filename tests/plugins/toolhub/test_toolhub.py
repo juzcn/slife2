@@ -513,7 +513,7 @@ async def test_a_skill_is_served_by_its_own_plugin(isolated_runtime: Path) -> No
     assert "name" in tool["parameters"]["properties"]
 
     assert answer["ok"] is True
-    assert json.loads(answer["text"])["content"].rstrip().endswith("The body.")
+    assert answer["text"].rstrip().endswith("The body.")
     assert later["ok"] is True
 
     # The plugin is a server and `servers()` reports it; the *catalogue source*
