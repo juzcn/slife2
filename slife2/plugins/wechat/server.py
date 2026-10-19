@@ -186,7 +186,7 @@ def render_qr(content: str) -> str:
     **Without `qrcode` this refuses rather than handing back the payload.**  It
     used to return the content as it came — a URL the caller then told the model
     to show "so it can be scanned", which is not something a URL can be, so a
-    weaker path was selected silently (DESIGN.md §10.1).  The `ImportError`
+    weaker path was selected silently (DESIGN.md §11.1).  The `ImportError`
     goes to the caller, which says what actually happened instead of reading a
     link as a code.
     """
@@ -361,7 +361,7 @@ def _read_session(path: Path) -> tuple[dict[str, Any], str]:
     directory it sits in.
 
     **A file that will not parse is named, not read as no file at all**
-    (DESIGN.md §10.1).  The outcome stays a cache miss — a login can be had
+    (DESIGN.md §11.1).  The outcome stays a cache miss — a login can be had
     again by scanning, and refusing to start over one would trade the whole
     feature for it — but an empty mapping on its own is indistinguishable from
     a machine that never scanned, so the status answer built from it told
@@ -705,7 +705,7 @@ class Wechat:
         saved, damage = _read_session(session_path(session.agent))
         if damage:
             # **The file is named, not read as no login at all** (DESIGN.md
-            # §10.1).  The status answer repeats `restore_note` verbatim, so a
+            # DESIGN.md §11.1).  The status answer repeats `restore_note` verbatim, so a
             # damaged cache now says which file it is and what was wrong with it
             # rather than telling somebody who already scanned to scan again.
             session.restore_note = damage
@@ -1213,7 +1213,7 @@ class Wechat:
             rendered = render_qr(content)
         except ImportError:
             # **A URL is not a code, so the answer says which one it is**
-            # (DESIGN.md §10.1).  Without the rendering library there is nothing
+            # (DESIGN.md §11.1).  Without the rendering library there is nothing
             # scannable to put in a reply, and handing `qr` the URL would be a
             # false instruction — the person would be told to scan a link.  So
             # `qr` is empty and the URL rides in `qr_url`, where the tool's own

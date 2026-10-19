@@ -3,7 +3,7 @@
 **A cron expression is a question about a calendar, and this is where that
 question is asked.**  It is a library rather than a plugin because there is
 nothing here to hold: no credential, no connection, no loop — a parser and a
-timezone policy, which is what §1.1's table calls a library.  The plugin that
+timezone policy, which is what DESIGN.md §1.1's table calls a library.  The plugin that
 *holds* the timers is `slife2.plugins.schedule.server` and it imports this.
 
 **`croniter` underneath, and nothing outside this module imports it.**  That is

@@ -93,7 +93,7 @@ INTERRUPTED = "(Tool execution interrupted)"
 #: and a trim note saying how many old turns had just been cut, which went on the
 #: **last assistant message**.  That note was runtime-only (stripped before the
 #: turn was saved, so no stored row ever held one) and the trim is deferred here
-#: (§9), which is what leaves this envelope with one occupant — and an envelope
+#: (DESIGN.md §10), which is what leaves this envelope with one occupant — and an envelope
 #: with one occupant can say what it holds.  `TURN` is what it holds: the turn
 #: this message opened.
 #:

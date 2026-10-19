@@ -13,13 +13,14 @@ was justified with, and it means the same thing here.  A timer has a lifetime
 that is not a turn's, and it is wrong anywhere but in a process of its own: in a
 library each importer gets a clock, so two windows on one agent fire the same
 task twice and a task one process wrote is invisible to the next; in the agent
-server it would be a loop the conversation owns, which is the arrangement §3
+server it would be a loop the conversation owns, which is the arrangement DESIGN.md §2.2
 exists to argue against.
 
 **It does not own the loop, and it does own the dispatch.**  v1 split the feature
 three ways — *timing* | *execution* | *record* — and the execution half was a
 dispatch into its subagent worker pool, which this build has no equivalent of
-(§9).  So a fire does what §1.2 is for: `slife2-tui`'s `submit` puts the task in
+(DESIGN.md §10).  So a fire does what DESIGN.md §6.1 is for: `slife2-tui`'s
+`submit` puts the task in
 front of the agent as a turn of its own, in the window running that conversation —
 and that turn has **one** instruction, to call `schedule_run_now`, which is this
 plugin *starting the work itself* as an ordinary agent task.  A window that is
@@ -40,7 +41,7 @@ state the ledger cannot account for.
 **The product is not this plugin's either.**  v1's `memfiles` owned the
 `schedules` *and* the `reports`, so `report_save` flipped a run to `ran` inside
 the one write that stored the report.  Here the cabinet is a plugin of its own
-and knows nothing about schedules (§1.4), and the work is an agent task whose
+and knows nothing about schedules (DESIGN.md §5.3), and the work is an agent task whose
 answer is delivered back to the conversation by *that* plugin — so this ledger
 records that a run happened, not what it produced.  What came of it is read where
 it was said.
@@ -48,13 +49,13 @@ it was said.
 **The ledger is the feature.**  `pending → ran | failed | missed | skipped`.  A
 run is written **before** the trigger is handed over, so the anchor advances and
 a fire cannot repeat on the next poll; a hand-over that refuses proves nothing was
-written and the run is `failed`; a hand-over that does not come back is §1.2's
+written and the run is `failed`; a hand-over that does not come back is DESIGN.md §6.1's
 third answer and leaves the row **pending**, because a run whose fate is unknown
 must not be reported as either.  Coming up again, the sweep fails what a stopped
 process left pending, and the poll records the newest fire each task missed — and
 **neither is announced**.  v1 printed unsettled runs into every turn's prompt; a
 note handed over on the trigger's channel is the change that would replace it, and
-it is deferred rather than half-built (DESIGN.md §9).  The ledger is where the
+it is deferred rather than half-built (DESIGN.md §10).  The ledger is where the
 answer is and `schedule_runs` is how it is read, so a **fire is the only thing
 this plugin ever says to a conversation** — one path, one template, and a prompt
 nobody had to edit.
@@ -211,7 +212,7 @@ def page_of(limit: int, offset: int, default: int, cap: int) -> tuple[int, int]:
 #: `agent_task.j2` is — so it is asked for by bare name and is the shipped one.
 #: **One template, because this plugin says one thing**: a run that was missed
 #: and a run that never settled are recorded and findable with `schedule_runs`,
-#: and nothing announces them (DESIGN.md §9).
+#: and nothing announces them (DESIGN.md §10).
 TRIGGER_TEMPLATE = "schedule.j2"
 
 
@@ -283,8 +284,8 @@ def ledgers() -> list[ScheduleStore]:
     sees a healthy clock.  So the skip is an **error** naming the file, which is
     the only place it can be seen, and it is why the ownerless-file warning
     beside it is a different level: that file was never this build's and its
-    skip was designed (§1.7), where this one is a damaged ledger somebody has to
-    go and look at (DESIGN.md §10.2).
+    skip was designed (DESIGN.md §6.5), where this one is a damaged ledger somebody has to
+    go and look at (SDD Appendix C).
     """
     found: list[ScheduleStore] = []
     for ledger in schedule_dbs():
@@ -388,7 +389,7 @@ async def tasks_server(
     """The agent-task plugin, and whether this call is the one that opened it.
 
     `slife2-agent-task` is the plugin that holds loops, and this one hands a run
-    to it rather than running anything itself (§1.7).  Opened per call and closed
+    to it rather than running anything itself (DESIGN.md §6.5).  Opened per call and closed
     after it, the way a hand-over is: a dispatch happens once per run rather than
     once per turn, and a long-lived connection to a plugin that may restart is a
     connection to re-establish.  An injected client is used as it is and left
@@ -421,7 +422,7 @@ async def dispatch(
     The plugin makes the call, so it is handed the task's id, so it can ask what
     became of it on a later poll — where a prompt that told a *model* to start one
     would leave the id in a conversation and the run's fate to that model's
-    memory (DESIGN.md §1.7).
+    memory (DESIGN.md §6.5).
 
     The work is an ordinary agent task: it runs as the agent, on the agent's own
     context, with the agent's prompt and tools, and its answer is delivered back
@@ -607,7 +608,7 @@ async def poll_once(
     is fired, and what is in flight is asked after.  A poll that only did the
     first would leave every run `pending` for as long as nothing else closed it —
     which is what a prompt telling a *model* to close it amounts to (DESIGN.md
-    §1.7).
+    DESIGN.md §6.5).
 
     Returns what it did, as lines — for the log, and because "it did nothing" is
     the ordinary answer and a caller should be able to see that rather than infer
@@ -691,7 +692,7 @@ async def sweep_once() -> list[str]:
 
     **Nothing is announced.**  v1 printed unsettled runs into every turn's
     prompt; a note handed over on the trigger's channel is the change that would
-    replace it, and it is deferred rather than half-built (DESIGN.md §9) because
+    replace it, and it is deferred rather than half-built (DESIGN.md §10) because
     the ledger already holds the answer and `schedule_runs` is how it is read.  So
     a **fire is the only thing this plugin ever says to a conversation**, which is
     what keeps its whole surface one path with one template — and what makes "did

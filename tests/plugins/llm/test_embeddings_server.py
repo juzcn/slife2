@@ -134,7 +134,7 @@ async def test_an_unknown_model_without_a_reported_input_limit_is_refused() -> N
     chunk past the real limit was rejected and v1's indexer stalled on that turn
     for ever.  The width can be measured; an input limit cannot be measured
     without sending the oversized input, so an endpoint that reports neither is
-    refused rather than guessed (`DESIGN.md` §10.1).
+    refused rather than guessed (`DESIGN.md` §11.1).
     """
     fake = _FakeOpenAI(dimension=3)  # no listing at all
     with pytest.raises(RuntimeError, match="input limit"):
@@ -153,7 +153,7 @@ async def test_a_listing_that_could_not_be_read_is_not_one_that_says_nothing() -
     that answered and reported no input limit, so "the endpoint did not answer"
     and "the endpoint does not say" became one refusal.  The width still falls
     through to the probe either way; the input limit names which happened
-    (`DESIGN.md` §10.1).
+    (`DESIGN.md` §11.1).
     """
     unreadable = _FakeOpenAI(dimension=3)  # `models.list` raises
     with pytest.raises(RuntimeError, match="could not be read"):
@@ -271,7 +271,7 @@ def test_a_server_that_cannot_describe_its_endpoint_is_refused() -> None:
     """**An empty slot in the identity makes a change invisible.**
 
     `RemoteEmbedder.identity` is the lever that turns a changed model or a
-    repointed `base_url` into a rebuild (`DESIGN.md` §5.1), and it is built from
+    repointed `base_url` into a rebuild (`DESIGN.md` §2.4), and it is built from
     `provider`, `model` and `base_url`.  A description missing any of them used
     to contribute `""`, so the change could not be seen — the same argument the
     width and input limit are refused on two lines below.

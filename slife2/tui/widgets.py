@@ -185,7 +185,7 @@ def channel_prefix(channel: str) -> str:
         # The clock, and which task came due.  **There is no marker to take off
         # here** — unlike an agent task's answer, a trigger wears none, because
         # the marker vocabulary is for matching a result to what produced it and
-        # a trigger is not a result (DESIGN.md §1.7).  So what the channel
+        # a trigger is not a result (DESIGN.md §6.5).  So what the channel
         # carries is the *whole* of what the window can say about where this came
         # from, which is why every message this plugin hands over names a task —
         # including the reconciliation, which is sent per task for this reason.
@@ -216,7 +216,7 @@ def channel_prefix(channel: str) -> str:
         return f"{LOCAL_AGENT.bubble}({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
-    # this window inventing a speaker (DESIGN.md §1.3).
+    # this window inventing a speaker (DESIGN.md §6.4).
     return f"{channel}> "
 
 
@@ -232,7 +232,7 @@ def _timestamp(when: datetime | str | None = None) -> str:
     `now` a caller gets for an *absent* moment is the live path's — a message
     that is arriving has no other moment to carry — and a damaged record was
     falling into it, so yesterday's turns wore the moment the window opened
-    (DESIGN.md §5.1: a window that stamped everything now "would render every
+    (DESIGN.md §2.4: a window that stamped everything now "would render every
     restored conversation as one undivided block stamped now").  A string that
     is not a moment answers `""`, which `add_user` draws as no stamp at all.
     """
@@ -539,7 +539,7 @@ class ChatView(VerticalScroll):
         **Why this exists at all.**  A cut-in is written into the conversation as
         a harness tool pair, so a display with no vocabulary for it could only
         draw a tool panel (which it is not) or nothing (which is what the
-        transcript did while this was deferred, DESIGN.md §9).  The words are
+        transcript did while this was deferred, DESIGN.md §10).  The words are
         already in the record; this is the line that says so while they arrive.
         """
         self._close_block()

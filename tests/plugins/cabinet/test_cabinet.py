@@ -743,7 +743,7 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 
     An answer with no `results` key used to render as the same "Nothing matched"
     a real miss produces, and that is a verdict a model acts on rather than a
-    failure it retries (DESIGN.md §10.1, "a failure is not a verdict").  Only a
+    failure it retries (DESIGN.md §11.1, "a failure is not a verdict").  Only a
     *readable* empty list may say it; anything else fails the call.
     """
 
@@ -761,7 +761,7 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
     """A file has no text of its own, so describing it is the only way in — and
     writing a summary **re-embeds** it, because the stored vector was the text
-    without it (§7.5's one asymmetry)."""
+    without it (DESIGN.md §5.3's one asymmetry)."""
     source = data_dir() / "spec.txt"
     source.write_text("body text\n", encoding="utf-8")
 

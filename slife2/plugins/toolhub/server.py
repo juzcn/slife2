@@ -114,7 +114,7 @@ somewhere to land.  So the hub's own tools are exactly the set-level three —
 themselves rather than `{server}__{tool}`, because there is no server to name.
 Neither are ours for the neighbouring reason that the server is slife2:
 `turn_read`, not `context__turn_read`.  `model_name` is that rule and DESIGN.md
-§8 is the argument for it.
+DESIGN.md §4.1 is the argument for it.
 
 They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
@@ -893,7 +893,7 @@ class Catalogue:
         A failure is not the error the model reads — this runs after a call that
         already happened, and the tool *did* run — but it is not nothing either:
         a stamp that did not land leaves the budget evicting the wrong tool, and
-        nothing else reads this write to notice.  §10.1's rule for a bookkeeping
+        nothing else reads this write to notice.  DESIGN.md §11.1's rule for a bookkeeping
         write is that it either lands or is reported, so it is logged, naming the
         tool, rather than suppressed.
         """
@@ -940,7 +940,7 @@ def _unpacked(text: str, ok: bool) -> tuple[str, bool]:
 #: What a source that has never been counted says where its counts go.
 #: `ToolStore.source_counts` has no row for a source with no rows at all, so a
 #: `tools` of `0` would be a count this process does not have — the absent value
-#: wearing the empty one's shape (DESIGN.md §10.1).
+#: wearing the empty one's shape (DESIGN.md §11.1).
 NOT_COUNTED = "not counted"
 
 
@@ -966,7 +966,7 @@ def _server_row(
     **A source nobody has counted says so, rather than reporting zero.**  The
     counts come from `catalogue.sources`, which has an entry only for a source
     that has rows; one that never answered has none, and `0` there would be a
-    confident count this process does not have — the same confusion §10.1 names
+    confident count this process does not have — the same confusion DESIGN.md §11.1 names
     between a value that is absent and the empty one it is spelled like.  A
     counted source keeps its number, so a reader that compares the two still can.
     """
@@ -1596,7 +1596,7 @@ SEARCH_LIMIT = 10
 #: and five filters on a search is five ways to ask a question that is not "find
 #: me the tool that does this": narrowing to one server, or to the rows that are
 #: switched off, is *reading the catalogue* — a different job with a different
-#: answer shape (a list, with no ranking), and §9 of DESIGN says so.
+#: answer shape (a list, with no ranking), and DESIGN.md §10 of DESIGN says so.
 #:
 #: The single `query` that replaced them is gone too, and this is the reason:
 #: one string went to *both* legs, and one of the two cannot read a sentence.
@@ -1985,7 +1985,7 @@ def _unload_names(found: Mapping[str, Any], key: str) -> list[str]:
     the list.**  The five lists are the whole of the answer, and `unloaded` is
     the one a caller acts on: an unreadable `found` used to be rendered as the
     same "nothing to unload" a real no-op produces, which is a verdict rather
-    than a failure (§10.1, "a failure is not a verdict").  Raising is what the
+    than a failure (DESIGN.md §11.1, "a failure is not a verdict").  Raising is what the
     two callers already handle — `call_tool`'s local branch answers `ok` false,
     and the harness's trim leaves the list alone and logs why.
     """
@@ -2009,7 +2009,7 @@ def _unload_answer(found: Mapping[str, Any]) -> dict[str, Any]:
 
     Every list is read through `_unload_names`, so an answer this process cannot
     read fails rather than reading as "nothing to unload" — a model that lost
-    tools and reads that stops looking (DESIGN.md §10.1, "a failure is not a
+    tools and reads that stops looking (DESIGN.md §11.1, "a failure is not a
     verdict").
     """
     return {
@@ -2162,7 +2162,7 @@ def _results(found: Mapping[str, Any]) -> dict[str, Any]:
     **A search answer that cannot be read is not a search that found nothing.**
     An empty `results` is a verdict a model acts on rather than a failure it
     retries, so only a *readable* empty list may say it; an answer with no
-    `results` list at all is damage, and it raises (§10.1, "a failure is not a
+    `results` list at all is damage, and it raises (DESIGN.md §11.1, "a failure is not a
     verdict").  `call_tool` turns the raise into `ok` false, so the model reads
     the failure instead of the confident negative.
     """
@@ -2192,7 +2192,7 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     families that are findable and not callable have to answer like grown-ups:
     the model read the name, tried it, and is owed the step that actually
     reaches the thing — `skill_use` for a playbook, and for a command the truth
-    that nothing runs one yet (DESIGN.md §9).
+    that nothing runs one yet (DESIGN.md §10).
     """
     if str(row.get("category") or "") == SKILL:
         return (
@@ -2220,7 +2220,7 @@ def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
     them differently: a switched-off entry is the operator's decision, a server
     that is not answering is one to try later (`servers` says which), and the two
     document families are findable and not loadable — `skill_use` reads a
-    playbook, and nothing runs an installed command yet (DESIGN.md §9).
+    playbook, and nothing runs an installed command yet (DESIGN.md §10).
     """
     outcome = str(answer.get("outcome") or "")
     if outcome in ("loaded", "already"):
@@ -2334,9 +2334,9 @@ def _parameters(schema: str) -> dict[str, Any]:
     **What it costs is registered, not argued away.**  A row whose *real* schema
     was damaged is handed to the model as a tool with no arguments, so the model
     calls it with none and reads the tool's own error several frames from the
-    cause — the weaker path standing in for a value nobody could read (§10.1).
+    cause — the weaker path standing in for a value nobody could read (DESIGN.md §11.1).
     Failing the row instead would need this half to tell the sentinel from the
-    damage, which is the opinion it must not have; DESIGN.md §10.2 carries it
+    damage, which is the opinion it must not have; SDD Appendix C carries it
     for that reason.
     """
     try:
@@ -2760,9 +2760,9 @@ def build_server(
         **An answer with no tool list is a failure, not an empty list.**  A
         catalogue whose shape this process does not know used to be served as no
         tools at all, which is the one answer the model cannot tell from a hub
-        that has nothing — and DESIGN.md §8.6's rule is the opposite in as many
+        that has nothing — and DESIGN.md §4.2's rule is the opposite in as many
         words: a hub that cannot read a plugin's tool list refuses to list
-        anything.  The same rule reaches a shape change here (§10.1, "a value
+        anything.  The same rule reaches a shape change here (DESIGN.md §11.1, "a value
         that cannot be read is not a value that is absent").
         """
         rows = found.get("tools")
@@ -2892,7 +2892,7 @@ def build_server(
                 server from the `mcp:` section is the opposite case and is
                 simply left out — it is the operator's configuration and somebody
                 else's process, and its tools are in the catalogue with `error`
-                on them.  See DESIGN.md §5 and §8.
+                on them.  See DESIGN.md §5.1 and §4.1.
 
         Returns:
             `tools`: one entry per tool the model may call, with `name` as the

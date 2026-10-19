@@ -18,7 +18,7 @@ budget in hand.  Bytes belong on disk, but a tool's output is text, and text
 belongs where the cabinet's other text is: this kind is a dump rather than a
 note because nothing about it was written by anybody, and it is in **this
 corpus** rather than in a directory of its own because the thing looking for it
-later is a search.  The cost is the one §1.4 names — a rank only means
+later is a search.  The cost is the one DESIGN.md §5.3 names — a rank only means
 something inside the corpus that produced it — and a dump is the one kind
 nobody wrote, so a search that names no kind reaches machine output ranked
 against a person's notes.  Whether a search that named no kind should skip this
@@ -38,7 +38,7 @@ bound is a property of the tool rather than a hope about how a model uses it.
 **A dump is not what a search that named no kind is for.**  A result over the
 window is a tool's *output*, and the address a model has for it is the marker in
 the transcript — so the corpus does not have to carry it for retrieval, and
-machine output ranked against a person's own notes is the dilution §1.4 warns
+machine output ranked against a person's own notes is the dilution DESIGN.md §5.3 warns
 about: one rank, and the thing nobody wrote matching on every word it happens to
 contain.  Naming the kind reaches it (`kind="dump"`), which is also how it is
 browsed and listed.
@@ -315,7 +315,7 @@ def vector_text(row: Mapping[str, Any]) -> str:
     described it, so a cabinet of saved files would be missing from the vector
     index from the moment it was saved — and `sync` would report every one of
     them as a document with no vector, a "failed save" it could never clear.
-    v1's rule, and why v1 composed a file's body the same way (§7.5).
+    v1's rule, and why v1 composed a file's body the same way (DESIGN.md §5.3).
 
     Tags are out of it, unlike the keyword text: a tag is a word somebody chose
     to file a document under, and a vector built from one describes the filing
@@ -1267,7 +1267,7 @@ class CabinetStore:
         """`cabinet_summarize`: a model's description of a row already saved.
 
         **A file is re-embedded and the other kinds are not**, which is the one
-        asymmetry §7.5 states: a summary is part of the text a file's vector is
+        asymmetry DESIGN.md §5.3 states: a summary is part of the text a file's vector is
         built from (a file has no text of its own), so the stored vector is now
         the wrong vector for its row and has to be replaced.  A note's vector is
         its body, which a summary does not change — and rebuilding it anyway
@@ -1447,7 +1447,7 @@ class CabinetStore:
 
         **One corpus, whatever `kind` says.**  A filter narrows what is *shown*
         and never what is ranked, because a rank only means something inside the
-        corpus that produced it (§5): one index per kind would be one corpus per
+        corpus that produced it (DESIGN.md §5.3): one index per kind would be one corpus per
         kind, and a query spanning them would answer with an order nothing
         measured.
 

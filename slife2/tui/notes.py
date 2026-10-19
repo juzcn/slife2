@@ -26,7 +26,7 @@ here goes through `t()` (`slife2.tui.i18n`), which is why a Chinese window reads
 arrival lines are written by *daemons* rather than by the window is a wrinkle
 worth knowing: a plugin composes its note in its own process, so `--lang` — a
 flag on the window's own command line — does not reach it, and a daemon follows
-the OS locale where a window follows the flag (`DESIGN.md` §1.11).
+the OS locale where a window follows the flag (`DESIGN.md` §7.5).
 """
 
 from __future__ import annotations

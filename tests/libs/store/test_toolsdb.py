@@ -477,7 +477,7 @@ def test_a_store_told_nothing_forgets_nothing_even_when_asked(tmp_path) -> None:
     collapsed by `self.known or frozenset()`, so a caller that constructed a
     store without the argument and then called `reset` deleted the catalogue —
     the destructive case `ToolStore.__init__` declines to run, reached through
-    the method it declines to run it with (DESIGN.md §10.1).
+    the method it declines to run it with (DESIGN.md §11.1).
     """
     path = tmp_path / "tools.db"
     told = ToolStore(path, threshold=100, known={"arxiv"})
@@ -786,7 +786,7 @@ def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> 
     the section they were written in belongs to a plugin:
     the budget exists to stop somebody else's ninety tools crowding the request,
     not to take away a tool slife2 guarantees — a model that has quietly lost
-    `turn_read` is the failure DESIGN.md §8 is built around.
+    `turn_read` is the failure DESIGN.md §4.1 is built around.
     """
     store = store_at(tmp_path, threshold=4)
     merge(store, "ours", "plugin", [tool("turn_list")])

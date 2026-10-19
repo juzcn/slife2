@@ -189,7 +189,7 @@ def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
     is what makes the feature work there, and also means PATH does not
     necessarily win.  The order is therefore reported rather than trusted:
     :attr:`_TunnelProviderBase.binary_path` carries the resolved path into
-    :meth:`_TunnelProviderBase.status`.  (Flagged for DESIGN.md §10.2: the
+    :meth:`_TunnelProviderBase.status`.  (Flagged for SDD Appendix C: the
     fallback narrows *which* binary runs to a guess when PATH is silent.)
     """
     found = shutil.which(binary)
@@ -1281,12 +1281,12 @@ class LocalhostRunTunnel(_CliTunnelProvider):
         self._host: str = str(opts.get("host") or "localhost.run")
         self._user: str = str(opts.get("user") or "nokey")
         # An absent `remote_port` is the default; a *present but malformed* one
-        # is refused rather than read as 80.  §1.6 declares exactly one
+        # is refused rather than read as 80.  DESIGN.md §8.1 declares exactly one
         # warn-instead-of-refuse in this section (an unknown provider *name*),
         # and says a malformed *shape* is refused like every other section — a
         # bad value in a known option is that same mistake, and silently
         # forwarding a different remote port than the config wrote is the kind
-        # of deformation nobody can find (§10.1).
+        # of deformation nobody can find (DESIGN.md §11.1).
         raw_port = opts.get("remote_port")
         if raw_port is None or raw_port == "":
             self._remote_port: int = 80
@@ -1426,7 +1426,7 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
         stays non-empty straight through an outage that answers every
         published link with HTTP 530, and the monitor watching it never sees
         anything wrong.  **The scraped set is read only when the child announced
-        no metrics server at all** (§1.6's boundary): a metrics server that was
+        no metrics server at all** (DESIGN.md §8.1's boundary): a metrics server that was
         announced and could not be asked leaves `_metrics_ready` answering
         ``None`` while `_metrics_base` is set, and that is *unknown* — not
         alive, because there is no probe answer for it and the scrape is

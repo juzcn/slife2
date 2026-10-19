@@ -53,7 +53,7 @@ selects against the window, and a trim after each save bounds what the selection
 missed.  With the rebuild on, the *selection* is the bound and the trim stands
 behind it as a guard for what no selection can see in advance — a turn whose tool
 results ballooned while it ran.  That guard is a separate change and it is named
-in DESIGN.md §9 rather than half-built here; what this plugin owes it is the
+in DESIGN.md §10 rather than half-built here; what this plugin owes it is the
 persisted list and the write that maintains it, which both are.
 """
 
@@ -709,7 +709,7 @@ def build_server(
         `except` folded a `ConfigError` in with a declared-absent window, so a
         broken config silently dropped the token cap and let a recall spend by
         count — the overfill the cap exists to stop.  A window that cannot be
-        *asked for* is a failure, not a zero (DESIGN.md §10.1: a weaker path is
+        *asked for* is a failure, not a zero (DESIGN.md §11.1: a weaker path is
         not a substitute for a missing capability).
         """
         return int(config.resolve(model)[2].context_window)
@@ -923,7 +923,7 @@ def build_server(
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
         # Published before the caller is told, and a failure here **fails the
-        # turn**.  The list is authoritative (DESIGN.md §5.1): the caller adopts
+        # turn**.  The list is authoritative (DESIGN.md §2.4): the caller adopts
         # this answer as its context, so returning the in-memory rebuild while
         # the *persisted* list did not move leaves the two disagreeing, and the
         # next start replays the stale one — a conversation that comes back one
@@ -976,7 +976,7 @@ def build_server(
             # Dropping the *query* and keeping the recall would run it as a
             # *period* recall instead — a different selection from the one the
             # model asked for — so the whole recall is dropped and the decision's
-            # other half, the keep-list, runs on its own, which is §5.1's outcome
+            # other half, the keep-list, runs on its own, which is DESIGN.md §2.4's outcome
             # when a rebuild cannot do its job: keep the context it had.
             logger.info("recall_query_has_no_term")
             return []

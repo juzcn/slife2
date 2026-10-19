@@ -126,7 +126,7 @@ def decode(message: str) -> WatchItem | None:
     a notification this build has no word for is a line not read, and the caller
     is a display that should stay up rather than a turn that should die.  A
     control frame whose payload is damaged is such a line — read as absent, not
-    guessed at, which is `DESIGN.md` §10.1's rule for a value that cannot be
+    guessed at, which is `DESIGN.md` §11.1's rule for a value that cannot be
     read.
     """
     try:

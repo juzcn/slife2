@@ -27,7 +27,7 @@ width can be *measured*; an input limit cannot be measured without sending the
 oversized input, which is the failure this module's history records — a rejected
 chunk, and an indexer stalled on that turn for ever.  So the limit comes from
 the table or the endpoint's listing, and a model whose endpoint reports neither
-is refused rather than handed a default (DESIGN.md §10.1).
+is refused rather than handed a default (DESIGN.md §11.1).
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ class EmbeddingClient:
         records: a chunk past the limit was rejected, and v1's indexer stalled on
         that turn for ever.  So the limit is asked for, and a model whose
         endpoint does not report one is refused rather than handed a guess
-        (DESIGN.md §10.1).
+        (DESIGN.md §11.1).
 
         Raises:
             RuntimeError: If neither the table nor the endpoint answers — either
@@ -182,7 +182,7 @@ class EmbeddingClient:
         unreadable listing there falls through to the probe; an input limit
         cannot, so the two answers must stay apart and this one is raised rather
         than returned as a `0` the caller cannot tell from silence (DESIGN.md
-        §10.1).
+        DESIGN.md §11.1).
 
         Raises:
             RuntimeError: If the listing itself could not be read, naming the
@@ -250,7 +250,7 @@ class EmbeddingClient:
         **Here an unreadable listing may be the silent one.**  The ladder this
         feeds measures the width without the endpoint's help, so a listing that
         could not be read and one that reports no width both fall to the probe —
-        the difference the input limit cannot afford (DESIGN.md §10.1).
+        the difference the input limit cannot afford (DESIGN.md §11.1).
         """
         try:
             listing = await self.client().models.list()

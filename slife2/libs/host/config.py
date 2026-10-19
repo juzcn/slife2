@@ -59,7 +59,7 @@ says it.  That is v1's `cli:` section, ported as configuration.
 **`slife2-cli` reads this section**, and declares one catalogue row per entry
 (`cli:yt-dlp`) so that `tool_search` finds a command by what it does.  What is
 still missing is the tool that would *run* one — the row is declared and the
-entry is not yet a tool the model can call (DESIGN.md §9) — so what is settled
+entry is not yet a tool the model can call (DESIGN.md §10) — so what is settled
 for now is where an entry is written down and what it may say, which is what
 lets a config copied from v1 keep working when that tool lands.  The other half
 of the same family, `skills/`, is read by `slife2-skills`, which serves
@@ -142,7 +142,7 @@ class WrongKindError(ConfigError):
     A subclass rather than a flag because one reader has to tell it apart from
     every other refusal: `MediaSettings.resolve` falls back to the first model of
     the kind when the operator's `defaults:` entry has gone *stale* — that is a
-    registered fallback (DESIGN.md §10.2), and its whole scope is "the name no
+    registered fallback (SDD Appendix C), and its whole scope is "the name no
     longer resolves".  A name that resolves to a `tts` model where an `image` one
     was wanted is not stale, it is wrong, and its own docstring says that case is
     "refused here rather than at the provider, where it costs money".  With one
@@ -506,7 +506,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # above, so they are served by a process of their own rather than borrowed
     # from `openai-completions`: that process is built from the chat providers,
     # and there is no chat provider here to attach an embedding model to.  It is
-    # a plugin (rather than a library) for §1.1's reason — it holds a key — and
+    # a plugin (rather than a library) for DESIGN.md §1.1's reason — it holds a key — and
     # it identifies itself by `describe`, the tool the db calls before it can
     # build an index.  See `slife2.plugins.llm.embeddings_server`.
     Plugin(
@@ -572,7 +572,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # WeChat, and the one plugin here that is nobody's family: it declares no
     # catalogue rows and owns no entries, and what it holds is a login per agent
     # and a conversation with somebody off this machine.  It is a plugin for the
-    # reason §1.1's first table row gives — it holds a credential, and a library
+    # reason DESIGN.md §1.1's first table row gives — it holds a credential, and a library
     # would put the token in every importer — and the only thing written down
     # about it is an address; a login is scanned rather than configured, and
     # lives inside the agent's own directory.  It identifies itself by
@@ -599,7 +599,7 @@ PLUGINS: tuple[Plugin, ...] = (
         probe="note_list",
         port=24035,
     ),
-    # Rendering, speech and transcription, behind `media:`.  A plugin for §1.1's
+    # Rendering, speech and transcription, behind `media:`.  A plugin for DESIGN.md §1.1's
     # table — it holds a provider's key and speaks to somebody else's endpoint —
     # and a *family* of endpoints rather than one, which is why it has a module
     # of its own.  It identifies itself by `generate_image`, the first of the
@@ -613,7 +613,7 @@ PLUGINS: tuple[Plugin, ...] = (
     ),
     # A public HTTPS URL for a local file, so something that cannot read this
     # machine's disk — a vision model, a chat API that takes links — can fetch
-    # one anyway.  A plugin for §1.1's reason: what it holds is somebody else's
+    # one anyway.  A plugin for DESIGN.md §1.1's reason: what it holds is somebody else's
     # connection (an ngrok session, an SSH forward, a cloudflared child), and it
     # is the one plugin here that serves a second HTTP route beside its MCP
     # endpoint, because the far end fetches `/share/<token>` through the tunnel.
@@ -700,7 +700,7 @@ PLUGINS: tuple[Plugin, ...] = (
         port=24039,
     ),
     # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT profile.
-    # A plugin for §1.1's reason — what it holds is somebody else's connection —
+    # A plugin for DESIGN.md §1.1's reason — what it holds is somebody else's connection —
     # and the only one here whose *identity* is per agent: the agent name is the
     # MQTT client id, so one shared process holds one mesh per agent it serves.
     # **Its key and its process name say different layers, on purpose**: the key
@@ -844,7 +844,7 @@ def _credstore_lookup(key: str) -> str | None:
     a platform credstore does not support) raises instead, because reading that
     as "not found" turns a credential nobody could read into a credential that
     is absent, and the `${VAR}` text then travels as the secret itself
-    (DESIGN.md §10.1).  The failure lands where the secret is resolved.
+    (DESIGN.md §11.1).  The failure lands where the secret is resolved.
     """
     try:
         from credstore import get_credential
@@ -867,7 +867,7 @@ def resolve_secret(value: object) -> str:
     installed, a `resolve_uri` that raises — the credential is not stored, the
     backend is locked — is allowed out: reading it as "not found" would leave
     the ``keyring:`` text to travel as the secret itself, which is the
-    deformation DESIGN.md §10.1 names.  The failure lands where the secret is
+    deformation DESIGN.md §11.1 names.  The failure lands where the secret is
     resolved.
 
     **A credential that was never stored is a config mistake, and it is said as
@@ -1051,7 +1051,7 @@ class ModelSettings:
     #: **Not tri-state like `store`, and the difference is which way the default
     #: has to fall.**  There, saying nothing leaves the endpoint's own default in
     #: place and that is the right one.  Here it is not: usage arrives only
-    #: because it was asked for, and §6 of DESIGN.md is the measurement that
+    #: because it was asked for, and §3.5 of DESIGN.md is the measurement that
     #: made the counts load-bearing — an adapter reading only the documented
     #: OpenAI shape reported zero tokens against a real endpoint.  So an absent
     #: value means *send*, and the escape hatch is a marked one.
@@ -1176,7 +1176,7 @@ class EmbeddingsSettings:
                 time — so reaching this means a `Config` assembled in code
                 rather than read from a file — or if `active` names a provider
                 this config does not have.  Substituting the first for an
-                unknown name is the deformation §10.1 names: vectors would come
+                unknown name is the deformation DESIGN.md §11.1 names: vectors would come
                 from an endpoint nobody chose, and the index's recorded identity
                 would change with nothing in any file to say why.
         """
@@ -1233,7 +1233,7 @@ class AgentTaskSettings:
     #: A cap rather than a preference, and the only bound this feature has: a
     #: task may start a task — the tool set is the one catalogue and nothing
     #: filters it — so without a cap a model can grow loops without limit.  What
-    #: it does not bound is how much work happens over *time*; DESIGN.md §9
+    #: it does not bound is how much work happens over *time*; DESIGN.md §10
     #: holds that one open, and `agent_task_list` with `agent_task_cancel` is
     #: what makes it visible and stoppable in the meantime.
     #:
@@ -1295,7 +1295,7 @@ class SubagentSettings:
     #: without this a model can grow a tree of them without limit.  What it costs
     #: when it does is small per member — a subagent is a conversation in the
     #: shared agent server, measured at ~1.5 MB against a `--headless` instance's
-    #: ~100 MB (`DESIGN §1.10`) — so the number here is about a runaway rather
+    #: ~100 MB (`DESIGN.md §6.6`) — so the number here is about a runaway rather
     #: than about the machine, and it is larger than the four an agent task gets
     #: because a subagent is a thing an agent *has* rather than a run it started.
     max_running: int = 32
@@ -1461,7 +1461,7 @@ class ToolLoadSettings:
 
     Eviction never touches a tool of ours (a plugin's) or a server marked
     `autoload: true`: those are loaded because the operator said so, and a
-    budget that could take `turn_read` away is the failure DESIGN.md §8 is
+    budget that could take `turn_read` away is the failure DESIGN.md §4.3 is
     about.  See `slife2.libs.store.catalogue.ToolStore.injectable`.
     """
 
@@ -1503,7 +1503,7 @@ class ToolLoadSettings:
 #: nobody controls rather than on what a model asked for once.
 #:
 #: What would move it again is the same instrument — the rows themselves, so
-#: re-reading it is a query, which is the observation §8.5 makes about the tool
+#: re-reading it is a query, which is the observation DESIGN.md §4.3 makes about the tool
 #: list's threshold.
 DEFAULT_TOOL_RESULT_TOKENS = 8000
 
@@ -1720,7 +1720,7 @@ class MediaSettings:
         `defaults:` intent for that kind.  *Does not cover:* a reference that
         names a model of the wrong kind or an unknown provider, which is refused
         here.  *Failure goes:* nowhere beyond the answer itself — flag for
-        `DESIGN.md` §10.2.
+        SDD Appendix C.
 
         Raises:
             ConfigError: If nothing can answer — including the case of a
@@ -1744,7 +1744,7 @@ class MediaSettings:
                 # A stale `defaults:` entry falls through to the first model of
                 # the kind rather than stopping the call — the registered
                 # fallback the docstring states, and one the answer's own
-                # `provider/model` makes visible (DESIGN.md §10.2).
+                # `provider/model` makes visible (SDD Appendix C).
                 pass
         for provider in self.providers.values():
             for entry in provider.models:
@@ -1806,7 +1806,7 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` falls back rather than raising**, which is §1.6's
+    **An unknown `active:` falls back rather than raising**, which is DESIGN.md §8.1's
     registered exception and the reason a tunnel is allowed it (it is no longer
     shared with `embeddings.active_model`, which now refuses an undefined
     name): a tunnel is a *subordinate* dependency, and a name this build does
@@ -1859,7 +1859,7 @@ class A2ASettings:
     **probe** the broker, deciding enablement at runtime on whether anything
     answered; that half does not port, because it existed to decide whether to
     spawn a per-agent plugin process and there is no spawn to gate here.  The
-    plugin always starts (§4: every plugin the config names is started and
+    plugin always starts (DESIGN.md §1.4: every plugin the config names is started and
     shared) and what the section decides is whether it opens a mesh at all.
 
     **Mosquitto is a hard constraint and not a default.**  v1 carried a
@@ -2385,7 +2385,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
 
     A file that is there but cannot be *stat'd* is neither: it raises, naming
     the path, rather than being read as "changed" and quietly answered with a
-    fresh object (DESIGN.md §10.1).
+    fresh object (DESIGN.md §11.1).
 
     **And the answer follows the caller's home, like every other read a shared
     plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.home`,
@@ -2405,7 +2405,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
             # the built-in defaults while `load("/tmp/typo.yaml")` raised
             # `config file not found`.  A caller that named a file is asking
             # about *that* file, and answering with a different configuration is
-            # the silent fallback `load` refuses (DESIGN.md §10.1).
+            # the silent fallback `load` refuses (DESIGN.md §11.1).
             return load(explicit)
         # The `None` key is the "there was no file" state, so a file appearing
         # afterwards takes the reload path below rather than being missed.
@@ -2421,7 +2421,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         # A stat that failed is not a file that changed.  Reading it as one
         # would hand a fresh `Config` to a caller whose whole staleness test is
         # object identity, so the edit would look like it never happened
-        # (DESIGN.md §10.1).  `load` reports an unreadable file the same way.
+        # (DESIGN.md §11.1).  `load` reports an unreadable file the same way.
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
     cached = _latest.get(path)
@@ -2621,7 +2621,7 @@ def _a2a(
 ) -> A2ASettings:
     """One mesh-shaped section, defaulted — and the one place `configured` is set.
 
-    **`section` because there are two of them** (§3.5): the remote network's
+    **`section` because there are two of them** (SDD §3.5): the remote network's
     `peer_agent:` and the local one's `subagent:`, parsed by the same rules and
     told apart by the name every refusal is written with — a `provider:` mistake
     in the local one must not be reported against a key the file does not have.
@@ -2650,7 +2650,7 @@ def _a2a(
 
     **An unknown `provider:` is refused rather than downgraded.**  This is the
     section's whole difference from `file_tunnel.active`, the one remaining
-    section that falls back (§1.6): that names a *subordinate* dependency this
+    section that falls back (DESIGN.md §8.1): that names a *subordinate* dependency this
     build may not have, where falling back leaves a working system; this names
     the transport of the feature, where falling back would leave `a2a_*` tools
     offered to a model for a mesh that is not running.  v1 answered that case
@@ -3097,7 +3097,7 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     providers that do exist.**  It used to fall back to the first provider, so
     vectors came from an endpoint nobody chose and the index's recorded
     identity changed underneath — a name the config does not define is not a
-    vote for the first name that does (DESIGN.md §10.1).  A section that names
+    vote for the first name that does (DESIGN.md §11.1).  A section that names
     no `active_model` still takes the first, which is the designed default and
     not a substitution.
     """
@@ -3345,7 +3345,7 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     section that holds entries (`_cli_tools`, `_tool_server`).  Read as an empty
     enabled entry it dropped the operator's key with nothing said, and the model
     later ran a playbook that died on the credential this section exists to
-    supply (DESIGN.md §10.1).
+    supply (DESIGN.md §11.1).
     """
     entries = _mapping(raw.get("skills"), "skills")
     for name, spec in entries.items():

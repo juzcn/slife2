@@ -600,7 +600,7 @@ def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
 
 # --- a value that cannot be read is not a value that is absent ----------------
 #
-# DESIGN.md §10.1's first deformation, at the one place in this module where it
+# DESIGN.md §11.1's first deformation, at the one place in this module where it
 # is data loss rather than a wrong answer: every path below used to answer
 # "there is nothing here" about a value it could not read, and then — on the
 # write paths — replace it with the empty one it had just invented.
@@ -700,7 +700,7 @@ def test_an_update_will_not_replace_an_entry_it_cannot_read(tmp_path):
 def test_a_mode_that_could_not_be_kept_is_said_rather_than_swallowed(
     tmp_path, monkeypatch, caplog
 ) -> None:
-    """**§8.7 states the swap as preserving the file's mode**, and the failure
+    """**DESIGN.md §8.3 states the swap as preserving the file's mode**, and the failure
     was `except OSError: pass`: the config came back at `mkstemp`'s `0600`,
     which tightens a file somebody had made group-readable — another user of
     the machine loses the config and nothing says why.

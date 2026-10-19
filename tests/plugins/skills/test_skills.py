@@ -225,7 +225,7 @@ def test_a_header_that_will_not_parse_is_a_skill_with_no_declarations(
     exists and `scan` names it after its directory — but it loses its declared
     name, its description and every `requires`, which is why a damaged header
     also stops `readiness` reporting a missing prerequisite.  That is the
-    fallback DESIGN.md §10.2 registers; this is the half a reader would
+    fallback SDD Appendix C registers; this is the half a reader would
     otherwise have to infer.
     """
     skill(root, "one", header="metadata: [unclosed\n")

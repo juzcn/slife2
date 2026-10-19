@@ -1176,7 +1176,7 @@ async def test_a_stored_moment_that_will_not_parse_is_no_moment_at_all() -> None
     carry when it was sent; a value that would not parse fell through to "now",
     so yesterday's turns wore the moment the window opened — the transcript
     making a claim about the record that the record contradicts (DESIGN.md
-    §5.1).  The line is drawn with no stamp rather than a false one — and the
+    DESIGN.md §2.4).  The line is drawn with no stamp rather than a false one — and the
     live path still stamps, because an *absent* moment is this one.
     """
     client = answering_with(

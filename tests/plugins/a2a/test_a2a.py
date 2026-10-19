@@ -1184,7 +1184,7 @@ async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
     takes, wearing the failure's own words and marked `failed` so the envelope
     does not call it an answer.  The record is left `pending` on purpose: no
     reply arrived, so the peer's real ending is unknown, and a late terminal
-    still routes and records `completed` over it (DESIGN.md §10.1).
+    still routes and records `completed` over it (DESIGN.md §11.1).
     """
     session = wired(window=window)
     # An id of this test's own: the store is the process's singleton, and a row
@@ -1212,7 +1212,7 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """**A probe that could not run is not a probe that found nothing**
-    (DESIGN.md §10.1).
+    (DESIGN.md §11.1).
 
     `_probe_own_name` answers the one verdict nothing else on the wire can:
     whether another agent already holds this name.  Answering `None` when its
@@ -1554,7 +1554,7 @@ async def test_an_empty_result_pushes_nothing(window: Window) -> None:
 
 @pytest.mark.asyncio
 async def test_a_message_is_handed_to_the_window(window: Window) -> None:
-    """§1.2's policy, and there is one road in it: the window is where a message
+    """DESIGN.md §6.1's policy, and there is one road in it: the window is where a message
     becomes a turn somebody sees, and a conversation with no window is not a
     conversation with fewer readers — it is one nobody is running."""
     session = wired(window=window)
@@ -2024,7 +2024,7 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
 
     A responder that advertised before the outbound connect timed out is still
     on the broker, so the teardown after a failed `connect` is what retires it
-    (DESIGN.md §1.8).  `suppress(Exception)` made a teardown that raised
+    (DESIGN.md §6.3).  `suppress(Exception)` made a teardown that raised
     indistinguishable from one that worked: the agent stayed advertised with
     nobody to retire it, and nothing said why.
     """
@@ -2061,7 +2061,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
     """**A teardown that carries a protocol fact is not silent.**
 
     The offline card is how a peer that watched an agent arrive watches it leave
-    (DESIGN.md §1.8), so a `disconnect` that raises as the window closes leaves
+    (DESIGN.md §6.3), so a `disconnect` that raises as the window closes leaves
     the agent advertised with nobody to retire it.  `suppress(Exception)` made
     that failure indistinguishable from success — the roster said `online` and
     nothing said why.

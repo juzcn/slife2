@@ -181,7 +181,7 @@ def in_checkout(directory: Path | None = None) -> bool:
     "no such file" answers False; a permissions error, or a directory sitting
     where the marker should be, raises, because reading either as "not a
     checkout" would send a checkout's whole data directory to `~/.slife2` with
-    nothing said (DESIGN.md §10.1).
+    nothing said (DESIGN.md §11.1).
     """
     marker = (directory or Path.cwd()) / _CHECKOUT_MARKER
     try:
@@ -209,7 +209,7 @@ def data_dir() -> Path:
     databases to the home directory instead of beside itself.  *Gives up:* the
     checkout's own directory; *does not cover:* an override, which wins; *failure
     goes:* nowhere visible until a file is missing where it was expected — flag
-    for `DESIGN.md` §10.2.
+    for SDD Appendix C.
     """
     override = os.environ.get(DATA_ENV_VAR)
     path = (
@@ -445,7 +445,7 @@ def _write_atomically(path: Path, text: str) -> None:
     leaves the file empty for as long as it takes to write it back — the file is
     opened and emptied first, and the JSON arrives afterwards — and `known_homes`
     lets a `ValueError` out by design: a record it cannot read is a file to look
-    at, not a home that is not there (`DESIGN.md` §10.1).  So a daemon walking
+    at, not a home that is not there (`DESIGN.md` §11.1).  So a daemon walking
     the registry in that window — the context store's lifespan pass
     (`turn_dbs`), the scheduler's poll (`schedule_dbs`), WeChat's resume — read
     an empty file and its `json.loads("")` failed its *start-up* pass, which is
@@ -486,7 +486,7 @@ def known_homes() -> list[Path]:
     A record that cannot be **read** is the opposite case and raises.  Reading a
     damaged file as "no home here" would drop that home's schedules, logins and
     ledgers with nothing said — the deformation this codebase refuses everywhere
-    else (DESIGN.md §10.1: a failure is not a verdict).  One unreadable file in a
+    else (DESIGN.md §11.1: a failure is not a verdict).  One unreadable file in a
     machine's registry is a file to look at, named in the error.
 
     Raises:
@@ -524,7 +524,7 @@ def turn_dbs() -> list[Path]:
     description of the turn files at all: `schedule.db` sits in the same
     directory and matches it, so the pass opened the *scheduler's* ledger as a
     `TurnStore` and wrote the turn schema into it — two plugins sharing one
-    SQLite file, which is the one thing `DESIGN.md` §5 says the file layout is
+    SQLite file, which is the one thing `DESIGN.md` §5.1 says the file layout is
     for.  A suffix `*.db` means "a database"; what is wanted here is "a
     conversation", and only the middle of the name says which.
 
@@ -601,7 +601,7 @@ def schedule_dbs() -> list[Ledger]:
 def schedule_db(agent: str) -> Path:
     """One agent's scheduled-task ledger: `<agent>/schedule.db`.
 
-    Beside `turns.db` rather than in a file of its own, for §5's reason — an
+    Beside `turns.db` rather than in a file of its own, for DESIGN.md §5.1's reason — an
     agent's state is a directory, and isolation is the filesystem rather than a
     `WHERE` clause — and **the file is also how the plugin finds agents**: it is
     one shared process serving every agent, so the poll loop walks

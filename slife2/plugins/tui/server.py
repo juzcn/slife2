@@ -33,7 +33,7 @@ window calls `attach` when it mounts and holds it for its life; the plugin pushe
 each handed-over message down that call as a progress notification, and the
 window's handler hands it to `deliver` — the same method its own typing goes
 through.  There is deliberately **no inbox to poll**: v1 polled the plugin
-(`__wechat_drain_incoming`) and DESIGN.md §1.2 records why that seam went, since
+(`__wechat_drain_incoming`) and DESIGN.md §6.2 records why that seam went, since
 a message that becomes a turn in the window is worth more than one that becomes
 a row somewhere else.  Holding the call open is also what makes a session
 self-cleaning — a window that dies takes its stream with it, which cancels the
@@ -188,7 +188,7 @@ def decode(message: str) -> Handover | None:
     direction that costs something is the other one: a *newer* plugin's third
     kind would be executed as a conversation turn rather than drawn as a line,
     and a line run as a turn is a model call nobody asked for.  So the safer
-    branch is the refusal (DESIGN.md §10.1: a weaker path is not a substitute
+    branch is the refusal (DESIGN.md §11.1: a weaker path is not a substitute
     for a missing capability).
     """
     try:

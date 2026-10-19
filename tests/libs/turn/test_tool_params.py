@@ -449,7 +449,7 @@ async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
 async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
     """No `deliver` means the mode is refused, in a sentence that can be acted on.
 
-    An agent task's loop is that case (DESIGN.md §9): it runs one turn and has no
+    An agent task's loop is that case (DESIGN.md §10): it runs one turn and has no
     second one for a result to arrive in, so a task id would be a promise nothing
     could keep.  The refusal says which one line fixes it.
     """

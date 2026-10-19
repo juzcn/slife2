@@ -131,7 +131,7 @@ class ToolCallAccumulator:
         naming the call, because a truncated or corrupt fragment stream is the
         provider's fault and reading it as `{}` re-attributes it to the model —
         which then sees a validation error about its own call and retries the
-        call it never got wrong (§10.1: a value that cannot be read is not a
+        call it never got wrong (DESIGN.md §11.1: a value that cannot be read is not a
         value that is absent).  A call that genuinely took no arguments is
         unaffected: an empty string still parses to no arguments, which is a
         real absence rather than a damaged one.
@@ -167,7 +167,7 @@ def _parse_arguments(raw: str, call: str) -> dict[str, Any]:
     **Valid JSON that is not an object is the same damage.**  `[]`, `"x"` and
     `null` all parse, and a call's arguments are an object by the protocol — so
     coercing one to `{}` is the very substitution refused above, just past the
-    parser instead of through it (§10.1: a value that cannot be read is not a
+    parser instead of through it (DESIGN.md §11.1: a value that cannot be read is not a
     value that is absent).
     """
     if not raw.strip():
@@ -527,7 +527,7 @@ def unresolved_key(server_name: str, name: str, provider: Any) -> str:
     was: that test does not recognise `keyring:NAME`, so on a host with no
     credstore installed the reference itself went out as the bearer token —
     `Bearer keyring:DEEPSEEK_API_KEY` — which is the exact deformation the
-    config module names (DESIGN.md §10.1) and which the other three readers of
+    config module names (DESIGN.md §11.1) and which the other three readers of
     this same answer already refused.
     """
     key = provider.api_key

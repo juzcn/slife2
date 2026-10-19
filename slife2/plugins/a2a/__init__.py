@@ -26,7 +26,7 @@ name.
 **Two things v1 had next to this are deliberately not here.**  `broker.py` — a
 TCP probe that decides whether to start the plugin at all — has no port, because
 `slife2.libs.host.runtime.tcp_listening` already is that and there is no spawn to gate: a
-plugin the config names is always started (§4), and what the section decides is
+plugin the config names is always started (DESIGN.md §1.4), and what the section decides is
 whether the plugin opens a mesh.  And `identity.py` is not ported at all: it is
 v1's *inbox* vocabulary (`AgentName`, `Channel`, `AgentMessage`), and this build
 carries a channel as the string a turn records (`peer_agent:<peer>` on this

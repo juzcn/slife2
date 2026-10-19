@@ -431,7 +431,7 @@ def test_a_missing_qr_renderer_refuses_rather_than_calling_a_url_a_code(
 
     Without `qrcode` the payload was returned as it came — a link the login tool
     then told the model to show "so it can be scanned", which is false
-    (DESIGN.md §10.1: a weaker path must not be selected silently).  The
+    (DESIGN.md §11.1: a weaker path must not be selected silently).  The
     renderer refuses now, and the caller says what actually happened.
     """
     monkeypatch.setitem(sys.modules, "qrcode", None)
@@ -1286,7 +1286,7 @@ async def test_a_damaged_login_file_is_named_rather_than_read_as_no_login(
 
     A torn cache answered `{}`, and the status sentence built from that said
     "no login is saved" over a file that was right there — telling somebody who
-    had already scanned to scan a fresh code (DESIGN.md §10.1).  The outcome is
+    had already scanned to scan a fresh code (DESIGN.md §11.1).  The outcome is
     kept, because a login is still had by scanning, but the file and its damage
     are named in what the model reads, through `restore_note`.
     """
@@ -1411,7 +1411,7 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     The window takes the message and the response is lost — a timeout inside
     `submit`, which is what `transport.window` bounds — so the words may already
     be down the stream.  Retrying on *any* exception is how one WeChat message
-    runs as two turns and draws two replies, the failure DESIGN §1.2/§1.3 call
+    runs as two turns and draws two replies, the failure DESIGN.md §6.2 and §6.4 call
     worse than a late answer.  `slife2.libs.harness.handover` classifies this as
     *unknown* rather than a refusal, so no retry is taken.
     """

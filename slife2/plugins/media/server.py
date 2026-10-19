@@ -7,7 +7,7 @@ v1's `media` plugin, and the four capabilities are the whole of it:
     text_to_speech      say something out loud
     transcribe_audio    write down what an audio file says
 
-**A plugin, by §1.1's own table.**  It holds a provider's key and speaks to
+**A plugin, by DESIGN.md §1.1's own table.**  It holds a provider's key and speaks to
 somebody else's endpoint, so it is a process rather than a library — the same
 row of that table as the model backends and the embeddings server, and for the
 same reason: a library would put the key in every importer.
@@ -396,7 +396,7 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
     this function ran the resolution *outside* the guard below.  A config with
     `api: typo` loads cleanly — the loader only requires the key to be present —
     and then failed at the first call as a raw exception instead of the
-    `[failed] …` sentence §1.5 promises.  A zero-argument factory is what moves
+    `[failed] …` sentence DESIGN.md §8.2 promises.  A zero-argument factory is what moves
     the resolution inside the `try`.
 
     **The three failures are told apart**, because a person does three different

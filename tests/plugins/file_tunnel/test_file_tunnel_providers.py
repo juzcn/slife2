@@ -502,7 +502,7 @@ def test_the_ssh_binary_option_is_honoured() -> None:
 
 
 def test_a_malformed_remote_port_is_refused() -> None:
-    """§1.6 declares exactly one warn-instead-of-refuse in this section — an
+    """DESIGN.md §8.1 declares exactly one warn-instead-of-refuse in this section — an
     unknown provider *name* — and says a malformed *shape* is refused.  A bad
     value in a known option is that same mistake: reading "not a number" as 80
     silently forwards a different remote port than the config wrote."""
@@ -784,7 +784,7 @@ def test_a_failed_probe_is_not_permission_to_trust_the_scrape(monkeypatch) -> No
     The scraped connector set stays full straight through a QUIC outage — no
     "Unregistered" line follows a "Serve tunnel error" — so letting it stand in
     for the answer the probe could not give is exactly how a flapping tunnel
-    reports healthy.  §1.6 declares the scrape only for a build that announces
+    reports healthy.  DESIGN.md §8.1 declares the scrape only for a build that announces
     no metrics server, which this is not.
     """
 
@@ -800,7 +800,7 @@ def test_a_failed_probe_is_not_permission_to_trust_the_scrape(monkeypatch) -> No
 
 
 def test_without_a_metrics_server_the_scraped_set_is_the_answer() -> None:
-    """§1.6's boundary: the scrape is the fallback for a build that announces
+    """DESIGN.md §8.1's boundary: the scrape is the fallback for a build that announces
     no metrics server to ask — which is the only case that licenses it."""
     tunnel = CloudflareQuickTunnel()
     tunnel._registered = {"0"}

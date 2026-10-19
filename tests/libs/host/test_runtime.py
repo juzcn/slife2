@@ -112,7 +112,7 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     """Bookkeeping must never block a start.
 
     This is the registered tolerance of `_read_json_dataclass` (`DESIGN.md`
-    §10.2): damage reads as absence, which is accepted for a *recorded pid* but
+    SDD Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
     is why `live_clients` does not delete a damaged record while its pid is
     alive — there the cost is a live client nobody counts.
     """
@@ -189,7 +189,7 @@ def test_a_sweep_whose_delete_failed_is_reported(
 
     `live_clients` removes a dead client's leftover under the same `_remove` the
     three clear functions use, so a sweep whose delete failed is logged rather
-    than leaving the record to survive silently (`DESIGN.md` §10.2).
+    than leaving the record to survive silently (SDD Appendix C).
     """
     path = runtime._clients_dir() / "999999-deadbeef.json"
     path.write_text("{ not json", encoding="utf-8")
@@ -221,7 +221,7 @@ def test_a_bookkeeping_write_that_failed_is_reported(
     The atomic write suppressed `OSError`, so a server that started but whose
     record never landed was invisible to `stop` and got orphaned.  The behaviour
     is kept — the caller is not prepared to fail over — but the path is logged,
-    so the orphan is findable (`DESIGN.md` §10.2).
+    so the orphan is findable (SDD Appendix C).
     """
     target = tmp_path / "record.json"
 
@@ -243,7 +243,7 @@ def test_a_delete_that_failed_is_reported(
     `clear_record` — and `clear_claim` and `unregister_client` — suppressed a
     failed unlink, so a record the code asked to remove survived with nothing
     said.  An absent file is still tolerated; a failed unlink is logged naming
-    the path (`DESIGN.md` §10.2).
+    the path (SDD Appendix C).
     """
     url = "http://127.0.0.1:24000/mcp"
     path = runtime.record_path(url)
@@ -273,7 +273,7 @@ def test_a_log_that_cannot_be_read_is_named_not_empty() -> None:
 
     `tail_log` is pasted into a `StartFailed` message, so answering "" said the
     server printed nothing when the file could not be opened.  The failure is
-    named in the text instead (`DESIGN.md` §10.1).
+    named in the text instead (`DESIGN.md` §11.1).
     """
     url = "http://127.0.0.1:24000/mcp"
     path = runtime.log_path(url)
@@ -292,7 +292,7 @@ def test_a_log_that_cannot_be_truncated_is_reported(
 
     `_truncate_if_huge` suppressed the stat and the unlink, so a log that could
     not be unlinked grew past the ceiling with nothing said.  The failure is now
-    logged naming the file (`DESIGN.md` §10.1).
+    logged naming the file (`DESIGN.md` §11.1).
     """
     path = tmp_path / "daemon.log"
     path.write_text("x", encoding="utf-8")
@@ -517,7 +517,7 @@ def test_the_linux_zombie_check_answers_false_when_proc_cannot_be_read(
     The direction matters: answering "zombie" from a read that never happened
     would report a live daemon as stopped, and a daemon reported as stopped is
     one nobody goes looking for.  An unanswerable question leaves it running
-    (`DESIGN.md` §10.1).
+    (`DESIGN.md` §11.1).
     """
 
     def deny(self: Path, **kw: object) -> str:
@@ -695,7 +695,7 @@ def test_tcp_listening_that_cannot_resolve_is_no_answer(
 
     A name that does not resolve answered `False`, so `open_server` stated as
     fact "nothing is listening" for a check it never got to make.  The third
-    answer is `None`, and the reason is logged (`DESIGN.md` §10.1).
+    answer is `None`, and the reason is logged (`DESIGN.md` §11.1).
     """
     import socket
 
@@ -714,7 +714,7 @@ def test_tcp_listening_that_answered_nothing_is_false_and_logs_why(
 ) -> None:
     """A refusal and a timeout are both "nothing answered the probe", which is
     the gate's question — the reason is named at debug, and neither is read as
-    an address that could not be asked about (`DESIGN.md` §10.1)."""
+    an address that could not be asked about (`DESIGN.md` §11.1)."""
 
     def timed_out(*args, **kwargs):
         raise TimeoutError("timed out")
@@ -766,7 +766,7 @@ def test_a_start_without_the_job_escape_is_reported(
     When the enclosing job forbids `CREATE_BREAKAWAY_FROM_JOB`, the process is
     retried without it — which is defensible, because losing the escape hatch
     beats failing to start, but *not* silently: the server then dies with the
-    job, and that consequence is named at warning (`DESIGN.md` §10.2).
+    job, and that consequence is named at warning (SDD Appendix C).
     """
     calls: list[int] = []
 

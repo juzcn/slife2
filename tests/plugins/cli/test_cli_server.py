@@ -249,7 +249,7 @@ async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
     `str.split()` makes the first word `"C:\\Program` — a program that cannot
     exist — so the note claims a program is missing that is not, and `shutil.which`
     is never asked about the one that is.  The line is split the way the argv
-    runner will (`DESIGN.md` §9: an argv rather than a shell), so quotes group a
+    runner will (`DESIGN.md` §10: an argv rather than a shell), so quotes group a
     word and come off, and a Windows path's backslashes stay literal.
     """
     asked: list[str] = []
@@ -388,7 +388,7 @@ async def test_a_command_line_that_cannot_be_split_is_refused_before_the_write(
 
     `_on_path` used to meet the unbalanced quote *after* the entry was written
     and answer `""` — the same silence as "the program is on PATH" — so `cli_set`
-    reported a success over a row nothing can run (DESIGN.md §9: an argv rather
+    reported a success over a row nothing can run (DESIGN.md §10: an argv rather
     than a shell).  The split is checked before the write, and the refusal names
     the line.
     """

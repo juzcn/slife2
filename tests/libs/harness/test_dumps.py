@@ -73,7 +73,7 @@ def test_a_line_is_never_quoted_and_never_rewritten() -> None:
 def test_a_reply_this_build_cannot_read_is_refused_rather_than_read_as_empty(
     reply: str,
 ) -> None:
-    """**An unreadable reply is not a decision to do nothing** (§5.1's split).
+    """**An unreadable reply is not a decision to do nothing** (DESIGN.md §2.4's split).
 
     They are different answers with different consequences — one is a failure
     the caller falls back from, the other is a model saying the output has

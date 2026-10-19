@@ -42,7 +42,7 @@ a signature — see below).  A test helper's ``timeout: float = 5.0`` is a fixtu
 a test helper's ``timeout: float = _T.timeouts.ready.probe`` is the capture bug
 in a file that is about to assert the registry works.
 
-Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and DESIGN.md §4.7):
+Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and DESIGN.md §9.2):
   * values live in ``slife2/helpers/timeouts.py`` — consumers read them at call time
     via ``slife2.helpers.timeouts.timeouts.<role>.<key>``;
   * budgets (``work``/``ready``/``grace``/``transport``/``storage``/

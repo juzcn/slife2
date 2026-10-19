@@ -249,7 +249,7 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # — but it raises rather than returning the bound un-normalised:
             # skipping the local-offset rewrite is the one thing this module
             # guarantees, so a value that reached here unparseable is a bound it
-            # cannot place (DESIGN.md §10.1).
+            # cannot place (DESIGN.md §11.1).
             raise InvalidTimeBound(_bound_error(role, value)) from None
         resolved = at(moment)
 

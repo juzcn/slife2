@@ -127,7 +127,7 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # Passed through as stored, an empty or damaged value included: `or None`
     # here turned one into "now" at the last iteration, which is the stamp
     # `_timestamp`
-    # refuses to invent (DESIGN.md §5.1).  A row that says nothing about when it
+    # refuses to invent (DESIGN.md §2.4).  A row that says nothing about when it
     # ran draws no moment at all.
     asked = turn.get("created_at") or ""
     # The turn's id, channel and span, shown beside the words that opened it.  It

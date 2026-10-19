@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 #: sentence — a plugin *is* an MCP server, so calling ours "MCP servers" would
 #: distinguish them from the twenty under `mcp:` not at all — and the
 #: difference it names is load-bearing: `required` on the hub's connection, a
-#: missing one failing the turn, and tools that start loaded (DESIGN.md §8).
+#: missing one failing the turn, and tools that start loaded (DESIGN.md §4.1).
 PLUGIN = "plugin"
 
 FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
@@ -845,7 +845,7 @@ class ToolStore:
 
         **Ours are loaded; somebody else's are on demand.**  A plugin's tools
         are few and the model is expected to have them — a model that has
-        quietly lost `now` and `calc` is the failure DESIGN.md §8 is built
+        quietly lost `now` and `calc` is the failure DESIGN.md §4.1 is built
         around — while a server under `mcp:` may offer ninety tools that cost
         a prompt on every call until one is wanted.  `autoload: true` is the
         operator saying this one is wanted, and it is the same set of sources
@@ -1036,7 +1036,7 @@ class ToolStore:
             # `plugin`, `mcp` and `rest` row in the file and their vectors, on
             # a call it was asked for outright.  `__init__` already declines to
             # run the pass for that store; the state it declines to run is now
-            # the state the method has (DESIGN.md §10.1).
+            # the state the method has (DESIGN.md §11.1).
             return {"forgotten": 0}
         known = self.known
         with self._connect() as connection:
@@ -1183,7 +1183,7 @@ class ToolStore:
         injected.  Nothing of ours is ever a victim, and neither is anything the
         operator marked `autoload`: the budget exists to stop somebody else's
         ninety tools crowding the prompt, not to take away the tools this system
-        guarantees (DESIGN.md §8).
+        guarantees (DESIGN.md §4.1).
 
         **The count is of everything held, protected tools included** — v1's
         arithmetic, and it is worth knowing what it means at the edges: a
@@ -1340,7 +1340,7 @@ class ToolStore:
         whole catalogue by accident, and a list of what exists is how a model or
         a person finds out what a category holds — which is why the store still
         answers it, and why the tool does not (`tool_search` refuses it: a
-        listing is a different question with a different shape, §9 of DESIGN).
+        listing is a different question with a different shape, DESIGN.md §10 of DESIGN).
 
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is

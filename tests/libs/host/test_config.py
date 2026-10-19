@@ -739,7 +739,7 @@ def test_no_keyring_at_all_still_degrades_to_the_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The declared degrade survives: with no backend, credstore answers None and
-    the chain steps past it to the reference (`DESIGN.md` §10.2)."""
+    the chain steps past it to the reference (SDD Appendix C)."""
     import credstore
 
     monkeypatch.setattr(credstore, "get_credential", lambda key: None)
@@ -816,7 +816,7 @@ def test_no_credstore_at_all_leaves_a_keyring_uri_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The declared degrade survives: with no backend, a `keyring:` reference is
-    left exactly as written (`DESIGN.md` §10.2)."""
+    left exactly as written (SDD Appendix C)."""
     monkeypatch.setitem(sys.modules, "credstore", None)
     assert resolve_secret("keyring:slife/deepseek") == "keyring:slife/deepseek"
 
@@ -1128,7 +1128,7 @@ def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:
 #
 # The third source of tools, and the only one with no connection in it: a
 # `cli:` entry names a program that is already installed.  Nothing serves these
-# yet (DESIGN.md §9) — what these tests hold is the shape the tools will read.
+# yet (DESIGN.md §10) — what these tests hold is the shape the tools will read.
 
 CLI = """
 cli:
@@ -1400,7 +1400,7 @@ def test_a_stale_media_default_falls_through_to_the_first_of_the_kind(
     """The one registered step past v1's four: a `defaults[kind]` that no longer
     resolves is a *weaker* statement than the caller's, so the first model of the
     kind answers rather than the call stopping — and the answer's own
-    `provider/model` is what makes the substitution visible (`DESIGN.md` §10.2).
+    `provider/model` is what makes the substitution visible (SDD Appendix C).
     """
     provider, model = load(write(tmp_path, MEDIA_STALE_DEFAULT)).media.resolve("image")
     assert (provider.name, model.model) == ("test", "img")

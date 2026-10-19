@@ -136,7 +136,7 @@ def tail_log(url: str, *, lines: int = 20) -> str:
     **A log that cannot be read is not a log that is empty.**  The caller pastes
     this into a `StartFailed` text, so answering "" would say the server printed
     nothing — a confident negative read off a file that could not be opened,
-    which is the deformation DESIGN.md §10.1 names.  The failure is named in the
+    which is the deformation DESIGN.md §11.1 names.  The failure is named in the
     text instead, so "it printed nothing" and "the log could not be read" do not
     arrive as one message.
     """
@@ -203,7 +203,7 @@ def _read_json_dataclass[RecordT](
     knows the file must exist (`read_claim`, `read_record`) still only learns
     that it does not.  *Failure goes:* nowhere, which is why the process that
     wrote the file is the one to read the warning `_write_json_atomic` logs;
-    flag for `DESIGN.md` §10.2.
+    flag for SDD Appendix C.
 
     The broad `except` is the point rather than a shortcut, and each arm is a
     different way the file fails to be one: `read_text` raises `OSError` when it
@@ -234,7 +234,7 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
     landed is invisible to `stop` and is then orphaned.  *Gives up:* the record,
     at the moment it was written.  *Does not cover:* nothing — the write is
     either complete or not attempted.  *Failure goes:* a warning naming the
-    path, so the orphan is findable in the log; flag for `DESIGN.md` §10.2.
+    path, so the orphan is findable in the log; flag for SDD Appendix C.
     """
     tmp = path.with_suffix(".tmp")
     try:
@@ -286,7 +286,7 @@ def _remove(path: Path) -> None:
     there and one that was not, so a caller cannot tell it removed anything;
     *it does not cover* an unlink that fails for another reason — permissions, a
     directory in the way — which is logged; *the failure goes* to that warning,
-    naming the path (DESIGN.md §10.2).  Only the failed unlink is reported,
+    naming the path (SDD Appendix C).  Only the failed unlink is reported,
     because otherwise the file the caller asked to remove would survive with
     nothing said.
     """
@@ -458,7 +458,7 @@ def live_clients() -> list[ClientRecord]:
     **A record that cannot be parsed is not a client that is gone.**  Deleting
     one makes a live client uncounted, and the count is what "the last one out
     stops the shared servers" rests on, so a file whose body is damaged is kept
-    and counted whenever the pid in its *name* is alive (DESIGN.md §10.1).  Only
+    and counted whenever the pid in its *name* is alive (DESIGN.md §11.1).  Only
     a dead pid is a crash to clean up, and only then is the file removed — by
     `_remove`, so a sweep whose delete failed is logged rather than silent.
     """
@@ -533,7 +533,7 @@ def _zombie_ps(pid: int) -> bool:
 
     **A `ps` that could not say is not a zombie** — no output, no `ps`, a
     deadline — which is the direction that leaves a daemon reported as running
-    rather than talked about as gone (DESIGN.md §10.1).
+    rather than talked about as gone (DESIGN.md §11.1).
     """
     try:
         result = subprocess.run(
@@ -747,7 +747,7 @@ def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool
     **A probe that could not be made is not a port that is closed.**  A name
     that does not resolve means the probe never asked the question it was meant
     to ask, and that is `None`; `open_server` names it rather than stating as
-    fact "nothing is listening" for a check it did not make (DESIGN.md §10.1).
+    fact "nothing is listening" for a check it did not make (DESIGN.md §11.1).
     Every *other* failure — a refusal, a timeout, a socket that could not be
     created — means a connection was attempted and nothing answered within the
     budget, which is precisely what this gate exists to ask, so it is `False`
@@ -898,7 +898,7 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
       **logged at warning, naming the consequence**, because the process then
       does not survive its enclosing job.  The retry is kept rather than failing
       the start — a machine where breakaway is forbidden at least gets a server
-      for this session — and it is a registered fallback; see `DESIGN.md` §10.2.
+      for this session — and it is a registered fallback; see SDD Appendix C.
 
     Also `cwd` is set away from the repository: a daemon must not hold a working
     directory open.  Which config the child reads is decided by the absolute
@@ -960,7 +960,7 @@ def _truncate_if_huge(path: Path) -> None:
     past the ceiling with nothing said.  The unlink is still best-effort — a log
     that is already gone is fine — but a failure is now logged naming the file,
     because the ceiling this function exists to hold is otherwise quietly
-    exceeded (DESIGN.md §10.1).
+    exceeded (DESIGN.md §11.1).
     """
     try:
         if path.exists() and path.stat().st_size > _LOG_KEEP_BYTES:
@@ -1026,7 +1026,7 @@ def terminate(pid: int, *, grace: float | None = None) -> bool:
     the caller learns only that the process is still alive, not that `taskkill`
     was unavailable.  *Does not cover:* a process that survives the poll, which
     this reports as `False` and `stop` reports as a server it could not stop.
-    *Failure goes:* the still-alive pid the caller polls (DESIGN.md §10.2).
+    *Failure goes:* the still-alive pid the caller polls (SDD Appendix C).
     """
     if not pid_alive(pid):
         return True

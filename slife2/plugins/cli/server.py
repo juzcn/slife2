@@ -8,7 +8,7 @@ command, a sentence about what it does, and how to install it if it is missing.
 **Why a process for a family with nothing to connect to.**  Nothing here needs a
 connection, and that was the argument for keeping it out of one — a server
 invented to wrap a row-builder is a process that exists to be connected to.
-What changed is what is next: DESIGN.md §9 has an entry becoming *a tool the
+What changed is what is next: DESIGN.md §10 has an entry becoming *a tool the
 operator's own config gave the model*, run as an argv rather than through a
 shell so that the arguments a model invents cannot become commands it invented.
 One tool per entry is a model-facing tool, and this is the process that will
@@ -154,7 +154,7 @@ def _prepare(name: str, entry: dict[str, Any]) -> CliToolSettings:
 
     **Both refusals come before the write.**  `_cli_tool` refuses an entry
     naming no program, and the split below refuses a command line `shlex` cannot
-    take apart — which the argv runner (`DESIGN.md` §9) would meet on the way in
+    take apart — which the argv runner (`DESIGN.md` §10) would meet on the way in
     too.  A line nothing can split is a row a search finds and no call can run,
     so it is refused here rather than written over a success.  Neither is a name
     collision: a `cli:` row is called `cli:{name}`, so it cannot collide with
@@ -205,7 +205,7 @@ def _missing_program(command: str) -> str:
     say once rather than every answer's to repeat.
 
     **The command line is split the way the argv runner will take it apart**
-    (`DESIGN.md` §9: an argv rather than a shell), so that quotes are honoured:
+    (`DESIGN.md` §10: an argv rather than a shell), so that quotes are honoured:
     `"C:\\Program Files\\tool\\tool.exe" --json` names one program, not
     `"C:\\Program`, and a Windows path's backslashes are literal rather than
     escape sequences — which is why this is `posix=False` and why the quotes it

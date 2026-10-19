@@ -129,7 +129,7 @@ def as_tool_text(answer: Any) -> str:
     `None` is the empty string rather than the text `"null"`, which is a result
     that is not there; a `str` passes through byte for byte; everything else is
     JSON, with `default=str` so that an object the encoder does not know becomes
-    text instead of failing the turn (DESIGN.md §10.2's register, where what
+    text instead of failing the turn (SDD Appendix C's register, where what
     that gives up is named).
 
     **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape

@@ -6,7 +6,7 @@ description; the loop runs as the calling agent — the same system prompt, the
 same model, the same tools — and its last message is handed back to that
 conversation when it stops.  Nothing waits for it: the call that starts one
 answers at once, and the answer arrives later as a message on the `agent-task`
-channel, wearing the marker that says which task it was (DESIGN.md §1.3).
+channel, wearing the marker that says which task it was (DESIGN.md §6.4).
 
 **It is a plugin because it holds loops**, which is what `slife2-agent` holds and
 why that one is a plugin.  What it does *not* do is reach for anything the agent
@@ -21,12 +21,12 @@ the loop.
 single turn is set up exactly as a turn of the agent's is — `restore` when the
 loop is built, `rebuild` once before the turn, `_func_tool_unload` at the turn's
 end — and the key every hop carries is `(agent, "")`, the agent's own
-conversation.  §5.1's *the context is chosen, not accumulated* has no exception
+conversation.  DESIGN.md §2.4's *the context is chosen, not accumulated* has no exception
 for a task: one that ran on whatever happened to be in the list would be the one
 turn in this system whose context nobody decided.  `restore` and `rebuild` are
 `slife2-context`'s and the trim is `slife2-toolhub`'s; what is repeated here is
 the *order* they are called in, which is the price of this plugin and the thing
-DESIGN.md §1.3 names rather than denies.
+DESIGN.md §6.4 names rather than denies.
 
 **Nothing is recorded, and that is a decision about tasks.**  A task's result
 reaches the conversation as a message and *that* message is what the agent server
@@ -45,11 +45,11 @@ than because it was left out:
 * **No filtering of the tool set.**  The catalogue is one list for the whole
   system (`slife2-toolhub`), so a task may start a task and the registry here is
   **flat** — no parents, no depth.  `agent-task: max_running` is the bound
-  instead; DESIGN.md §9 holds the one it does not bound.
+  instead; DESIGN.md §10 holds the one it does not bound.
 
 The answer goes back through `slife2-tui`'s `submit`, which is this system's one
 path for "something outside the conversation became a turn in it" (DESIGN.md
-§1.2).  A window that is not showing that agent is a **failed delivery**: the
+DESIGN.md §6.1).  A window that is not showing that agent is a **failed delivery**: the
 work happened, the answer reached no conversation, and the log says so — a task
 is over either way, and running a turn for nobody to make the two agree is the
 "carry on without the window" this system dropped.
@@ -140,7 +140,7 @@ CHANNEL = "agent-task"
 
 #: What the answer wears, so the model can read the task's id back out of the
 #: row.  It is **content**, not an annotation this build derives: it goes into
-#: the stored message verbatim, which by `DESIGN.md` §1.2's convention is what
+#: the stored message verbatim, which by `DESIGN.md` §2.4's convention is what
 #: the word-shaped spelling says and `[TURN:…]`'s capitals do not.
 #:
 #: **`AgentTaskResult`, because that is what the line is**: an agent task's
@@ -178,7 +178,7 @@ class AgentTask:
     The five fields `report` answers with are a task's *whole* description:
     there is no message list here, no transcript and no result beyond the one
     being delivered, because none of those outlive the coroutine that produced
-    them (DESIGN.md §1.3).
+    them (DESIGN.md §6.4).
     """
 
     agent: str
@@ -199,7 +199,7 @@ class AgentTask:
     #: The answer, held only from the moment the loop returns until it is handed
     #: over.  Never served to the model — asking is a question about *state* and
     #: the answer travels by message, so that a result cannot enter the
-    #: conversation twice (DESIGN.md §1.3).
+    #: conversation twice (DESIGN.md §6.4).
     text: str = ""
     #: Whether the answer reached the conversation.  Kept because "was it handed
     #: over" is the one fact about a finished task that nothing else can
@@ -230,7 +230,7 @@ class AgentTask:
         """The task, named for a model to read.
 
         Built from the channel and the name rather than minted, for the reason
-        §3 gives for `(agent, subagent)`: a name cannot go stale, and a handle a
+        DESIGN.md §1.5 gives for `(agent, subagent)`: a name cannot go stale, and a handle a
         caller has to keep is a thing that can be lost.  It also says where the
         answer will come from.
 
@@ -255,7 +255,7 @@ class AgentTask:
         is working out of.
 
         The empty second half is `subagent`'s "this agent's own conversation",
-        which is exactly what a task is running on (DESIGN.md §3).
+        which is exactly what a task is running on (DESIGN.md §1.5).
         """
         return (self.agent, "")
 
@@ -266,7 +266,7 @@ class AgentTask:
         `agent_task_list` all read this, so a model never has to translate
         between two spellings of one fact — which is the same reason the marker
         keys are named after the arguments and fields the tools use
-        (DESIGN.md §1.2).
+        (DESIGN.md §2.4).
         """
         return {
             "task_id": self.task_id,
@@ -303,7 +303,7 @@ def channel_for(task: AgentTask) -> str:
     and nothing else (`slife2.tui.widgets.channel_prefix`), so `AsyncTask(name)> `
     is a fact the channel has to carry rather than one the window could guess.
     The *recorded* channel carries it too, which is what the `[TURN:{…}]`
-    footnote hands the model (§5.1) — so a result says which task it came from
+    footnote hands the model (DESIGN.md §2.4) — so a result says which task it came from
     outside the marker as well as inside it.
     """
     return f"{CHANNEL}:{task.name}"
@@ -313,7 +313,7 @@ def marker(task: AgentTask) -> str:
     """What a task's answer wears, so the model knows which task it came from.
 
     The space between a marker and the words beside it is the joiner's to add,
-    exactly as `slife2-wechat` adds its own (DESIGN.md §1.2).
+    exactly as `slife2-wechat` adds its own (DESIGN.md §2.4).
     """
     return f"{MARKER_PREFIX}{json.dumps(task.report(), ensure_ascii=False)}]"
 
@@ -424,7 +424,7 @@ def build_server(
 
         A hub that is not there **raises**, like every other peer in this
         system: a task with a quietly short tool list would be a loop that fails
-        in ways the model cannot see (DESIGN.md §8).
+        in ways the model cannot see (DESIGN.md §4.1).
         """
         nonlocal hub_conn
         if hub_client is not None:
@@ -530,7 +530,7 @@ def build_server(
         messages and no ids as a context whose turns nothing could name, so the
         task's loop and the store disagreed about what it held from that point
         on.  A missing or null `turn_ids` is the same damage as a non-list
-        `messages` and is refused the same way (DESIGN.md §10.1: a value that
+        `messages` and is refused the same way (DESIGN.md §11.1: a value that
         cannot be read is not a value that is absent).
         """
         raw = payload.get("messages")
@@ -580,7 +580,7 @@ def build_server(
 
         **Once, and once is exactly right** — a task runs a single turn, so the
         one call the agent server makes before a turn is the one call a task
-        makes.  *Not* making it is the thing that would be wrong: §5.1's rule is
+        makes.  *Not* making it is the thing that would be wrong: DESIGN.md §2.4's rule is
         that the context is chosen rather than accumulated, and a turn that ran
         on whatever happened to be in the list would be the one turn in this
         system whose context nobody decided.
@@ -591,7 +591,7 @@ def build_server(
 
         **And it writes only when it changes something.**  A decision that asks
         for what is in hand rebuilds nothing and touches nothing on disk
-        (§5.1's common case) — which is a saving and **not** a licence, and it
+        (DESIGN.md §2.4's common case) — which is a saving and **not** a licence, and it
         did not use to be read that way: the argument ran that because this call
         usually writes nothing it need not be serialised.  The case that *does*
         write is the one that lands, and it is exactly the case that has to be
@@ -689,7 +689,7 @@ def build_server(
             # nowhere.
             refresh=partial(registry, task),
             # **No `deliver`, and so no `_async` here — a stated limitation**
-            # (DESIGN.md §9, "Background work inside an agent task").  This loop
+            # (DESIGN.md §10, "Background work inside an agent task").  This loop
             # runs one turn and has no second one for a background result to
             # arrive in, so there is nowhere to hand one back to: the loop
             # therefore *refuses* the mode with a sentence the model can act on
@@ -718,7 +718,7 @@ def build_server(
         **What went is written into the turn** as the harness pair
         `_func_tool_unload` called with no names, so a reader of the record reads
         that the list shrank and which tools left, rather than reaching for one
-        it still believes it has (§8.5).  Nothing is written when nothing moved:
+        it still believes it has (DESIGN.md §4.3).  Nothing is written when nothing moved:
         an empty pair would be a record of something that did not happen.
 
         **A skip is a failure, and it is said at `error`.**  A task runs one
@@ -729,7 +729,7 @@ def build_server(
         one by bookkeeping) and what is added is visibility: the skip is logged
         at `error`, naming the task, because the loaded set is one list for the
         whole system and an untrimmed one leaves every other conversation's
-        request longer (DESIGN.md §1.3).  Registered as a §10.2 fallback: it
+        request longer (DESIGN.md §6.4).  Registered as a fallback in SDD Appendix C: it
         *skips the trim* when the hub cannot be reached or answers with a shape
         this build cannot read; it *gives up* the trim for that turn; it *does
         not cover* a hub that is gone for good — there is no next turn here to
@@ -785,7 +785,7 @@ def build_server(
     async def run(task: AgentTask) -> None:
         """One task's whole life: run the loop, then hand the answer over.
 
-        **Every failure is a message, not a silence** (§7): a loop that raises
+        **Every failure is a message, not a silence** (SDD §5.1): a loop that raises
         still has an answer to deliver, and a task that vanished without one
         would leave the conversation waiting for something that will never
         arrive.  Cancellation is the one exception, and it is not one — a task
@@ -810,13 +810,13 @@ def build_server(
                 task.status = FINISHED
                 task.finished_at = now()
             except asyncio.CancelledError:
-                # No await anywhere in this path: §3 measured that a plain
+                # No await anywhere in this path: DESIGN.md §2.5 measured that a plain
                 # `await` in a cancelled scope is cancelled again at its next
                 # checkpoint, so anything awaited here would simply not happen.
                 task.status = CANCELLED
                 task.finished_at = now()
                 raise
-            except Exception as exc:  # noqa: BLE001 - §7's rule, one level down
+            except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
                 logger.warning("agent task %s failed: %s", task.name, exc)
                 task.text = f"The agent task {task.name!r} failed: {exc}"
                 task.status = FAILED
@@ -839,7 +839,7 @@ def build_server(
             # outlives a task is this object, and the only part of it worth
             # megabytes is the answer.  Nothing reads it again — the hand-over
             # was the only reader, and there is deliberately no tool that fetches
-            # an answer back (§1.3) — so keeping it would be holding a second
+            # an answer back (DESIGN.md §6.4) — so keeping it would be holding a second
             # copy of something that is either already in the conversation or,
             # in the one case above, gone.  Keeping the *handle* would be the
             # same mistake in the other direction: a finished `asyncio.Task`
@@ -1029,7 +1029,7 @@ def build_server(
         tasks[task.key] = task
         # Detached from the call that starts it, which is the whole of what
         # "background" means here: the request that asked returns, and the loop
-        # keeps going.  §3's rule for a write from a cancelled turn is the same
+        # keeps going.  DESIGN.md §2.5's rule for a write from a cancelled turn is the same
         # rule — work created outside the cancelled scope does land.
         task.handle = asyncio.create_task(run(task))
         logger.info("agent task %s started for %s", name, agent)

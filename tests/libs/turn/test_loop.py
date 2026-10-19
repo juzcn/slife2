@@ -442,7 +442,7 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
     guarantees is that nothing half-written is in the list; what happens to that
     trailing user message is the owner's decision, and the owner is the agent
     server — which keeps it, and records it, because losing it is the failure
-    the whole loop design exists to prevent.  See DESIGN.md §3.
+    the whole loop design exists to prevent.  See DESIGN.md §2.5.
     """
     backend = FakeBackend(
         text_turn(
@@ -586,7 +586,7 @@ async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
     that very state whenever it is called *after* the work is over.  Answering
     the state alone and popping the task would throw that result away — the one
     copy of an answer nobody can ask for a second time — which is `DESIGN.md`
-    §8.8's "the alternative to returning it is losing it", and losing it in
+    DESIGN.md §4.6's "the alternative to returning it is losing it", and losing it in
     silence is the worse of the two.  So the answer carries it, exactly as
     `check_async` would have: `status` says the call was already over (and so
     that *this* call cancelled nothing), and `result` is the answer itself.

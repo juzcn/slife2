@@ -69,7 +69,7 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
     **A value outside those spellings is refused, not read as "send nothing".**
     The field has a closed set, and a typo (`enabledd`) used to fall through the
     match to `case _` — so the operator's intent was dropped with no word while
-    the request went out unchanged, the deformation §10.1 names: a weaker path
+    the request went out unchanged, the deformation DESIGN.md §11.1 names: a weaker path
     silently standing in for the one that was asked for.  The refusal names the
     value and the spellings this adapter knows.
     """
@@ -80,7 +80,7 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
             # adapter inventing an output budget for somebody else's model — and
             # the thinking budget is half of it, so the invented number decided
             # how long the model could think.  `thinking: enabled` without a cap
-            # is a configuration that cannot be satisfied, and §10.1's rule for
+            # is a configuration that cannot be satisfied, and DESIGN.md §11.1's rule for
             # that is to say so where it is used.
             if not settings.max_tokens:
                 raise ValueError(
@@ -308,7 +308,7 @@ def _reasoning(delta: Any) -> str:
     one streams reasoning that reaches the transcript never — invisibly, because
     nothing errors and the answer is still correct.  Logging the unrecognised
     names once makes that gateway findable from the log instead of from a reader
-    noticing the missing line (§10.1: an unreadable value must not be a silent
+    noticing the missing line (DESIGN.md §11.1: an unreadable value must not be a silent
     absence).
     """
     for field in _REASONING_FIELDS:

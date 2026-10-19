@@ -152,7 +152,7 @@ def test_the_agent_speaking_in_a_subagents_conversation_is_drawn_as_an_agent() -
 
 def test_a_scheduled_trigger_says_which_task_came_due() -> None:
     """The clock's messages wear **no marker** — there is nothing to match a
-    result to, because a trigger is not a result (DESIGN.md §1.7) — so the
+    result to, because a trigger is not a result (DESIGN.md §6.5) — so the
     channel carries the whole of what the window can say about where it came
     from, and every message this plugin hands over names a task."""
     from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL

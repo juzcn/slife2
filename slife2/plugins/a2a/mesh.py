@@ -54,7 +54,7 @@ place is held for it by the one party that knows it is wanted: the maker's next
 message, which cannot be delivered to a name nobody is listening for.  So
 `slife2.plugins.a2a.server.place_for` gives the receiver its place before it
 publishes — once, for the rest of the process — and this object is what it holds
-(DESIGN.md §1.10, "the road").
+(DESIGN.md §6.6, "the road").
 
 The timeouts are v1's numbers, and they are module constants rather than v1's
 `slife.timeouts` registry: that registry existed so a value could be re-read at
@@ -246,7 +246,7 @@ def _decode_payload(msg) -> dict | None:
     """Decode an MQTT payload to JSON; ``None`` when there is nothing to read.
 
     **An empty payload and a corrupt one are not the same answer**
-    (DESIGN.md §10.1).  An empty body is how a publisher retires a card
+    (DESIGN.md §11.1).  An empty body is how a publisher retires a card
     (``_handle_discovery``), so it is ``None`` without a word.  A body that is
     not JSON is somebody else's process sending this build something it cannot
     read, and the caller drops it either way — so a silent ``None`` left the
@@ -542,7 +542,7 @@ def _reply_state(data: dict) -> str:
     more input" ends its requester ladder here; this system has no way to
     continue an interrupted task, so such a reply is recorded as `failed` and
     read that way — the honest ending available, and the same word the store's
-    row carries (DESIGN.md §9, "an interrupted peer task").
+    row carries (DESIGN.md §10, "an interrupted peer task").
     """
     result = data.get("result") or {}
     status = result.get("statusUpdate", {}).get("status", {})
@@ -763,7 +763,7 @@ class A2AMesh:
         Returns a description of the claim, or ``None`` when the name is free.
 
         **A probe that failed is not a probe that found nothing** (DESIGN.md
-        §10.1).  A connection that could not be made or read used to be
+        DESIGN.md §11.1).  A connection that could not be made or read used to be
         swallowed at debug and answered ``None``, which reads as "the name is
         free" — the one verdict this check exists to give, and the one it must
         never guess: a duplicated name means every task sent to it runs twice.
@@ -918,14 +918,14 @@ class A2AMesh:
         `UNREACHABLE` and not one of the three peer verdicts, because no peer
         said anything: this is the requester's failure, and rendering it as an
         answer is the confident negative `slife2.libs.turn.loop` would act on
-        instead of re-sending (DESIGN.md §10.1).  The words do not claim what
+        instead of re-sending (DESIGN.md §11.1).  The words do not claim what
         cannot be known — the ladder had not run out, so whether the peer has the
         message is exactly what is unknown.
 
         **The record is left alone, and that is `_deliver`'s rule rather than an
         omission.**  No reply arrived, so the peer's real ending is unknown, and
         a row marked `failed` would be a verdict this process has no business
-        giving (§10.1).  The correlation routes do go with the teardown, so a
+        giving (DESIGN.md §11.1).  The correlation routes do go with the teardown, so a
         terminal reply from a peer that did receive the message lands as
         `a2a_reply_unknown_corr` — which is the second thing the notice says: the
         sender has to send it again.
@@ -1300,7 +1300,7 @@ class A2AMesh:
         envelope is told it is a failure so it is not rendered as an answer.
         The store record is deliberately left alone: no reply arrived, so the
         peer's real ending is unknown, and marking the row `failed` would be a
-        verdict this process has no business giving (DESIGN.md §10.1).  Left
+        verdict this process has no business giving (DESIGN.md §11.1).  Left
         `pending`, a late terminal still routes — the ``finally`` below keeps
         every correlation for exactly that — and records the true outcome.
 

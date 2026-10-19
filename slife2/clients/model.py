@@ -149,7 +149,7 @@ class MCPBackend:
             # structured content, and `from_wire(None)` builds an assistant
             # message with no text and no tool calls.  The turn then ends
             # "successfully" with an empty answer and the model's real reply is
-            # discarded — the confident negative DESIGN.md §10.1 forbids, on the
+            # discarded — the confident negative DESIGN.md §11.1 forbids, on the
             # one hop that does not go through `tool_payload`.  The likely cause
             # is a model server from another build, so the sentence says so.
             if not isinstance(result.data, dict):

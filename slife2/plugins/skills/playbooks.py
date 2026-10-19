@@ -51,7 +51,7 @@ credstore — which is what makes a key that lives in the OS keyring reach a
 script whose process was started days later by a daemon that never saw it.  This
 module only reads the *declaration* and reports it; the resolution is
 `slife2.libs.host.config`'s, and injecting what it resolved is the business of whatever
-runs a skill's scripts (`DESIGN.md` §9 — nothing does yet).
+runs a skill's scripts (`DESIGN.md` §10 — nothing does yet).
 
 Why this is a module rather than part of the server
 ---------------------------------------------------
@@ -220,7 +220,7 @@ def frontmatter(content: str) -> dict[str, Any]:
     reading costs nothing to adopt.
 
     **A header that does not parse degrades to no header, and that is a
-    decision registered in `DESIGN.md` §10.2 — not an accident.**  What it does:
+    decision registered in SDD Appendix C — not an accident.**  What it does:
     a header that is not YAML reads as a file with no frontmatter, so `scan`
     names the skill after its directory and shows its body unread.  What it
     gives up: the declared `name`, `description` and every `requires`, so a
@@ -253,7 +253,7 @@ def requirements(header: Mapping[str, Any]) -> Requirements:
 
     **A malformed `metadata` block is skipped rather than fatal**, which is the
     same decision as `frontmatter`'s, one level down and registered with it in
-    `DESIGN.md` §10.2: a declaration that is not a mapping declares nothing, so
+    SDD Appendix C: a declaration that is not a mapping declares nothing, so
     the skill still loads and reads — and its requirements are simply not
     reported.  What it gives up: a prerequisite that a malformed block *meant*
     to state, which `readiness` then cannot warn about.  What it does not cover:

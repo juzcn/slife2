@@ -243,7 +243,7 @@ async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
     A `keyring:NAME` written as an API key is the shape `resolve_secret` leaves
     verbatim when `credstore` cannot be imported — its declared degrade — and the
     value then travels to somebody else's API *as the credential*
-    (DESIGN.md §10.1).  The note above is what turns that into a sentence at the
+    (DESIGN.md §11.1).  The note above is what turns that into a sentence at the
     moment it is written, and it did not: the `keyring:` shape returned early
     with nothing to say, so the two halves of one rule disagreed and the leaking
     half was the silent one.  The rule is

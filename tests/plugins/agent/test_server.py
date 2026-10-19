@@ -307,7 +307,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     **`answer_approval` is the one entry here that a *client* calls rather than
     a model or the harness**: it is how the window answers an `_approve`
     request a turn is parked on, and it is on this server because the waiting
-    turn is (`slife2.libs.turn.loop`'s gate, DESIGN.md §8.8).
+    turn is (`slife2.libs.turn.loop`'s gate, DESIGN.md §4.6).
     """
     async with Client(
         build_server(
@@ -540,7 +540,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     loop could name no turn of: the loop and the store disagreed about what the
     context was from that point on, and the next write persisted the wrong list.
     Both halves are one answer and are now read the same way — a missing or null
-    `turn_ids` is refused, naming the payload (DESIGN.md §10.1: a value that
+    `turn_ids` is refused, naming the payload (DESIGN.md §11.1: a value that
     cannot be read is not a value that is absent).
     """
     store = UnreadableStore(restore={"messages": [], "turns": []})
@@ -561,7 +561,7 @@ async def test_a_rebuild_that_carried_no_counts_is_refused_rather_than_drawn_as_
     A reply that replaced the context list but omitted the two counts drew
     `[kept 0, recalled 0]` — a note reporting a decision nobody made, since the
     discriminator *was* paid and did decide.  The answer is refused the way a
-    shape `_adopt` cannot read is, naming the payload (DESIGN.md §10.1: a
+    shape `_adopt` cannot read is, naming the payload (DESIGN.md §11.1: a
     failure is not a verdict).
     """
     store = UnreadableStore(
@@ -1312,7 +1312,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     that cancellation abandons `run_turn_into`'s `finally` before the outcome is
     assigned, and `send_message`'s handler then finds an empty `outcome.messages`:
     it records nothing and re-raises, while the loop still holds the completed
-    turn's messages.  That is the row §3's rule ("every turn of a loop that
+    turn's messages.  That is the row DESIGN.md §2.5's rule ("every turn of a loop that
     records is written") exists to guarantee, gone, and the loop's `covered`/
     `turn_ids` left out of step with the list — a completed turn the model will
     be sent again but the log has never heard of.
@@ -1371,7 +1371,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
 
         # **The loop is still whole.**  The completed turn is in the record *and*
         # still in the conversation, so the next turn is sent it exactly once —
-        # the two halves §3 requires to agree, and the half a stale `covered`
+        # the two halves DESIGN.md §2.5 requires to agree, and the half a stale `covered`
         # would have broken.
         assert (await send(server, "two")).data["text"] == "second answer"
         assert prompts_seen(backend, 1) == [
@@ -1756,7 +1756,7 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     written, and the model went on believing it still held the tools that had
     gone.  Absent is not empty: both halves of the answer are read as strictly
     as `_adopt` reads the store's, so an answer without the key is a failure and
-    only a *readable* empty answer is a verdict (DESIGN.md §10.1: a failure is
+    only a *readable* empty answer is a verdict (DESIGN.md §11.1: a failure is
     not a verdict).  The trim is post-turn, so the refusal is caught and logged
     rather than failing a turn that has already answered.
     """
@@ -2166,7 +2166,7 @@ async def test_the_prompt_knows_whether_anybody_is_watching(
     `_approve` is a courtesy extended to somebody who is there, and the model is
     what decides whether to use it: nothing in the machinery branches on being
     unattended, so the prompt is where an unattended agent has to be able to find
-    out (`slife2 --headless`, DESIGN §1.9).  **And the server is what has to find
+    out (`slife2 --headless`, DESIGN.md §7.4).  **And the server is what has to find
     it out**, in a process that never saw that command line: the question is not
     about this call (`watched`) but about who is holding the agent's name, which
     is what the claim records.
@@ -2693,7 +2693,7 @@ async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
     The local network holds a place for a maker's *own* subagents and no further
     in (`slife2.plugins.a2a.server.place_for`), so a member of a member would be
     a conversation with nothing listening for it — a refusal from the tool rather
-    than a subagent that exists and can never answer (SDD §12.8).
+    than a subagent that exists and can never answer (SDD §4.5.3).
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()

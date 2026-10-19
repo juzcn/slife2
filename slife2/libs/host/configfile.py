@@ -133,11 +133,11 @@ def _swap(path: Path, text: str) -> None:
                 os.chmod(tmp, path.stat().st_mode & 0o7777)
             except OSError as exc:
                 # **Said out loud, because the mode is a promise this makes.**
-                # DESIGN.md §8.7 states the swap as preserving the file's mode;
+                # DESIGN.md §8.3 states the swap as preserving the file's mode;
                 # swallowing this left the config at `mkstemp`'s `0600`, which
                 # *tightens* a file somebody had made group-readable — an
                 # unreadable config for another user of the same machine, and
-                # nothing anywhere to say why (DESIGN.md §10.1).
+                # nothing anywhere to say why (DESIGN.md §11.1).
                 logger.warning("%s: the file's mode was not kept: %s", path, exc)
         os.replace(tmp, path)
     except BaseException:
@@ -172,7 +172,7 @@ def read_section(
     system starts, and disagreeing *quietly*: a listing tool would report a
     section that has four entries as one that has none, and the operator would
     see the truth only on the next start.  Reading a value that is not there as
-    a value that is empty is the first deformation in DESIGN.md §10.1, and the
+    a value that is empty is the first deformation in DESIGN.md §11.1, and the
     listing tools are exactly where it does the most damage — the model is told
     about a config nobody has.
     """
@@ -230,7 +230,7 @@ def _section(
     destroyed.  The operator's `mcp: "oops"` became `mcp: {}` on the way past,
     and the tool that did it reported success; the write is refused now, naming
     the section, because a value that cannot be read is not a value that is
-    absent (DESIGN.md §10.1) — and the one place that difference is *data loss*
+    absent (DESIGN.md §11.1) — and the one place that difference is *data loss*
     rather than a wrong answer is here.
     """
     current = document.get(section)
@@ -600,7 +600,7 @@ def set_enabled(
         entry = current[name]
         if not isinstance(entry, dict):
             # Not replaced by an empty entry: that write reported success and
-            # destroyed whatever the operator had put there (DESIGN.md §10.1).
+            # destroyed whatever the operator had put there (DESIGN.md §11.1).
             raise ConfigError(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "switch. Fix the entry, or take it out."
@@ -652,7 +652,7 @@ def update_entry(
         if raw is not None and not isinstance(raw, dict):
             # Handed to `change` as "not there yet" this used to *become* the
             # entry `change` returns, which is the operator's value replaced by
-            # a tool's idea of it (DESIGN.md §10.1).
+            # a tool's idea of it (DESIGN.md §11.1).
             raise ConfigError(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "change — fixing it would replace what is there."

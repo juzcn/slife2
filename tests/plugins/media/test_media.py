@@ -348,7 +348,7 @@ async def test_an_unknown_api_is_a_sentence_not_a_raw_error() -> None:
     """**A config with `api: typo` loads cleanly** — the loader only requires the
     key to be there — and then fails at the first call, where `create_adapter`
     raises.  Resolving the adapter *outside* `_run` let that failure escape as a
-    raw exception instead of the sentence §1.5 promises, so the
+    raw exception instead of the sentence DESIGN.md §8.2 promises, so the
     resolution is inside the guard and this checks the sentence is what arrives.
     """
     section = {
@@ -686,7 +686,7 @@ async def test_a_payload_that_is_not_base64_is_a_failure_not_a_traceback(
     and `slife2.plugins.media.server._run` converts only `NotImplementedError`,
     `MediaAdapterError` and `FileNotFoundError`.  So a vendor answering with a
     truncated `b64_json` (or an `audio.data` that is an object) reached the model
-    as a raw traceback instead of the sentence §1.5 promises —
+    as a raw traceback instead of the sentence DESIGN.md §8.2 promises —
     exactly the class of answer `_json_object` exists to eliminate one line up.
     """
     images = OpenAICompatAdapter(settings().providers["test"])

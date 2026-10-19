@@ -27,7 +27,7 @@ reclaims memory; nothing a caller can observe depends on it.
 **The key travels with the call.**  Everything this server asks of a peer is
 asked on behalf of the same `(agent, subagent)` — the write to the db and the
 model call both carry it — so a hop is never anonymous.  What the model servers do
-*not* do with it is keep the conversation: see DESIGN.md §3 for why the history
+*not* do with it is keep the conversation: see DESIGN.md §2.2 for why the history
 has to live here, on the side of the hop that does not speak a wire protocol.
 
 **The tools come from the toolhub**, and are asked for again before every model
@@ -35,7 +35,7 @@ call — the list goes out with each request, so it is read with each request.
 That is why this server holds no tool registry of its own and why `loop.py`
 still knows nothing about MCP: it is handed a coroutine, and where the registry
 came from is nobody else's business.  Our own plugins included: one owner for
-the model's whole tool list is worth one hop.  See DESIGN.md §8.
+the model's whole tool list is worth one hop.  See DESIGN.md §4.1.
 
 Two consequences of owning the history are paid for here rather than avoided,
 because they are the price of the state:
@@ -59,7 +59,7 @@ because they are the price of the state:
   it, so `send_message` drops them and says so in the error the caller reads.
 
 What statelessness bought and is now given up deliberately: a conversation store
-that can grow without bound.  See DESIGN.md §9 — trimming is the next thing, not
+that can grow without bound.  See DESIGN.md §10 — trimming is the next thing, not
 a thing this cut pretends to have solved.
 """
 
@@ -304,7 +304,7 @@ async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
     bare call rather than a wrapped one.  The row was written a moment ago by
     this same process, so a window that cannot be read back is not a case to
     design for — it is the cabinet having stopped answering, which the register
-    (§10.2) puts on the side of the steps that must succeed.  It used to catch
+    (SDD Appendix C) puts on the side of the steps that must succeed.  It used to catch
     every exception, log a warning and answer `""`, which is an empty tool result
     entering the conversation: the fallback `compress_for` forbids one paragraph
     up ("nothing else here falls back"), and the mask covered exactly the failure
@@ -1060,7 +1060,7 @@ def build_server(
     def compress_for(backend: LLMBackend, client_id: ClientId) -> Compress:
         """How one conversation's tool results are fitted into it.
 
-        **The second discriminator, and the shape of the first** (DESIGN §5.2):
+        **The second discriminator, and the shape of the first** (DESIGN.md §5.4):
         one model call, given the result, the conversation in hand and the
         current input, answering with **line numbers rather than text** — so the
         harness cuts the original, and what enters the conversation is the tool's
@@ -1659,7 +1659,7 @@ def build_server(
         the loop's `turn_ids` and the store's disagreed from that point on and
         the next write persisted the wrong list.  A missing or null `turn_ids`
         is the same damage as a non-list `messages` and is refused the same way
-        (DESIGN.md §10.1: a value that cannot be read is not a value that is
+        (DESIGN.md §11.1: a value that cannot be read is not a value that is
         absent).
         """
         messages = payload.get("messages")
@@ -1849,7 +1849,7 @@ def build_server(
         **An answer that carried no counts is refused**, like a shape `_adopt`
         cannot read: a reply that replaced the context list but omitted `kept`
         and `recalled` used to draw `[kept 0, recalled 0]`, a note reporting a
-        decision nobody made (DESIGN.md §10.1: a failure is not a verdict).
+        decision nobody made (DESIGN.md §11.1: a failure is not a verdict).
         """
         carried = max(len(loop.messages) - loop.covered, 0)
         payload = tool_payload(
@@ -1904,7 +1904,7 @@ def build_server(
         a tool pair — `_func_tool_unload` called with no names — so the model
         reads that its list shrank and which tools left, instead of reaching for
         a tool it still believes it has.  That is v1's *harness tool-pair*
-        (DESIGN.md §2.5 there), and it is why the tool is in the model's list at
+        (DESIGN.md §4.3 there), and it is why the tool is in the model's list at
         all: v1's rule is that such a pair has to name a **declared** tool,
         because the Responses and Messages backends reject a tool call in
         history that is not in the request's tool list.  A pair invented in the
@@ -1914,7 +1914,7 @@ def build_server(
         empty pair every turn would be a record of something that did not
         happen, and a model reading it would learn to distrust the mechanism.
 
-        Best-effort by construction, and registered as a §10.2 fallback.  It
+        Best-effort by construction, and registered as a fallback in SDD Appendix C.  It
         *skips the trim* when the hub cannot be reached or answers with a shape
         this build cannot read — the turn is over and has been answered, and
         bookkeeping that runs after it must not turn a good turn into a failed
@@ -2281,7 +2281,7 @@ def build_server(
             # commit below, and `send_message`'s handler would then find an empty
             # `outcome.messages`, record nothing and re-raise — a completed turn
             # with no row, which is the "conversation the database has never
-            # heard of" §3's rule exists to prevent.  So the commit is put in a
+            # heard of" DESIGN.md §2.5's rule exists to prevent.  So the commit is put in a
             # `finally` of its own: it holds no `await`, so it completes even as a
             # cancellation unwinds past it (the property
             # `slife2.plugins.agent_task.server`'s cancelled path names), and the turn is
@@ -3481,7 +3481,7 @@ def build_server(
         **A `turns` this build cannot read is refused, not drawn as none.**  A
         context plugin answering with a shape this build does not know — the
         same damage `_adopt` refuses — used to become `[]`, so a screen showed
-        an empty conversation and said nothing (DESIGN.md §10.1: a failure is
+        an empty conversation and said nothing (DESIGN.md §11.1: a failure is
         not a verdict).
 
         Args:
@@ -3741,7 +3741,7 @@ def build_server(
             # local network's membership is the maker's *own* subagents
             # (`subagent_dirs`, under the agent's own `subagents/`), and a place is
             # what makes a member
-            # reachable at all (`slife2.plugins.a2a.server.place_for`).  SDD §12.8
+            # reachable at all (`slife2.plugins.a2a.server.place_for`).  SDD §4.5.3
             # holds the rule this depends on.
             raise ToolError(
                 "a subagent cannot make a subagent: the local network holds a "

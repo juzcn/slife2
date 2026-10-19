@@ -621,7 +621,7 @@ _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
 #: it can.
 NEEDS: dict[str, tuple[str, ...]] = {
     "context": ("embeddings",),
-    # **The window, and not the agent server** (DESIGN.md §1.2).  WeChat's poll
+    # **The window, and not the agent server** (DESIGN.md §6.2).  WeChat's poll
     # loop hands a message to the conversation the window is showing, which is
     # the one inbox everything this system takes goes into — and the agent server
     # was the peer named here until that changed, an edge that outlived the code

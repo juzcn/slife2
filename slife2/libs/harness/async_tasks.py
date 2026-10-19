@@ -323,7 +323,7 @@ async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
     the text began `"Error"`, which made a verdict out of a spelling: an answer
     that legitimately begins "Error" was recorded `failed`, and a tool the
     registry itself marked `ok=False` without that prefix was recorded
-    `finished` (DESIGN.md §10.1, "a failure is not a verdict").  A coroutine
+    `finished` (DESIGN.md §11.1, "a failure is not a verdict").  A coroutine
     that *raises* is the one case left, and a raise is a failure because it is
     the only thing it can be.
     """
@@ -492,7 +492,7 @@ async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     thrown away.**  There is nothing to cancel — the work is over — but a task
     whose hand-back never provably landed is still holding the one copy of its
     result (`Task.delivered`/`result`), and popping it while answering only
-    "nothing to cancel" would lose that copy for good.  §8.8 says the
+    "nothing to cancel" would lose that copy for good.  DESIGN.md §4.6 says the
     alternative to returning a result is losing it, and losing it in silence is
     the worse of the two, so this case is answered with exactly what
     `check_async` would have said.  What tells the two apart is `status`, and

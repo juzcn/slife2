@@ -382,7 +382,7 @@ async def until(predicate: Any, *, timeout: float = 5.0) -> None:
 async def test_the_six_tools_are_the_models_and_nothing_else_is() -> None:
     """Six, which is v1's six.  There is no `schedule_run_settle` because there is
     nothing for a model to close: a run ends when the background task doing it
-    ends, and the plugin is the one that asks (§1.7)."""
+    ends, and the plugin is the one that asks (DESIGN.md §6.5)."""
     tools = await build().list_tools()
     assert sorted(t.name for t in tools) == [
         SCHEDULE_LIST,
@@ -392,7 +392,7 @@ async def test_the_six_tools_are_the_models_and_nothing_else_is() -> None:
         SCHEDULE_RUNS,
         SCHEDULE_SET,
     ]
-    # The gate (§8.1): a tool the model may call says so, and absence is the
+    # The gate (DESIGN.md §4.1): a tool the model may call says so, and absence is the
     # answer "no" rather than "nobody has decided yet".
     assert all(for_the_model(t.meta) for t in tools)
 
@@ -760,7 +760,7 @@ async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
 ) -> None:
     """**The whole of what a trigger asks for.** The plugin makes the call, so it
     is handed the id — and that is why a run can close itself later instead of a
-    model having to remember anything (§1.7)."""
+    model having to remember anything (DESIGN.md §6.5)."""
     async with Client(build(tasks=tasks)) as client:
         await write(client)
         run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
@@ -1128,7 +1128,7 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
     """**A fire is the only thing this plugin says to a conversation.** v1 printed
     unsettled runs into every turn's prompt; here that would be one plugin
     reaching into a prompt another plugin owns, and a note handed over on the
-    trigger's channel is deferred rather than half-built (DESIGN.md §9). What the
+    trigger's channel is deferred rather than half-built (DESIGN.md §10). What the
     agent gets instead is a ledger it can read — which is what makes "did it run?"
     a question with an answer rather than a message nobody asked for."""
     async with Client(build(window)) as client:

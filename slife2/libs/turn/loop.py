@@ -101,7 +101,7 @@ def harness_call(name: str) -> ToolCall:
     bound), and this shape sits inside it by construction.  The letters are the
     load-bearing part: a separator outside that class is one that would have to
     be sanitised on the way out, which is the thing a single builder exists to
-    make unnecessary.  `DESIGN.md` §8.5 carries the measurement.
+    make unnecessary.  `SDD` §5.3 carries the measurement.
     """
     return ToolCall(
         id=f"_harness_{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
@@ -692,7 +692,7 @@ class AgentLoop:
         """One call's answer, as its text *and* whether it worked.
 
         **The pair travels now, and the old argument for dropping it is the one
-        DESIGN.md §10.1 forbids.**  `_ok` used to be thrown away on the grounds
+        DESIGN.md §11.1 forbids.**  `_ok` used to be thrown away on the grounds
         that it was not lost — a failure is text by the time it reaches here
         (`ToolRegistry.execute` renders one) so the `Error` the string starts
         with was said to *be* the fact, and `slife2.libs.harness.async_tasks` read the prefix.

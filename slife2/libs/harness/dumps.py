@@ -13,7 +13,7 @@ original, chosen by a discriminator under the conversation in hand, within
 * **The reply is lines, not text.**  The model is asked which lines of the
   output belong in this conversation and is never asked to write any of it — so
   what arrives is the tool's own words or it is nothing, and a reply that is
-  wrong costs a re-read rather than a fact no tool said.  That is §5.1's
+  wrong costs a re-read rather than a fact no tool said.  That is DESIGN.md §2.4's
   property one discriminator over: there the answer is turn ids, here it is line
   ranges, and the harness does the cutting both times.
 * **An unreadable reply is not a decision to do nothing.**  `Rejected` against
@@ -80,7 +80,7 @@ COMPACT_REPLY: dict[str, Any] = {
 }
 
 #: The harness's own annotation.  **A name in capitals is the harness's**, by
-#: the convention §1.2 states and `[TURN:{…}]` wears — nothing reads the case,
+#: the convention DESIGN.md §2.4 states and `[TURN:{…}]` wears — nothing reads the case,
 #: and what the capitals are for is a reader telling an annotation from
 #: something somebody said.  Nothing goes inside the brackets but the payload,
 #: because the payload is the part a model copies out.
@@ -300,7 +300,7 @@ def window(
     # enough budget it cut the marker mid-JSON (the model could not name the dump
     # to ask for the rest) and at a smaller one still it answered with the empty
     # string — a tool result that says nothing at all, in a conversation that
-    # carries it forever.  The state is the one §10.2 puts on the side of the
+    # carries it forever.  The state is the one SDD Appendix C puts on the side of the
     # steps that must succeed: an output nobody can read back is worse than a
     # turn that failed, because it looks like an answer.
     clipped = clip_to_tokens(answer, budget)

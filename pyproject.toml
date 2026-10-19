@@ -61,7 +61,7 @@ dependencies = [
     # this one as unavailable when it is selected.
     "ngrok>=1.6.0",
     "jinja2>=3.1.0",
-    # Cron, for the scheduled tasks (`slife2.plugins.schedule.expressions`, DESIGN.md §1.7).  **v1's
+    # Cron, for the scheduled tasks (`slife2.plugins.schedule.expressions`, DESIGN.md §6.5).  **v1's
     # dependency, for v1's feature, and after v1's own argument with itself**: the
     # design notes for that feature say "no apscheduler, no croniter, hand-write
     # the parser" and the implementation used croniter anyway.  What decided it
@@ -91,7 +91,7 @@ dependencies = [
     # dependency with v1's comment, kept because the reason is invisible from an
     # import that does not exist: `zoneinfo` loads it by name, from C.
     "tzdata>=2026.5",
-    # The A2A mesh (`slife2.plugins.a2a`, DESIGN.md §1.8), and **the wire is not ours**.
+    # The A2A mesh (`slife2.plugins.a2a`, DESIGN.md §6.3), and **the wire is not ours**.
     # The published A2A-over-MQTT profile *is* the SDK: the topic tree, the
     # retained agent card with presence carried by an MQTT user property, the
     # JSON-RPC 2.0 envelopes whose `ResponseTopic`/`CorrelationData` properties

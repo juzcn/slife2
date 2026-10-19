@@ -16,7 +16,7 @@ wait nobody is making.
 **Four kinds, one corpus.**  A note, a day, a saved file and a report are rows
 of one table with a `kind` column, so a search ranks them against each other
 rather than against their own kind — a rank only means something inside the
-corpus that produced it, and four indexes would be four corpora (§5).  What
+corpus that produced it, and four indexes would be four corpora (DESIGN.md §5.3).  What
 differs per kind is what a *document* is, and that is `SPECS` in the store: its
 key, its time axis, whether a second write appends, and where its markdown goes.
 
@@ -38,7 +38,7 @@ What this cut does **not** do, each named rather than half-built:
   config switch and its own tests, and porting it half-way would be a guard that
   looks like one.
 * **There is no `grep` leg.**  v1's cabinet had three search legs and this has
-  the two slife2 has; the third is deferred in DESIGN.md §9 by name, and the
+  the two slife2 has; the third is deferred in DESIGN.md §10 by name, and the
   cabinet inherits the deferral rather than inventing a second regex engine.
 * **There is no schedule half.**  v1's `memfiles` also owned the scheduled-task
   tables and sixteen tools over them, and reports bound to a task.  There is no
@@ -1079,7 +1079,7 @@ def _window_of(
     agent shares — and the code-reading tools that take a regex take it because
     their engines cannot backtrack, which Python's can.  A literal substring,
     ignoring case, is also what the common case wants: a symbol, a path, a
-    spelling remembered approximately (§9's own three examples for the grep leg
+    spelling remembered approximately (DESIGN.md §10's own three examples for the grep leg
     v1 had).  A model that needs a real regex has the file — `where` names it,
     and the operator's own tools read it.
 
@@ -1273,7 +1273,7 @@ def _hits(found: dict[str, Any]) -> dict[str, Any]:
     **A search answer that cannot be read is not a search that found nothing.**
     An answer with no `results` list used to render as the same "nothing
     matched" a real miss produces, which is a verdict a model acts on rather
-    than a failure it retries (§10.1, "a failure is not a verdict"); only a
+    than a failure it retries (DESIGN.md §11.1, "a failure is not a verdict"); only a
     *readable* empty list may say the search found nothing, and anything else
     fails the call.  The raise is this plugin's to make — the store's shape is
     the thing that is wrong — and the far end reads it as a failed call rather

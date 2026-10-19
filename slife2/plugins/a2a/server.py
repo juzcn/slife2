@@ -1,9 +1,9 @@
 """slife2-a2a — the A2A mesh, as a plugin.
 
-v1's `slife.plugins.a2a.server`, and the two things that changed are §4's and
-§1.2's rather than anything about the mesh.
+v1's `slife.plugins.a2a.server`, and the two things that changed are DESIGN.md §1.4's and
+DESIGN.md §6.2's rather than anything about the mesh.
 
-**§4: one process, one mesh per member.**  v1 spawned one plugin per agent, so its
+**DESIGN.md §1.4: one process, one mesh per member.**  v1 spawned one plugin per agent, so its
 module globals *were* that agent's — one mesh, one set of queues, one identity.
 slife2's servers are shared, so the same things live in a :class:`Session` keyed
 by the **client id every call carries**, exactly as `slife2-wechat`'s login does.
@@ -20,9 +20,9 @@ whole of the difference between the two instances of this module.  Everything th
 local one adds is the part a peer without a process needs: a place held for it by
 somebody else (:data:`MEMBER`), a road that is not a window (`run_turn`), and a
 send path that gives the receiver its place before it publishes (`send_message`).
-`SDD` §3.5 and DESIGN.md §1.10 are where those are argued.
+`SDD` §3.5 and DESIGN.md §6.6 are where those are argued.
 
-**§1.2: the drain tool was the seam, and the seam is gone.**  v1's harness polled
+**DESIGN.md §6.2: the drain tool was the seam, and the seam is gone.**  v1's harness polled
 `__a2a_drain_incoming` once a second and injected what it found into the agent's
 inbox.  There is no harness here, and what replaced that seam is two roads out of
 one queue: an inbound message for an *agent* is handed to the terminal showing
@@ -201,7 +201,7 @@ CHANNEL = REMOTE.channel
 #: spelled it `[A2A:`, and capitals are the convention for the *other* kind of
 #: bracket — `[TURN:{…}]`, which says "this is what the process knows about the
 #: conversation, not what was said" (`slife2.plugins.wechat.server`'s module docstring,
-#: DESIGN.md §1.2).  This one *is* what was said: it goes into the turn's row
+#: DESIGN.md §2.4).  This one *is* what was said: it goes into the turn's row
 #: and comes back out of it verbatim, so v1's capitals told the model the
 #: opposite of the truth about it.  What is *not* renamed is anything that names
 #: the plugin — the `a2a` channel, its config key, `A2A_TYPES` — because those
@@ -399,7 +399,7 @@ def peer_phrase(net: Net, peer: str) -> str:
 class Session:
     """One member's mesh, its connect state, and its delivery queue.
 
-    The queue is the piece §1.2's removal of the drain leaves behind.  A mesh
+    The queue is the piece DESIGN.md §6.2's removal of the drain leaves behind.  A mesh
     callback runs on the MQTT reader's stack, so it must not await a hop to
     another server; and arrival order is the order the model should read things
     in.  One queue with one writer behind it is both, and it is exactly what
@@ -546,7 +546,7 @@ async def run_turn(
     so there is nothing to find; and its answer does not go to a person at all.
     It goes to its maker, which is a model, and what the maker is handed is a
     message in *its own* conversation — the member's turn is in the member's
-    store, where its maker can read it.  DESIGN.md §1.10 states that cost and
+    store, where its maker can read it.  DESIGN.md §6.6 states that cost and
     accepts it.
 
     **The turn is run by the agent server, so it is an ordinary turn**: the same
@@ -684,7 +684,7 @@ def _wire(session: Session) -> None:
         `cancelled` boolean and a `failed` one, of which only the second could
         mean two different things, and of which the first could not express the
         third ending at all.  A peer that *answered* with a failure was rendered
-        as "completed" — the confident negative DESIGN.md §10.1 forbids — because
+        as "completed" — the confident negative DESIGN.md §11.1 forbids — because
         the renderer had no value that said so.
         """
         # Nothing to say about an empty *success*.  A withdrawal, a failure and
@@ -702,7 +702,7 @@ def _wire(session: Session) -> None:
             # this is not the peer answering and must not be rendered as one:
             # "completed"/"replied" over a message no peer sent is exactly the
             # confident negative the model would act on instead of re-sending
-            # (DESIGN.md §10.1).  The words are the mesh's — the failure is the
+            # (DESIGN.md §11.1).  The words are the mesh's — the failure is the
             # requester's, not the peer's — and the marker and channel stay a
             # terminal reply's, so the line lands where the task was discussed.
             if kind == "message":
@@ -1111,7 +1111,7 @@ def build_server(
         the guard is one comparison.
 
         **A teardown that could not retire the name is reported, not swallowed**
-        (DESIGN.md §1.8): the offline card is how a peer is told this member left,
+        (DESIGN.md §6.3): the offline card is how a peer is told this member left,
         and a failure here leaves it advertised with nobody to retire it.
         """
         sessions.pop(key, None)
@@ -1122,7 +1122,7 @@ def build_server(
                 await writer
         try:
             await session.mesh.disconnect()
-        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this member left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this member left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
             logger.error(
                 "a2a %s: the mesh would not leave the broker, so it may stay "
                 "advertised: %s",
@@ -1180,7 +1180,7 @@ def build_server(
                 # already taken) — never leak a half-started mesh on retry.
                 try:
                     await session.mesh.disconnect()
-                except Exception as teardown:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: a responder that advertised before the outbound connect failed is still on the broker, and a failure here leaves it advertised with nobody to retire it (DESIGN.md §1.8)
+                except Exception as teardown:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: a responder that advertised before the outbound connect failed is still on the broker, and a failure here leaves it advertised with nobody to retire it (DESIGN.md §6.3)
                     logger.error(
                         "a2a %s: the mesh would not be torn down after a failed "
                         "connect, so it may stay advertised: %s",
@@ -1325,7 +1325,7 @@ def build_server(
                     session.writer.cancel()
                 try:
                     await session.mesh.disconnect()
-                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
                     logger.error(
                         "a2a %s: the mesh would not leave the broker on "
                         "shutdown, so it may stay advertised: %s",
@@ -1399,7 +1399,7 @@ def build_server(
                 if session.release(WINDOW):
                     try:
                         await session.mesh.disconnect()
-                    except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §1.8)
+                    except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
                         logger.error(
                             "a2a %s: the mesh would not leave the broker as its "
                             "window left, so the agent may stay advertised: %s",

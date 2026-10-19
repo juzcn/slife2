@@ -221,7 +221,7 @@ def test_the_note_names_the_source_it_knows() -> None:
     A `data:` URL names its type in the header and a remote URL is named by
     itself, but a part with no readable source was rendered as a bare `image` —
     a claim about a picture this function never saw, in the one sentence a
-    restored turn reads back (§10.1).  What it knows, it names.
+    restored turn reads back (DESIGN.md §11.1).  What it knows, it names.
     """
     typed = attachments.image_note(
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}

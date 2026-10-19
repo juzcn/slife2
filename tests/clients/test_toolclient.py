@@ -198,7 +198,7 @@ async def test_a_listed_tool_without_a_name_fails_the_list() -> None:
     identity: a hub daemon from another build answering `{"tools": [{}]}` used to
     arrive as a tool whose name was the empty string.  The element that broke the
     shape is the evidence of the wrong build, so it is the element that is quoted
-    (DESIGN.md §10.1).
+    (DESIGN.md §11.1).
     """
     with pytest.raises(ConnectionError, match="slife2 down"):
         await remote_tools(FakeHub(junk={"tools": [{}]}))

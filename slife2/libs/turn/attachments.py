@@ -247,7 +247,7 @@ def image_note(part: dict[str, Any]) -> str:
     media type in the header, and a remote URL is named by itself; a part whose
     source is neither — one the record kept without an address, or a `data:` URL
     with no type — was rendered as a bare `image`, a claim about a picture this
-    function never had, in the one place a restored turn reads back (§10.1).  It
+    function never had, in the one place a restored turn reads back (DESIGN.md §11.1).  It
     says the source is unnamed instead.
     """
     url = part.get("image_url")

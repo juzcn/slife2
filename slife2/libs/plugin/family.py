@@ -1172,7 +1172,7 @@ async def list_entry_tools(
 class Documents:
     """A family whose rows are documents: one config section, no connection.
 
-    `skills:` and `cli:` are the two (DESIGN.md §8.2 is the argument for giving
+    `skills:` and `cli:` are the two (DESIGN.md §4.1 is the argument for giving
     them servers at all).  What they share is not a *mechanism* — one writes
     files into a folder and the other validates a command line against `PATH` —
     but a shape, and the shape was written out twice:
@@ -1403,7 +1403,7 @@ def build_family_server(
     model, and neither should be — the model is given the tools of the *entries*,
     merged by the hub, and never these.  What the model gets from this process is
     what `management` registers, which is a different surface with a different
-    reader (see `slife2.libs.plugin.family`'s own note on `refusal`, and DESIGN.md §8).
+    reader (see `slife2.libs.plugin.family`'s own note on `refusal`, and DESIGN.md §4.5).
 
     `transports` and `client_factory` are the same two seams the hub has and for
     the same reason: a test drives the whole thing over in-memory servers, with

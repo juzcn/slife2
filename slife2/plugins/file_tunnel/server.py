@@ -12,7 +12,7 @@ things and they are the whole of it:
 * it serves the bytes at ``GET /share/{token}``, on the same port, because the
   far end fetches that path *through the tunnel*.
 
-**A plugin, by §1.1's own table.**  It holds somebody else's connection — a
+**A plugin, by DESIGN.md §1.1's own table.**  It holds somebody else's connection — a
 tunnel process, or an SDK holding an account — so it is a process rather than a
 library, for the same reason the model backends are: a library would put the
 tunnel in every importer.

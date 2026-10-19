@@ -182,7 +182,7 @@ def database_path(agent: str, subagent: str = "") -> Path:
 
     **One file per id, not a column.**  Isolation as a property of the filesystem
     beats isolation as a `WHERE` clause somebody can forget to write — the same
-    argument DESIGN.md §5 makes for agents, applied one level down.
+    argument DESIGN.md §5.1 makes for agents, applied one level down.
 
     **A non-fork subagent's store is its own directory**,
     `agents/<agent>/subagents/<subagent>/`, because a subagent is an agent that
@@ -1526,7 +1526,7 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     difference is not academic: `append_context` reads this list and appends to
     it, so a damaged list read as `[]` becomes a **one-turn context** on the
     next save, permanently and without a word.  `_structural` is the refusal,
-    and DESIGN.md §10.1 is the rule it follows.
+    and DESIGN.md §11.1 is the rule it follows.
     """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
@@ -1606,7 +1606,7 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     the question that tells them apart is what the empty value *means*: here it
     means "this one turn's body is unreadable", which is a smaller claim than
     the damaged value made.  There it means something the damage did not
-    (DESIGN.md §10.1).
+    (DESIGN.md §11.1).
 
     **The *shape* is damage too, and it is the half that was missing.**  A
     stored value that parses to a string, a number, or a list of strings is

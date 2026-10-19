@@ -232,7 +232,7 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
 
     What bounds a call now is the caller's own: the loop wraps the dispatch in
     the `_timeout` the model stated or the tool declared (and, with neither, in
-    nothing, which is what `DESIGN.md` §8.8 says a foreground call gets).  The
+    nothing, which is what `DESIGN.md` §9.2 says a foreground call gets).  The
     two awaits here that *no* caller bounds — a listing, and the hub's ask for a
     plugin's sources — carry their own, at the call site.
     """

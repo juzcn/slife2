@@ -265,7 +265,7 @@ async def test_nothing_here_is_offered_to_the_model() -> None:
 async def test_the_surface_answers_to_the_name_it_advertises() -> None:
     """`slife2.libs.plugin.protocol.open_server` proves who it reached before handing over.
 
-    A record or an address is never evidence (§4): what a caller trusts is the
+    A record or an address is never evidence (DESIGN.md §1.4): what a caller trusts is the
     name the handshake reports, which is why every server here has one.
     """
     server = control.build_server()

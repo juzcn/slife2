@@ -831,7 +831,7 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
     start came back one turn short, silently.  The caller adopts this answer as
     its context, so returning it while the write failed leaves the two
     disagreeing; the write is now unguarded and the failure reaches the caller
-    (DESIGN.md §5.1: the list is authoritative).  The old guard did not even buy
+    (DESIGN.md §2.4: the list is authoritative).  The old guard did not even buy
     the tolerance it named — a busy or full disk raised out of `rebuild` anyway.
     """
 
@@ -871,7 +871,7 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> N
     With an `anchor` (or a `since`/`until`) beside it, that ran the recall as a
     *period* recall — a different selection from the one the model asked for, and
     a much larger one when the anchor named the oldest turns.  The whole recall
-    is dropped instead, which is §5.1's outcome when a rebuild cannot do its job:
+    is dropped instead, which is DESIGN.md §2.4's outcome when a rebuild cannot do its job:
     the decision's keep-list runs on its own and the context it had stands.
     """
     hold = [SYSTEM, {"role": "user", "content": "two"}]
@@ -901,7 +901,7 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
     A model the config does not have is a *failure*, not a zero: folding the two
     together silently dropped the token cap and let a recall spend by count — the
     overfill the cap exists to stop.  A window nobody *declared* still keeps the
-    count cap; a window that cannot be asked for is loud (DESIGN.md §10.1: a
+    count cap; a window that cannot be asked for is loud (DESIGN.md §11.1: a
     weaker path is not a substitute for a missing capability).
     """
 

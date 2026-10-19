@@ -118,7 +118,7 @@ def to_input_image(raw: Any) -> dict[str, Any] | None:
 
     It is *named* when it is dropped, by its scheme, for the reason the
     unrecognised part type one function up is named: an attachment that vanishes
-    without a word is the failure this module cannot see from inside (§10.1).
+    without a word is the failure this module cannot see from inside (DESIGN.md §11.1).
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
     if not isinstance(url, str) or not url:
@@ -174,7 +174,7 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
             # **Taken, and not dropped.**  Reading only `str` content meant a
             # system turn carrying blocks contributed nothing at all, with no
             # word anywhere: a prompt the caller wrote left the request, and the
-            # model answered a question nobody had asked (DESIGN.md §10.1).  It
+            # model answered a question nobody had asked (DESIGN.md §11.1).  It
             # is the same neutral `Message` the Anthropic adapter reads and the
             # same failure it fixed on its own side, so this is the same answer:
             # the parts come from the converter the other roles use, so a `str`
