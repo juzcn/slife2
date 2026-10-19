@@ -2554,8 +2554,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "(`owner` or `member`) and `error`. This is the separate member read,\n"
         "as in a chat app: the message marker does not repeat the roster, so a\n"
         "large group is not copied into every message. `{group_list}` shows\n"
-        "the groups you know. This is what this conversation has persisted\n"
-        "locally, not a live check of who is connected."
+        "the groups you know. Membership is not activity: a member that never\n"
+        "answers is still a member. This is what this conversation has\n"
+        "persisted locally, not a live check of who is connected."
     ),
     GROUP_REMOVE: (
         "Disband a group you own.\n"
@@ -2584,7 +2585,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "addresses everyone. A mention is attention, not delivery — every other\n"
         "member still receives the message. Delivery is fire-and-forget — no\n"
         "task, no completion — so a member that is not on the network now may\n"
-        "miss it. Use `{send}` when you need an answer."
+        "miss it. **A group chat is casual**: nobody has to answer, and silence\n"
+        "is not 'pending' or 'undelivered'; `sent` is only a publish count. Use\n"
+        "`{send}` when you need an answer."
     ),
 }
 

@@ -585,6 +585,12 @@ state is per member because there is no shared database to own it; every
 cross-member fact has to be a wire event, and every member has to be able to
 converge from what it receives.
 
+**A group chat is casual.** No member owes an answer; a member that stays
+silent is not `pending` or `undelivered`, and `sent` is only a publish count.
+A group message is not a task — only a direct `task_request` has an expected
+answer — so a model that reads silence as an open task is reading the wrong
+vocabulary into the group.
+
 Two smaller rules follow from the rest of the system:
 
 - **A fork is never a member.** It is a temporary copy of its maker's

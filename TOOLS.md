@@ -1260,8 +1260,9 @@ Returns `group`, `owner`, `members` (including the owner), your `role`
 (`owner` or `member`) and `error`. This is the separate member read,
 as in a chat app: the message marker does not repeat the roster, so a
 large group is not copied into every message. `peer_agent_group_list` shows
-the groups you know. This is what this conversation has persisted
-locally, not a live check of who is connected.
+the groups you know. Membership is not activity: a member that never
+answers is still a member. This is what this conversation has
+persisted locally, not a live check of who is connected.
 
 **Parameters**
 
@@ -1309,7 +1310,9 @@ group:
 addresses everyone. A mention is attention, not delivery — every other
 member still receives the message. Delivery is fire-and-forget — no
 task, no completion — so a member that is not on the network now may
-miss it. Use `peer_agent_send_message` when you need an answer.
+miss it. **A group chat is casual**: nobody has to answer, and silence
+is not 'pending' or 'undelivered'; `sent` is only a publish count. Use
+`peer_agent_send_message` when you need an answer.
 
 **Parameters**
 
@@ -1957,8 +1960,9 @@ Returns `group`, `owner`, `members` (including the owner), your `role`
 (`owner` or `member`) and `error`. This is the separate member read,
 as in a chat app: the message marker does not repeat the roster, so a
 large group is not copied into every message. `subagent_group_list` shows
-the groups you know. This is what this conversation has persisted
-locally, not a live check of who is connected.
+the groups you know. Membership is not activity: a member that never
+answers is still a member. This is what this conversation has
+persisted locally, not a live check of who is connected.
 
 **Parameters**
 
@@ -2006,7 +2010,9 @@ group:
 addresses everyone. A mention is attention, not delivery — every other
 member still receives the message. Delivery is fire-and-forget — no
 task, no completion — so a member that is not on the network now may
-miss it. Use `subagent_send_message` when you need an answer.
+miss it. **A group chat is casual**: nobody has to answer, and silence
+is not 'pending' or 'undelivered'; `sent` is only a publish count. Use
+`subagent_send_message` when you need an answer.
 
 **Parameters**
 

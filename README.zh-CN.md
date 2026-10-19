@@ -848,7 +848,8 @@ agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己�
 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker 到达，频道为
 `peer_agent_group:<group>:<sender>`。查看成员是单独的操作
 （`peer_agent_group_member_list`），就像聊天软件一样，因此大群不会在每条消息里
-重复整份名单。每个成员把学到的内容保存在
+重复整份名单。**群聊是随意的**：没有成员必须回复，沉默不是 `pending` 或
+`undelivered`；`sent` 只是发布数量。需要回答时用一对一的 send 工具。每个成员把学到的内容保存在
 `agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
 会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或
 解散群；成员的退出方式是 `peer_agent_group_leave`。

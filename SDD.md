@@ -1543,7 +1543,10 @@ Rules specific to this system:
     listening misses it. Every event carries the roster and a generation id, so
     a member that missed a control learns the group from the next message, and
     a delayed event cannot resurrect a group the member left or the owner
-    disbanded.
+    disbanded. **A group chat is casual**: no member owes an answer, and a
+    member that stays silent is not `pending` or `undelivered` — a group
+    message is not a task, `sent` is only a publish count, and a task request
+    is the only send with an expected answer.
 14. **Group messages have their own vocabulary.** The peer network uses the
     `PeerAgentGroup` channel and marker; the local network uses
     `SubagentGroup`, for the maker and its subagents alike. The marker carries
@@ -1556,7 +1559,9 @@ Rules specific to this system:
     receives the message.
 16. **Membership controls are silent.** A join, leave or disband changes the
     local record and nothing else; the conversation learns the current roster
-    from the group list tool or from the next group message.
+    from the group member list tool, or from the next group message's wire
+    event. Membership is not activity: a member that never answers is still a
+    member.
 
 The model-facing tools are:
 

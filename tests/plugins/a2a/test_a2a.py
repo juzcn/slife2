@@ -3974,6 +3974,9 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
     assert "members are a" in description
     assert "separate read" in description
     assert PEER_GROUP_MEMBER_LIST in description
+    assert "A group chat is casual" in description
+    assert "silence" in description
+    assert "'pending' or 'undelivered'" in description
 
 
 @pytest.mark.asyncio
