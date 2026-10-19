@@ -709,6 +709,17 @@ deletes the directory. If the network notification cannot be made, the subagent
 is left unchanged. A place on the network outlives the directory it was held
 for.
 
+**A message takes the agent's road, not a slower one.** The local network's
+writer submits the turn to the agent server and reads the next arrival, exactly
+as a window's `submit` does for an agent; the server appends to the inbox before
+taking the lock, so a message that arrives while a turn is running is folded in
+by `_check_new_input` at the next iteration. Awaiting the whole turn in the
+writer was the one difference: the inbox stayed empty, the check had nothing to
+hand over, and every group message became its own turn. A small in-flight cap
+is the writer's backpressure, and one shared connection keeps the queue's order
+at the server. The harness still only delivers; the model decides whether to
+answer with `group_send_message`.
+
 ## 7. Terminal
 
 ### 7.1 The window is a client

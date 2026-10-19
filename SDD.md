@@ -591,6 +591,11 @@ as a peer agent, under `subagent_*` names: the direct five, and the five group
 tools (`subagent_group_set`, `subagent_group_list`, `subagent_group_remove`,
 `subagent_group_leave`, `subagent_group_send_message`).
 
+A message reaches a subagent the same way one reaches an agent: it is submitted
+to the shared agent server's inbox, and a message that arrives while a turn is
+running is folded into that turn at its next iteration boundary. The harness
+delivers; whether a member answers is the model's own `group_send_message` call.
+
 #### 4.5.1 Directory and record
 
 Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. A non-fork

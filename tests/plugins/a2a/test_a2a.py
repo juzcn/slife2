@@ -3944,3 +3944,56 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
     assert "@all" in description
     assert "A mention is attention, not delivery" in description
     assert "still receives the message" in description
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_turn_is_submitted_while_the_previous_one_runs(
+    tmp_path: Path,
+) -> None:
+    """**The member road submits a turn; it does not await it.**
+
+    That is what the agent server's cut-in needs: `send_message` appends to the
+    conversation's inbox before taking the lock, and a running turn's
+    `_check_new_input` takes the head at its next iteration.  The writer used to
+    await `run_turn`, so the inbox stayed empty and every group message became
+    its own turn — the difference between a subagent and an agent, whose window
+    submits immediately.  The gate makes the first turn unmissable: both calls
+    must have started before either is released, in queue order.
+    """
+    started: list[str] = []
+    release = asyncio.Event()
+
+    class Answer:
+        def __init__(self) -> None:
+            self.data = {"text": "done"}
+
+    class GatedAgent:
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], timeout: float | None = None
+        ) -> Answer:
+            started.append(str(arguments.get("prompt", "")))
+            await release.wait()
+            return Answer()
+
+    session = local_member(tmp_path, subagent="tester")
+    session.post("first", AGENT, "a group message")
+    session.post("second", AGENT, "a group message")
+    writer = asyncio.create_task(
+        _drain(session, default_config(), None, GatedAgent())  # type: ignore[arg-type]
+    )
+    try:
+        deadline = (  # timeouts: the value this test is built around, not a budget
+            asyncio.get_running_loop().time() + 5.0
+        )  # timeouts: the value this test is built around, not a budget
+        while len(started) < 2:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError(
+                    "the second member turn was not submitted while the first ran"
+                )
+            await asyncio.sleep(0.01)
+        assert started == ["first", "second"], "the queue order is the turn order"
+    finally:
+        release.set()
+        writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writer

@@ -250,6 +250,16 @@ A2A_TYPES = (
 #: is the one whose moment has most likely passed.
 MAX_QUEUED = 500
 
+#: How many subagent turns may be in flight at once.  **The member road submits
+#: a turn instead of awaiting it**, so the next message is in the conversation's
+#: inbox while the current turn runs — which is what `_check_new_input` folds in
+#: at its next iteration, exactly as a window's hand-over does.  This bound keeps
+#: a burst from overrunning the agent server's own inbox (32) and keeps the
+#: shutdown set small; the rest wait in `Session.queue`, which is the arrival
+#: order.  It is not the agent server's constant because a plugin does not import
+#: another plugin's internals: 8 is the smaller number on purpose.
+MAX_MEMBER_TURNS = 8
+
 #: What a call that does not say which agent it is for is told.  A shared process
 #: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
 #: the agent's own name.
@@ -948,6 +958,22 @@ async def _drain(
     between the two turns it happened between — and one writer is what keeps a
     mesh callback off the MQTT reader's stack.
 
+    **A member's turn is submitted, not awaited.**  The writer starts the turn
+    as a task and reads the next arrival, so the next `send_message` is in the
+    conversation's inbox while the current turn runs — which is exactly what
+    `_check_new_input` folds in at its next iteration, the same way a window's
+    hand-over does.  Waiting for the turn here was the one difference between a
+    subagent and an agent: the agent's window submits immediately and its
+    messages cut in, while a subagent's messages sat in this queue until the
+    previous turn ended.  `MAX_MEMBER_TURNS` bounds what is in flight; the rest
+    wait here, which is the arrival order.
+
+    **The client is shared by those turns**, when the build did not inject one,
+    for the same reason the window's client is: one connection is what keeps the
+    queue's order at the agent server, and one connection is what the cut-in
+    needs.  It is opened lazily and dropped after a failed call, so the next
+    turn reconnects rather than reusing a dead one.
+
     **A delivery that fails is an error, and the message is not carried on
     anywhere.**  There is no second road for it (`slife2.libs.harness.handover`), so a peer's
     message that reached no conversation has not been answered — and the one
@@ -972,69 +998,163 @@ async def _drain(
     writer that no longer exists.  So each message is guarded on its own and a
     failure is logged and dropped, and the loop goes on to the next.
     """
-    while True:
-        text, peer, what, note, group = await session.queue.get()
-        try:
-            if note:
-                if session.subagent:
-                    # **A note has no second road, and a subagent has no window.**
-                    # Presence is what these lines are — a peer arriving, a peer
-                    # going — and the roster a subagent can ask for is
-                    # `subagent_list`, so drawing one for it would be a
-                    # turn spent on a fact nobody here has to act on; and it
-                    # cannot be drawn in its maker's window either, which is
-                    # where it would read as the harness telling somebody their
-                    # own subagent is online.  Dropped, and said at debug.
-                    logger.debug(
-                        "a2a_note_no_window agent=%s line=%s",
-                        describe((session.agent, session.subagent)),
-                        what,
-                    )
-                    continue
-                # A harness line for whoever is looking, and that is the whole of
-                # where it goes: a note is not a turn anybody runs, and it is not
-                # retried (a `✗ offline` that arrives after the window has moved on
-                # is worth less than silence).
-                if (
-                    await note_to_window(
-                        config, session.agent, text, client=window_client
-                    )
-                    is False
-                ):
-                    logger.debug(
-                        "a2a_note_no_window agent=%s line=%s", session.agent, what
-                    )
-                continue
-            # **Group traffic wears the network's group vocabulary, not the
-            # sender's.**  On the local network the maker and its subagents
-            # both read `SubagentGroup`; the sender is `@`-named inside it.  A
-            # direct message keeps the old rule (`sender_net`), where the
-            # maker and a sibling do wear different words.
-            channel = (
-                group_store.group_channel_for(session.net, group, peer)
-                if group
-                else channel_for(sender_net(session, peer), peer)
-            )
+    #: The one agent-server connection this writer's member turns share, when
+    #: the build did not inject one.  Lazily opened, and replaced after a
+    #: failed call rather than reused.
+    member_client: Client | None = agent_client
+    member_client_ours = False
+    member_client_lock = asyncio.Lock()
+    #: The member turns currently running.  Each removes itself in its own
+    #: `finally`; the writer caps the set and cancels it on teardown.
+    member_turns: set[asyncio.Task] = set()
+
+    async def ensure_member_client() -> Client:
+        """The shared agent-server connection, opened once and on demand."""
+        nonlocal member_client, member_client_ours
+        if member_client is not None:
+            return member_client
+        async with member_client_lock:
+            if member_client is not None:
+                return member_client
             try:
+                member_client = await open_server(
+                    config.server("agent").url,
+                    name=AGENT_SERVER_NAME,
+                    fallback_tool="send_message",
+                    timeout=None,
+                )
+            except Exception as exc:  # noqa: BLE001 - every way the agent server can be missing is one answer
+                raise DeliveryFailed(
+                    describe((session.agent, session.subagent)),
+                    f"the agent server could not be reached: {exc}",
+                ) from exc
+            member_client_ours = True
+            return member_client
+
+    async def drop_member_client() -> None:
+        """Forget a failed connection, closing it if this writer opened it."""
+        nonlocal member_client, member_client_ours
+        async with member_client_lock:
+            client, member_client = member_client, None
+            ours, member_client_ours = member_client_ours, False
+        if ours and client is not None:
+            with contextlib.suppress(Exception):
+                await close_server(client)
+
+    async def member_turn(text: str, peer: str, channel: str) -> None:
+        """One member's turn, submitted without holding the writer."""
+        try:
+            try:
+                client = await ensure_member_client()
+                said = await run_turn(
+                    config,
+                    session.agent,
+                    session.subagent,
+                    text,
+                    channel,
+                    client=client,
+                )
+                # The length and not the words: the member's answer is its
+                # own, and what it says to its maker is the reply it sends
+                # (`run_turn`).  This line is the evidence that the turn ran.
+                logger.info(
+                    "a2a_turn_answered agent=%s peer=%s chars=%d",
+                    describe((session.agent, session.subagent)),
+                    peer,
+                    len(said),
+                )
+            except DeliveryFailed as exc:
+                # **An error, because the words are the only thing that could
+                # answer `peer` and they went nowhere.**  Its own key rather
+                # than the handler's below, which is about this plugin's own
+                # fault: this one is a conversation that could not be reached.
+                logger.error(
+                    "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+                    describe((session.agent, session.subagent)),
+                    peer,
+                    len(text),
+                    exc,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one bad turn must not end the writer
+                # **Not fatal, and the difference is this agent's whole mesh.**
+                # A turn that failed is one message dropped — a peer re-sends
+                # its own task — and the next one is read.  The connection is
+                # replaced too, because the failure may have been the
+                # connection's and the next turn is what finds out.
+                logger.exception(
+                    "a2a_delivery_failed agent=%s peer=%s — that message dropped",
+                    describe((session.agent, session.subagent)),
+                    peer,
+                )
+                await drop_member_client()
+        finally:
+            member_turns.discard(asyncio.current_task())
+
+    try:
+        while True:
+            text, peer, what, note, group = await session.queue.get()
+            try:
+                if note:
+                    if session.subagent:
+                        # **A note has no second road, and a subagent has no
+                        # window.**  Presence is what these lines are — a peer
+                        # arriving, a peer going — and the roster a subagent can
+                        # ask for is `subagent_list`, so drawing one for it would
+                        # be a turn spent on a fact nobody here has to act on;
+                        # and it cannot be drawn in its maker's window either,
+                        # which is where it would read as the harness telling
+                        # somebody their own subagent is online.  Dropped, and
+                        # said at debug.
+                        logger.debug(
+                            "a2a_note_no_window agent=%s line=%s",
+                            describe((session.agent, session.subagent)),
+                            what,
+                        )
+                        continue
+                    # A harness line for whoever is looking, and that is the
+                    # whole of where it goes: a note is not a turn anybody runs,
+                    # and it is not retried (a `✗ offline` that arrives after
+                    # the window has moved on is worth less than silence).
+                    if (
+                        await note_to_window(
+                            config, session.agent, text, client=window_client
+                        )
+                        is False
+                    ):
+                        logger.debug(
+                            "a2a_note_no_window agent=%s line=%s", session.agent, what
+                        )
+                    continue
+                # **Group traffic wears the network's group vocabulary, not the
+                # sender's.**  On the local network the maker and its subagents
+                # both read `SubagentGroup`; the sender is `@`-named inside it.
+                # A direct message keeps the old rule (`sender_net`), where the
+                # maker and a sibling do wear different words.
+                channel = (
+                    group_store.group_channel_for(session.net, group, peer)
+                    if group
+                    else channel_for(sender_net(session, peer), peer)
+                )
                 if session.subagent:
-                    said = await run_turn(
-                        config,
-                        session.agent,
-                        session.subagent,
-                        text,
-                        channel,
-                        client=agent_client,
+                    # **Wait for a slot, not for the turn.**  The queue holds
+                    # the rest; this is the only backpressure.  Each turn is
+                    # submitted while the ones before it may still be running,
+                    # so the agent server's `_check_new_input` finds the next
+                    # message waiting at its next iteration.
+                    while len(member_turns) >= MAX_MEMBER_TURNS:
+                        await asyncio.wait(
+                            set(member_turns),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    task = asyncio.create_task(
+                        member_turn(text, peer, channel),
+                        name=f"a2a-turn-{session.subagent}",
                     )
-                    # The length and not the words: the member's answer is its
-                    # own, and what it says to its maker is the reply it sends
-                    # (`run_turn`).  This line is the evidence that the turn ran.
-                    logger.info(
-                        "a2a_turn_answered agent=%s peer=%s chars=%d",
-                        describe((session.agent, session.subagent)),
-                        peer,
-                        len(said),
-                    )
-                else:
+                    member_turns.add(task)
+                    continue
+                try:
                     await hand_over(
                         config,
                         session.agent,
@@ -1043,45 +1163,49 @@ async def _drain(
                         what=what,
                         window_client=window_client,
                     )
-            except DeliveryFailed as exc:
-                # **An error, because the words are the only thing that could
-                # answer `peer` and they went nowhere.**  Its own key rather than
-                # the handler's below, which is about this plugin's own fault:
-                # this one is a conversation that could not be reached.  The
-                # count is logged rather than the text: the text is the
-                # conversation's business.
-                logger.error(
-                    "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+                except DeliveryFailed as exc:
+                    # **An error, because the words are the only thing that
+                    # could answer `peer` and they went nowhere.**  Its own key
+                    # rather than the handler's below, which is about this
+                    # plugin's own fault.
+                    logger.error(
+                        "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+                        describe((session.agent, session.subagent)),
+                        peer,
+                        len(text),
+                        exc,
+                    )
+            except asyncio.CancelledError:
+                # `shutdown` cancels this writer; a cancellation is not a
+                # delivery failure and must reach the awaiting task as one.
+                raise
+            except Exception:  # noqa: BLE001 — one bad message must not end the writer
+                # **Not fatal, and the difference is this agent's whole mesh.**
+                # This task is never awaited until shutdown, so an exception
+                # escaping here used to kill the writer *silently*: every later
+                # inbound task, result, broadcast and presence event queued and
+                # was never handed over, for the life of the process, while the
+                # mesh still looked connected and the model simply never heard
+                # anything.  One message that could not be rendered or handed
+                # over is dropped — a peer re-sends its own task — and the next
+                # one is read.
+                logger.exception(
+                    "a2a_delivery_failed agent=%s peer=%s — that message dropped",
                     describe((session.agent, session.subagent)),
                     peer,
-                    len(text),
-                    exc,
                 )
-        except asyncio.CancelledError:
-            # `shutdown` cancels this writer; a cancellation is not a
-            # delivery failure and must reach the awaiting task as one.
-            raise
-        except Exception:  # noqa: BLE001 — one bad message must not end the writer
-            # **Not fatal, and the difference is this agent's whole mesh.**
-            # This task is never awaited until shutdown, so an exception
-            # escaping here used to kill the writer *silently*: every later
-            # inbound task, result, broadcast and presence event queued and
-            # was never handed over, for the life of the process, while the
-            # mesh still looked connected and the model simply never heard
-            # anything.  One message that could not be rendered or handed
-            # over is dropped — a peer re-sends its own task — and the next one
-            # is read.
-            #
-            # **A member's turn that failed reaches here too**, and that is the
-            # honest answer for it: the message was received and its turn did not
-            # happen (a provider that answered 500, a store that refused), so the
-            # peer is owed an answer this process no longer holds a turn for, and
-            # the line names the conversation it was for (`describe`).
-            logger.exception(
-                "a2a_delivery_failed agent=%s peer=%s — that message dropped",
-                describe((session.agent, session.subagent)),
-                peer,
-            )
+    finally:
+        # **Cancellation is what a session teardown looks like.**  The writer is
+        # cancelled by `drop_session`/the lifespan; the turns it submitted are
+        # its children and must go with it, and the client this writer opened
+        # must be closed.  The tasks remove themselves from the set, so the
+        # snapshot is what is still running.
+        ending = list(member_turns)
+        for task in ending:
+            task.cancel()
+        if ending:
+            await asyncio.gather(*ending, return_exceptions=True)
+        await drop_member_client()
 
 
 def build_server(
