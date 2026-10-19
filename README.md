@@ -552,6 +552,10 @@ best matches, not a page of everything. None of the three takes an agent
 argument: the call itself carries the conversation, so a model reads its own
 history and nothing else.
 
+`turn_summarize` writes a summary and tags onto a turn — the one being run, or
+an earlier one by id — so the keyword search can find it. They join the text
+the words leg reads; the meaning leg does not use them.
+
 Every turn is indexed twice when stored: a keyword index over the text by which
 a turn is found, and a vector index over what it is about. Both indexes are
 derived from the turns and can be rebuilt from them. Changing the embedding

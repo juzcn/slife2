@@ -312,6 +312,7 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
             "turn_list",
             "turn_read",
             "turn_search",
+            "turn_summarize",
         ]
         text, ok = await registry.execute(
             ToolCall(id="c1", name="fake__echo", arguments={"text": "through"})

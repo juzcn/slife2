@@ -103,10 +103,11 @@ INSTRUCTIONS = (
     "One conversation's memory, addressed by `(agent, subagent)`. Call "
     "`remember` after a turn: it is a record, not an interpretation, and it "
     "writes what it is given. `turn_list` browses, `turn_search` finds a turn by "
-    "what it was about, and `turn_read` returns one turn whole — all three are "
-    "the model's, and none names an agent, because they answer about the "
-    "conversation the call came from. `restore` and `rebuild` are the harness's: "
-    "they decide which turns a conversation is made of, and no model calls them."
+    "what it was about, `turn_summarize` annotates one for the words leg, and "
+    "`turn_read` returns one turn whole — all four are the model's, and none "
+    "names an agent, because they answer about the conversation the call came "
+    "from. `restore` and `rebuild` are the harness's: they decide which turns a "
+    "conversation is made of, and no model calls them."
 )
 
 #: The discriminator call, as a seam: the conversation and the input in, whatever
@@ -285,6 +286,8 @@ def build_server(
         who_helped: str = "",
         what_model: str = "",
         channel: str = "",
+        summary: str = "",
+        tags: str = "",
         created_at: str | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any]:
@@ -319,6 +322,9 @@ def build_server(
             what_model: Which model answered, as `provider/model`.
             channel: Where the turn came in from — `tui`, or a client id.
                 Empty when the caller has nothing to say about it.
+            summary: The summary a `turn_summarize` call wrote for this turn in
+                flight; the agent server captures it at the save point.
+            tags: The tags from that call, comma-separated.
             created_at: When the user pressed enter.  Defaults to now, which is
                 the same moment to within a hop for a caller on loopback.
             completed_at: When the assistant finished.  Defaults to now.
@@ -335,6 +341,8 @@ def build_server(
             who_helped=who_helped,
             what_model=what_model,
             channel=channel,
+            summary=summary,
+            tags=tags,
             created_at=created_at,
             completed_at=completed_at,
         )
@@ -530,6 +538,55 @@ def build_server(
             entry["similarity"] = similarity
             entries.append(entry)
         return {"entries": entries, "limit": page_limit(limit)}
+
+    @mcp.tool(meta=FOR_THE_MODEL)
+    async def turn_summarize(
+        ctx: Context,
+        turn_id: int | None = None,
+        summary: str | None = None,
+        tags: str | None = None,
+    ) -> dict[str, Any]:
+        """Write a summary and tags for a turn, so a keyword search can find it.
+
+        A summary is one or two sentences about what the turn was about; tags
+        are comma-separated words. Either or both. They join the text the words
+        leg of `turn_search` reads; the meaning leg does not use them.
+
+        Omit `turn_id` to annotate the turn being run: the annotation is
+        captured now and written when this turn is saved. With a `turn_id`, an
+        earlier turn is annotated at once.
+
+        Args:
+            turn_id: The turn to annotate; omit for the turn being run.
+            summary: What the turn was about, in a sentence or two.
+            tags: Comma-separated words to file it under.
+
+        Returns:
+            `status` — `captured` for the turn being run, `updated` for one
+            written now — and `turn_id`, which is `null` for a captured one.
+        """
+        agent, subagent = _caller(ctx)
+        summary = (summary or "").strip()
+        tags = (tags or "").strip()
+        if not summary and not tags:
+            raise ToolError("turn_summarize needs a summary and/or tags")
+        if turn_id is None:
+            return {
+                "status": "captured",
+                "turn_id": None,
+                "message": (
+                    "annotation captured for the current turn — written when "
+                    "this turn is saved"
+                ),
+            }
+        store = await off_loop(store_for, agent, subagent)
+        changed = await off_loop(
+            store.update_summary, turn_id, summary=summary, tags=tags
+        )
+        if not changed:
+            raise ToolError(f"no turn {turn_id} in {describe((agent, subagent))}")
+        logger.info("summarized turn %s for %s", turn_id, describe((agent, subagent)))
+        return {"status": "updated", "turn_id": turn_id}
 
     # --- the two decisions ---------------------------------------------------
     #

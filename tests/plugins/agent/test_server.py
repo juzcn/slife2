@@ -1534,8 +1534,8 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     assert created_at <= completed_at
     # The bill for the turn against the size it had grown to by the end.
     assert (token_count, context_tokens) == (245, 135)
-    # Retrieval hooks: nothing writes them yet, and the schema is where the
-    # later feature finds them rather than an ALTER TABLE.
+    # No `turn_summarize` call in this turn, so the two hooks stay empty; the
+    # capture path is the test below.
     assert (summary, tags) == ("", "")
     # What actually answered, which with an injected backend is the backend —
     # not the config's default, which is a model that never ran.
@@ -1568,6 +1568,60 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     assert [p.name for p in here if p.is_file()] and all(
         p.name.startswith("tools.db") for p in here if p.is_file()
     ), "the only file in a home's agents/ is its own tool catalogue"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_summarize_call_annotates_the_turn_being_saved(
+    tmp_path, monkeypatch, hub
+) -> None:
+    """The rowid-less annotation is applied at the save point, not written early."""
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    cfg = config()
+
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="turn_summarize",
+                        arguments={
+                            "summary": "the quarterly forecast",
+                            "tags": "planning",
+                        },
+                    ),
+                ),
+                usage=Usage(prompt_tokens=100, completion_tokens=10),
+                stop_reason="tool_calls",
+            ),
+        ),
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="Noted.",
+                usage=Usage(prompt_tokens=120, completion_tokens=5),
+                stop_reason="stop",
+            ),
+        ),
+    )
+
+    async with Client(
+        build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            cfg, backend=backend, context_client=context_client, hub_client=hub
+        )
+        await send(server, "remember this", agent="jack", channel="tui")
+
+    row = (
+        sqlite3.connect(agent_dir("jack") / "turns.db")
+        .execute("SELECT summary, tags FROM turn")
+        .fetchone()
+    )
+    assert row == ("the quarterly forecast", "planning")
 
 
 @pytest.mark.asyncio

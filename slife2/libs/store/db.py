@@ -291,6 +291,8 @@ class _Stored:
 
     document: str
     search: str
+    summary: str
+    tags: str
     created_at: str
     completed_at: str
     channel: str
@@ -309,9 +311,9 @@ CREATE TABLE IF NOT EXISTS turn (
     -- there is not meant to be — the file is named in the text.
     messages       TEXT    NOT NULL DEFAULT '[]',
 
-    -- Retrieval hooks for later.  Nothing writes them yet; they are here
-    -- because adding a column to a table with rows in it is the thing this
-    -- schema has no mechanism for.
+    -- Retrieval hooks.  `turn_summarize` writes them for a turn the model
+    -- annotated, and they join the text the keyword index holds; the vector
+    -- index deliberately keeps only the conversation.
     summary        TEXT             DEFAULT '',
     tags           TEXT             DEFAULT '',
 
@@ -523,9 +525,9 @@ def searchable_text(
 ) -> str:
     """The text a turn is *found* by — everything worth looking for it with.
 
-    Both halves of the exchange, plus the two retrieval hooks for whoever
-    writes them later: a term that survives only in a summary is the keyword
-    leg's to find, and that is the whole reason `summary` is in this string.
+    Both halves of the exchange, plus the two retrieval hooks `turn_summarize`
+    writes: a term that survives only in a summary is the keyword leg's to
+    find, and that is the whole reason `summary` is in this string.
 
     Normalized here rather than at the index, because a query has to be
     normalized by the same rule (`slife2.libs.store.textindex`) and this is the one place
@@ -668,6 +670,8 @@ class TurnStore:
         messages: list[dict[str, Any]],
         embedder: Embedder,
         channel: str = "",
+        summary: str = "",
+        tags: str = "",
         who_helped: str = "",
         what_model: str = "",
         token_count: int = 0,
@@ -682,6 +686,11 @@ class TurnStore:
         rules about what is worth keeping belong on this side of it.  **There is
         one such rule, and it announces itself** — an attached image becomes a
         note saying it was there (`strip_images`).
+
+        `summary` and `tags` are the annotation a `turn_summarize` call made in
+        flight; they are written with the row and join the text the keyword
+        index holds.  The vector is the conversation's alone, so they are not
+        embedded.
 
         **There used to be a second one, and its absence is a decision.**  An
         oversized tool result was kept as a head-and-tail digest, on the argument
@@ -715,7 +724,9 @@ class TurnStore:
         stored = strip_images(messages)
         record = _Stored(
             document=storable(json.dumps(stored, ensure_ascii=False)),
-            search=searchable_text(stored),
+            search=searchable_text(stored, summary, tags),
+            summary=summary,
+            tags=tags,
             created_at=created_at or now(),
             completed_at=completed_at or now(),
             channel=channel,
@@ -756,11 +767,14 @@ class TurnStore:
         """The three inserts, in one transaction, on a thread of their own."""
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO turn (messages, created_at, completed_at,"
-                " channel, who_helped, what_model, token_count, context_tokens)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO turn (messages, summary, tags, created_at,"
+                " completed_at, channel, who_helped, what_model,"
+                " token_count, context_tokens)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.document,
+                    record.summary,
+                    record.tags,
                     record.created_at,
                     record.completed_at,
                     record.channel,
@@ -785,6 +799,47 @@ class TurnStore:
             # leaves either both or neither.
             append_context(connection, turn_id)
             return turn_id
+
+    def update_summary(
+        self,
+        turn_id: int,
+        *,
+        summary: str | None = None,
+        tags: str | None = None,
+    ) -> bool:
+        """Write a summary and/or tags, and the text the turn is found by.
+
+        **Two writes in one transaction, because the keyword index is a copy.**
+        `turn_fts.search` holds `searchable_text` for the row (the schema says
+        why it is a copy rather than an external-content index), so updating
+        `turn` alone would leave the new words unfindable.  The vector is not
+        touched: `embed_text` keeps the conversation and only the conversation,
+        and a summary is a retrieval hook for the keyword leg.
+
+        `False` means no row has that id, which the caller reports.  A call
+        that names neither field is the caller's mistake and writes nothing.
+        """
+        if summary is None and tags is None:
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT messages, summary, tags FROM turn WHERE rowid = ?",
+                (turn_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            messages = json.loads(str(row["messages"] or "[]"))
+            new_summary = str(row["summary"] or "") if summary is None else summary
+            new_tags = str(row["tags"] or "") if tags is None else tags
+            connection.execute(
+                "UPDATE turn SET summary = ?, tags = ? WHERE rowid = ?",
+                (new_summary, new_tags, turn_id),
+            )
+            connection.execute(
+                "UPDATE turn_fts SET search = ? WHERE rowid = ?",
+                (searchable_text(messages, new_summary, new_tags), turn_id),
+            )
+        return True
 
     def turns(
         self,

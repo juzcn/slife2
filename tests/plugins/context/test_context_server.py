@@ -180,7 +180,7 @@ async def test_the_model_tools_name_no_agent() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    for name in ("turn_list", "turn_search", "turn_read"):
+    for name in ("turn_list", "turn_search", "turn_summarize", "turn_read"):
         assert "agent" not in tools[name].input_schema["properties"]
         assert "subagent" not in tools[name].input_schema["properties"]
     # And the ones the agent side calls still take it: `remember`, `restore` and
@@ -202,7 +202,7 @@ async def test_none_of_the_harness_tools_is_the_models() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
 
-    for name in ("turn_list", "turn_search", "turn_read"):
+    for name in ("turn_list", "turn_search", "turn_summarize", "turn_read"):
         assert listed[name].meta.get("slife2/audience") == "assistant"
     for name in ("remember", "restore", "rebuild", "forget"):
         assert "slife2/audience" not in (listed[name].meta or {})
@@ -440,6 +440,73 @@ async def test_search_finds_the_topic_a_person_names_in_chinese() -> None:
     assert [e["user_message"] for e in found.data["entries"]][0] == (
         "昨天讨论的首经贸发展问题"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
+    """`turn_summarize` rewrites the keyword index, not just the row."""
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        wrote = await client.call_tool(
+            "turn_summarize",
+            {"turn_id": 1, "summary": "the quarterly forecast", "tags": "planning"},
+            meta=client_meta("jack"),
+        )
+        read = await client.call_tool(
+            "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+        )
+        found = await client.call_tool(
+            "turn_search", {"query": "quarterly"}, meta=client_meta("jack")
+        )
+
+    assert wrote.data == {"status": "updated", "turn_id": 1}
+    assert (read.data["summary"], read.data["tags"]) == (
+        "the quarterly forecast",
+        "planning",
+    )
+    assert [e["turn_id"] for e in found.data["entries"]][0] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_current_turns_annotation_is_captured_not_written() -> None:
+    """No id means the turn being run; it has no row yet to write."""
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        wrote = await client.call_tool(
+            "turn_summarize",
+            {"summary": "the current turn", "tags": "now"},
+            meta=client_meta("jack"),
+        )
+        # Nothing was stored, so the id cannot resolve.
+        with pytest.raises(ToolError, match="no turn 1"):
+            await client.call_tool(
+                "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+            )
+
+    assert wrote.data["status"] == "captured"
+    assert wrote.data["turn_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_summary_with_nothing_to_write_is_refused() -> None:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        with pytest.raises(ToolError, match="summary and/or tags"):
+            await client.call_tool(
+                "turn_summarize", {"turn_id": 1}, meta=client_meta("jack")
+            )
+
+
+@pytest.mark.asyncio
+async def test_summarizing_a_turn_that_is_not_there_says_which_one() -> None:
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        with pytest.raises(ToolError, match="no turn 7"):
+            await client.call_tool(
+                "turn_summarize",
+                {"turn_id": 7, "summary": "nowhere"},
+                meta=client_meta("jack"),
+            )
 
 
 # --- restore: the exit-time context, replayed ---------------------------------

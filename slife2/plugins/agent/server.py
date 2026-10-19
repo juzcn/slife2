@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import shutil
 import time
@@ -1028,6 +1029,44 @@ def build_server(
         """
         return ToolRegistry(await turn_tools(client_id) + async_tools())
 
+    def turn_annotation(
+        messages: list[dict[str, Any]],
+    ) -> tuple[str | None, str | None]:
+        """The annotation a rowid-less `turn_summarize` call carries.
+
+        The model annotates the in-flight turn by calling `turn_summarize` with
+        no `turn_id`; the tool answers `captured` and writes nothing.  The
+        values are applied here, at the one save point, so they land on exactly
+        the turn being saved — no "latest row" race, no pending state, and a
+        turn whose save fails applies nothing.  A call with an explicit id is
+        ignored: the tool wrote that one already.
+        """
+        summary: str | None = None
+        tags: str | None = None
+        for message in messages:
+            for call in message.get("tool_calls") or ():
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                function = function if isinstance(function, dict) else {}
+                if str(function.get("name") or "").split("__")[-1] != "turn_summarize":
+                    continue
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(arguments, dict):
+                    continue
+                if arguments.get("turn_id") is not None:
+                    continue
+                found = arguments.get("summary")
+                if isinstance(found, str) and found.strip():
+                    summary = found.strip()
+                found = arguments.get("tags")
+                if isinstance(found, str) and found.strip():
+                    tags = found.strip()
+        return summary, tags
+
     async def remember_turn(
         agent: str,
         subagent: str,
@@ -1063,6 +1102,7 @@ def build_server(
         existed when the turn ended: the number the *next* request would resend.
         A cancelled turn has neither, and reports zero rather than a guess.
         """
+        summary, tags = turn_annotation(messages)
         client = await memory()
 
         try:
@@ -1083,6 +1123,8 @@ def build_server(
                         # neither says which model wrote the answer.
                         "what_model": model,
                         "channel": channel,
+                        "summary": summary or "",
+                        "tags": tags or "",
                         "created_at": created_at,
                         "completed_at": completed_at,
                     },

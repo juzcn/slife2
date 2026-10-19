@@ -514,6 +514,37 @@ async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_summary_rewrites_the_text_the_turn_is_found_by(tmp_path) -> None:
+    """The keyword index is a copy, so a summary has to rewrite it too.
+
+    The vector is the conversation's, deliberately: a summary is a retrieval
+    hook for the words leg, not a second description to embed.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await store.save_turn(
+        embedder=EMBEDDER,
+        messages=[
+            {"role": "user", "content": "what is the plan?"},
+            {"role": "assistant", "content": "…"},
+        ],
+        created_at=now(),
+    )
+
+    assert store.update_summary(1, summary="the quarterly forecast", tags="planning")
+    record = store.turn(1)
+    assert (record.summary, record.tags) == ("the quarterly forecast", "planning")
+    found = await store.search("forecast", embedder=EMBEDDER)
+    assert [one.turn_id for one in found][0] == 1
+
+    # A call that names only tags keeps the summary it did not mention.
+    assert store.update_summary(1, tags="budget")
+    record = store.turn(1)
+    assert (record.summary, record.tags) == ("the quarterly forecast", "budget")
+    assert not store.update_summary(99, summary="nowhere")
+    assert not store.update_summary(1)
+
+
+@pytest.mark.asyncio
 async def test_a_cut_message_says_it_was_cut(tmp_path) -> None:
     """`…`, because a silent cut is a short answer somebody acts on.
 

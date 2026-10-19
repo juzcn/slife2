@@ -408,8 +408,8 @@ async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() 
     ours = {
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "context"
     }
-    assert ours == {"turn_list", "turn_search", "turn_read"}
-    # Six sources, and each is a real one: `context` offers the model its three
+    assert ours == {"turn_list", "turn_search", "turn_summarize", "turn_read"}
+    # Six sources, and each is a real one: `context` offers the model its four
     # history tools (they carry the mark), `skills-server` offers `skill_use`
     # and the four tools that install, remove and switch a playbook, and
     # `mcp-tools`, `restapi-tools` and `cli-server` offer the tools a model uses
@@ -430,8 +430,8 @@ async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() 
     assert row["kind"] == "plugin"
     assert row["required"] is True
     assert row["state"] == "ready"
-    assert row["tools"] == 3
-    assert row["loaded"] == 3, "a plugin's tools are in the model's list"
+    assert row["tools"] == 4
+    assert row["loaded"] == 4, "a plugin's tools are in the model's list"
 
 
 def write_skill(
@@ -896,7 +896,12 @@ async def test_a_plugins_tool_is_named_as_itself() -> None:
 
     # The same list, the same hop, the same `_advertise`: only the category
     # differs, and it is what the name is decided by.
-    assert called("context") == {"turn_list", "turn_search", "turn_read"}
+    assert called("context") == {
+        "turn_list",
+        "turn_search",
+        "turn_summarize",
+        "turn_read",
+    }
     assert called("fake") == {"fake__echo", "fake__boom", "fake__read_file"}
 
 
@@ -2627,7 +2632,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
         listed = await client.call_tool("list_tools", {})
         assert names(listed.data) == {
             "_func_tool_unload",
-            # The context store's three history tools are the model's — they
+            # The context store's four history tools are the model's — they
             # carry the mark — so the real plugin brings them along.  **Ours
             # are bare**, and `spawned__greet` below is the only name on this
             # surface with somebody else's server in front of it: there is one
@@ -2635,6 +2640,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
             # would be a division the model has no use for.
             "turn_list",
             "turn_search",
+            "turn_summarize",
             "turn_read",
             "skill_use",
             "tool_search",
