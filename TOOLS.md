@@ -4,8 +4,8 @@ slife2's own tools — the `plugin` category of the tool catalogue. External
 `mcp:`, `rest-api:`, `cli:` and `skills:` entries are not listed.
 
 Arguments are the wire schemas the hub advertises. A tool's answer is not part
-of that schema, so every entry says what it returns. Snapshot of
-`agents/tools.db`: 2026-10-19, 79 tools.
+of that schema, so every entry says what it returns. Generated from
+`agents/tools.db` (79 tools) by `scripts/gen_tools_doc.py`.
 
 ## Contents
 
