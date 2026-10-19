@@ -56,8 +56,22 @@ from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX
-from slife2.libs.turn.events import MessageCutIn, TurnEvent, decode
+from slife2.libs.turn.events import (
+    MessageCutIn,
+    TextDelta,
+    TurnEvent,
+    TurnFinished,
+    decode,
+)
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.watch import (
+    Closed,
+    Snapshot,
+    TurnStarted,
+)
+from slife2.libs.turn.watch import (
+    decode as decode_watch,
+)
 from slife2.plugins.agent.server import (
     ATTACH_IMAGE,
     SUBAGENT_REMOVE,
@@ -315,7 +329,9 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "send_message",
         "subagent_remove",
         "subagent_set",
+        "subagents",
         "transcript",
+        "watch",
     ]
 
 
@@ -2307,7 +2323,7 @@ async def test_a_broken_observer_does_not_lose_the_message(
     class Broken:
         """A context whose progress stream is closed: every report throws."""
 
-        def __init__(self, _ctx: Any) -> None: ...
+        def __init__(self, _ctx: Any, **_options: Any) -> None: ...
 
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
@@ -2345,7 +2361,7 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
     from slife2.plugins.agent import server as server_module
 
     class Broken:
-        def __init__(self, _ctx: Any) -> None: ...
+        def __init__(self, _ctx: Any, **_options: Any) -> None: ...
 
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
@@ -3476,3 +3492,218 @@ async def test_a_machine_with_no_subagent_network_removes_without_telling_anyone
 
     assert (await remove_subagent(server, "researcher")).data["removed"] is True
     assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+
+# --- watching a conversation -------------------------------------------------
+
+
+@contextlib.asynccontextmanager
+async def watching(
+    server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = ""
+) -> AsyncGenerator[tuple[list[Any], asyncio.Task[Any]]]:
+    """A watch call held open, and the frames it has been handed so far.
+
+    The call is started as a task and *probed* for its snapshot rather than
+    slept on: what proves a watcher is registered is that the server has
+    answered it at all — the same question every caller of the tool asks.
+    """
+    frames: list[Any] = []
+    snapshot = asyncio.Event()
+
+    async def on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        item = decode_watch(message or "")
+        if item is None:
+            return
+        frames.append(item)
+        if isinstance(item, Snapshot):
+            snapshot.set()
+
+    async with Client(server) as client:
+        task = asyncio.create_task(
+            client.call_tool(
+                "watch",
+                {"agent": agent, "subagent": subagent},
+                progress_handler=on_progress,
+                timeout=None,
+            )
+        )
+        try:
+            await asyncio.wait_for(snapshot.wait(), timeout=10)
+            yield frames, task
+        finally:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+async def wait_for_frame(
+    frames: list[Any], wanted: type, *, timeout: float = 10
+) -> Any:
+    """Wait for one frame of a type, and answer with it.
+
+    A poll rather than an event: a test wants *a particular* frame out of a
+    stream whose length it cannot know, and the stream is live — the progress
+    callback appends in arrival order.
+    """
+    for _ in range(int(timeout / 0.01)):
+        for item in frames:
+            if isinstance(item, wanted):
+                return item
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"no {wanted.__name__} arrived; frames: {frames!r}")
+
+
+@pytest.mark.asyncio
+async def test_the_subagent_list_is_the_makers_directories(context, hub) -> None:
+    """The list a screen offers is the directories, not the mesh roster.
+
+    A subagent is a directory carrying its record
+    (`slife2.libs.host.paths.subagent_dirs`), so that is the list — one that
+    asked `subagent_list` would be the model's roster, which connects the mesh
+    and wakes members to answer, and a picker must not do either.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await set_subagent(server, "researcher", role="code reviewer")
+    await set_subagent(server, "scout", model="deepseek/deepseek-flash")
+
+    async with Client(server) as client:
+        answer = await client.call_tool("subagents", {"agent": DEFAULT_AGENT})
+        none = await client.call_tool("subagents", {"agent": "jill"})
+
+    assert answer.data == {
+        "subagents": [
+            {
+                "name": "researcher",
+                "model": "",
+                "role": "code reviewer",
+                "fork": False,
+            },
+            {
+                "name": "scout",
+                "model": "deepseek/deepseek-flash",
+                "role": "subagent",
+                "fork": False,
+            },
+        ]
+    }, "sorted, with the record's own facts"
+    assert none.data == {"subagents": []}, "an agent that made none has none"
+
+
+@pytest.mark.asyncio
+async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
+    context, hub
+) -> None:
+    """A turn already in the store is the snapshot's, and the tap stands down.
+
+    The tap holds the last or current turn, and a turn that has just been
+    recorded is both in the store and in the tap.  `recorded_turn` is what tells
+    the two apart: when the snapshot contains that id, replaying the tap would
+    draw the same turn twice.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=answering("hello back"),
+    )
+    await send(server, "hello", subagent="scout")
+
+    async with watching(server, subagent="scout") as (frames, _):
+        first = frames[0]
+        assert isinstance(first, Snapshot)
+        assert len(first.turns) == 1
+        assert any(
+            message.get("role") == "user" for message in first.turns[0]["messages"]
+        ), "the stored turn is the one that was sent"
+        # Give the handler its turn at the replay decision, then assert it made
+        # none: one frame is the whole stream for a conversation with no live
+        # turn.
+        await asyncio.sleep(0.05)
+        assert [type(item) for item in frames] == [Snapshot]
+
+
+@pytest.mark.asyncio
+async def test_a_watched_conversation_streams_its_next_turn(context, hub) -> None:
+    """A watcher that is already attached sees a turn's whole vocabulary.
+
+    `TurnStarted` is the one frame a turn's own caller never needs: it sent the
+    message.  A watcher did not, so it is what says what is being answered.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("hi")),
+    )
+
+    async with watching(server, subagent="scout") as (frames, _):
+        await send(server, "hello", subagent="scout")
+        ended = await wait_for_frame(frames, TurnFinished)
+        started = await wait_for_frame(frames, TurnStarted)
+
+        assert started.text == "hello"
+        assert started.channel == ""
+        assert any(isinstance(item, TextDelta) for item in frames)
+        assert ended.text == "hi"
+
+
+@pytest.mark.asyncio
+async def test_a_watch_that_joins_mid_turn_is_handed_the_turn_from_its_start(
+    context, hub
+) -> None:
+    """**The tap is why switching to a running conversation shows its start.**
+
+    The store has nothing for a turn in flight — a turn is written when it ends
+    — so a watcher that only read the store would see the answer without the
+    question, and the deltas after the moment it arrived without the ones
+    before.  The tap holds the turn from `TurnStarted` on, and the snapshot
+    here is genuinely empty: the turn's start can only have come from it.
+    """
+    backend = FakeBackend(text_turn("abcdef", delay=0.15))
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    running = asyncio.create_task(send(server, "slow one", subagent="scout"))
+    # The turn has reached the model, and has streamed at least one chunk by
+    # the time the watch opens — so the replay has something to replay.
+    await wait_for_streams(backend, 1)
+    await asyncio.sleep(0.25)
+
+    async with watching(server, subagent="scout") as (frames, _):
+        first = frames[0]
+        assert isinstance(first, Snapshot)
+        assert first.turns == [], "the store has no turn yet — it is in flight"
+
+        started = await wait_for_frame(frames, TurnStarted)
+        assert started.text == "slow one", "the message the watcher never sent"
+        await wait_for_frame(frames, TurnFinished)
+        assert any(isinstance(item, TextDelta) for item in frames)
+
+    assert (await running).data["text"] == "abcdef"
+
+
+@pytest.mark.asyncio
+async def test_removing_a_subagent_ends_its_watch(context, hub) -> None:
+    """The last frame says why, and the call returns rather than going quiet.
+
+    A stream that simply stopped would be indistinguishable from an idle
+    conversation, which is the opposite news.  `Closed` is the sentence, and the
+    handler's own return is what makes the far end's call come back.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await set_subagent(server, "scout")
+
+    async with watching(server, subagent="scout") as (frames, task):
+        await remove_subagent(server, "scout")
+        result = await asyncio.wait_for(task, timeout=10)
+
+    assert result.data == {"closed": True}
+    assert isinstance(frames[-1], Closed)
+    assert "scout was removed" in frames[-1].reason

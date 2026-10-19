@@ -22,6 +22,8 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.plugin import protocol as protocol_module
+from slife2.libs.turn.watch import Snapshot, TurnStarted
+from slife2.libs.turn.watch import encode as encode_watch
 from slife2.plugins.tui.server import ATTACH, Handover, encode
 from slife2.tui.client import MCPAgentClient, MCPWindowClient
 
@@ -41,6 +43,13 @@ class FakeTransport:
         self.server_info = SimpleNamespace(name=name) if name else None
         #: Every (tool, arguments) pair handed to `call_tool`, in order.
         self.sent: list[tuple[str, dict[str, Any]]] = []
+        #: Every call's keyword options — the half that says a progress handler
+        #: was supplied and the call is not on a clock (`MCPAgentClient.watch`).
+        self.options: list[dict[str, Any]] = []
+        #: What `subagents` answers with, as the server would.
+        self.subagents_data: Any = {"subagents": []}
+        #: Watch frames the fake's `watch` call reports, already encoded.
+        self.watch_items: list[str] = []
 
     async def __aenter__(self) -> FakeTransport:
         return self
@@ -58,6 +67,7 @@ class FakeTransport:
         # that kept the reference would let a later mutation show up in a
         # recorded call.
         self.sent.append((name, copy.deepcopy(arguments)))
+        self.options.append(kwargs)
         if name == "model_switch":
             # The facts the tool returns, which FastMCP hands back wrapped in
             # `data` — the shape the client reads, and the shape it refuses when
@@ -65,6 +75,16 @@ class FakeTransport:
             return SimpleNamespace(
                 data={"default": arguments["ref"], "previous": "local/big", "moved": 0}
             )
+        if name == "subagents":
+            return SimpleNamespace(data=copy.deepcopy(self.subagents_data))
+        if name == "watch":
+            # What a held-open call's stream does: report, then return when the
+            # server closes the conversation.
+            handler = kwargs.get("progress_handler")
+            if handler is not None:
+                for message in self.watch_items:
+                    await handler(1, None, message)
+            return SimpleNamespace(data={"closed": True})
         return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
 
 
@@ -408,6 +428,80 @@ async def test_a_named_server_is_accepted_without_listing_tools(monkeypatch) -> 
     await client.connect()
     await client.run_turn("hi", lambda event: None)
     assert sent(transport, "send_message")[0]["prompt"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
+    monkeypatch,
+) -> None:
+    """The picker's rows are the agent server's, one call with the agent's name."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    transport.subagents_data = {
+        "subagents": [
+            {"name": "scout", "model": "", "role": "subagent", "fork": False},
+        ]
+    }
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    found = await client.subagents()
+
+    assert sent(transport, "subagents") == [{"agent": "jack"}]
+    assert found == [{"name": "scout", "model": "", "role": "subagent", "fork": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_list_without_names_is_not_an_empty_list(monkeypatch) -> None:
+    """A shape this build cannot read is refused, not drawn as "none".
+
+    An agent with no subagents is a real, empty list; a payload whose rows have
+    no names is damage, and reading it as empty is a picker that offers nothing
+    and says nothing (DESIGN.md §10.1).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    transport.subagents_data = {"subagents": [{"role": "subagent"}]}
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    with pytest.raises(ConnectionError):
+        await client.subagents()
+
+
+@pytest.mark.asyncio
+async def test_watching_names_the_conversation_and_asks_for_the_stream(
+    monkeypatch,
+) -> None:
+    """A watch is a held-open call for one subagent, and it decodes its frames.
+
+    Three things go out and each is load-bearing: the `(agent, subagent)` pair,
+    because that is the conversation; the progress handler, because the server's
+    report is a silent no-op without one; and no timeout, because the call lasts
+    as long as the view does.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    transport.watch_items = [
+        encode_watch(Snapshot([])),
+        encode_watch(TurnStarted("hello", "subagent:jack")),
+    ]
+    client = MCPAgentClient("http://test/mcp", agent="jack", subagent="scout")
+    seen: list[Any] = []
+
+    await client.connect()
+    await client.watch(seen.append)
+
+    assert transport.sent == [
+        ("watch", {"agent": "jack", "subagent": "scout"}),
+    ]
+    (options,) = transport.options
+    assert options["progress_handler"] is not None
+    assert options["timeout"] is None
+    assert seen == [
+        Snapshot([]),
+        TurnStarted("hello", "subagent:jack"),
+    ]
 
 
 # --- and the other direction: the window's own inbox --------------------------

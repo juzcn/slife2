@@ -16,6 +16,7 @@ import pytest
 from fakes import (
     FakeAgentClient,
     FakeMeshClient,
+    FakeWatchClient,
     FakeWindowClient,
     RefusingMeshClient,
 )
@@ -34,12 +35,15 @@ from slife2.libs.turn.events import (
     TurnFinished,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
+from slife2.libs.turn.watch import Snapshot, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
 from slife2.tui.theme import GLYPHS, PALETTE
+from slife2.tui.watch import WatchScreen
 from slife2.tui.widgets import (
     AssistantMessage,
     ChatView,
+    ConversationPicker,
     HistoryInput,
     ModelChoice,
     ModelPicker,
@@ -3033,3 +3037,114 @@ async def test_a_refused_mesh_says_so_once_and_keeps_trying(
 
     assert text.count("not on the mesh") == 1
     assert "already in use" in text, "the reason, verbatim"
+
+
+# --- watching a subagent -----------------------------------------------------
+
+
+async def test_ctrl_o_offers_the_subagents_the_server_lists() -> None:
+    """The picker's rows are the agent server's directories, one call.
+
+    Not the mesh roster: `subagent_list` connects the network and wakes members
+    to answer, and a key that only asks what exists must not do either.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}, {"name": "researcher"}]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+
+        listing = app.query_one(ConversationPicker).plain_text()
+        assert "scout" in listing and "researcher" in listing
+        assert "Watch a subagent" in listing
+
+        # Escape is the cancel, and it leaves a line saying so rather than a
+        # picker that vanished.
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert "Cancelled" in shown(app)
+
+
+async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
+    """An empty list is said, not shown as a picker with no rows."""
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: "no subagents yet" in shown(app))
+        assert not app.query(ConversationPicker)
+        assert "`subagent_set`" in shown(app)
+
+
+async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window() -> (
+    None
+):
+    """The screen is a read over the window, not a replacement for it.
+
+    The window's own conversation is still there underneath — it has drawn
+    nothing here because nothing was said — and closing the screen leaves it
+    exactly as it was.  The watch call, which is the screen's lifetime, is
+    cancelled with it.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}]
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TurnStarted("what is 6*7?", "subagent:jack"),
+            TextDelta("It is 42."),
+            TurnFinished(
+                text="It is 42.",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            ),
+        )
+    )
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        watch_client_factory=lambda name: watch,
+        agent="jack",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+        await pilot.press("enter")
+        assert await settled(pilot, lambda: isinstance(app.screen, WatchScreen))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        text = app.screen.query_one(ChatView).plain_text()
+        assert "what is 6*7?" in text
+        assert "It is 42." in text
+
+        # `Ctrl+O` is the window's key, not the watch's: with the screen up it
+        # does nothing rather than mounting a picker underneath it.  The
+        # decided picker from the first press is still in the window's
+        # transcript, so the count is what says a second one was not mounted.
+        mounted = len(app.query(ConversationPicker))
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert len(app.screen_stack) == 2, "no second screen was pushed"
+        assert len(app.query(ConversationPicker)) == mounted, "no picker under it"
+
+        await pilot.press("escape")
+        assert await settled(pilot, lambda: len(app.screen_stack) == 1)
+        # The picker left its decision line in the window's transcript — that
+        # is the window's own record of the key — and nothing the watched
+        # conversation said is in it.
+        assert "Watching scout" in shown(app)
+        assert "what is 6*7?" not in shown(app)
+        assert "It is 42." not in shown(app)
+
+    assert watch.closed is True, "leaving the screen is the detach"

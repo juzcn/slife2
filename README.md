@@ -321,6 +321,7 @@ ignored outside WSL's mirrored mode.
 | `Esc` | Cancel the running turn. |
 | `Ctrl+C` | Copy when something is selected; otherwise cancel the running turn; otherwise quit. |
 | `Ctrl+S` | Open the model picker. `↑`/`↓` move, `Enter` selects, `Esc` closes. |
+| `Ctrl+O` | Open the subagent picker. Choosing one opens a read-only view of its conversation; `Esc` closes it. |
 | `Ctrl+Q` | Quit (the standard Textual binding). It is not shown in the status bar because terminals with flow control may consume it before the application sees it. |
 | `PageUp` / `PageDown` | Page the transcript. |
 | `Home` / `End` | Jump to the start or end of the transcript. |
@@ -348,6 +349,20 @@ Selecting a model calls the same `model_switch` tool the model itself can call.
 The conversation keeps its history and moves to the new model on its next turn;
 a turn already in progress finishes on the model it started with. The status bar
 updates its context window and capability marks.
+
+### Watching a subagent
+
+`Ctrl+O` lists the subagents this agent has made and opens a read-only view of
+the one you choose. The view shows the stored conversation and then the live
+turn — the message that woke it, its tool calls, its reasoning, and its answer —
+as it happens, including a turn already in progress when you open it. `Esc`
+returns to the window; the window's own conversation kept running underneath and
+is unchanged.
+
+The view is read-only on purpose: a subagent has no window, and watching does
+not make you one. The prompt is not shown, and an approval request is not put to
+you — a subagent's turns run unattended, while its maker (or a peer) gets the
+answer as a `Subagent(<name>)>` message in its own conversation.
 
 ### Restoring a conversation
 
@@ -977,7 +992,14 @@ for a level below them.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be
-made, the subagent is left unchanged.
+made, the subagent is left unchanged. A window watching the subagent is told the
+conversation is gone, and its view ends with that sentence.
+
+The window reaches subagents through two read-only management tools on the agent
+server: `subagents` lists the maker's directories, and `watch` streams a
+conversation's turns (history first, then the live turn) until the call is
+cancelled. Neither starts, steers, or answers a turn; the local network and the
+maker's own tools do all of that.
 
 The local network is configured under `subagent:`. It needs a `broker`; a
 `peer_agent:` section with no broker uses the same address. The `unit` is always

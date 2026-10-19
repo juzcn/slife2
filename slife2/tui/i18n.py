@@ -339,6 +339,52 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Switched to ",
         "zh": "已切换到 ",
     },
+    # ── the subagent picker (`slife2.tui.widgets.ConversationPicker`) ─────
+    "conversation_picker_title": {
+        "en": "Watch a subagent",
+        "zh": "观看 subagent",
+    },
+    # The decision line, once a name has been chosen.  The screen opens on it,
+    # so the wording is "watching" rather than "opened".
+    "conversation_watching": {
+        "en": "Watching {name}",
+        "zh": "正在观看 {name}",
+    },
+    # `Ctrl+O` with nothing to offer.  Said rather than shown as an empty
+    # picker, for `no_models`'s reason: a list with no rows is a key that looks
+    # broken, and the tool that would fix it is the thing worth naming.
+    "no_subagents": {
+        "en": "{agent} has no subagents yet; the model makes one with `subagent_set`",
+        "zh": "{agent} 还没有 subagent；模型可用 `subagent_set` 创建",
+    },
+    "subagents_failed": {
+        "en": "the subagents could not be listed: {err}",
+        "zh": "无法列出 subagent：{err}",
+    },
+    # ── the watch screen (`slife2.tui.watch`) ─────────────────────────────
+    "watch_header": {
+        "en": "watching {subagent} — Esc closes",
+        "zh": "正在观看 {subagent} — Esc 关闭",
+    },
+    "watch_failed": {
+        "en": "the conversation could not be watched: {err}",
+        "zh": "无法观看该对话：{err}",
+    },
+    # The protocol's first frame is the history; one that is not is a build
+    # this screen cannot read, said rather than drawn as if the live half were
+    # the whole conversation.
+    "watch_snapshot_missing": {
+        "en": "the watch stream did not open with the conversation's history",
+        "zh": "观看流没有以会话历史开头",
+    },
+    "watch_closed": {
+        "en": "watching ended: {reason}",
+        "zh": "观看结束：{reason}",
+    },
+    "watch_closed_generic": {
+        "en": "watching ended",
+        "zh": "观看结束",
+    },
     # ── the approval row (`slife2.tui.widgets.ApprovalPrompt`) ────────────
     # Leading spaces, because the tool's name is a span of its own before it:
     # the fragment carries its own separator, so a translation that reorders the

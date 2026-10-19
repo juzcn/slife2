@@ -33,6 +33,8 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.libs.turn.events import TurnEvent, decode
+from slife2.libs.turn.watch import WatchItem
+from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.a2a.server import JOIN
 from slife2.plugins.tui.server import ATTACH, Handover
 from slife2.plugins.tui.server import decode as decode_handover
@@ -133,6 +135,22 @@ class AgentClient(Protocol):
         """
         ...
 
+    async def subagents(self) -> list[dict[str, Any]]:
+        """The subagents this agent has made, for the conversation picker.
+
+        **The agent server's answer, not the mesh's.**  A subagent is a
+        directory carrying its record, and the server that owns the
+        conversations is the one that reads those directories; the model's
+        `subagent_list` is a different question — it connects the mesh and wakes
+        members to answer, neither of which a picker may do.
+
+        Each entry has `name`, `model` (empty for the maker's own), `role` and
+        `fork`.  A list this build cannot read raises rather than answering
+        empty: an agent with no subagents is a real, empty list, and the two
+        must not look alike (DESIGN.md §10.1).
+        """
+        ...
+
     async def transcript(self) -> list[dict[str, Any]]:
         """The turns this conversation is made of, for a window to draw.
 
@@ -198,6 +216,32 @@ class AgentClient(Protocol):
         have ended (the person pressed Esc a moment before pressing `y`), and a
         client that raised over it would call a prompt that arrived too late a
         failure of the connection.
+        """
+        ...
+
+
+class WatchClient(Protocol):
+    """A screen's view of one conversation it is not running.
+
+    A second Protocol rather than three more methods on :class:`AgentClient`,
+    because the two callers are different in kind: the window *runs* its
+    conversation, and a watch screen only reads somebody else's.  The screen
+    gets its own client — and therefore its own connection — so a watch that
+    drops cannot take the window's turn with it.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
+        """Hold this conversation's watch open, calling `on_item` as it goes.
+
+        **Does not return while the conversation is watchable.**  The first item
+        is a `Snapshot` of the stored history, then `TurnStarted` and the turn
+        events (`slife2.libs.turn.watch`).  It returns when the server closes the
+        conversation — a removed subagent's last frame is `Closed` — and a
+        cancelled call is the detach.
         """
         ...
 
@@ -368,6 +412,24 @@ class MCPAgentClient:
             raise _unreadable("return a turn list", payload)
         return list(turns)
 
+    async def subagents(self) -> list[dict[str, Any]]:
+        """Read the subagent list.  See `AgentClient.subagents`.
+
+        The transport rule is `_call_tool`'s: a failure that is not the server
+        answering drops the connection, because a client that kept it would look
+        connected to a server nothing is talking to for the rest of the session.
+        The shape check is outside that, so a refusal keeps the link — the
+        server answered, and it is the answer this build cannot read.
+        """
+        result = await self._call_tool("subagents", {"agent": self._agent})
+        payload = result.data
+        found = payload.get("subagents") if isinstance(payload, dict) else None
+        if not isinstance(found, list) or not all(
+            isinstance(one, dict) and isinstance(one.get("name"), str) for one in found
+        ):
+            raise _unreadable("return a subagent list", payload)
+        return list(found)
+
     async def answer_approval(self, call_id: str, approved: bool) -> str:
         """Answer one `_approve` request.  See `AgentClient.answer_approval`."""
         result = await self._call_tool(
@@ -380,6 +442,46 @@ class MCPAgentClient:
             },
         )
         return str((result.data or {}).get("text") or "")
+
+    async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
+        """Hold this conversation's watch open.  See `WatchClient.watch`.
+
+        **A call with no deadline**, for `run_turn`'s reason exactly: it lasts
+        as long as the view does, and a connection-level or call-level timeout
+        would detach a screen that had merely been open for a while.  A
+        transport failure drops this client — the screen's own, never the
+        window's — so a watch that goes away cannot cost a running turn.
+        """
+        if self._client is None:
+            raise ConnectionError("not connected")
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            item = decode_watch(message or "")
+            if item is not None:
+                on_item(item)
+
+        try:
+            await self._client.call_tool(
+                "watch",
+                {"agent": self._agent, "subagent": self._subagent},
+                # Passing a progress handler is what makes the SDK attach a
+                # progress token, and the server's `report_progress` is a
+                # *silent no-op* without one — a screen that omitted this would
+                # watch a conversation and be handed nothing.
+                progress_handler=on_progress,
+                timeout=None,
+            )
+        except ToolError:
+            # The server answered and refused: the conversation is not
+            # watchable, or the call was badly formed.  The link is fine.
+            raise
+        except Exception:
+            # The transport itself is gone; dropping the client is what lets a
+            # later view reconnect rather than hold a dead connection.
+            await self.close()
+            raise
 
     async def run_turn(
         self,

@@ -539,7 +539,9 @@ A subagent:
   cabinet, and media directory, while a fork stores no turns, reads the maker's
   turn log for context without writing it, and shares the maker's cabinet and
   media;
-- has no process, no window, and no claim on an agent name;
+- has no process, no window, and no claim on an agent name; its conversation MAY
+  be watched by a terminal (§4.5.6), and watching is a read rather than a
+  window;
 - has no independent external identity: no WeChat login and no peer-agent
   membership; it is reached only on the local subagent network;
 - shares the maker's schedule ledger, because scheduling stays with the agent;
@@ -641,6 +643,35 @@ so a task answered in prose remains pending and visible as a model failure.
 The first roster read after a start connects the caller's place before reporting.
 A refused connection is reported as the tool's `error`, not raised. An unwoken
 member remains `offline`.
+
+#### 4.5.6 Watching a conversation
+
+A terminal can watch a subagent's conversation without becoming its window. The
+agent server exposes two read-only management tools:
+
+- `subagents(agent)` lists the maker's subagent directories, with the model, role,
+  and fork flag read from each `subagent.yaml`. It reads the filesystem, not the
+  local network roster: the roster is the model's, and it connects the mesh and
+  wakes members to answer.
+- `watch(agent, subagent)` is a held-open call. Its first progress frame is a
+  snapshot of the stored turns — `transcript`'s own read, so history ends at the
+  same place for a watcher and a restarted window. If a turn is in flight, it is
+  replayed from a `TurnStarted` frame (the message its caller sent and a watcher
+  never saw) followed by the events already produced (the tap). Live turn events
+  follow. A cancelled call is the detach. When the subagent is removed, the last
+  frame is `Closed` and the call returns.
+
+Watching is a read: it starts no turn, chooses no context, spends no model call,
+and never answers an approval request. The watched turn remains unattended in the
+loop's sense (`watched=false`), exactly as it is when nobody watches. A display
+that falls behind loses frames; the turn never waits for it.
+
+**Rationale.** A turn's events reach the caller of `send_message`, and a
+subagent's turn has no such caller with a screen (§4.5.5: the local network runs
+it with no progress handler). The watch adds a second consumer of the same events
+rather than a second event vocabulary. The store remains the history of completed
+turns; the tap is the turn in flight, which the store does not have yet, and it
+is replaced at the next turn's start.
 
 ## 5. Turn execution
 

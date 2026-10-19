@@ -68,13 +68,8 @@ from textual.worker import Worker
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import DEFAULT_AGENT, Config
 from slife2.libs.turn.events import (
-    ContextChosen,
     MessageCutIn,
-    TextDelta,
-    ThinkingDelta,
     ToolApprovalRequested,
-    ToolCallFinished,
-    ToolCallStarted,
     TurnEvent,
     TurnFinished,
 )
@@ -87,15 +82,19 @@ from slife2.tui.client import (
     MCPWindowClient,
     MeshClient,
     TurnReply,
+    WatchClient,
     WindowClient,
 )
+from slife2.tui.draw import draw
 from slife2.tui.i18n import t
 from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
+from slife2.tui.watch import WatchScreen
 from slife2.tui.widgets import (
     WINDOW_CHANNEL,
     ApprovalPrompt,
     ChatView,
+    ConversationPicker,
     HistoryInput,
     ModelChoice,
     ModelPicker,
@@ -234,6 +233,12 @@ class SlifeApp(App[None]):
         # model switching a model are one behaviour with one implementation
         # rather than two that can drift apart.
         Binding("ctrl+s", "switch_model", "Switch model", show=False),
+        # The conversation switcher: `Ctrl+O` opens the list of this agent's
+        # subagents, and choosing one pushes a read-only screen that watches it
+        # (`slife2.tui.watch`).  `o` for open; not a tab bar, because a subagent
+        # is a place to look rather than a second prompt to type into, and a
+        # screen leaves the window's own conversation running underneath it.
+        Binding("ctrl+o", "watch_subagent", "Watch a subagent", show=False),
         # Home/End go to the transcript rather than to the draft, and
         # `priority` is what makes that true: the priority pass runs *before*
         # the focused widget, and the focused widget is the prompt, whose
@@ -263,6 +268,7 @@ class SlifeApp(App[None]):
         client_factory: Callable[[], AgentClient] | None = None,
         window_factory: Callable[[], WindowClient] | None = None,
         mesh_factory: Callable[[], MeshClient] | None = None,
+        watch_client_factory: Callable[[str], WatchClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
@@ -301,6 +307,11 @@ class SlifeApp(App[None]):
         #: one and leave the first's future unresolved, so the second press is
         #: the one that does nothing — v1's guard, and v1's reason for it.
         self._switching = False
+        #: Whether the subagent picker is being opened, or is on screen.  The
+        #: same guard as `_switching` and for the same reason: a second press
+        #: while the first is still reading the list would stack a second
+        #: picker, and the first's future would never resolve.
+        self._choosing = False
         #: The approval row on screen, if one is.  Held so a cancelled turn can
         #: refuse the call it was holding: the loop is parked on that future, and
         #: a prompt nothing ever answers would keep the turn from ending.
@@ -330,6 +341,13 @@ class SlifeApp(App[None]):
         #: And the third: the mesh membership this window holds for its agent.
         self._mesh_factory = mesh_factory or (
             lambda: MCPMeshClient(mesh_url, agent=agent)
+        )
+        #: The fourth, and it points the other way again: a screen that watches
+        #: one of this agent's subagents gets a connection of its own, so a
+        #: watch that drops cannot take the window's turn with it.  Injectable
+        #: for the scripts, like the other three.
+        self._watch_client_factory = watch_client_factory or (
+            lambda name: MCPAgentClient(url, agent=agent, subagent=name)
         )
         self._client: AgentClient | None = None
         self._window: WindowClient | None = None
@@ -1009,64 +1027,33 @@ class SlifeApp(App[None]):
         self._apply(message.event)
 
     def _apply(self, event: TurnEvent) -> None:
-        """One event, applied to the transcript."""
-        match event:
-            case MessageCutIn(text=text, channel=channel):
-                # A message that jumped the queue, drawn inside the turn that
-                # took it: the line belongs here and the turn stays open, so the
-                # answer still arriving continues underneath it.
-                self._transcript.add_cut_in(text, channel=channel)
-            case ContextChosen(kept=kept, recalled=recalled):
-                # The discriminator's answer, and the only sight of it there is:
-                # one model call decides what the turn runs on, it is the most
-                # expensive thing a turn does, and until this arrived nothing in
-                # the window said whether it had run, what it kept or what it
-                # went back to the log for.  A note rather than a panel,
-                # because it is the same kind of thing as "[restored N turns]":
-                # something the harness did that the conversation itself does
-                # not show — and `notes.kept` is where that pair is written.
-                self._transcript.add_note(notes.kept(kept, recalled))
-            case TextDelta(text=text):
-                self._transcript.append_text(text)
-            case ThinkingDelta(text=text):
-                self._transcript.append_thinking(text)
-            case ToolCallStarted(
-                call_id=call_id,
-                name=name,
-                arguments=arguments,
-                iteration=iteration,
-                max_iterations=max_iterations,
-            ):
-                self._transcript.add_tool_start(
-                    call_id,
-                    name,
-                    arguments,
-                    iteration=iteration,
-                    max_iterations=max_iterations,
-                )
-            case ToolApprovalRequested(call_id=call_id, name=name, arguments=arguments):
-                # **The turn is parked on this**, so it is answered off the
-                # message pump rather than in it — see `_ask_approval`.
-                self._ask_approval(call_id, name, arguments)
-            case ToolCallFinished(
-                call_id=call_id,
-                ok=ok,
-                result_preview=preview_text,
-                result_chars=chars,
-                elapsed_ms=elapsed,
-            ):
-                self._transcript.add_tool_end(call_id, ok, preview_text, chars, elapsed)
-            case TurnFinished(usage=usage, last_usage=last_usage):
-                # Two numbers, two questions.  `last_usage` is how large the
-                # conversation had become by the end — the only thing a context
-                # percentage can be a percentage of.  `usage` is the turn's bill
-                # across every model call it took, which is what the line under
-                # the answer reports.  Taking the bill for the size reads as a
-                # context two or three times fuller than it is on any turn that
-                # called a tool, and it was what this did.
-                self._context_tokens = last_usage.total_tokens
-                self._transcript.set_usage(usage.total_tokens)
-                self._refresh_status()
+        """One event, applied to the transcript.
+
+        **The display half is `slife2.tui.draw.draw`'s**, shared with the screen
+        that watches a conversation the window is not running, so a watched turn
+        and a typed one cannot render differently.  The two events that are the
+        *window's* — the approval prompt and the bill in the status bar — are
+        handled here, because they are facts about this view rather than about
+        the conversation.
+        """
+        if isinstance(event, ToolApprovalRequested):
+            # **The turn is parked on this**, so it is answered off the message
+            # pump rather than in it — see `_ask_approval`.
+            self._ask_approval(event.call_id, event.name, event.arguments)
+            return
+        if isinstance(event, TurnFinished):
+            # Two numbers, two questions.  `last_usage` is how large the
+            # conversation had become by the end — the only thing a context
+            # percentage can be a percentage of.  `usage` is the turn's bill
+            # across every model call it took, which is what the line under the
+            # answer reports.  Taking the bill for the size reads as a context
+            # two or three times fuller than it is on any turn that called a
+            # tool, and it was what this did.
+            self._context_tokens = event.last_usage.total_tokens
+            self._transcript.set_usage(event.usage.total_tokens)
+            self._refresh_status()
+            return
+        draw(self._transcript, event)
 
     # --- keyboard ------------------------------------------------------------
 
@@ -1202,6 +1189,66 @@ class SlifeApp(App[None]):
             )
         )
         self._apply_model(choice)
+
+    # --- watching a subagent -------------------------------------------------
+
+    def action_watch_subagent(self) -> None:
+        """Open the subagent picker; the choice pushes a read-only screen.
+
+        **Sync, for the model picker's reason** (`action_switch_model`): an
+        action runs inside the key handler, so awaiting the list and then the
+        choice there would block the pump that has to deliver the `Enter` that
+        resolves the picker.  A worker does both.
+        """
+        if self._choosing:
+            return
+        # **Only the window's own screen offers this.**  With a watch screen
+        # up, the picker would mount in the transcript underneath it — invisible
+        # — and the choice would push a second screen over the first.  `Esc` is
+        # how you leave a watch; the next `Ctrl+O` then opens the picker again.
+        if self.screen is not self.screen_stack[0]:
+            return
+        self._choosing = True
+        self.run_worker(self._choose_subagent(), group="watch", exit_on_error=False)
+
+    async def _choose_subagent(self) -> None:
+        """Read the list, ask which one, and push the screen that watches it.
+
+        The list is the agent server's (`subagents`) and not the mesh's: a
+        subagent is a directory, and the roster that connects the network and
+        wakes members is a different question (`slife2.tui.client.AgentClient`).
+        """
+        try:
+            await self._require_connected()
+            assert self._client is not None
+            found = await self._client.subagents()
+            if not found:
+                # Said rather than shown as an empty picker: a list with no
+                # rows is a key that looks broken, and the tool that would fix
+                # it is the thing to name.
+                self._transcript.add_note(t("no_subagents", agent=self._agent))
+                return
+            choices = [str(one["name"]) for one in found]
+            future: asyncio.Future[str | None] = asyncio.Future()
+            picker = self._transcript.add_conversation_picker(
+                ConversationPicker(choices, future)
+            )
+            picker.focus()
+            choice = await future
+            # The prompt takes the focus back whether or not anything was
+            # chosen: what the person did before `Ctrl+O` was type.
+            self.query_one(HistoryInput).focus()
+            if choice is None:
+                return  # cancelled — the picker's own line is the whole answer
+            self.push_screen(
+                WatchScreen(choice, lambda: self._watch_client_factory(choice))
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
+            self._transcript.add_error(t("subagents_failed", err=exc))
+        finally:
+            self._choosing = False
 
     def _ask_approval(self, call_id: str, name: str, arguments: dict[str, Any]) -> None:
         """Put one tool call to the person, and answer it off the message pump.

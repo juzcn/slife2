@@ -603,6 +603,15 @@ class ChatView(VerticalScroll):
         """
         return self._add(picker, "model-picker")
 
+    def add_conversation_picker(self, picker: ConversationPicker) -> ConversationPicker:
+        """Mount the subagent picker inline, at the tail.
+
+        **Nothing is closed for it**, for `add_picker`'s reason exactly: an
+        answer that is still streaming stays above the question, and the line
+        the decision leaves appears under it.
+        """
+        return self._add(picker, "conversation-picker")
+
     def add_approval(self, prompt: ApprovalPrompt) -> ApprovalPrompt:
         """Mount an approval row inline, at the tail.
 
@@ -834,11 +843,11 @@ class ChatView(VerticalScroll):
         lines = []
         for widget in self.query(
             ".user-message, .assistant-message, .system-message, .tool-call, "
-            ".model-picker, .approval-prompt"
+            ".model-picker, .conversation-picker, .approval-prompt"
         ):
             if isinstance(widget, ToolCallWidget):
                 lines.append(widget.plain_text())
-            elif isinstance(widget, ModelPicker):
+            elif isinstance(widget, (ModelPicker, ConversationPicker)):
                 lines.append(widget.plain_text())
             elif isinstance(widget, Static):
                 lines.append(content_text(widget.content))
@@ -1576,6 +1585,123 @@ class ModelPicker(Static):
         line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
         line.append(t("picker_switched"), f"bold {PALETTE['green']}")
         line.append(self._chosen.ref, f"bold {PALETTE['text']}")
+        return line
+
+    def plain_text(self) -> str:
+        """What this row shows, for the transcript's own `plain_text`."""
+        return content_text(self.content)
+
+
+class ConversationPicker(Static):
+    """The subagents this agent has made, inline in the transcript.
+
+    The model picker's shape, one decision smaller: a cursor, `Enter` picks,
+    `Esc` cancels, a blur cancels (a question abandoned is worse than a wasted
+    keystroke), and the row re-renders as the line the decision left.  The
+    bindings are `priority` for the picker's reason: the focused widget is the
+    prompt, whose `TextArea` would otherwise take `↑`/`↓` for its draft
+    history — the wrong list to move while a conversation is being chosen.
+
+    **No active row and no missing-row case**, unlike the model picker: there is
+    no setting this changes, so there is nothing the list could already be on.
+    The cursor opens on the first name, because a person who pressed the key
+    came to watch one of them.
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("up", "cursor_up", "Up", priority=True, show=False),
+        Binding("down", "cursor_down", "Down", priority=True, show=False),
+        Binding("enter", "pick", "Pick", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self, choices: Sequence[str], future: asyncio.Future[str | None]
+    ) -> None:
+        super().__init__("")
+        self._choices = list(choices)
+        self._future = future
+        self._decided = False
+        self._chosen: str | None = None
+        self._cursor = 0 if self._choices else -1
+        self.update(self._body())
+
+    # --- the keys ------------------------------------------------------------
+
+    def action_cursor_up(self) -> None:
+        if not self._decided and self._cursor > 0:
+            self._cursor -= 1
+            self.update(self._body())
+
+    def action_cursor_down(self) -> None:
+        if not self._decided and self._cursor < len(self._choices) - 1:
+            self._cursor += 1
+            self.update(self._body())
+
+    def action_pick(self) -> None:
+        """Choose the name under the cursor, or nothing when none is under it."""
+        if not self._decided and 0 <= self._cursor < len(self._choices):
+            self._decide(self._choices[self._cursor])
+
+    def action_cancel(self) -> None:
+        self._decide(None)
+
+    def on_blur(self) -> None:
+        """Focus went elsewhere: nothing was chosen.  See `ModelPicker`."""
+        self._decide(None)
+
+    def _decide(self, choice: str | None) -> None:
+        """Resolve the future once, and re-render as the decision.
+
+        Once, because the blur that follows every decided picker would otherwise
+        set the same future a second time and raise out of the message pump —
+        the guard `ModelPicker._decide` and `ApprovalPrompt._decide` both carry.
+        """
+        if self._decided:
+            return
+        self._decided = True
+        self._chosen = choice
+        if not self._future.done():
+            self._future.set_result(choice)
+        self.update(self._body())
+
+    # --- the row -------------------------------------------------------------
+
+    def _body(self) -> Text:
+        if self._decided:
+            return self._decided_line()
+        line = Text()
+        line.append(t("conversation_picker_title"), f"bold {PALETTE['text']}")
+        for index, name in enumerate(self._choices):
+            line.append("\n")
+            line.append(
+                f"{GLYPHS['cursor']} " if index == self._cursor else "  ",
+                PALETTE["amber"],
+            )
+            line.append(f"{index + 1}. ", PALETTE["dim"])
+            line.append(name, f"bold {PALETTE['text']}")
+        line.append("\n")
+        line.append(f"{GLYPHS['up']}/{GLYPHS['down']} ", PALETTE["dim"])
+        line.append(t("picker_select"), f"bold {PALETTE['green']}")
+        line.append("  Enter ", PALETTE["dim"])
+        line.append(t("picker_pick"), f"bold {PALETTE['green']}")
+        line.append("  Esc ", PALETTE["dim"])
+        line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
+        return line
+
+    def _decided_line(self) -> Text:
+        line = Text()
+        if self._chosen is None:
+            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
+            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
+            return line
+        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
+        line.append(
+            t("conversation_watching", name=self._chosen),
+            f"bold {PALETTE['green']}",
+        )
         return line
 
     def plain_text(self) -> str:

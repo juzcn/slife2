@@ -29,6 +29,7 @@ from slife2.libs.host.config import Config
 from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
+from slife2.libs.turn.watch import WatchItem
 from slife2.plugins.tui.server import NOTE, Handover
 from slife2.tui.client import TurnReply
 from slife2.tui.widgets import WINDOW_CHANNEL
@@ -190,6 +191,9 @@ class FakeAgentClient:
         #: What `answer_approval` was called with, in order — the half of the
         #: `_approve` handshake that leaves the window (`slife2.tui.app`).
         self.answers: list[tuple[str, bool]] = []
+        #: What `subagents` answers with — the directories the agent server
+        #: would list.  Empty is the real answer for an agent that made none.
+        self.subagents_answer: list[dict[str, Any]] = []
 
     async def connect(self) -> None:
         if self._connect_error is not None:
@@ -230,6 +234,12 @@ class FakeAgentClient:
         self.answers.append((call_id, approved))
         return ""
 
+    async def subagents(self) -> list[dict[str, Any]]:
+        """The list the agent server would answer with, scripted by the test."""
+        if not self.connected:
+            raise ConnectionError("not connected")
+        return [dict(one) for one in self.subagents_answer]
+
     async def run_turn(
         self,
         prompt: str,
@@ -266,6 +276,63 @@ class FakeAgentClient:
         except Exception:
             self.connected = False
             raise
+
+
+class FakeWatchClient:
+    """A :class:`~slife2.tui.client.WatchClient` that plays a scripted stream.
+
+    `watch` hands every scripted item to the callback and then **holds the call
+    open**, like the real one — a fake that returned would let the screen's
+    worker finish while the view was still up and hide exactly the lifetime
+    this class exists to exercise.  `finish` is for the other ending: a server
+    that closed the conversation, whose call does return.  A test that wants to
+    push something later calls `send`.
+    """
+
+    def __init__(
+        self,
+        items: tuple[WatchItem, ...] = (),
+        *,
+        finish: bool = False,
+        connect_error: Exception | None = None,
+    ) -> None:
+        self.items = list(items)
+        self.finish = finish
+        self.connect_error = connect_error
+        self.connected = False
+        self.closed = False
+        #: Set once `watch` has been entered, so a test can wait for the screen's
+        #: worker rather than sleep on it.
+        self.watching = asyncio.Event()
+        #: The handler `watch` was handed, so a test can push live items.
+        self.on_item: Callable[[WatchItem], None] | None = None
+
+    async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+        self.closed = True
+
+    async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.on_item = on_item
+        self.watching.set()
+        for item in self.items:
+            on_item(item)
+        if self.finish:
+            return
+        # Held rather than returned, for `FakeWindowClient.attach`'s reason:
+        # the real call is the view's lifetime.
+        await asyncio.Event().wait()
+
+    def send(self, item: WatchItem) -> None:
+        """Push one item, as the server's progress stream does."""
+        assert self.on_item is not None, "nothing has started watching"
+        self.on_item(item)
 
 
 class FakeWindowClient:

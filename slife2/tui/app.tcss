@@ -99,6 +99,40 @@ ChatView {
     border: solid $slife-amber;
 }
 
+/* The subagent picker wears the model picker's clothes: both are questions in
+   the stream, and the drawn edge is what says so.  Same rules, a second class
+   because the two rows say different things and a later change to one should
+   not silently change the other. */
+.conversation-picker {
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: solid $slife-border;
+    background: $slife-panel;
+    height: auto;
+    width: 1fr;
+}
+
+.conversation-picker:focus {
+    border: solid $slife-amber;
+}
+
+/* ── The watch screen ───────────────────────────────────────────────────── */
+
+/* A read-only view over the whole window, with the conversation filling it.
+   The header is the one line that is not the conversation: it names whose it
+   is and the key that leaves. */
+WatchScreen {
+    layout: vertical;
+    background: $slife-bg;
+}
+
+#watch-header {
+    height: 1;
+    padding: 0 1;
+    background: $slife-panel;
+    color: $slife-dim;
+}
+
 /* ── The approval row ───────────────────────────────────────────────────── */
 
 /* The second thing in the transcript that asks something, and it wears the
