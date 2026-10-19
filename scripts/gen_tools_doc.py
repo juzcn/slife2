@@ -84,7 +84,7 @@ GROUPS = [
         "slife2/plugins/media/server.py",
     ),
     (
-        "peer_agent",
+        "peer-agent",
         "Peer agent network",
         "The remote A2A mesh.",
         "slife2/plugins/a2a/server.py",

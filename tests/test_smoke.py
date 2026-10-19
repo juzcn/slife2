@@ -15,7 +15,13 @@ import pytest
 
 import slife2
 from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
-from slife2.libs.host.config import A2A_SERVER_NAME, A2ASettings, default_config, load
+from slife2.libs.host.config import (
+    A2A_SERVER_NAME,
+    REMOTE,
+    A2ASettings,
+    default_config,
+    load,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -88,20 +94,22 @@ def test_the_tui_url_can_be_overridden() -> None:
 
 
 def test_the_mesh_url_is_the_key_the_address_is_filed_under() -> None:
-    """`a2a`, and not `slife2-a2a` — two names one word apart.
+    """`peer-agent`, and not `slife2-a2a` — two names a layer apart.
 
     `servers:` is keyed by the short name every plugin's module calls its
-    `CONFIG_KEY` — a `PLUGINS` row's `key` — and `slife2-a2a` is what the
-    *server* answers to, the `name` of that same row (the identity
-    `open_server(name=…)` checks).  Looking
-    up the identity in the key table is a `ConfigError` before the TUI starts,
-    which is what this caught: every test of the window passed an address in by
-    hand, so nothing exercised the line that reads one out of the file.
+    `CONFIG_KEY` — a `PLUGINS` row's `key`, which for the mesh is
+    `REMOTE.plugin_key` — and `slife2-a2a` is what the *server* answers to, the
+    `name` of that same row (the identity `open_server(name=…)` checks).  The
+    section a person writes (`peer_agent:`) is a third word and is not a key in
+    that table.  Looking up the identity in the key table is a `ConfigError`
+    before the TUI starts, which is what this caught: every test of the window
+    passed an address in by hand, so nothing exercised the line that reads one
+    out of the file.
     """
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
 
-    assert mesh_url(config) == config.server("peer_agent").url
+    assert mesh_url(config) == config.server(REMOTE.plugin_key).url
     assert mesh_url(config) != A2A_SERVER_NAME
 
 
@@ -154,7 +162,7 @@ def test_a_broker_the_running_mesh_was_not_started_on_is_refused(
     from slife2.libs.host.launcher import Outcome, ServerSpec, Status
 
     spec = ServerSpec(
-        name="peer_agent",
+        name="peer-agent",
         module="slife2.plugins.a2a.server",
         url="http://127.0.0.1:24040/mcp",
         host="127.0.0.1",
@@ -188,7 +196,7 @@ def test_a_mesh_this_command_started_honours_the_flag(
     from slife2.libs.host.launcher import Outcome, ServerSpec, Status
 
     spec = ServerSpec(
-        name="peer_agent",
+        name="peer-agent",
         module="slife2.plugins.a2a.server",
         url="http://127.0.0.1:24040/mcp",
         host="127.0.0.1",

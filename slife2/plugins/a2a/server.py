@@ -133,13 +133,13 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = REMOTE.server_name
 
-#: This instance's key in the config's `servers:` table — and the name of the
-#: section it reads, which is the one section here whose *presence* is a
+#: This instance's key in the config's `servers:` table.  **Three names, three
+#: readers**: `peer-agent` is the plugin key a `status` line prints, `peer_agent`
+#: is the section a person writes — the one section here whose *presence* is a
 #: setting: a machine with no `peer_agent:` is a machine that is not on that
-#: network (`slife2.libs.host.config.A2ASettings`).  **The key is the semantic
-#: one and the process is not**: `peer_agent` is what a person writes, and
-#: `slife2-a2a` is the plugin that serves it.
-CONFIG_KEY = REMOTE.key
+#: network (`slife2.libs.host.config.A2ASettings`) — and `slife2-a2a` is the
+#: process that serves it.
+CONFIG_KEY = REMOTE.plugin_key
 
 #: The remote network's tools, named.  **`PEER_*` and not `A2A_*`**, because
 #: what a model is handed is the semantic side of `Net`: this process speaks A2A,
@@ -2733,7 +2733,7 @@ def main(argv: list[str] | None = None, *, net: Net = REMOTE) -> int:
     return serve_plugin(
         argv,
         server_name=net.server_name,
-        config_key=net.key,
+        config_key=net.plugin_key,
         build=lambda config: build_server(config, net=net),
         logger=logger,
         note=lambda config: server_note(config, net),

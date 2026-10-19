@@ -247,11 +247,10 @@ class Net:
     server actually serves.
     """
 
-    #: The section, and the key in `servers:` — the launcher's address for this
-    #: network and the plugin's settings for it are one word.  **Also the keys
-    #: this network's plugin is filed under in `PLUGINS`**, which is why
-    #: `server_name` below can read its answer off that table rather than saying
-    #: it a second time.
+    #: The network's section — where its settings live, and the word
+    #: `_NET_WORDS` files it under.  **The local network's `servers:` key too**,
+    #: which is why `plugin_key` defaults to it; the remote network's address
+    #: there is hyphenated while its section is not (`plugin_key`).
     key: str
     #: Where this network's settings are on `Config`, as the attributes to walk:
     #: the remote one *is* its section, and the local one is the network half of
@@ -275,11 +274,24 @@ class Net:
     group_channel: str
     group_marker: str
     group_bubble: str
+    #: The key this network's row is filed under in `servers:` and `PLUGINS` —
+    #: what the launcher starts it by and `config.server()` finds it with.
+    #: **Empty means the same word as `key`**, which is the local network's
+    #: case; the remote network says `peer-agent` here while the section a
+    #: person writes stays `peer_agent:`, because a plugin key is hyphenated
+    #: and that section is the semantic word the model's tools are named for.
+    plugin_key: str = ""
     #: Whether every agent of this network meets its peers in one namespace.
     #: True for the remote network — a room somebody shares — and false for a
     #: subagent network, where the mesh is the agent's (`namespace`, which is
     #: where the rule and its argument are).
     shared_namespace: bool = True
+
+    def __post_init__(self) -> None:
+        # Frozen, so the default is resolved once here rather than left for
+        # every reader to fall back on.
+        if not self.plugin_key:
+            object.__setattr__(self, "plugin_key", self.key)
 
     @property
     def server_name(self) -> str:
@@ -292,7 +304,7 @@ class Net:
         a probe has to be able to tell them apart — which is a fact about their
         rows in `PLUGINS` like every other server's name is.
         """
-        return plugin(self.key).name
+        return plugin(self.plugin_key).name
 
     def tool(self, verb: str) -> str:
         """One of this network's tools, named: `tool(LIST)`.
@@ -348,8 +360,16 @@ class Net:
 #: that turns the feature on.  It is the same line the local network draws —
 #: its section (`subagent:`) and its tools never say `a2a` either, and both are
 #: served by that one technical plugin.
+#:
+#: **Its `servers:` key is spelled the plugin way** — `peer-agent`, with the
+#: hyphen every other row uses — while the section stays `peer_agent:`.  The
+#: two are different words for different readers: the key is the launcher's
+#: address and what a `status` line prints, and the section is what a person
+#: writes and what the model's tool names are built from.  `plugin_key` is
+#: where that split is recorded.
 REMOTE = Net(
     key="peer_agent",
+    plugin_key="peer-agent",
     settings=("peer_agent",),
     prefix="peer_agent_",
     channel="peer_agent",
@@ -420,10 +440,11 @@ LOCAL = Net(
 #: the sender is, and the name in the parentheses says which one.
 LOCAL_AGENT = replace(LOCAL, channel="agent", marker="[Agent:", bubble="Agent")
 
-#: The remote network's section key, which is also its key in `servers:`.
-#: **`peer_agent` and not `a2a`**: what a person writes in the config is what
-#: they are configuring, and the plugin that serves it is named separately
-#: (`PLUGINS`, `slife2-a2a`).
+#: The remote network's section key — what a person writes in `slife2.yaml`
+#: to turn the network on.  **`peer_agent` and not `a2a`**: the section is
+#: named for what it configures, and the plugin that serves it is named
+#: separately (`PLUGINS`, `slife2-a2a`).  Its `servers:` key is
+#: `REMOTE.plugin_key` (`peer-agent`) and is a different word on purpose.
 PEER_AGENT_KEY = REMOTE.key
 
 
@@ -734,10 +755,12 @@ PLUGINS: tuple[Plugin, ...] = (
     # A plugin for DESIGN.md §1.1's reason — what it holds is somebody else's connection —
     # and the only one here whose *identity* is per agent: the agent name is the
     # MQTT client id, so one shared process holds one mesh per agent it serves.
-    # **Its key and its process name say different layers, on purpose**: the key
-    # is `peer_agent` because that is the section a person writes and the network
-    # it configures, and `slife2-a2a` is the technical plugin that serves it —
-    # the same plugin, on one port over, that serves `subagent:`.
+    # **Its key, its section and its process name say three different layers**:
+    # the key is `peer-agent`, spelled like every other row in `servers:`, while
+    # `peer_agent` is the section a person writes and the word the model's tools
+    # are named for (`REMOTE.plugin_key` records the split); `slife2-a2a` is the
+    # technical plugin that serves it — the same one, on one port over, that
+    # serves `subagent:`.
     # The section's presence is the machine's opt-in: a machine that should not
     # be on that network is a machine where nobody writes one, which is the same
     # argument the `wechat` section is absent by.  It identifies itself by
@@ -746,7 +769,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # starts in on a machine whose broker is not up yet, which is the state a
     # probe has to be able to name.
     Plugin(
-        key=REMOTE.key,
+        key=REMOTE.plugin_key,
         module="slife2.plugins.a2a.server",
         name="slife2-a2a",
         probe=REMOTE.tool(LIST),
@@ -820,7 +843,7 @@ MEDIA_SERVER_NAME = plugin("media").name
 FILE_TUNNEL_SERVER_NAME = plugin("file-tunnel").name
 AGENT_TASK_SERVER_NAME = plugin("agent-task").name
 SCHEDULE_SERVER_NAME = plugin("schedule").name
-A2A_SERVER_NAME = plugin(REMOTE.key).name
+A2A_SERVER_NAME = plugin(REMOTE.plugin_key).name
 
 #: The plugins that are not model backends, and so have a name of their own
 #: rather than one derived from a wire protocol.  This is the *set* of ours, in

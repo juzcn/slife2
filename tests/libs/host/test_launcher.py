@@ -94,7 +94,7 @@ def test_there_is_one_plugin_per_job(tmp_path) -> None:
         "agent",
         "agent-task",
         "schedule",
-        "peer_agent",
+        "peer-agent",
         "subagent",
     ]
     modules = {spec.module for spec in launcher.specs(config)}
@@ -386,7 +386,7 @@ def test_one_server_per_wire_protocol(tmp_path) -> None:
         "agent",
         "agent-task",
         "schedule",
-        "peer_agent",
+        "peer-agent",
         "subagent",
     ]
 
@@ -450,7 +450,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
         "agent",
         "agent-task",
         "schedule",
-        "peer_agent",
+        "peer-agent",
         "subagent",
     ]
 
@@ -476,7 +476,7 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
         "agent",
         "agent-task",
         "schedule",
-        "peer_agent",
+        "peer-agent",
         "subagent",
     ]
     # WeChat delivers to the window and to nothing else: the terminal is the peer
@@ -493,7 +493,7 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     # The mesh reaches two, and it is the same pair for the same reason
     # (DESIGN.md §6.3): what arrives from a peer is a message handed to a
     # conversation, wherever the conversation can be reached.
-    assert set(launcher.NEEDS["peer_agent"]) == {"tui", "agent"}
+    assert set(launcher.NEEDS["peer-agent"]) == {"tui", "agent"}
     # And the local network is the same pair: it is the same module serving
     # subagents rather than peers, and what it hands over is handed over the
     # same way.

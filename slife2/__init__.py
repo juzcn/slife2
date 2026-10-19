@@ -64,6 +64,7 @@ import time
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     DEFAULT_AGENT,
+    REMOTE,
     Config,
     ConfigError,
     ModelSettings,
@@ -450,15 +451,15 @@ def mesh_url(config: Config) -> str:
     answer "this machine is not on the A2A mesh" every two seconds, which reads
     as a fault rather than as a setting.
 
-    **The key, and not the identity** — two names one word apart, and looking up
-    the wrong one is a `ConfigError` before anything starts.  `a2a` is what
-    `servers:` files this address under (`slife2.libs.host.config.LOCAL_SERVERS`, and the
-    section's own name); `slife2-a2a` is what the *server* answers to, which is
-    what `slife2.tui.client` proves it reached (`open_server(name=…)`) and has
-    never been a key in that table.  `control_url` above is `"tui"` for the same
-    reason.
+    **The plugin key, and not the identity** — two names apart, and looking up
+    the wrong one is a `ConfigError` before anything starts.  `peer-agent` is
+    what `servers:` files this address under (`REMOTE.plugin_key`, in
+    `slife2.libs.host.config.LOCAL_SERVERS`); `slife2-a2a` is what the *server*
+    answers to, which is what `slife2.tui.client` proves it reached
+    (`open_server(name=…)`) and has never been a key in that table.
+    `control_url` above is `"tui"` for the same reason.
     """
-    return config.server("peer_agent").url if config.peer_agent.configured else ""
+    return config.server(REMOTE.plugin_key).url if config.peer_agent.configured else ""
 
 
 def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:

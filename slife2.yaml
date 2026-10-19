@@ -31,7 +31,7 @@ servers:
   cabinet: {port: 24035}
   tui: {port: 24005}
   schedule: {port: 24039}
-  peer_agent: {port: 24040}
+  peer-agent: {port: 24040}
   subagent: {port: 24041}
   media: {port: 24036}
   file-tunnel: {port: 24038}

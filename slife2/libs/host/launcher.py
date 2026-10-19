@@ -660,7 +660,7 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # rather than correctness, like every edge here: a message that cannot be
     # handed over is logged and dropped, which looks like the mesh not working
     # rather than like a daemon that was still starting.
-    REMOTE.key: ("tui", "agent"),
+    REMOTE.plugin_key: ("tui", "agent"),
     # The local network, for the line above's reason: it hands a member's answer
     # to the conversation the same way, and its start resumes the ledgers it
     # finds.  The two networks are one module, so the edge is one edge — and it
