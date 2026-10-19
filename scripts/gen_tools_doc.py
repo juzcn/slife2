@@ -188,8 +188,19 @@ RETURNS = {
     ),
     "tool_search": (
         "`results` — rows of `name`, `category`, `source`, `status`, `loaded`, "
-        "`matched`, `meaning` and `description` — plus `best` and "
-        "`confidence` (`sure`, `weak` or `none`)."
+        "`matched`, `meaning` and `description` — plus `best` and `confidence`."
+        "\n\n"
+        "- `meaning` — the row's cosine similarity to the closest thing asked; "
+        "higher is closer. Every row on the page has one, including rows the "
+        "keyword leg found; `null` only when the row has no vector.\n"
+        "- `matched` — what found the row: `words` when every keyword you gave "
+        "is in the fields the result prints (name, description, category, "
+        "source), `parameters` when the match is only in a tool's parameter "
+        "schema, `body` for the same in a playbook's text, and empty when only "
+        "the meaning leg returned it.\n"
+        "- `best` — the largest `meaning` on the page (`0.0` when no row has "
+        "one). `confidence` is derived from it and from the word matches: "
+        "`sure`, `weak` or `none`."
     ),
     "func_tool_load": (
         "`loaded` — the names now in the model's list — and `failed` — rows of "
