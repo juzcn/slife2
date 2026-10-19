@@ -414,9 +414,9 @@ def build_server(
 
         Returns:
             `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message` and `token_count` per turn — and `total`, how
-            many turns the window holds, so `offset + len(entries) < total`
-            says whether more remain.
+            `assistant_message` and `token_count` (the turn's own estimated size)
+            per turn — and `total`, how many turns the window holds, so
+            `offset + len(entries) < total` says whether more remain.
         """
         # `store_for` and not `store_of`: reading history needs the turn table
         # and nothing else, so it must not need an embedding model.  A browse
@@ -443,6 +443,7 @@ def build_server(
         Everything it holds, in the order it happened: what was said, every
         assistant message, the tool calls and their answers. Your own history,
         like `turn_list` — an id resolves inside it and nowhere else.
+        `token_count` is how large this turn is, estimated from its messages.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.
@@ -454,7 +455,20 @@ def build_server(
         record = await off_loop(store.turn, turn_id)
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
-        return record.to_wire()
+        wire = record.to_wire()
+        # **The two stored counts answer questions about the context this read
+        # does not return.**  `token_count` was the bill for every model call the
+        # turn made, each carrying the conversation of its moment; `context_tokens`
+        # was that conversation's final size. A detached turn has neither, so what
+        # the reader gets is the turn's own size — estimated from the messages it
+        # is about to read — and no context size at all.
+        wire["token_count"] = estimate_turn_tokens(record.messages)
+        wire.pop("context_tokens", None)
+        # **`who_helped` is the same name on every row of this file** — the agent
+        # the conversation belongs to — so a read of that conversation gains
+        # nothing from it.
+        wire.pop("who_helped", None)
+        return wire
 
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_search(
@@ -484,8 +498,8 @@ def build_server(
 
         Returns:
             `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message`, `token_count` and `similarity` per hit, best
-            first — and `limit`.
+            `assistant_message`, `token_count` (the turn's own estimated size)
+            and `similarity` per hit, best first — and `limit`.
         """
         agent, subagent = _caller(ctx)
         if not terms(query):

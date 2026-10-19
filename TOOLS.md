@@ -855,9 +855,9 @@ history: no argument names whose memory to read.
 **Returns**
 
 `entries` — `turn_id`, `created_at`, `user_message`,
-`assistant_message` and `token_count` per turn — and `total`, how
-many turns the window holds, so `offset + len(entries) < total`
-says whether more remain.
+`assistant_message` and `token_count` (the turn's own estimated size)
+per turn — and `total`, how many turns the window holds, so
+`offset + len(entries) < total` says whether more remain.
 
 ### `turn_read`
 
@@ -877,7 +877,7 @@ like `turn_list` — an id resolves inside it and nowhere else.
 
 **Returns**
 
-The whole turn: `turn_id`, `messages`, `summary`, `tags`, `created_at`, `completed_at`, `channel`, `who_helped`, `what_model`, `token_count` and `context_tokens`.
+The whole turn: `turn_id`, `messages`, `summary`, `tags`, `created_at`, `completed_at`, `channel`, `what_model` and `token_count` (the turn's own size, estimated from its messages).
 
 ## File tunnel
 

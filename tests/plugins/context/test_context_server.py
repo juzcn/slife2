@@ -29,6 +29,7 @@ from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
+from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -113,10 +114,19 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
     record = read.data
     assert record["turn_id"] == 1
     assert record["messages"] == messages
-    assert record["who_helped"] == "jack"
     assert record["what_model"] == "deepseek/deepseek-flash"
-    assert (record["token_count"], record["context_tokens"]) == (245, 135)
+    # The read answers with the turn's own size, not the bill it cost or the
+    # context it ran in; the stored row keeps both for the status bar.
+    assert record["token_count"] == estimate_turn_tokens(messages)
+    assert "context_tokens" not in record
+    assert "who_helped" not in record
     assert record["created_at"] and record["completed_at"]
+    stored_row = TurnStore(agent_dir("jack") / "turns.db").turn(1)
+    assert (
+        stored_row.who_helped,
+        stored_row.token_count,
+        stored_row.context_tokens,
+    ) == ("jack", 245, 135)
 
 
 @pytest.mark.asyncio

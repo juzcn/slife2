@@ -117,6 +117,7 @@ from slife2.libs.store.index import (
 )
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import normalise_ids
+from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -245,13 +246,20 @@ class TurnRecord:
         announces itself: a message that reads as short is a message the caller
         has no reason to `turn_read`, so a silent cut turns one wrong answer
         into a wrong answer nobody looks up.
+
+        **`token_count` is the turn's own size, not the bill `self.token_count`
+        records.**  The stored count sums every model call the turn made, and
+        each call carried the whole context of its moment; it answers "what did
+        this turn cost", not "how much room does this turn take".  The estimate
+        from its messages is the second question — the one a caller choosing a
+        turn can act on.
         """
         return {
             "turn_id": self.turn_id,
             "created_at": self.created_at,
             "user_message": _cut(user_message(self.messages), chars),
             "assistant_message": _cut(assistant_message(self.messages), chars),
-            "token_count": self.token_count,
+            "token_count": estimate_turn_tokens(self.messages),
         }
 
     def to_wire(self) -> dict[str, Any]:

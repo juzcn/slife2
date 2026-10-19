@@ -151,8 +151,8 @@ RETURNS = {
     ),
     "turn_read": (
         "The whole turn: `turn_id`, `messages`, `summary`, `tags`, "
-        "`created_at`, `completed_at`, `channel`, `who_helped`, `what_model`, "
-        "`token_count` and `context_tokens`."
+        "`created_at`, `completed_at`, `channel`, `what_model` and "
+        "`token_count` (the turn's own size, estimated from its messages)."
     ),
     "peer_agent_send_message": (
         "`peer` (the member addressed), `task_id`, `message_type` and `note`; a "
