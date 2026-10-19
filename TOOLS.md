@@ -1854,7 +1854,7 @@ Source: [`slife2/plugins/toolhub/server.py`](slife2/plugins/toolhub/server.py)
 
 ### `_func_tool_unload`
 
-[`slife2/plugins/toolhub/server.py:3121`](slife2/plugins/toolhub/server.py#L3121)
+[`slife2/plugins/toolhub/server.py:3124`](slife2/plugins/toolhub/server.py#L3124)
 
 Take tools out of your list. Name the ones you are done with, or leave it empty and the harness's trim runs at a turn boundary. Either way the answer names what went.
 
@@ -1873,7 +1873,7 @@ list), and `text`, the same thing said in a sentence.
 
 ### `func_tool_load`
 
-[`slife2/plugins/toolhub/server.py:1872`](slife2/plugins/toolhub/server.py#L1872)
+[`slife2/plugins/toolhub/server.py:1875`](slife2/plugins/toolhub/server.py#L1875)
 
 Put tools into the list you are shown before each request. A name from `tool_search` can be called without loading; loading is what keeps it in that list. The least recently used go when the list passes its cap.
 
@@ -1889,9 +1889,9 @@ Put tools into the list you are shown before each request. A name from `tool_sea
 
 ### `tool_search`
 
-[`slife2/plugins/toolhub/server.py:1862`](slife2/plugins/toolhub/server.py#L1862)
+[`slife2/plugins/toolhub/server.py:1865`](slife2/plugins/toolhub/server.py#L1865)
 
-Find a tool by what it does, across the whole catalogue.
+Find a tool by what it does, across the whole catalogue — including MCP, REST API, CLI and SKILL tools.
 
 **Parameters**
 

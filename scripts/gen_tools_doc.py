@@ -217,14 +217,8 @@ SUBAGENT_SAME = {
     "subagent_broadcast": "peer_agent_broadcast",
 }
 
-#: Tools registered from description constants rather than a docstring.
-SOURCE_OVERRIDES = {
-    "tool_search": {"file": "slife2/plugins/toolhub/server.py", "line": 1862},
-    "func_tool_load": {"file": "slife2/plugins/toolhub/server.py", "line": 1872},
-}
-
-#: Those two descriptions live in source constants, so the catalogue can lag a
-#: change to them until the hub next starts.  The source is the current answer.
+#: The hub's own descriptions live in source constants, so the catalogue can lag
+#: a change to them until the hub next starts.  The source is the current answer.
 DESCRIPTION_CONSTANTS = {
     "tool_search": "TOOL_SEARCH_DESCRIPTION",
     "func_tool_load": "FUNC_TOOL_LOAD_DESCRIPTION",
@@ -327,6 +321,38 @@ def ast_constants(root: Path) -> dict[str, str]:
     return found
 
 
+def ast_local_tools(root: Path, constants: dict[str, str]) -> dict[str, dict]:
+    """The hub's self-served tools, by name, with their `LocalTool` line."""
+    path = root / "slife2" / "plugins" / "toolhub" / "server.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: dict[str, dict] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "LocalTool"
+        ):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "tool" or not isinstance(keyword.value, ast.Call):
+                continue
+            for inner in keyword.value.keywords:
+                if inner.arg != "name":
+                    continue
+                if isinstance(inner.value, ast.Constant):
+                    name = str(inner.value.value)
+                elif isinstance(inner.value, ast.Name):
+                    name = constants.get(inner.value.id, "")
+                else:
+                    name = ""
+                if name:
+                    found[name] = {
+                        "file": path.relative_to(root).as_posix(),
+                        "line": node.lineno,
+                    }
+    return found
+
+
 def returns_of(name: str, source: dict | None) -> str:
     """The answer a tool gives, from its note or its `Returns:` section."""
     if name in RETURNS:
@@ -420,6 +446,7 @@ def build_document(root: Path, db: Path) -> str:
     """The whole of `TOOLS.md`, as the text to write."""
     tools = ast_tools(root)
     constants = ast_constants(root)
+    local = ast_local_tools(root, constants)
     connection = sqlite3.connect(db)
     try:
         rows = list(
@@ -482,7 +509,7 @@ def build_document(root: Path, db: Path) -> str:
                 DESCRIPTION_CONSTANTS.get(name, ""), description
             )
             lookup = SUBAGENT_SAME.get(name, name)
-            source = tools.get(lookup) or SOURCE_OVERRIDES.get(lookup)
+            source = tools.get(lookup) or local.get(lookup)
             if source is None and lookup.startswith("_"):
                 source = tools.get(lookup[1:])
             out.append(f"### `{name}`")
