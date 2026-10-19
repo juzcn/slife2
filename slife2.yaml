@@ -116,8 +116,7 @@ agent:
   # system_prompt: prompts/jack.j2
 
 agent-task:
-  # Background tasks running at once per agent. A task may start a task; this
-  # bounds concurrency, not total work over time.
+  # Agent tasks running at once per agent.
   max_running: 4
 
 subagent:
