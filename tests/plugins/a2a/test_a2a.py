@@ -45,6 +45,7 @@ from slife2.libs.host.config import (
     CANCEL_TASK,
     LIST,
     LOCAL,
+    LOCAL_AGENT,
     REMOTE,
     SEND_MESSAGE,
     TASK_LIST,
@@ -1798,6 +1799,9 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     # maker's subagents, and — for a subagent — the agent that made it.
     assert "your agent if you are one of them" in send.description
     assert LOCAL.marker in send.description, "its own envelope, in its own text"
+    assert LOCAL_AGENT.marker in send.description, (
+        "and the maker's, because both answer this conversation"
+    )
     assert REMOTE.marker not in send.description
     assert "on the A2A mesh" not in send.description, "not the remote network's words"
     assert "agent on your subagent" not in send.description, (
@@ -2524,8 +2528,9 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
 
     A subagent has no window and never gets one, so the turn is run here, on the
     agent server, addressed by the client id the message named.  The pair is what
-    matters: `subagent` is the *member*, and the prompt arrives wearing the local
-    network's envelope with the sender in it.
+    matters: `subagent` is the *member*, and the prompt arrives wearing the
+    **agent's** envelope — `[Agent:…]` and `agent:<maker>` — because a subagent
+    has to be able to tell its maker from a sibling.
     """
     session = local_member(tmp_path)
     session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
@@ -2535,11 +2540,41 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
         {
             "agent": AGENT,
             "subagent": "tester",
-            "prompt": f"{marker(LOCAL, AGENT, TASK)}add one and one",
-            "channel": channel_for(LOCAL, AGENT),
+            "prompt": f"{marker(LOCAL_AGENT, AGENT, TASK)}add one and one",
+            "channel": channel_for(LOCAL_AGENT, AGENT),
         }
     ], "the turn did not reach the member's own conversation"
     assert window.handed == [], "a subagent's message is not a window's"
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_can_tell_its_agent_from_a_sibling(
+    tmp_path: Path, agent_server: AgentServer
+) -> None:
+    """**The sender's kind is in the word, which is why the local network has two.**
+
+    A subagent's conversation is entered by its maker and by a sibling.
+    `[Agent:…]`/`agent:<maker>` and `[Subagent:…]`/`subagent:<sibling>` are what
+    a model and a person reading the same turn use to tell them apart — the
+    question a single `Subagent` word could not answer.  The maker is the mesh's
+    unit (`Net.namespace`), so `source == session.agent` is the identity and not
+    a naming convention.
+    """
+    session = local_member(tmp_path)
+    session.mesh.on_inbound_task(AGENT, "from your agent", TASK)
+    session.mesh.on_inbound_task("researcher", "from a sibling", "", kind="message")
+    await drain_until_idle(session, agent=agent_server)
+
+    assert [(turn["prompt"], turn["channel"]) for turn in agent_server.turns] == [
+        (
+            f"{marker(LOCAL_AGENT, AGENT, TASK)}from your agent",
+            channel_for(LOCAL_AGENT, AGENT),
+        ),
+        (
+            f"{marker(LOCAL, 'researcher', None, type='message')}from a sibling",
+            channel_for(LOCAL, "researcher"),
+        ),
+    ], "the two senders did not wear different words"
 
 
 @pytest.mark.asyncio
@@ -2572,7 +2607,7 @@ async def test_a_prose_answer_to_a_task_does_not_complete_it(
     await drain_until_idle(session, agent=agent_server)
 
     assert [turn["prompt"] for turn in agent_server.turns] == [
-        f"{marker(LOCAL, AGENT, TASK)}add one and one"
+        f"{marker(LOCAL_AGENT, AGENT, TASK)}add one and one"
     ], "the turn did not reach the member's conversation"
     assert completed == [], "the harness answered the task with the turn's text"
 
@@ -2602,7 +2637,7 @@ async def test_a_task_less_message_is_not_answered_by_the_harness(
     await drain_until_idle(session, agent=agent_server)
 
     assert [turn["prompt"] for turn in agent_server.turns] == [
-        f"{marker(LOCAL, AGENT, None, type='message')}hello"
+        f"{marker(LOCAL_AGENT, AGENT, None, type='message')}hello"
     ], "the message did not reach the member's conversation"
     assert sent == [], "the harness sent the turn's text back to the sender"
 

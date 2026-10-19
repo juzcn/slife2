@@ -92,6 +92,7 @@ from slife2.libs.host.config import (
     CANCEL_TASK,
     LIST,
     LOCAL,
+    LOCAL_AGENT,
     REMOTE,
     SEND_MESSAGE,
     TASK_LIST,
@@ -246,7 +247,11 @@ def marker(
 ) -> str:
     """Content prefix for ANY inbound A2A message — one envelope, a type field.
 
-    ``[PeerAgent:{"from": …, "task_id": …, "type": …}] `` — ``from`` names the
+    **``net`` is the *sender's* vocabulary**, which is `REMOTE` on the remote
+    network and one of its two speakers on the local one (`sender_net`): the
+    envelope's first word says whether an agent or a subagent sent this, and
+    that is the fact the receiving model needs.  ``[PeerAgent:{"from": …,
+    "type": …}] ``, ``[Agent:{…}] `` or ``[Subagent:{…}] ``; ``from`` names the
     *sending* peer (never the receiver).  ``type`` tells what it is:
     ``task_request`` (an inbound task to answer, via
     ``peer_agent_send_message(message_type="task_response", task_id=…)`` — it may take
@@ -281,12 +286,13 @@ def a2a_marker(text: str, net: Net) -> dict[str, Any] | None:
     reader beside it is how the two would drift.
 
     ***net* is required, because the two meshes are independent and so are their
-    envelopes** (`[PeerAgent:` and `[Subagent:`).  A reader with a default would
-    read one network's message with the other's word, and the task it carries
-    would not look like a marker at all — the sender's task would stay pending
-    while the reader called it a message nobody owes an answer.  The network is
-    the only thing that knows which word to look for, so it is an argument
-    rather than a default.
+    envelopes** (`[PeerAgent:`, and the local network's two, `[Agent:` and
+    `[Subagent:`).  A reader with a default would read one network's message
+    with the other's word, and the task it carries would not look like a marker
+    at all — the sender's task would stay pending while the reader called it a
+    message nobody owes an answer.  The network — and, on the local one, the
+    sender's kind (`sender_net`) — is the only thing that knows which word to
+    look for, so it is an argument rather than a default.
 
     Returns ``None`` when *text* carries no marker, a marker that does not close,
     or a payload that is not an object — the same three cases v1's type reader
@@ -341,6 +347,31 @@ def channel_for(net: Net, peer: str) -> str:
     return f"{net.channel}:{peer}"
 
 
+def sender_net(session: Session, source: str) -> Net:
+    """The vocabulary of an inbound message's sender: `net`, or its other speaker.
+
+    **The local network is the one with two kinds of speaker, and a subagent
+    has to be able to tell which one it is reading.**  Its conversation is
+    entered by its maker and by a sibling; `[Agent:…]` and `Agent(name)> ` say
+    the first, `[Subagent:…]` and `Subagent(name)> ` the second, and the word
+    is stored in the turn's row along with the message, so a rebuilt transcript
+    gives the same answer.
+
+    The agent is the mesh's maker, and `Session.agent` is the maker's name for
+    every session of that mesh (`Net.namespace` makes the agent's name the
+    unit), so `source == session.agent` is the identity rather than a naming
+    convention.  The remote network has nothing to choose between: every member
+    is a peer agent and `REMOTE` is the whole of its vocabulary.
+
+    **Asked per message rather than kept on the session**, because the sender
+    is per message: one session hears from the maker and from siblings, and the
+    words belong to the message being delivered.
+    """
+    if session.net is LOCAL and source == session.agent:
+        return LOCAL_AGENT
+    return session.net
+
+
 def peer_phrase(net: Net, peer: str) -> str:
     """How a line about the far end names it: `Peer **jill**`, or `**jill**`.
 
@@ -353,9 +384,10 @@ def peer_phrase(net: Net, peer: str) -> str:
     reading about one of its subagents, and a subagent reading about its maker or
     a sibling — and no relationship word is true for both: "your subagent" is
     false for a subagent reading about its maker, and so is plain `Subagent`.
-    What the far end *is* is already on the line, in the word this project uses
-    for it: the `[Subagent:…]` envelope, and the `Subagent(<name>)> ` bubble
-    the window draws from the channel.
+    What the far end *is* is already on the line, in the sender's word this
+    project uses for it: the `[Agent:…]`/`[Subagent:…]` envelope, and the
+    `Agent(<name>)> `/`Subagent(<name>)> ` bubble the window draws from the
+    channel.
     """
     return f"Peer **{peer}**" if net is REMOTE else f"**{peer}**"
 
@@ -632,7 +664,8 @@ def _wire(session: Session) -> None:
         marker_id = (task_id or None) if kind == "task" else None
         marker_type = "message" if kind != "task" else "task_request"
         session.post(
-            f"{marker(session.net, source, marker_id, type=marker_type)}{content}",
+            f"{marker(sender_net(session, source), source, marker_id, type=marker_type)}"
+            f"{content}",
             source,
             f"an inbound {marker_type} from {source}",
         )
@@ -659,6 +692,10 @@ def _wire(session: Session) -> None:
         # conversation is waiting for an answer that will not come.
         if not result and outcome == mesh.COMPLETED:
             return
+        # The words of whoever is answering: on the local network a subagent
+        # may be hearing from its maker or from a sibling, and the two are
+        # different senders (`sender_net`).
+        words = sender_net(session, peer)
         if outcome == mesh.UNREACHABLE:
             # **A send that never landed is told as itself.**  The mesh's
             # requester ladder ran out with no reply at all (`_deliver`), so
@@ -670,13 +707,13 @@ def _wire(session: Session) -> None:
             # terminal reply's, so the line lands where the task was discussed.
             if kind == "message":
                 text = (
-                    f"{marker(session.net, peer, type='message')}"
+                    f"{marker(words, peer, type='message')}"
                     f"**{peer}** was never reached, so nothing will answer your "
                     f"message:\n\n{result}"
                 )
             else:
                 text = (
-                    f"{marker(session.net, peer, corr_id or None, type='task_response')}"
+                    f"{marker(words, peer, corr_id or None, type='task_response')}"
                     f"**{peer}** was never reached, so no result will arrive for "
                     f"this task (ID: `{corr_id}`):\n\n{result}"
                 )
@@ -684,7 +721,7 @@ def _wire(session: Session) -> None:
             # A MESSAGE conversation was answered: a bare message reply, no
             # task involved.
             text = (
-                f"{marker(session.net, peer, type='message')}"
+                f"{marker(words, peer, type='message')}"
                 f"{peer_phrase(session.net, peer)} replied to your message:"
                 f"\n\n{result}"
             )
@@ -693,7 +730,7 @@ def _wire(session: Session) -> None:
             # `cancelled` or `failed`, in the peer's own word.  All three are a
             # verdict it had, which is what separates them from `UNREACHABLE`.
             text = (
-                f"{marker(session.net, peer, corr_id or None, type='task_response')}"
+                f"{marker(words, peer, corr_id or None, type='task_response')}"
                 f"{peer_phrase(session.net, peer)} {outcome} async task "
                 f"(ID: `{corr_id}`):\n\n{result}"
             )
@@ -756,7 +793,7 @@ def _wire(session: Session) -> None:
         """
         peer = safe_name(peer)
         session.post(
-            f"{marker(session.net, peer, task_id, type='cancel_task')}"
+            f"{marker(sender_net(session, peer), peer, task_id, type='cancel_task')}"
             f"The sender withdrew this task — stop working on it.",
             peer,
             f"a withdrawal from {peer}",
@@ -768,7 +805,7 @@ def _wire(session: Session) -> None:
         # channel, a stored turn and a log line.
         sender = safe_name(sender)
         session.post(
-            f"{marker(session.net, sender, type='broadcast')}{text}",
+            f"{marker(sender_net(session, sender), sender, type='broadcast')}{text}",
             sender,
             f"a broadcast from {sender}",
         )
@@ -861,7 +898,7 @@ async def _drain(
                         session.agent,
                         session.subagent,
                         text,
-                        channel_for(session.net, peer),
+                        channel_for(sender_net(session, peer), peer),
                         client=agent_client,
                     )
                     # The length and not the words: the member's answer is its
@@ -878,7 +915,7 @@ async def _drain(
                         config,
                         session.agent,
                         text,
-                        channel_for(session.net, peer),
+                        channel_for(sender_net(session, peer), peer),
                         what=what,
                         window_client=window_client,
                     )
@@ -1762,9 +1799,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "\n"
         "`message_type` decides what it is. 'task_request' (the default) asks for\n"
         "work and returns an id straight away — the answer arrives later, on its\n"
-        "own, as a `{marker}…` of type 'task_response'. Never wait for it and\n"
+        "own, as a {marker} of type 'task_response'. Never wait for it and\n"
         "never poll: there is nothing to poll. 'task_response' completes a task\n"
-        "somebody sent you, and needs the `task_id` from that task's `{marker}…`\n"
+        "somebody sent you, and needs the `task_id` from that task's {marker}\n"
         "marker. 'message' is a plain conversation — no task, no completion, and\n"
         "the reply arrives as a message."
     ),
@@ -1791,7 +1828,7 @@ _TOOL_TEXTS: dict[str, str] = {
         "\n"
         "Nobody answers one and it is delivered at most once, so it is for\n"
         "information somebody may act on and not for anything you need a reply\n"
-        "to — use `{send}` for that. It arrives as a `{marker}…` of type\n"
+        "to — use `{send}` for that. It arrives as a {marker} of type\n"
         "'broadcast', with no task and no completion."
     ),
     TASK_LIST: (
@@ -1831,6 +1868,7 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         "roster": "the peer agents — you first, then each by name",
         "name": "the peer network",
         "section": "`peer_agent:`",
+        "marker": "`[PeerAgent:…]`",
         "offline": (
             "Offline entries are the ones that have said they are leaving, so\n"
             "they are listed rather than hidden."
@@ -1862,6 +1900,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         ),
         "name": "the subagent network",
         "section": "`subagent:`",
+        # Two, because the receiver is one of two kinds: a member's answer
+        # wears the *sender's* word, and both a maker and a sibling can answer
+        # this conversation (`sender_net`, which is where the choice is made).
+        "marker": "`[Agent:…]` or `[Subagent:…]`",
         "offline": (
             "A member is listed whether or not it is awake: `offline` means\n"
             "nothing is listening for it at this moment, and a message to it\n"
@@ -1905,7 +1947,6 @@ def describe_tool(net: Net, verb: str) -> str:
     return _TOOL_TEXTS[verb].format(
         send=net.tool(SEND_MESSAGE),
         cancel=net.tool(CANCEL_TASK),
-        marker=net.marker,
         **words,
     )
 

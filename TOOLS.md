@@ -1732,7 +1732,7 @@ Publish a fire-and-forget event to every member of your subagent network.
 
 Nobody answers one and it is delivered at most once, so it is for
 information somebody may act on and not for anything you need a reply
-to — use `subagent_send_message` for that. It arrives as a `[Subagent:…` of type
+to — use `subagent_send_message` for that. It arrives as a `[Agent:…]` or `[Subagent:…]` of type
 'broadcast', with no task and no completion.
 
 **Parameters**
@@ -1802,9 +1802,9 @@ sends nothing to the other side.
 
 `message_type` decides what it is. 'task_request' (the default) asks for
 work and returns an id straight away — the answer arrives later, on its
-own, as a `[Subagent:…` of type 'task_response'. Never wait for it and
+own, as a `[Agent:…]` or `[Subagent:…]` of type 'task_response'. Never wait for it and
 never poll: there is nothing to poll. 'task_response' completes a task
-somebody sent you, and needs the `task_id` from that task's `[Subagent:…`
+somebody sent you, and needs the `task_id` from that task's `[Agent:…]` or `[Subagent:…]`
 marker. 'message' is a plain conversation — no task, no completion, and
 the reply arrives as a message.
 

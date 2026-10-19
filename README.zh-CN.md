@@ -59,7 +59,7 @@ slife2 围绕四条规则构建。
 | **client id** | `(agent, subagent)`：一次调用所代表的身份。每个 server 都按它保存状态。 |
 | **conversation** | 一个 client id 的历史。 |
 | **turn** | 一次交换：输入、模型的回答以及它发起的工具调用，作为一行存储。 |
-| **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`subagent:<name>`、`agent-task:<name>`、`async-tool:<name>` 或 `schedule:<name>`。 |
+| **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>`、`async-tool:<name>` 或 `schedule:<name>`。本地网络中 `agent:` 是创建者、`subagent:` 是 subagent，这样 subagent 能分清在回答谁的消息。 |
 | **marker** | channel 在投递消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。marker 随消息存储，只在显示时移除。 |
 | **family** | 拥有一个配置节并声明该节所描述行的 plugin。 |
 | **source** | plugin 持有的一个条目，例如 `mcp:` server、playbook 或命令。 |
@@ -333,7 +333,9 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 
 视图只读是有意为之：subagent 没有窗口，观看并不会让你成为它的窗口。视图不显示
 输入框，也不会把审批请求交给你——subagent 的轮次是无人的，它的创建者（或 peer）
-会在自己的对话里收到 `Subagent(<name>)>` 消息。
+会在自己的对话里收到 `Subagent(<name>)>` 消息。在被观看的对话里，唤它的那条
+消息戴创建者的气泡 `Agent(<name>)>`；来自兄弟 subagent 的消息戴
+`Subagent(<name>)>`。
 
 ### 恢复对话
 

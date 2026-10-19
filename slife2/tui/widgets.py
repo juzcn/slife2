@@ -62,7 +62,7 @@ from slife2.libs.harness.markers import strip as strip_marker
 # imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
-from slife2.libs.host.config import LOCAL
+from slife2.libs.host.config import LOCAL, LOCAL_AGENT
 from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
 from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
@@ -89,6 +89,11 @@ MARKERS: tuple[str, ...] = (
     # it, which is the exact failure the imports above exist to prevent:
     # `channel_prefix` already knows this channel and gives it `Subagent(jill)>`.
     LOCAL.marker,
+    # And the same network's other speaker: a message the agent sends to one of
+    # its subagents wears `[Agent:` (`slife2.libs.host.config.LOCAL_AGENT`).
+    # Two markers because the *sender's* kind decides the word; one list
+    # because this window strips every envelope it knows.
+    LOCAL_AGENT.marker,
 )
 
 #: So `_add` can hand back the widget type it was given.
@@ -194,13 +199,21 @@ def channel_prefix(channel: str) -> str:
         #
         return f"PeerAgent({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{LOCAL.channel}:"):
-        # One of this agent's own subagents, and **the word is the network's own
-        # on both sides**: the bubble says `Subagent(name)` because the window
-        # belongs to the agent that made the subagent, and the envelope says
-        # `[Subagent:` for the reason every marker here says what it says — it
-        # names the network the message came over, and nothing a subagent's turn
-        # reads names the protocol underneath it (`slife2.libs.host.config.LOCAL`).
+        # A subagent speaking — to its maker, or to a sibling.  **The word is
+        # the sender's, not the window's**: the same local network has two
+        # speakers, and `agent:<name>` below is the other one.  A subagent's
+        # conversation can be entered by its maker and by a sibling, and the
+        # model has to be able to tell whose instruction it is answering
+        # (`slife2.libs.host.config.LOCAL`).
         return f"{LOCAL.bubble}({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{LOCAL_AGENT.channel}:"):
+        # The agent that made this subagent, speaking into the subagent's own
+        # conversation — drawn on the watch screen, and stored in the turn row
+        # so a rebuilt one says the same.  `Agent(name)` rather than
+        # `Subagent(name)`: a person watching sees who spoke, and the model
+        # that read the message sees the same word in its envelope
+        # (`slife2.libs.host.config.LOCAL_AGENT`).
+        return f"{LOCAL_AGENT.bubble}({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
     # this window inventing a speaker (DESIGN.md §1.3).

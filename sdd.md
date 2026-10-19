@@ -632,9 +632,11 @@ The local network is configured under `subagent:`.
   32). The cap is a bound on runaway growth, not a target.
 
 A subagent's place on the network is held by the local network's process. A
-message to a subagent becomes a turn in the subagent's own conversation. The
-answer is drawn on the maker's terminal as `Subagent(<name>)>`, and it reaches
-the maker as a message in the maker's own conversation.
+message to a subagent becomes a turn in the subagent's own conversation, wearing
+`Agent(<name>)>` — the sender is the maker — while an answer from a sibling
+wears `Subagent(<name>)>`. The subagent's answer is drawn on the maker's
+terminal as `Subagent(<name>)>`, and it reaches the maker as a message in the
+maker's own conversation.
 
 A turn that ends in prose is not a reply. The harness does not send one. The
 model's own `subagent_send_message` or `task_response` call is the only way out,
@@ -823,6 +825,7 @@ the turn records where it came in.
 | `tui` | The person, in this window | `You>` | none |
 | `wechat` | A WeChat login | `Wechat>` | `[Wechat:{…}]` |
 | `peer_agent:<peer>` | A peer agent | `PeerAgent(<peer>)>` | `[PeerAgent:{…}]` |
+| `agent:<name>` | The agent, in one of its subagents' conversations | `Agent(<name>)>` | `[Agent:{…}]` |
 | `subagent:<name>` | One of this agent's subagents | `Subagent(<name>)>` | `[Subagent:{…}]` |
 | `agent-task:<name>` | A background loop's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
 | `async-tool:<name>` | A background tool call's result | `AsyncTool(<name>)>` | `[AgentToolResult:{…}]` |
@@ -838,6 +841,13 @@ The channel is an address (`agent-task:research`); the displayed line says who
 answered (`AsyncTask(research)>`). The two names are not derived from each other.
 The prefix is decided in one function (`tui/widgets.py:channel_prefix`), used by
 both the live prompt and the rebuild.
+
+The local network has **two kinds of speaker**, so it has two channel words. A
+subagent's conversation is entered by the agent that made it and by a sibling;
+`agent:<name>`/`[Agent:{…}]`/`Agent(<name>)>` says the first and
+`subagent:<name>`/`[Subagent:{…}]`/`Subagent(<name>)>` the second. The sender's
+kind is the word, not the receiver's, so the model answering a turn and a person
+reading it both know whose instruction it is.
 
 A channel that delivers a message owes the conversation a **whole turn**, not a
 prompt. A channel that cannot reach a conversation says so and stops; it does not

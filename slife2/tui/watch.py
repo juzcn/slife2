@@ -103,8 +103,10 @@ class WatchScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         # The transcript signs the assistant's messages with the subagent's
-        # name, so the screen reads `scout> ...` under lines that wear
-        # `Subagent(jack)>` — the same spelling every other surface uses.
+        # name, so the screen reads `scout> ...` under the message that woke it,
+        # which wears its maker's bubble, `Agent(jack)>` — and under a sibling's
+        # message, which wears `Subagent(jill)>`.  The sender's kind is in the
+        # channel, so this screen does not decide it (`channel_prefix`).
         yield Static(t("watch_header", subagent=self._subagent), id="watch-header")
         yield ChatView(self._subagent)
 

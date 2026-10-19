@@ -133,6 +133,23 @@ def test_one_of_the_agents_own_subagents_is_drawn_as_a_subagent() -> None:
     assert channel_prefix(LOCAL.channel) == f"{LOCAL.channel}> "
 
 
+def test_the_agent_speaking_in_a_subagents_conversation_is_drawn_as_an_agent() -> None:
+    """`Agent(name)> ` — the local network's other speaker.
+
+    A subagent's conversation is entered by its maker and by a sibling, and the
+    channel carries the sender's kind so the two can be told apart: `agent:` for
+    the maker, `subagent:` for a sibling (`slife2.libs.host.config.LOCAL_AGENT`).
+    The envelope on the same message opens with the matching word, and the
+    window has to know both to take either back off.
+    """
+    from slife2.libs.host.config import LOCAL_AGENT
+
+    assert channel_prefix(f"{LOCAL_AGENT.channel}:jack") == "Agent(jack)> "
+    assert channel_prefix(LOCAL_AGENT.channel) == f"{LOCAL_AGENT.channel}> "
+    assert markers.strip('[Agent:{"from": "jack"}] hello', *MARKERS) == "hello"
+    assert LOCAL_AGENT.marker in MARKERS
+
+
 def test_a_scheduled_trigger_says_which_task_came_due() -> None:
     """The clock's messages wear **no marker** — there is nothing to match a
     result to, because a trigger is not a result (DESIGN.md §1.7) — so the

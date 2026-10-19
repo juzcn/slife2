@@ -86,6 +86,7 @@ class InboundStore:
         **A bridge is a task still owed an answer**, which is what `task_list`
         reports (`slife2.plugins.a2a.mesh.open_tasks`): the model that has lost
         track of what it was going to answer has this to ask, and the
-        `[Subagent:…]`/`[PeerAgent:…]` marker in its own turn is the id.
+        `[Agent:…]`/`[Subagent:…]`/`[PeerAgent:…]` marker in its own turn is the
+        id.
         """
         return sorted(self._pending.values(), key=lambda t: t.since or "")

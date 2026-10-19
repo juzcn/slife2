@@ -29,7 +29,7 @@ def stored_turn(
     asked: str = "count to three",
     answered: str = "one two three",
     *,
-    channel: str = "subagent:jack",
+    channel: str = "agent:jack",
 ) -> dict:
     """One stored turn, in the shape `restore` draws."""
     return {
@@ -65,12 +65,13 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
     message its caller sent and a watcher never saw; the deltas and the final
     answer are the turn as it happens.  The bubble on that message is the
     channel's, so the maker is named by the same function every other surface
-    uses.
+    uses — and it is `Agent(jack)>`, not `Subagent`: the sender is the agent
+    that made this subagent.
     """
     watch = FakeWatchClient(
         (
             Snapshot([stored_turn()]),
-            TurnStarted("what is 6*7?", "subagent:jack"),
+            TurnStarted("what is 6*7?", "agent:jack"),
             TextDelta("It is "),
             TextDelta("42."),
             finished("It is 42."),
@@ -87,7 +88,7 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         assert "count to three" in text, "the stored question came back"
         assert "one two three" in text, "and its answer"
         assert "what is 6*7?" in text, "the turn's own message"
-        assert "Subagent(jack)>" in text, "wearing the channel's bubble"
+        assert "Agent(jack)>" in text, "the maker's bubble, not its own word"
         assert "It is 42." in text, "and the answer as it arrived"
         assert text.count("It is 42.") == 1, "deltas and the result are one block"
 

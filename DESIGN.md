@@ -1126,8 +1126,10 @@ subagents and nothing holds a place for a level below them.
 
 A subagent’s place on the local network is held by the local network’s process.
 An inbound message becomes a turn in the subagent’s own conversation through
-`send_message`; a message from the subagent to its maker is a turn in the
-maker’s conversation, wearing the `subagent:<name>` channel.
+`send_message`, wearing the sender’s word: `agent:<maker>` when the agent sent
+it, `subagent:<sibling>` when a sibling did. A message from the subagent to its
+maker is a turn in the maker’s conversation, wearing the `subagent:<name>`
+channel.
 
 A turn that ends in prose is not a reply. The send tool’s description says a
 reply is a call, and it is the only road out: a task answered in prose stays

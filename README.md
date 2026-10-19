@@ -64,7 +64,7 @@ slife2 is built around four rules.
 | **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. Every server keys its state by it. |
 | **Conversation** | One client id's history. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made, stored as one row. |
-| **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. |
+| **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. On the local network `agent:` names the maker and `subagent:` a subagent, so a subagent can tell whose message it is answering. |
 | **Marker** | The machine-readable prefix a channel adds to a delivered message, e.g. `[Wechat:{…}]`. Markers are stored with the message and removed only for display. |
 | **Family** | A plugin that owns a configuration section and declares the rows that section describes. |
 | **Source** | One entry a plugin holds, such as an `mcp:` server, a playbook, or a command. |
@@ -362,7 +362,9 @@ is unchanged.
 The view is read-only on purpose: a subagent has no window, and watching does
 not make you one. The prompt is not shown, and an approval request is not put to
 you — a subagent's turns run unattended, while its maker (or a peer) gets the
-answer as a `Subagent(<name>)>` message in its own conversation.
+answer as a `Subagent(<name>)>` message in its own conversation. In the watched
+conversation the message that woke it wears the maker's bubble,
+`Agent(<name>)>`; a message from a sibling subagent wears `Subagent(<name>)>`.
 
 ### Restoring a conversation
 

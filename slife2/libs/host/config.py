@@ -217,6 +217,14 @@ class Net:
     name it answers as, the tool names the model is handed, the channel a turn
     says it arrived on, and the envelope its messages open with.
 
+    **A network with more than one kind of speaker has more than one record.**
+    The remote network's members are all peers, so `REMOTE` is the whole of its
+    vocabulary; the local network's members are an agent and its subagents, so
+    its *speech* names come in two sets (`LOCAL` for a subagent, `LOCAL_AGENT`
+    for the agent) while the section, the tools and the namespace are one.  A
+    receiver picks the sender's set, and what it picks between are the channel,
+    the envelope and the bubble.
+
     **Here rather than in the plugin**, because that is where names that cross
     boundaries already live (`A2A_SERVER_NAME`, `TUI_SERVER_NAME`): the launcher
     builds its probe out of `tool()`, the plugin builds its tools out of the
@@ -331,13 +339,22 @@ REMOTE = Net(
 #: reason its two segments are not the file's: the unit is the agent's name, and
 #: the org is `SUBAGENT_ORG`.
 #:
-#: **Its envelope and its window say the same word, `Subagent`** — `[Subagent:`
-#: and `Subagent(name)> ` — and the pairing with the remote network's
-#: `[PeerAgent:` is what names the two: one message and one family of messages
-#: are told apart by the first word inside the bracket, which is read at a glance
-#: by a person and by the screen that takes the marker off before drawing.  What
-#: the word names is the *network* the message came over, like every other marker
-#: here (`[Wechat:`, `[AsyncTaskResult:`); who sent it is the `from` inside.
+#: **`LOCAL` is the subagent's word, and `LOCAL_AGENT` the agent's — the local
+#: network is the one with two kinds of speaker.**  A message from a subagent
+#: wears `[Subagent:` and `subagent:<name>`; a message from the agent that made
+#: it wears `[Agent:` and `agent:<name>`.  The pair exists because the
+#: *receiver* has to be able to tell them apart: a subagent's conversation can be
+#: entered by its maker and by a sibling, and a model that read both as
+#: `Subagent(...)` could not tell whose instruction it was answering.  Which set
+#: a message wears is the sender's kind, not the network's; the section, the
+#: tools, the prefix and the namespace are one.
+#:
+#: **The pairing with the remote network's `[PeerAgent:` is what names the
+#: family**: one message and one family of messages are told apart by the first
+#: word inside the bracket, which is read at a glance by a person and by the
+#: screen that takes the marker off before drawing.  What the word names here is
+#: the *sender* rather than the network — there are two of them on this side —
+#: and the `from` inside still names which member it was.
 #:
 #: **And its list tool is `subagent_list`**, which is the one name here that is
 #: not the shared verb under this prefix (`Net.roster`): what that roster holds
@@ -354,6 +371,23 @@ LOCAL = Net(
     # One mesh per agent: see `Net.namespace`.
     shared_namespace=False,
 )
+
+#: The local network as its **maker** speaks it: `agent:<name>`, `[Agent:`,
+#: `Agent(name)> `.
+#:
+#: **The same network and its other speaker, not a third network.**  It shares
+#: `LOCAL`'s key, settings, tool prefix and namespace — everything that says
+#: which network this is — and changes only the three fields that say *who* sent
+#: an inbound message.  A receiver chooses it with
+#: `slife2.plugins.a2a.server.sender_net`, which is the one place the sender's
+#: kind is decided.
+#:
+#: **`Agent` and not the agent's own name in the word**, for `PeerAgent`'s
+#: reason one network over: the bubble and envelope are read by a model that is
+#: given its own name in its system prompt, and a word that was just a name
+#: would be the sender/receiver confusion v1 measured.  `Agent(...)` says what
+#: the sender is, and the name in the parentheses says which one.
+LOCAL_AGENT = replace(LOCAL, channel="agent", marker="[Agent:", bubble="Agent")
 
 #: The remote network's section key, which is also its key in `servers:`.
 #: **`peer_agent` and not `a2a`**: what a person writes in the config is what
