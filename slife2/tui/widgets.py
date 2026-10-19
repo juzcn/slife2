@@ -1991,7 +1991,8 @@ class StatusBar(Static):
         # that is the whole test.**  ctrl+c is the one control key nothing
         # intercepts, and it is what a person reaches for to leave; ctrl+s is
         # v1's for the switch, "s" for switch, and it is not ctrl+g because VS
-        # Code keeps that one.  Ctrl+Q would quit too — Textual binds it — and
+        # Code keeps that one; ctrl+o is the picker, "o" for open, and no
+        # terminal claims it.  Ctrl+Q would quit too — Textual binds it — and
         # it is deliberately not named: a terminal with flow control eats it as
         # XON, so the bar would be promising a key that arrives nowhere.  A bar
         # read by somebody whose key does nothing is worse than a bar that says
