@@ -94,15 +94,19 @@ def cabinet_stub(
 
 
 def config_over(tokens: int):
+    base = default_config()
     return replace(
-        default_config(),
+        base,
         tool_result=ToolResultSettings(tokens=tokens),
-        # `autoload`, so the model may call the stand-in's tools without a
-        # `func_tool_load` first: this test is about what happens to the result,
-        # and a scripted load would be three lines of somebody else's subject.
-        mcp={
-            "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
-        },
+        # The fake server's tool is on the load list, so the model may call it
+        # without a `func_tool_load` first: this test is about what happens to
+        # the result, and a scripted load would be three lines of somebody
+        # else's subject.
+        tool_load=replace(
+            base.tool_load,
+            autoload=(*base.tool_load.autoload, "fake__echo"),
+        ),
+        mcp={"fake": ToolServerSettings(name="fake", command="in-memory")},
     )
 
 

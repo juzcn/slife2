@@ -393,7 +393,7 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 | `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
 | `embeddings:` | 记忆索引使用的 embedding provider。 |
 | `context:` | 上下文决策的限制。 |
-| `tool_load:` | 模型可加载工具的上限。 |
+| `tool_load:` | 已加载工具的上限，以及一开始就加载且不会被卸载的工具。 |
 | `tool_result:` | 单个工具结果的 token 预算。 |
 | `mcp:` | 外部 MCP server（stdio 或 HTTP）。 |
 | `rest-api:` | 作为工具暴露的 OpenAPI 文档。 |
@@ -442,7 +442,9 @@ context:
   timeout: 20.0              # 判别器调用的秒数
 
 tool_load:
-  threshold: 100             # 加载工具超过该数量后卸载最久未使用的
+  threshold: 100             # 超过该数量后卸载最久未使用的
+  autoload: [tool_search, func_tool_load, _func_tool_unload,
+             _check_new_input, skill_use, turn_read]   # 且不会被卸载
 
 tool_result:
   tokens: 8000               # 单个结果的预算；最小 128
@@ -559,11 +561,14 @@ hub 提供三个集合级工具：
 随附的清单中。模型的清单在每次模型调用前都从 hub 重新读取，因此轮次中加载的
 工具从下一次迭代起可用。
 
-slife2 自己的 plugin 提供的工具一开始都是加载的。外部来源只有在其条目设置
-`autoload: true` 时才一开始加载。其他一切都按需发现和加载。
+`tool_load.autoload` 列出每次请求都随附在清单中的工具，按模型调用它们的名字书写
+——plugin 工具的裸名（`turn_read`），或外部 server 的 `{server}__{tool}`。其他一切
+（包括 plugin 的工具）都通过 `tool_search` 发现，再用 `func_tool_load` 加载。这个
+清单以工具为单位而不是以 server 为单位：一个 server 可能提供九十个工具，其中只有
+两个需要每轮都在。系统赖以工作的五个名字是必需的，配置缺少任何一个都会启动失败。
 
 已加载清单由 `tool_load.threshold` 限制（默认 100）。超过限制时，最近最少被
-调用的工具会被卸载；slife2 自己的工具和 `autoload` 来源永远不会被卸载。从未
+调用的工具会被卸载；`tool_load.autoload` 中的名字永远不会被卸载。从未
 被调用过的工具按加载时间排序。裁剪发生在轮次边界；被移除的名字会作为一次工具
 调用及其结果写入对话，因此模型会知道清单缩小了。被逐出的代价是一次搜索和一次
 加载，而不是失去一种能力。

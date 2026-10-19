@@ -72,11 +72,12 @@ The list the model gets is not everything
 **What goes out with a request is the tools the model has *loaded*, not the tools
 that exist.**  Two tools find and load (`tool_search`, `func_tool_load`), one
 reads a skill, and everything else arrives on demand: a server with ninety tools
-is a catalogue entry until one of them is wanted, and `autoload: true` on an
-entry is the operator saying this one is different.  The catalogue is where that
-state lives and the db is where it is kept, so a tool loaded in one conversation
-is loaded for the next, and a tool loaded yesterday is still loaded after a
-restart — the two things a snapshot in this process could never do.
+is a catalogue entry until one of them is wanted, and so is a plugin's tool the
+operator did not put in `tool_load.autoload` — the list of names that are wanted
+every turn, and the only tools the budget may never take back.  The catalogue is
+where that state lives and the db is where it is kept, so a tool loaded in one
+conversation is loaded for the next, and a tool loaded yesterday is still loaded
+after a restart — the two things a snapshot in this process could never do.
 
 The budget that bounds it is enforced by the *harness*, not by the gate:
 `_func_tool_unload` is called by the agent server before it saves a turn, and the
@@ -173,7 +174,6 @@ from collections.abc import (
     AsyncGenerator,
     Awaitable,
     Callable,
-    Iterable,
     Mapping,
     Sequence,
 )
@@ -324,12 +324,12 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 #: away would leave the model holding a set it cannot change — and the fourth is
 #: `skill_use`, which reads the playbooks every session is meant to reach for.
 #:
-#: **It lives in a plugin and is still on this list.**  The budget would never
-#: evict it either way (a plugin's rows are exempt, `slife2.libs.store.catalogue.evict`), so what
-#: this adds is the other half: the model naming it in `_func_tool_unload` and
-#: being obeyed.  One string is cheaper than a column the row would have to
-#: carry to say "the system needs me", and the name it must match is
-#: `slife2.plugins.skills.playbooks.USE_TOOL`.
+#: **It lives in a plugin and is still on this list.**  It is also in
+#: `tool_load.autoload` by construction (`slife2.libs.host.config.REQUIRED_AUTOLOAD`), so the
+#: budget could not evict it; what this adds is the other half: the model naming
+#: it in `_func_tool_unload` and being obeyed.  One string is cheaper than a
+#: column the row would have to carry to say "the system needs me", and the name
+#: it must match is `slife2.plugins.skills.playbooks.USE_TOOL`.
 #:
 #: **This is a question about unloadability and not about who calls a tool** —
 #: `slife2.libs.turn.tools` separates the two and this set is where the third one is
@@ -340,8 +340,9 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 #: **A tool the model calls for itself is not one of them**, however important:
 #: `attach_image` is a plugin's ordinary model-facing tool and is not here,
 #: because nothing *else* names it — no pair the harness writes, no prompt the
-#: system builds.  Being wanted in every turn is the budget's question
-#: (`tool_load.threshold`), and being worth starting loaded is the operator's.
+#: system builds.  Being wanted in every turn is a separate answer, and it is
+#: `tool_load.autoload`'s: the operator lists the tools that start loaded, and
+#: the budget protects that list rather than this one.
 #: `CHECK_NEW_INPUT` is the sharpest case of that and is spelled below
 #: (the hub must not import a server): a pair the harness wrote into the history
 #: names it, so a turn that unloaded it would send a request whose history calls
@@ -472,11 +473,10 @@ class Catalogue:
         #: module's third failure rule applied to the wrong party.
         self._failed: dict[str, dict[str, str]] = {}
         #: What the sources **this machine** reaches last said — the hub's own
-        #: rows, and every plugin's listing — by source: its category, its rows,
-        #: and whether its tools may never be evicted.  See `remember`, which is
-        #: the only writer, and `seed`, which is what a home that has not asked
-        #: yet is built from.
-        self._held: dict[str, tuple[str, list[Mapping[str, Any]], bool]] = {}
+        #: rows, and every plugin's listing — by source: its category and its
+        #: rows.  See `remember`, which is the only writer, and `seed`, which is
+        #: what a home that has not asked yet is built from.
+        self._held: dict[str, tuple[str, list[Mapping[str, Any]]]] = {}
 
     @property
     def failure(self) -> str:
@@ -563,8 +563,6 @@ class Catalogue:
         source: str,
         category: str,
         tools: Sequence[Mapping[str, Any]],
-        *,
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """Record a source's whole tool list **in this home's file**.  See
         `slife2.libs.store.catalogue.ToolStore.merge`.
@@ -576,23 +574,21 @@ class Catalogue:
         else.  What the sources *the hub reaches itself* say is a fact about the
         machine and takes `remember` instead.
 
-        `autoload` still travels with the merge for the reason it always did: it
-        is the operator's `autoload: true`, which lives in the section the plugin
-        that holds the source owns — so the plugin says it and the hub passes it
-        on, exactly as liveness is passed on.
+        **Nothing about the operator's list travels with a merge.**  Which tools
+        start loaded is `tool_load.autoload`, read where the catalogue is opened
+        (`ToolStore.autoload`), and a merge only seeds a *new* row from it.  The
+        old `autoload` a plugin declared here was a fact about a section; the
+        list is about the model's tool names, and those are the hub's own
+        namespace.
         """
         store = await self.store()
-        return await self._write(
-            str(home_dir()), store, source, category, tools, autoload=autoload
-        )
+        return await self._write(str(home_dir()), store, source, category, tools)
 
     async def remember(
         self,
         source: str,
         category: str,
         tools: Sequence[Mapping[str, Any]],
-        *,
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """Record a source **the whole machine has**, in every home's file.
 
@@ -636,7 +632,6 @@ class Catalogue:
             source,
             category,
             rows,
-            autoload=autoload,
         )
         # **The hold and the fan-out are one step, and the lock is `_opening`**
         # — the one `store` builds a file under — because the two writers that
@@ -654,12 +649,10 @@ class Catalogue:
         # source into one file are a race on the tool table's primary key (the
         # same fact `Declarations.lock` is built on).
         async with self._opening:
-            self._held[source] = (category, rows, autoload)
+            self._held[source] = (category, rows)
             for key, store in list(self._stores.items()):
                 if key != here:
-                    await self._write(
-                        key, store, source, category, rows, autoload=autoload
-                    )
+                    await self._write(key, store, source, category, rows)
         return found
 
     async def seed(self, key: str, store: ToolStore) -> None:
@@ -689,9 +682,9 @@ class Catalogue:
         between them is a `seed`'s length — every source the machine holds, each
         with an embedding call behind it.
         """
-        for source, (category, rows, autoload) in list(self._held.items()):
+        for source, (category, rows) in list(self._held.items()):
             try:
-                await self._write(key, store, source, category, rows, autoload=autoload)
+                await self._write(key, store, source, category, rows)
             except Exception as exc:  # noqa: BLE001 - kept, and the file opens
                 if not _refused(exc):
                     continue  # `_write` has already said why, and kept it
@@ -709,8 +702,6 @@ class Catalogue:
         source: str,
         category: str,
         tools: Sequence[Mapping[str, Any]],
-        *,
-        autoload: bool,
     ) -> dict[str, Any]:
         """One source's rows into one home's file, and the health of the write.
 
@@ -727,7 +718,6 @@ class Catalogue:
                 category,
                 list(tools),
                 embedder=await self._embedder_in(key),
-                autoload=autoload,
             )
         except Exception as exc:  # noqa: BLE001 - `_refused` is the split, below
             if _refused(exc):
@@ -835,18 +825,15 @@ class Catalogue:
         """
         return await off_loop((await self.store()).injectable, list(sources))
 
-    async def evict(
-        self, sources: Sequence[str], *, autoload: Iterable[str] = ()
-    ) -> list[str]:
+    async def evict(self, sources: Sequence[str]) -> list[str]:
         """Trim the loaded set to the configured budget; name what it took out.
 
-        `autoload` is the set of sources the budget may never touch, and it comes
-        from the declarations for the same reason the flag above does: the store
-        cannot read the sections those sources were configured in.
+        The names the budget may never touch come from `tool_load.autoload`, read
+        once where the store is opened.  Nothing about a *source* is passed here:
+        which tools are protected is a fact about the names the model calls, not
+        about which server happens to offer them.
         """
-        found = await off_loop(
-            (await self.store()).evict, list(sources), autoload=list(autoload)
-        )
+        found = await off_loop((await self.store()).evict, list(sources))
         return [str(name) for name in found]
 
     async def route(self, name: str) -> dict[str, Any] | None:
@@ -951,7 +938,6 @@ def _server_row(
     transport: str,
     state: str,
     counts: Mapping[str, int] | None,
-    autoload: bool,
     description: str,
     error: str,
     required: bool,
@@ -982,10 +968,6 @@ def _server_row(
         #: server that has stopped offering them.
         "tools": counted.get("tools", NOT_COUNTED),
         "loaded": counted.get("loaded", NOT_COUNTED),
-        #: Wanted every turn: its tools start loaded and are never evicted
-        #: (`autoload` in the config, or `required`, which means the same thing
-        #: for our own servers).
-        "autoload": autoload,
         "description": description,
         "error": error,
         #: Ours rather than somebody else's: the answer to "why did a whole turn
@@ -1029,7 +1011,6 @@ class DeclaredSource:
     category: str
     enabled: bool
     up: bool
-    autoload: bool
     error: str
     description: str
     transport: str
@@ -1062,7 +1043,6 @@ class DeclaredSource:
             transport=self.transport,
             state=state,
             counts=counts,
-            autoload=self.autoload,
             description=self.description,
             error=self.error,
             # Nothing a plugin holds is one slife2 starts: those are the hub's
@@ -1183,7 +1163,6 @@ class Upstream:
             transport=self.settings.transport,
             state=self._connection.state,
             counts=counts,
-            autoload=self.settings.autoload or self.required,
             description=self.settings.description,
             error=self._connection.error,
             required=self.required,
@@ -1505,9 +1484,7 @@ class Upstream:
         rows = raw.get("rows")
         if up and isinstance(rows, list):
             try:
-                await self._catalogue.merge(
-                    name, category, rows, autoload=bool(raw.get("autoload"))
-                )
+                await self._catalogue.merge(name, category, rows)
             except Exception as exc:  # noqa: BLE001 - split by _refused, below
                 if not _refused(exc):
                     # The catalogue itself did not work, and it has recorded the
@@ -1534,7 +1511,6 @@ class Upstream:
             category=category,
             enabled=enabled,
             up=up,
-            autoload=bool(raw.get("autoload")),
             error=error,
             description=str(raw.get("description") or ""),
             transport=str(raw.get("transport") or ""),
@@ -1722,7 +1698,6 @@ def local_tools(
     catalogue: Catalogue,
     live_sources: Callable[[], list[str]],
     refresh_declared: Callable[[], Awaitable[None]],
-    autoload_sources: Callable[[], list[str]],
 ) -> list[LocalTool]:
     """What this process serves a model itself: the three it manages tools with.
 
@@ -1849,9 +1824,7 @@ def local_tools(
         depend on this list, this catalogue or this routing being in any
         particular state, and `_func_tool_unload` is where that is argued.
         """
-        found = await unload_tools(
-            catalogue, live_sources(), _names_of(arguments), autoload_sources()
-        )
+        found = await unload_tools(catalogue, live_sources(), _names_of(arguments))
         # **Every one of the five lists is a verdict about a name, and all five
         # are the answer.**  Nothing here is a failure: the model asked about its
         # own list and this is what is true of it — `tool_search` cannot go
@@ -1899,7 +1872,6 @@ async def unload_tools(
     catalogue: Catalogue,
     sources: Sequence[str],
     names: Sequence[str],
-    autoload: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Take tools out of the model's list — the harness's trim.
 
@@ -1928,7 +1900,7 @@ async def unload_tools(
     """
     if not names:
         return {
-            "unloaded": await catalogue.evict(sources, autoload=autoload),
+            "unloaded": await catalogue.evict(sources),
             "refused": [],
             "no_load_state": [],
             "unknown": [],
@@ -2494,6 +2466,12 @@ def build_server(
         or it is read as one that has gone — see `configured_sources`, which is
         where that argument is.
 
+        **`autoload` is `tool_load.autoload`**, and it is read here because this
+        is where one home's file is opened: the names start loaded, the budget
+        may not take them, and both halves read the `ToolStore` that holds them.
+        The boot pass on the same store applies the list to rows that already
+        exist, which is what makes an edited list take effect at the next start.
+
         `transports` is still the seam at the level below — every *upstream* is
         built from a wired entry in a test — and the catalogue is deliberately
         no longer one of them: a file is not a plugin, and a test that wants it
@@ -2505,6 +2483,7 @@ def build_server(
             ToolStore,
             catalogue_db(),
             threshold=theirs.tool_load.threshold,
+            autoload=theirs.tool_load.autoload,
             known=configured_sources(theirs),
         )
         # **Everything the machine already holds goes in before this home is
@@ -2719,29 +2698,19 @@ def build_server(
             mine.holders.clear()
             mine.holders.update(owners)
 
-    def autoload_sources() -> list[str]:
-        """The declared sources the budget may never take back.
-
-        The operator's `autoload: true`, which the hub has to supply because the
-        store cannot read the sections these sources were configured in
-        (`slife2.libs.store.catalogue.ToolStore.evict`).  **One callable for its two readers** —
-        `local_tools`' `_func_tool_unload` body and this process's own
-        `_func_tool_unload` tool — because a set rebuilt by hand in the second
-        place is a set the first one can stop agreeing with.
-        """
-        return [one.name for one in declarations().held.values() if one.autoload]
-
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
     #: which it re-reads on every call.  `live_sources` is handed in because the
     #: trim asks the catalogue for what the model is *holding*, and only this
     #: process knows which sources are answering; `refresh_declared` because a
-    #: search is where a plugin's declarations have to be current.
+    #: search is where a plugin's declarations have to be current.  Which tools
+    #: the budget may not take is **not** handed in: it is
+    #: `tool_load.autoload`, read where the catalogue is opened, so the trim and
+    #: the seed read the same set without a second copy to keep in step.
     local: list[LocalTool] = local_tools(
         catalogue,
         live_sources,
         refresh_declared,
-        autoload_sources,
     )
 
     def local_route(name: str) -> LocalTool | None:
@@ -3157,10 +3126,10 @@ def build_server(
         Args:
             names: The tools to take out — one or several.  **Empty means
                 "enforce the budget"**: whatever is over
-                `tool_load.threshold` goes, least recently used first, and none
-                of this process's own tools and nothing marked `autoload: true`
-                is ever a candidate.  Naming one of the four this system works
-                by is refused rather than obeyed.
+                `tool_load.threshold` goes, least recently used first, and
+                nothing named in `tool_load.autoload` is ever a candidate.
+                Naming one of the five this system works by is refused rather
+                than obeyed.
 
         Returns:
             `unloaded` — the names that moved, which is the answer this exists
@@ -3172,7 +3141,6 @@ def build_server(
             catalogue,
             live_sources(),
             list(names or []),
-            autoload_sources(),
         )
         # `text` is the same answer said as the model reads it — the harness
         # writes the trim into the conversation as a tool pair, and the pair's
@@ -3199,8 +3167,7 @@ def build_server(
             `rest` or `plugin`), `transport`, `state` (`ready`, `connecting`,
             `failed`, `idle` or `off`), how many `tools` it last offered, how
             many of them are `loaded` (which is what the model has now, so a
-            source that is not live is `0` whatever its rows say), `autoload` —
-            whether they are wanted every turn, so they are never evicted — the
+            source that is not live is `0` whatever its rows say), the
             `description` it was configured with, the `error` if there is one,
             and `required` — whether slife2 starts it, which is what decides if
             its absence fails a turn or merely shortens the tool list.  A

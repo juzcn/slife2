@@ -131,9 +131,9 @@ class Link:
     **The rows are here and not on a binding**, because what the far end offers is
     the *server's* listing: two homes reading it are reading one answer, and a
     copy per home would be a second thing to keep in step.  What an entry says
-    that a server does not — the switch, the description, the autoload flag — stays
-    on `Held`, which is what lets one home switch an entry off without switching
-    it off for anybody else.
+    that a server does not — the switch and the description — stays on `Held`,
+    which is what lets one home switch an entry off without switching it off for
+    anybody else.
 
     `settings` is what this link was **started** from, which is the first home's.
     A second home naming the same entry with a different command gets this link and
@@ -331,11 +331,15 @@ class Links:
 class Held:
     """**One home's** binding to one configured entry: its switch, and its link.
 
-    What a home owns is what its own section says — `enabled`, `description`, the
-    autoload flag, and therefore the whole of what it declares — and what the
-    machine owns is the process and the listing (`Link`).  That split is the answer
-    to "what may two homes' sections disagree about": everything here, and nothing
-    there.
+    What a home owns is what its own section says — `enabled`, `description`, and
+    therefore the whole of what it declares — and what the machine owns is the
+    process and the listing (`Link`).  That split is the answer to "what may two
+    homes' sections disagree about": everything here, and nothing there.
+
+    **Which of its tools start loaded is not here.**  That is
+    `tool_load.autoload` in the home's own config, and the hub reads it by tool
+    name when it opens that home's catalogue — a declaration carries what the
+    *server* offers, and the load list is about the model's list.
 
     **A switched-off entry has no link.**  That is what `enabled: false` has always
     meant — the operator's promise that a *call* is not a thing that starts it —
@@ -476,7 +480,6 @@ class Held:
             "enabled": enabled,
             "up": up,
             "error": self.link.connection.error if self.link is not None else "",
-            "autoload": self.settings.autoload,
             "description": self.settings.description,
             "transport": self.settings.transport,
             # No rows unless it is answering: see the module docstring.

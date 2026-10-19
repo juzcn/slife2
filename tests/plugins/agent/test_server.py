@@ -939,7 +939,9 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
     ]
 
 
-def wired(backend: FakeBackend, context: Client) -> tuple[Client, FastMCP]:
+def wired(
+    backend: FakeBackend, context: Client, config: Any = None
+) -> tuple[Client, FastMCP]:
     """A hub and an agent that can reach each other, which takes a holder.
 
     **The circle is real and it is the feature.**  The pair the cut-in writes has
@@ -954,19 +956,23 @@ def wired(backend: FakeBackend, context: Client) -> tuple[Client, FastMCP]:
     both objects exist — and `plugin_transports`'s agent entry is a `blank_plugin`
     otherwise, which would leave the loop with a registry that has no such tool
     and the pair naming one the model was never offered.
+
+    **`config` is for a test that needs a tool on the model's list**: what starts
+    loaded is `tool_load.autoload`, and a test whose scripted model calls a
+    plugin's tool has to put its name there.  Left out, the default is the
+    required set — which the cut-in's own pair works with.
     """
     from slife2.plugins.toolhub.server import build_server as build_hub
     from tests.fakes import plugin_transports
 
+    config = config or default_config()
     holder: dict[str, Any] = {}
-    transports = plugin_transports(default_config())
+    transports = plugin_transports(config)
     transports["agent"] = lambda _settings: holder["agent"]
-    hub_server = build_hub(
-        default_config(), transports=transports, embedder=StubEmbedder()
-    )
+    hub_server = build_hub(config, transports=transports, embedder=StubEmbedder())
     hub_client = Client(hub_server)
     server = build_server(
-        default_config(),
+        config,
         context_client=context,
         hub_client=hub_client,
         backend=backend,
@@ -1848,9 +1854,10 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     because an empty one every turn is a record of something that did not happen
     and a model reading those learns to distrust the mechanism.
 
-    The evictable tools have to be somebody else's: everything slife2 ships is
-    protected from the budget, so the only way to be over it is to have loaded a
-    tool server's — which is the case the budget was built for.
+    The evictable tools have to be outside `tool_load.autoload`: the names on
+    that list are what the budget may not take, so the only way to be over the
+    cap is to have loaded something else — which is the case the budget was
+    built for.
     """
     from slife2.libs.host.config import ToolLoadSettings, ToolServerSettings
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
@@ -1859,8 +1866,8 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     from tests.fakes import plugin_transports, upstream_server
 
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    # A cap of three, so the nine slife2 ships are already over it and the two
-    # the model loads are the only victims there are.
+    # A cap of three, so the five the config starts loaded are already over it
+    # and the two the model loads are the only unprotected tools there are.
     base = default_config()
     cfg = replace(
         base,
@@ -2594,7 +2601,18 @@ async def test_the_models_own_attachment_is_repaired_the_same_way(context) -> No
         ),
         text_turn("a cat, and the next turn works"),
     )
-    hub_client, server = wired(backend, context)
+    base = default_config()
+    hub_client, server = wired(
+        backend,
+        context,
+        replace(
+            base,
+            tool_load=replace(
+                base.tool_load,
+                autoload=(*base.tool_load.autoload, "attach_image"),
+            ),
+        ),
+    )
 
     async with hub_client:
         with pytest.raises(Exception, match="unsupported image"):

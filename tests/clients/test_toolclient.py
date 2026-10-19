@@ -248,13 +248,18 @@ def hub_with_upstream() -> FastMCP:
         """Echo it back."""
         return text
 
+    base = default_config()
     config: Config = replace(
-        default_config(),
-        # `autoload` because this is a test about the hop, not about the load
-        # gate: the tool servers here are wanted in the list from the start.
-        mcp={
-            "fake": ToolServerSettings(name="fake", command="in-memory", autoload=True)
-        },
+        base,
+        # The fake tool is on `tool_load.autoload` because this is a test about
+        # the hop, not about the load gate: it is in the list from the start.
+        # `skill_list` is there so the second half can call a *plugin's* tool
+        # through the same hundred metres.
+        tool_load=replace(
+            base.tool_load,
+            autoload=(*base.tool_load.autoload, "fake__echo", "skill_list"),
+        ),
+        mcp={"fake": ToolServerSettings(name="fake", command="in-memory")},
     )
     return build_hub(
         config,
@@ -275,44 +280,17 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
         # In the catalogue's order, which is the name's.  **Ours are bare** —
         # a plugin's tools read the same as the hub's own, because there is one
         # set of tools here — and `fake__echo`, an entry under `mcp:`, is the
-        # one name that says whose it is.  The hub's four cross this hop like
-        # everything else, `_func_tool_unload` included: it is the one
-        # `_`-prefixed name a model sees, and the reason is in its own test.
+        # one name that says whose it is.  What is here is what the config
+        # starts loaded: the required names, plus the two this test put on the
+        # list.  The plugin admin tools are on demand now, which is the whole
+        # of what changed about a plugin's set.
         assert [spec.name for spec in registry.specs] == [
             "_func_tool_unload",
-            # `cli-server` records programs already on this machine, and offers
-            # the model the tools that edit that record.
-            "cli_list",
-            "cli_remove",
-            "cli_set",
-            "cli_set_enabled",
             "fake__echo",
             "func_tool_load",
-            # The `mcp_*` and `rest_api_*` fives are here too: each family
-            # plugin holds somebody else's servers *and* offers the model the
-            # tools that edit its own section, and both arrive by the same road.
-            "mcp_list",
-            "mcp_list_tools",
-            "mcp_remove",
-            "mcp_set",
-            "mcp_set_enabled",
-            "rest_api_list",
-            "rest_api_list_tools",
-            "rest_api_remove",
-            "rest_api_set",
-            "rest_api_set_enabled",
-            # And `skills-server`: `skill_use` was always the model's, and the
-            # four that install, remove and switch a playbook have joined it.
             "skill_list",
-            "skill_remove",
-            "skill_set",
-            "skill_set_enabled",
             "skill_use",
             "tool_search",
-            "turn_list",
-            "turn_read",
-            "turn_search",
-            "turn_summarize",
         ]
         text, ok = await registry.execute(
             ToolCall(id="c1", name="fake__echo", arguments={"text": "through"})
@@ -373,6 +351,14 @@ async def test_the_identity_reaches_the_db_through_the_hub(
             )
 
     config = default_config()
+    config = replace(
+        config,
+        # The two this test reads are on the list, so the registry has them.
+        tool_load=replace(
+            config.tool_load,
+            autoload=(*config.tool_load.autoload, "turn_list", "turn_read"),
+        ),
+    )
     hub = build_hub(
         config,
         transports=plugin_transports(config, {"context": lambda settings: store}),

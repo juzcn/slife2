@@ -242,7 +242,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         api_key: str = "",
         description: str = "",
         enabled: bool = True,
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """Add or update a REST API under `rest-api:` (upsert).
 
@@ -261,8 +260,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
                 stores `${GITHUB_TOKEN}`. Omit it for an API that needs no key.
             description: What the API is for.
             enabled: Serve it now. False writes the entry switched off.
-            autoload: Every operation starts in your tool list and is never
-                evicted. Check how many there are first.
 
         Returns:
             The payload `mcp_set` answers with over this family's words:
@@ -279,7 +276,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             api_key,
             description=description or None,
             enabled=enabled,
-            autoload=autoload or None,
         )
         answer = await apply_and_report(homes.current(), settings, words=WORDS)
         if unresolved := _unresolved(api_key):

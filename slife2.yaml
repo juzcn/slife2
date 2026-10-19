@@ -149,8 +149,45 @@ context:
 
 tool_load:
   # Above this many loaded tools, the least recently used are unloaded at a
-  # turn boundary. slife2's own tools and `autoload` sources are never evicted.
+  # turn boundary. Nothing in `autoload` below is ever evicted.
   threshold: 100
+  # The tools that start in the model's list, by the name the model calls them.
+  # Everything else — a plugin's tools included — is found with `tool_search`
+  # and loaded with `func_tool_load`, and is evicted when unused. The first five
+  # are what the system works by; a list without them fails the start.
+  autoload:
+    - tool_search
+    - func_tool_load
+    - _func_tool_unload
+    - _check_new_input
+    - skill_use
+    # Memory and recorded turns.
+    - turn_search
+    - turn_read
+    - turn_list
+    # Files, notes and reports.
+    - cabinet_search
+    - file_read
+    - note_read
+    - note_edit
+    - report_save
+    # A tool output the harness shortened.
+    - dump_read
+    # Images.
+    - attach_image
+    # One external tool, by its `{server}__{tool}` name — the list is per
+    # tool, so the rest of that server stays on demand.
+    - tavily-mcp__tavily_search
+    # Delegation and the subagent network.
+    - subagent_set
+    - subagent_list
+    - subagent_send_message
+    - subagent_task_list
+    - subagent_group_send_message
+    # Asynchronous tasks.
+    - agent_task_start
+    - agent_task_status
+    - agent_task_list
 
 tool_result:
   # A result over this is kept whole as a dump; the conversation carries a
@@ -159,9 +196,9 @@ tool_result:
 
 mcp:
   # External MCP servers. `command` starts a process; `url` connects to one
-  # already running. `autoload: true` starts its tools loaded; `enabled: false`
-  # keeps the entry configured but not connected. Tools arrive as
-  # `{name}__{tool}`.
+  # already running. `enabled: false` keeps the entry configured but not
+  # connected. Tools arrive as `{name}__{tool}`; one that should start loaded
+  # goes in `tool_load.autoload` by that name — per tool, not per server.
   serper:
     command: npx
     args:

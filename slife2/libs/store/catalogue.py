@@ -238,12 +238,12 @@ _TOOL_SCHEMA = f"""
 -- "no load state" are real values ('n/a'), so no reader needs an IS NULL arm.
 --
 -- Two stamps, and they answer two different questions.  `last_loaded` is when
--- the row entered the model's list — the operator's `autoload`, or the model's
--- own `func_tool_load`.  `last_used` is when the model last *called* it, written
--- by the hub after every routed call.  The budget evicts by whichever of the two
--- is newer (`MAX`), so a tool that is being called outlives one that was merely
--- loaded later, and a tool loaded a moment ago and not yet used is not the first
--- thing to go.  `''` means "never", and sorts below every timestamp.
+-- the row entered the model's list — the operator's `tool_load.autoload`, or the
+-- model's own `func_tool_load`.  `last_used` is when the model last *called* it,
+-- written by the hub after every routed call.  The budget evicts by whichever of
+-- the two is newer (`MAX`), so a tool that is being called outlives one that was
+-- merely loaded later, and a tool loaded a moment ago and not yet used is not
+-- the first thing to go.  `''` means "never", and sorts below every timestamp.
 CREATE TABLE IF NOT EXISTS tool (
     name        TEXT PRIMARY KEY NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
@@ -424,6 +424,7 @@ class ToolStore:
         path: Path,
         *,
         threshold: int,
+        autoload: Iterable[str] = (),
         known: Iterable[str] | None = None,
     ) -> None:
         #: The most function tools the model may hold — see
@@ -431,6 +432,17 @@ class ToolStore:
         #: call because the count it bounds is a `SELECT COUNT(*)` over these
         #: rows: the budget and the rows it applies to live in one place.
         self.threshold = max(1, int(threshold))
+        #: The names that start in the model's list and that the budget may
+        #: never take back (`tool_load.autoload`).  **A set of tool names**, not
+        #: of sources: the unit of the decision is what the model calls, and one
+        #: server may offer ninety tools of which two are wanted every turn.  It
+        #: is the same set `_seed` loads and `evict` protects, so "starts loaded"
+        #: and "cannot be evicted" have one spelling.
+        #:
+        #: Passed at construction because the config it comes from is read once,
+        #: per home, where the store is opened (`slife2.plugins.toolhub.server.open_catalogue`) —
+        #: the same place `threshold` is read.
+        self.autoload: frozenset[str] = frozenset(str(name) for name in autoload)
         #: Every source name the *config* carries, which is what the boot pass
         #: needs to tell a stale row from a slow one: see `reset`.  It is not the
         #: peers alone — a `mcp:` entry, a `rest-api:` one and the two document
@@ -439,8 +451,8 @@ class ToolStore:
         #: caller assembles the set (`slife2.plugins.toolhub.server.configured_sources`), because
         #: which sections name sources is knowledge about the config and this
         #: module has none — and it is *names*, not a list of connections: this
-        #: file is still told nothing about liveness (`merge`'s `autoload` and
-        #: `evict`'s are where the other facts the config used to supply arrive).
+        #: file is still told nothing about liveness (`evict`'s `sources` is
+        #: where that arrives).
         #:
         #: **`None` is not the empty set, and the difference is destructive.**
         #: `None` is a caller that has not said which sources the config carries,
@@ -468,6 +480,7 @@ class ToolStore:
         # never given, and every answer it could give is a deletion.
         if self.known is not None:
             self.reset()
+            self.seed_autoload()
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -562,7 +575,6 @@ class ToolStore:
         rows: Sequence[Mapping[str, Any]],
         *,
         embedder: Embedder,
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """Merge one source's whole tool list into the catalogue.
 
@@ -600,7 +612,7 @@ class ToolStore:
                 input, and the second is a naming problem the caller can fix —
                 so it fails this source's list rather than the whole catalogue.
         """
-        plan = await asyncio.to_thread(self._plan, source, category, rows, autoload)
+        plan = await asyncio.to_thread(self._plan, source, category, rows)
         # Before anything is written: a vector needs a table, the table needs a
         # width, and only the embedder knows the width.  One read of `meta` once
         # it is there.
@@ -623,7 +635,6 @@ class ToolStore:
         source: str,
         category: str,
         rows: Sequence[Mapping[str, Any]],
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """The difference between what a source offers and what is stored.
 
@@ -711,7 +722,7 @@ class ToolStore:
                     fields["status"] = verdict
                 previous = existing.get(name)
                 if previous is None:
-                    load_status = self._seed(category, autoload)
+                    load_status = self._seed(category, name)
                     entry = {
                         **fields,
                         "status": fields.get("status", STATUS_ENABLED),
@@ -840,20 +851,26 @@ class ToolStore:
             "skipped": int(plan["skipped"]),
         }
 
-    def _seed(self, category: str, autoload: bool) -> str:
+    def _seed(self, category: str, name: str) -> str:
         """What a tool's load state is when it is first seen.
 
-        **Ours are loaded; somebody else's are on demand.**  A plugin's tools
-        are few and the model is expected to have them — a model that has
-        quietly lost `now` and `calc` is the failure DESIGN.md §4.1 is built
-        around — while a server under `mcp:` may offer ninety tools that cost
-        a prompt on every call until one is wanted.  `autoload: true` is the
-        operator saying this one is wanted, and it is the same set of sources
-        `_protected` keeps from eviction: a tool that starts loaded because
-        somebody asked for it must not be evicted by the budget either.
+        **The operator's list decides, and nothing else does.**  A name in
+        `tool_load.autoload` starts in the model's list and the budget will never
+        take it back; everything else — a plugin's tools included — is on
+        demand.  A plugin used to be loaded in full because its tools were few;
+        they are not few any more, and one of its tools a model never calls is a
+        prompt spent on every request.  The list is also why the old
+        `autoload: true` on a server is gone: the decision belongs to a tool, not
+        to the server that happens to offer it.
+
+        The required names are in that list by construction (`REQUIRED_AUTOLOAD`;
+        the config refuses a list without them), so the tools the system works by
+        never depend on this branch being remembered here.
 
         A new row is the only thing this decides.  Discovery never puts a tool
-        into the model's list by itself, and it never takes one out.
+        into the model's list by itself, and it never takes one out — the boot
+        pass (`seed_autoload`) is the one place the operator's baseline is
+        applied to rows that already exist.
         """
         if category in (SKILL, CLI):
             # Neither has a load state at all: a skill is a document the hub
@@ -864,9 +881,7 @@ class ToolStore:
             # keeps them out of the model's list: the gate is the function
             # categories, so a row can be findable without being callable.
             return NA
-        if category == PLUGIN or autoload:
-            return LOADED
-        return UNLOADED
+        return LOADED if name in self.autoload else UNLOADED
 
     def _index(
         self, connection: sqlite3.Connection, rowid: int, fields: Mapping[str, Any]
@@ -1052,6 +1067,71 @@ class ToolStore:
             self._delete(connection, names)
         return {"forgotten": len(names)}
 
+    def seed_autoload(self) -> dict[str, int]:
+        """Put the configured baseline in the model's list — run at open.
+
+        **The one pass that overwrites `load_status`, and the reason it is not a
+        merge.**  A merge is about what a *server* says, and the load state is
+        the model's; this is about what the *operator* says, and it runs once
+        per open so an edited `tool_load.autoload` takes effect at the next start
+        rather than during a session.
+
+        Two moves, and the second is what makes a shorter list take effect:
+
+        * every configured name becomes `loaded` — including one the model
+          unloaded in an earlier session, because the list is the baseline every
+          process starts from.  Only names with a load state move; a skill or a
+          command has none.
+        * a **plugin's** rows the list does not name become `unloaded`.  Those
+          and no others: their loading used to be the rule "all of a plugin's
+          tools are loaded", so it was never the model's decision, and the first
+          start under the new rule is where that rule is replaced.  Somebody
+          else's server that the model loaded itself stays loaded — "a tool
+          loaded yesterday is still loaded after a restart" is this file's
+          promise, and only the plugin set has an operator-defined baseline.
+
+        A name with no row does nothing: the list may name a tool whose server
+        has not answered yet, and the next merge seeds it loaded (`_seed` reads
+        the same set).  A store nobody told which sources the config carries
+        does not run this — `known` of `None` is a process that has not read a
+        config, and the list it would enforce is one it was never given.
+        """
+        if self.known is None:
+            return {"loaded": 0, "unloaded": 0}
+        loaded = unloaded = 0
+        stamp = now()
+        with self._connect() as connection:
+            for chunk in chunks(sorted(self.autoload)):
+                cursor = connection.execute(
+                    f"UPDATE tool SET load_status = ?, last_loaded = ?"
+                    f" WHERE name IN ({_marks(chunk)}) AND load_status = ?"
+                    f" AND category IN ({_in_list(FUNCTION_CATEGORIES)})",
+                    (LOADED, stamp, UNLOADED, *chunk),
+                )
+                loaded += int(cursor.rowcount)
+            held = [
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM tool WHERE category = ? AND load_status = ?",
+                    (PLUGIN, LOADED),
+                )
+            ]
+            victims = [name for name in held if name not in self.autoload]
+            for chunk in chunks(victims):
+                cursor = connection.execute(
+                    f"UPDATE tool SET load_status = ?"
+                    f" WHERE name IN ({_marks(chunk)}) AND load_status = ?",
+                    (UNLOADED, *chunk, LOADED),
+                )
+                unloaded += int(cursor.rowcount)
+        if loaded or unloaded:
+            logger.info(
+                "tool_load.autoload: %d tool(s) loaded, %d plugin tool(s) unloaded",
+                loaded,
+                unloaded,
+            )
+        return {"loaded": loaded, "unloaded": unloaded}
+
     def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Flip one row's load state, and say what happened.
 
@@ -1154,9 +1234,7 @@ class ToolStore:
             ).fetchall()
         return {"tools": [_tool_dict(row) for row in rows]}
 
-    def evict(
-        self, sources: Sequence[str], *, autoload: Iterable[str] = ()
-    ) -> list[str]:
+    def evict(self, sources: Sequence[str]) -> list[str]:
         """Trim the loaded set to `threshold`, least recently *used* first.
 
         **Use, with the load as the fallback, and not the load alone.**  The
@@ -1180,16 +1258,19 @@ class ToolStore:
         The victim is chosen among the tools the model is *holding* — the same
         rows `injectable` answers with — so a server that is down, or a row the
         config switched off, cannot absorb the budget by being counted and not
-        injected.  Nothing of ours is ever a victim, and neither is anything the
-        operator marked `autoload`: the budget exists to stop somebody else's
-        ninety tools crowding the prompt, not to take away the tools this system
-        guarantees (DESIGN.md §4.1).
+        injected.  **The names in `tool_load.autoload` are never victims**, and
+        neither is anything else: a plugin's tools used to be exempt by
+        category, which made the loaded set grow with every plugin and left the
+        budget unable to meet its own cap.  The operator's list is now the whole
+        of the protection — the tools loaded because somebody said so — and
+        everything else is a candidate once it is no longer being called
+        (DESIGN.md §4.1, and `seed_autoload` for the baseline this reads).
 
         **The count is of everything held, protected tools included** — v1's
         arithmetic, and it is worth knowing what it means at the edges: a
-        threshold below the number of tools slife2 ships means the budget can
-        never be met, and every evictable tool goes.  A sane threshold is well
-        above them, which is why the default is a hundred.
+        threshold below the number of tools named in `autoload` means the budget
+        can never be met, and every evictable tool goes.  A sane threshold is
+        well above them, which is why the default is a hundred.
 
         Returns the names it unloaded, which is what the caller reports.
         """
@@ -1207,11 +1288,11 @@ class ToolStore:
             if excess <= 0:
                 return []
             values = list(live)
-            protected = f"category IN ({_in_list({PLUGIN})})"
-            wanted = frozenset(str(name) for name in autoload)
-            if wanted:
-                protected += f" OR source_id IN ({_marks(wanted)})"
-                values.extend(sorted(wanted))
+            protected = "0"
+            if self.autoload:
+                wanted = sorted(self.autoload)
+                protected = f"name IN ({_marks(wanted)})"
+                values.extend(wanted)
             # `MAX` of the two stamps: the newer event wins, so a call outranks
             # a later load and a load outranks an earlier one.  Both columns are
             # `''` for "never", which sorts below every timestamp — so a row

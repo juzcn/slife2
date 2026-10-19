@@ -1224,18 +1224,22 @@ The list is re-read from the hub before every model call.
 
 Initial state:
 
-- Every tool served by slife2's own plugins is loaded.
-- An external source's tools are loaded when its entry says `autoload: true`.
-- Everything else is discoverable but not callable until loaded.
+- The tools named in `tool_load.autoload` are loaded, by the name the model
+  calls them — a plugin's bare name or an external server's `{server}__{tool}`.
+- The names the system itself refers to (the two list tools, the two harness
+  pairs and `skill_use`) are required in that list; a configuration that omits
+  one fails the start rather than serving a model that cannot manage its list.
+- Everything else, a plugin's tools included, is discoverable but not callable
+  until loaded. A plugin's set is no longer loaded in full by category: one of
+  its tools the model never calls is a prompt spent on every request.
 
 A model can call a name returned by `tool_search` without loading it, but loading
 is what keeps it in the list sent with each request.
 
-The list is bounded by `tool_load.threshold` (default 100 function tools). Over
-the limit, the least recently **called** tools are unloaded:
+The loaded set is bounded by `tool_load.threshold` (default 100 function tools).
+Over the limit, the least recently **called** tools are unloaded:
 
-- our own tools are never evicted;
-- an `autoload` source is never evicted;
+- the names in `tool_load.autoload` are never evicted;
 - a tool never called since it was loaded is ordered by its load time.
 
 The trim happens at a turn boundary. The harness calls `_func_tool_unload` before

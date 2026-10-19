@@ -430,7 +430,7 @@ a `${VAR}` or `keyring:` reference resolved at runtime.
 | `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
 | `embeddings:` | Embedding providers used by the memory index. |
 | `context:` | Limits for the context decision. |
-| `tool_load:` | Maximum number of loaded model tools. |
+| `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
 | `tool_result:` | Token budget for a single tool result. |
 | `mcp:` | External MCP servers (stdio or HTTP). |
 | `rest-api:` | OpenAPI documents exposed as tools. |
@@ -484,6 +484,8 @@ context:
 
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
+  autoload: [tool_search, func_tool_load, _func_tool_unload,
+             _check_new_input, skill_use, turn_read]   # and never evicted
 
 tool_result:
   tokens: 8000               # per-result budget; minimum 128
@@ -615,16 +617,21 @@ is what keeps it in the list sent with every request. The model's list is
 re-read from the hub before every model call, so a tool loaded during a turn is
 available from the next iteration.
 
-Every tool served by slife2's own plugins starts loaded. An external source
-starts loaded only when its entry sets `autoload: true`. Everything else is
-discovered and loaded on demand.
+`tool_load.autoload` names the tools that start in the list sent with every
+request, by the name the model calls them — a plugin's bare name (`turn_read`)
+or an external server's `{server}__{tool}`. Everything else, a plugin's tools
+included, is discovered with `tool_search` and loaded with `func_tool_load`.
+The list is per tool and not per server: one server may offer ninety tools of
+which two are wanted every turn. The five names the system works by are
+required and a configuration that leaves one out fails the start.
 
 The loaded list is bounded by `tool_load.threshold` (default 100). Over the
-limit, the least recently called tools are unloaded, never slife2's own tools
-and never an `autoload` source. A tool that has never been called is ordered by
-when it was loaded. The trim happens at a turn boundary; the names removed are
-written into the conversation as a tool call and its result, so the model learns
-that the list shrank. Eviction costs a search and a load, not a capability.
+limit, the least recently called tools are unloaded; nothing named in
+`tool_load.autoload` is ever evicted. A tool that has never been called is
+ordered by when it was loaded. The trim happens at a turn boundary; the names
+removed are written into the conversation as a tool call and its result, so the
+model learns that the list shrank. Eviction costs a search and a load, not a
+capability.
 
 Tool names:
 

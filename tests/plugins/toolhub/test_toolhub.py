@@ -91,6 +91,8 @@ def hub_for(
     connected: dict[str, Any] | None = None,
     entries: dict[str, ToolServerSettings] | None = None,
     threshold: int | None = None,
+    load_fake_tools: bool = True,
+    autoload: tuple[str, ...] = (),
     **kwargs: Any,
 ) -> FastMCP:
     """A hub over in-db servers, keyed by entry name.
@@ -114,34 +116,50 @@ def hub_for(
     search finds.  Only a name nothing here knows falls through to a blank
     plugin.
 
-    **The tool servers below are `autoload: true`**, which is what a test wants
-    them to be: these are servers whose tools are in the model's list, so a test
-    about naming, routing or the sanitiser is about that and not about having to
-    load one first.  What it means to be on demand instead is
-    `test_a_servers_tools_are_on_demand_until_they_are_loaded`, which is the same
-    hub built without the flag.
+    **The fake servers' tools are put in `tool_load.autoload`**, which is what a
+    test wants them to be: these are servers whose tools are in the model's
+    list, so a test about naming, routing or the sanitiser is about that and not
+    about having to load one first.  `load_fake_tools=False` is the opposite —
+    `test_a_servers_tools_are_on_demand_until_they_are_loaded` builds the same
+    hub without them — and `autoload=` adds names a test needs (a plugin's tool,
+    or a fake server's one beyond the three in `upstream_server`).
     """
     base = default_config()
-    # The tools first, then the transports: the db server is built *from* the
-    # config — it reads which entries are `autoload` and which are switched off
-    # — so a hub whose catalogue was built before the entries were added would
-    # seed every one of them unloaded.
+    # The tools first, then the transports: a hub whose catalogue was opened
+    # before the entries were added would seed every one of them unloaded.
     config = replace(
         base,
         mcp={
             **{
-                name: ToolServerSettings(name=name, command="in-memory", autoload=True)
+                name: ToolServerSettings(name=name, command="in-memory")
                 for name in [*base.plugins(), *(connected or {})]
                 if name not in base.plugins()
             },
             **(entries or {}),
         },
     )
-    if threshold is not None:
-        # The budget is a hundred by default, which is the right number and not
-        # a testable one: a trim is how the eviction *order* is observed from
-        # outside, and the order is only visible when something is over the cap.
-        config = replace(config, tool_load=ToolLoadSettings(threshold=threshold))
+    # `upstream_server`'s three tools, by the names the hub advertises.  A
+    # `connected` entry that is another server simply has no rows under these
+    # names, and a list entry with no row is a no-op.
+    fake = (
+        tuple(
+            f"{name}__{tool}"
+            for name in (connected or {})
+            for tool in ("echo", "boom", "read_file")
+        )
+        if load_fake_tools
+        else ()
+    )
+    # The budget is a hundred by default, which is the right number and not a
+    # testable one: a trim is how the eviction *order* is observed from outside,
+    # and the order is only visible when something is over the cap.
+    config = replace(
+        config,
+        tool_load=ToolLoadSettings(
+            threshold=threshold if threshold is not None else base.tool_load.threshold,
+            autoload=(*base.tool_load.autoload, *fake, *autoload),
+        ),
+    )
     wired = plugin_transports(config, connected, kwargs.get("client_factory"))
     # The embedder is the hub's own now: the catalogue is a file this process
     # opens, and its vectors come from the *same* embedding plugin the context
@@ -397,7 +415,9 @@ async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() 
     `arxiv__search` does, and a name carrying the server would be the one place
     the hop leaked into what the model reads.
     """
-    async with Client(hub_for()) as hub:
+    async with Client(
+        hub_for(autoload=("turn_list", "turn_search", "turn_summarize", "turn_read"))
+    ) as hub:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
@@ -409,19 +429,22 @@ async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() 
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "context"
     }
     assert ours == {"turn_list", "turn_search", "turn_summarize", "turn_read"}
-    # Six sources, and each is a real one: `context` offers the model its four
-    # history tools (they carry the mark), `skills-server` offers `skill_use`
-    # and the four tools that install, remove and switch a playbook, and
-    # `mcp-tools`, `restapi-tools` and `cli-server` offer the tools a model uses
-    # to edit those three sections itself.  The last is this process's own —
-    # `tool_search`, `func_tool_load` and `_func_tool_unload`.
+    # Which sources are in the *loaded* list is the operator's list now:
+    # `context` (this test puts its four on it), `skills-server` (`skill_use` is
+    # required) and the hub's own three.  The other plugins are connected and
+    # real all the same — `servers()` reports them — their tools are simply on
+    # demand, which is the default for a plugin's tools.
     assert {tool["server"] for tool in listed.data["tools"]} == {
+        "context",
+        "skills-server",
+        "toolhub",
+    }
+    assert {row["name"] for row in reported.data["servers"]} >= {
         "cli-server",
         "context",
         "mcp-tools",
         "restapi-tools",
         "skills-server",
-        "toolhub",
     }
 
     # Found by name, not by position: the hub asks every plugin, so each is one
@@ -839,7 +862,10 @@ async def test_a_plugins_tool_is_the_models_only_when_it_says_so() -> None:
     in by writing it down, which is what the tests above are listing.
     """
     async with Client(
-        hub_for(connected={"agent": lambda settings: plugin_with_two_kinds_of_tool()})
+        hub_for(
+            connected={"agent": lambda settings: plugin_with_two_kinds_of_tool()},
+            autoload=("digest",),
+        )
     ) as hub:
         listed = await hub.call_tool("list_tools", {})
         unreachable = await call(hub, "remember", {"text": "hi"})
@@ -885,7 +911,10 @@ async def test_a_plugins_tool_is_named_as_itself() -> None:
     is here too: two of somebody else's servers may each offer a `search`.
     """
     async with Client(
-        hub_for(connected={"fake": lambda settings: upstream_server()})
+        hub_for(
+            connected={"fake": lambda settings: upstream_server()},
+            autoload=("turn_list", "turn_search", "turn_summarize", "turn_read"),
+        )
     ) as hub:
         listed = await hub.call_tool("list_tools", {})
 
@@ -956,14 +985,16 @@ async def test_a_servers_tools_are_on_demand_until_they_are_loaded() -> None:
 
     What the model is handed is the tools it has *loaded*, not everything
     installed: a server with ninety tools would otherwise cost a prompt on every
-    request.  `autoload: true` is the operator saying this server's are wanted
-    every turn, which is what every other test in this file relies on.
+    request.  Only `tool_load.autoload` starts a tool loaded — for a plugin's
+    and somebody else's alike — which is what the other tests in this file rely
+    on when they put a fake server's names in it.
     """
-    entry = ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    entry = ToolServerSettings(name="fake", command="in-memory")
     async with Client(
         hub_for(
             connected={"fake": lambda settings: upstream_server()},
             entries={"fake": entry},
+            load_fake_tools=False,
         )
     ) as hub:
         before = await hub.call_tool("list_tools", {})
@@ -1007,12 +1038,13 @@ async def test_the_budget_spares_the_tool_the_model_called(
     """
     when = "2026-01-01T00:00:00+00:00"
     monkeypatch.setattr("slife2.libs.store.catalogue.now", lambda: when)
-    entry = ToolServerSettings(name="fake", command="in-memory", autoload=False)
+    entry = ToolServerSettings(name="fake", command="in-memory")
     async with Client(
         hub_for(
             connected={"fake": lambda settings: upstream_server()},
             entries={"fake": entry},
             threshold=1,
+            load_fake_tools=False,
         )
     ) as hub:
         # The upstream has to have answered before a name of its can be loaded:
@@ -1590,17 +1622,19 @@ async def test_the_loaded_set_outlives_the_process() -> None:
     data directory is the whole of what carried it across.
     """
     connected = {"fake": lambda settings: upstream_server()}
-    entries = {
-        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
-    }
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
 
-    async with Client(hub_for(connected=connected, entries=entries)) as first:
+    async with Client(
+        hub_for(connected=connected, entries=entries, load_fake_tools=False)
+    ) as first:
         # The list first, as the agent asks for it before every model call —
         # which is also what makes a server's tools *known* to the catalogue.
         await first.call_tool("list_tools", {})
         assert (await call(first, "func_tool_load", {"names": ["fake__echo"]}))["ok"]
 
-    async with Client(hub_for(connected=connected, entries=entries)) as second:
+    async with Client(
+        hub_for(connected=connected, entries=entries, load_fake_tools=False)
+    ) as second:
         listed = await second.call_tool("list_tools", {})
 
     assert "fake__echo" in names(listed.data)
@@ -1695,9 +1729,7 @@ async def test_servers_does_not_count_a_dead_servers_tools_as_held() -> None:
     this asserts — it was the one number in `servers()` that could disagree with
     `list_tools`.
     """
-    entries = {
-        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
-    }
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
 
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("no such program: in-memory")
@@ -1815,14 +1847,17 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
     one.  The fourth, `no_load_state`, is the document families' and is the
     sibling test above.
     """
-    entries = {
-        "fake": ToolServerSettings(name="fake", command="in-memory", autoload=False)
-    }
+    entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
     async with Client(
-        hub_for(connected={"fake": lambda settings: upstream_server()}, entries=entries)
+        hub_for(
+            connected={"fake": lambda settings: upstream_server()},
+            entries=entries,
+            load_fake_tools=False,
+        )
     ) as client:
         # A listing first, so the rows exist: a tool server's are on demand
-        # (`autoload` is off), and the one loaded here is the one that moves.
+        # (not in `tool_load.autoload`), and the one loaded here is the one
+        # that moves.
         await client.call_tool("list_tools", {})
         await call(client, "func_tool_load", {"names": ["fake__echo"]})
         answer = await client.call_tool(
@@ -1915,7 +1950,7 @@ async def test_an_unknown_name_says_what_is_available() -> None:
     # Not `"weather" in result["text"]`: `unknown_tool` interpolates the name it
     # was asked for into every answer, so that line passed whatever the answer
     # said.  Naming an alternative is the claim, and it is the check below.
-    assert "turn_list" in result["text"], result["text"]
+    assert "tool_search" in result["text"], result["text"]
 
 
 @pytest.mark.asyncio
@@ -1953,7 +1988,9 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("no such program: npx")
 
-    async with Client(hub_for(connected={"broken": refuses_to_start})) as hub:
+    async with Client(
+        hub_for(connected={"broken": refuses_to_start}, autoload=("turn_list",))
+    ) as hub:
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
 
@@ -2047,7 +2084,7 @@ async def test_a_tool_from_a_server_that_never_started_is_unknown() -> None:
 
     assert result["ok"] is False
     assert "unknown tool" in result["text"]
-    assert "turn_list" in result["text"]
+    assert "tool_search" in result["text"]
 
 
 # --- the link, and what is done about a bad one -------------------------------
@@ -2447,7 +2484,7 @@ async def test_a_catalogue_that_works_again_is_not_still_reported_broken(
     merge, state = a_catalogue_that_cannot_record("context")
     monkeypatch.setattr(ToolStore, "merge", merge)
 
-    async with Client(hub_for()) as hub:
+    async with Client(hub_for(autoload=("turn_read",))) as hub:
         with pytest.raises(ToolError, match="the embedding model is down"):
             await hub.call_tool("list_tools", {})
 
@@ -2625,49 +2662,20 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
     )
 
     async with Client(hub) as client:
-        # The entry is on demand — it says nothing about `autoload` — so its
-        # tool is *not* in the list yet, and the model has to ask for it.  That
-        # is the whole of the mechanism, end to end: no config flag, so the
-        # search-and-load path is what puts a server's tools in front of a model.
+        # The entry is not in `tool_load.autoload`, so its tool is *not* in the
+        # list yet and the model has to ask for it.  That is the whole of the
+        # mechanism, end to end: no per-server flag, so the search-and-load path
+        # is what puts a server's tools in front of a model.
         listed = await client.call_tool("list_tools", {})
         assert names(listed.data) == {
+            # The config's required names that have a row here: the hub's own
+            # three, and the playbook reader.  `_check_new_input` is required
+            # too, but this test's `agent` plugin is a blank one, so nothing
+            # serves it — a name in the list with no row is a no-op.
             "_func_tool_unload",
-            # The context store's four history tools are the model's — they
-            # carry the mark — so the real plugin brings them along.  **Ours
-            # are bare**, and `spawned__greet` below is the only name on this
-            # surface with somebody else's server in front of it: there is one
-            # set of tools here, slife2's, and a plugin's name in front of one
-            # would be a division the model has no use for.
-            "turn_list",
-            "turn_search",
-            "turn_summarize",
-            "turn_read",
             "skill_use",
             "tool_search",
             "func_tool_load",
-            # Three of the plugins offer the model the tools that edit the
-            # section each owns — `cli-server` four, the other two five each,
-            # and they are the ones that add `spawned__greet` below if a person
-            # would rather be told than write it.
-            "cli_list",
-            "cli_remove",
-            "cli_set",
-            "cli_set_enabled",
-            "mcp_list",
-            "mcp_list_tools",
-            "mcp_remove",
-            "mcp_set",
-            "mcp_set_enabled",
-            "rest_api_list",
-            "rest_api_list_tools",
-            "rest_api_remove",
-            "rest_api_set",
-            "rest_api_set_enabled",
-            # And `skills-server`, which already served `skill_use`.
-            "skill_list",
-            "skill_remove",
-            "skill_set",
-            "skill_set_enabled",
         }
 
         # The child is a real process. `list_tools` starts its connect and does
@@ -3080,7 +3088,7 @@ async def test_a_fault_in_one_homes_catalogue_is_not_anothers(
         with in_home(mine):
             listed = await client.call_tool("list_tools", {}, meta=client_meta("jack"))
 
-    assert "turn_read" in names(listed.data), "this home's catalogue is working"
+    assert "skill_use" in names(listed.data), "this home's catalogue is working"
 
 
 @pytest.mark.asyncio
@@ -3115,7 +3123,7 @@ async def test_a_verdict_is_written_into_every_homes_catalogue(
     for home in (mine, theirs):
         with in_home(home):
             await catalogue.store()
-            await catalogue.merge("serper", "mcp", rows, autoload=False)
+            await catalogue.merge("serper", "mcp", rows)
     with in_home(mine):
         await catalogue.source_state("serper", "error")
 

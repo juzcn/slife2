@@ -341,6 +341,55 @@ def test_an_explicit_zero_is_not_read_as_absent(tmp_path) -> None:
         load(path)
 
 
+def test_the_autoload_list_defaults_to_the_names_the_system_works_by(
+    tmp_path,
+) -> None:
+    """Without a list, the shipped default is the required set — no tools of ours.
+
+    `tool_load.autoload` names the tools that start in the model's list, and a
+    plugin's tools are not there by default any more.  What must be there is the
+    set the system refers to by name; a config that leaves one out is refused
+    here rather than at the first turn whose harness pair names a tool the
+    request does not declare.
+    """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
+
+    config = load(write(tmp_path, "tool_load:\n  threshold: 50\n"))
+    assert config.tool_load.autoload == REQUIRED_AUTOLOAD
+    assert config.tool_load.threshold == 50
+
+    mine = (*REQUIRED_AUTOLOAD, "turn_read", "serper__search")
+    text = "tool_load:\n  autoload:\n" + "".join(f"    - {name}\n" for name in mine)
+    config = load(write(tmp_path, text))
+    assert config.tool_load.autoload == mine, "the operator's names are kept"
+
+    path = write(
+        tmp_path,
+        "tool_load:\n  autoload:\n    - turn_read\n",
+    )
+    with pytest.raises(ConfigError, match="missing .*tool_search"):
+        load(path)
+
+    path = write(tmp_path, "tool_load:\n  autoload:\n    - ''\n")
+    with pytest.raises(ConfigError, match="cannot be blank"):
+        load(path)
+
+
+def test_the_required_autoload_is_what_the_hub_never_lets_go() -> None:
+    """Two spellings of one set, and they answer different questions.
+
+    `REQUIRED_AUTOLOAD` is what the config insists starts loaded;
+    `ALWAYS_LOADED` is what the hub refuses to let the model unload.  They are
+    the same names because they are the same fact — "something else refers to
+    this tool by name" — seen from the two processes that have to act on it, and
+    the config module cannot import a server to read the other spelling.
+    """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
+    from slife2.plugins.toolhub.server import ALWAYS_LOADED
+
+    assert frozenset(REQUIRED_AUTOLOAD) == ALWAYS_LOADED
+
+
 def test_no_cap_is_spelt_zero_or_not_at_all(tmp_path) -> None:
     """**A cap is something asked for**, so a config that does not ask for one
     does not have one: an absent key and a written `0` are one statement, and

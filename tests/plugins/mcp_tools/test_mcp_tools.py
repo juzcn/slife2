@@ -11,6 +11,7 @@ flipped on an object that says one thing and does another.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -403,6 +404,23 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
     """
     write_config(isolated_runtime)
     config: Config = load()
+    # A plugin's tools are on demand now, so this test says which of them it
+    # wants in front of the model.  The required set stays in: the loader
+    # refuses a list without it.
+    config = replace(
+        config,
+        tool_load=replace(
+            config.tool_load,
+            autoload=(
+                *config.tool_load.autoload,
+                "mcp_list",
+                "mcp_list_tools",
+                "mcp_set",
+                "mcp_remove",
+                "mcp_set_enabled",
+            ),
+        ),
+    )
     hub = build_hub(
         config,
         transports=plugin_transports(config, client_factory=answering(upstream())),

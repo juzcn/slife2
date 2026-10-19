@@ -5,8 +5,8 @@ can assert is what survives the trip.  These are about the store itself: what a
 merge does to the rows, what the gate answers, who the budget may take out, and
 what the two search legs find.  The store is where the four things the whole
 design rests on are decided — a name is a row's identity, off is not down, the
-load state is the model's and nobody else's, and a name beginning with `_` is
-the harness's.
+load state is the model's with the operator's `autoload` list as its one
+baseline, and a name beginning with `_` is the harness's.
 
 The embedder is the deterministic stub, for the reason `tests/test_db.py` gives:
 these are about what the store does with a vector, not about the model that
@@ -42,12 +42,18 @@ EMBEDDER = StubEmbedder()
 def store_at(tmp_path, **kwargs) -> ToolStore:
     """A catalogue with the defaults these tests want: room to hold everything.
 
-    `autoload` and `disabled` are not here any more, and their absence is the
-    point: which sources are wanted every turn and which are switched off used to
-    be read off the config at construction, and both arrive with the *merge* now
-    — `autoload` as an argument, the switch as a row's own status.
+    `autoload` is the operator's `tool_load.autoload`: the tool names that start
+    loaded and that the budget may not take.  It is a construction argument for
+    the same reason `threshold` is — the two are one section of one config, read
+    where the catalogue is opened — and it is a list of *names*, not of sources,
+    because one server may offer ninety tools of which two are wanted.
     """
-    return ToolStore(tmp_path / "tools.db", threshold=kwargs.pop("threshold", 100))
+    return ToolStore(
+        tmp_path / "tools.db",
+        threshold=kwargs.pop("threshold", 100),
+        autoload=kwargs.pop("autoload", ()),
+        known=kwargs.pop("known", None),
+    )
 
 
 def tool(
@@ -72,18 +78,9 @@ def merge(
     source: str,
     category: str,
     rows: list[dict],
-    *,
-    autoload: bool = False,
 ) -> dict:
-    """One source's list, merged.  The embedder is a parameter of the real call.
-
-    `autoload` travels with the merge now rather than with the store's
-    construction: the operator's `autoload: true` lives in the section a plugin
-    owns, so the plugin states it and the hub passes it on.
-    """
-    return asyncio.run(
-        store.merge(source, category, rows, embedder=EMBEDDER, autoload=autoload)
-    )
+    """One source's list, merged.  The embedder is a parameter of the real call."""
+    return asyncio.run(store.merge(source, category, rows, embedder=EMBEDDER))
 
 
 def rows_in(store: ToolStore) -> list[tuple]:
@@ -575,7 +572,9 @@ def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
     out — which is what the second half of this asserts, and it is the half that
     keeps the convention from eroding into "names the hub happens to like".
     """
-    store = store_at(tmp_path)
+    store = store_at(
+        tmp_path, autoload=("_func_tool_unload", "_check_new_input", "tool_search")
+    )
     merge(
         store,
         "toolhub",
@@ -668,23 +667,73 @@ def test_a_document_row_carries_its_own_verdict(tmp_path) -> None:
     ], "a mirror does not reconnect a document"
 
 
-def test_a_plugins_tools_start_loaded_and_a_servers_do_not(tmp_path) -> None:
-    """Ours are few and wanted; somebody else's may be ninety and are on demand.
+def test_the_autoload_list_decides_which_tools_start_loaded(tmp_path) -> None:
+    """A name on the list starts loaded, whoever offers it; everything else waits.
 
-    `autoload: true` is the operator saying a server is wanted every turn, and
-    it decides the same set the budget protects: a tool that starts loaded
-    because somebody asked for it must not be evicted by the count either.
+    **A plugin's tools are no longer loaded because they are a plugin's.**  The
+    old rule seeded every row of ours loaded, which was right while a plugin had
+    a handful of tools and wrong once it had dozens: the model carried all of
+    them in every request whether it called them or not.  What starts loaded is
+    now one list of names — a plugin's bare name or somebody else's
+    `{server}__{tool}` — and it is the same list the budget protects.
     """
-    store = store_at(tmp_path)
-    merge(store, "ours", "plugin", [tool("turn_list")])
-    merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
+    store = store_at(tmp_path, autoload=("turn_list", "serper__search"))
+    merge(store, "context", "plugin", [tool("turn_list"), tool("turn_search")])
+    merge(store, "serper", "mcp", [tool("serper__search")])
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
 
     assert rows_in(store) == [
-        ("arxiv__search", "enabled", "unloaded"),
+        ("arxiv__search", "enabled", UNLOADED),
         ("serper__search", "enabled", LOADED),
         ("turn_list", "enabled", LOADED),
+        ("turn_search", "enabled", UNLOADED),
     ]
+
+
+def test_a_new_list_is_applied_to_rows_that_already_exist(tmp_path) -> None:
+    """**An edited list takes effect at the next start, and only for plugins.**
+
+    A merge never touches a load state, so a row seeded under an older list
+    would keep it for ever.  The boot pass is what makes the list the baseline:
+    names on it are loaded, and a plugin's loaded rows it does not name are
+    unloaded — their loading was the old rule's, not the model's.  Somebody
+    else's tool that the model loaded itself is left alone: "a tool loaded
+    yesterday is still loaded after a restart" is the catalogue's promise, and
+    only the plugin set has an operator-defined baseline.
+    """
+    path = tmp_path / "tools.db"
+    first = ToolStore(
+        path,
+        threshold=100,
+        autoload=("turn_list",),
+        known={"context", "serper"},
+    )
+    merge(
+        first,
+        "context",
+        "plugin",
+        [tool("turn_list"), tool("turn_search"), tool("cabinet_search")],
+    )
+    merge(first, "serper", "mcp", [tool("serper__search")])
+    # What a previous session left: two plugin tools and somebody else's tool,
+    # all loaded by the model.  `turn_list` is the one the new list keeps.
+    for name in ("turn_search", "cabinet_search", "serper__search"):
+        first.set_load(name, LOADED)
+
+    second = ToolStore(
+        path,
+        threshold=100,
+        autoload=("turn_list",),
+        known={"context", "serper"},
+    )
+
+    loaded = {name: state for name, _, state in rows_in(second)}
+    assert loaded == {
+        "turn_list": LOADED,
+        "turn_search": UNLOADED,
+        "cabinet_search": UNLOADED,
+        "serper__search": LOADED,
+    }, "the list is the plugin baseline; a model's own load is not a plugin's"
 
 
 def test_a_reconnect_never_touches_what_the_model_decided(tmp_path) -> None:
@@ -777,38 +826,37 @@ def stamps(store: ToolStore, name: str) -> tuple[str, str]:
     return (str(row[0]), str(row[1])) if row else ("", "")
 
 
-def test_the_budget_takes_the_least_recently_used_and_nothing_else(tmp_path) -> None:
-    """Three candidates, and the two the system will not give up.
+def test_the_budget_takes_the_least_recently_used_and_spares_the_list(tmp_path) -> None:
+    """The names on `tool_load.autoload` are the only ones the budget may not take.
 
-    A plugin's tools and anything the operator marked `autoload: true` are never
-    victims — and which sources those are is a *parameter* of the eviction now
-    rather than something this file read off the config when it opened, because
-    the section they were written in belongs to a plugin:
-    the budget exists to stop somebody else's ninety tools crowding the request,
-    not to take away a tool slife2 guarantees — a model that has quietly lost
-    `turn_read` is the failure DESIGN.md §4.1 is built around.
+    **A plugin's tools used to be exempt by category**, which is what made the
+    budget unable to meet its own cap once the plugins grew: the count included
+    every one of them and no trim could reduce it.  The protection is now the
+    operator's list, by name, and a plugin's tool outside it is an ordinary
+    candidate — while a listed tool of somebody else's is untouchable.
     """
-    store = store_at(tmp_path, threshold=4)
-    merge(store, "ours", "plugin", [tool("turn_list")])
-    merge(store, "serper", "mcp", [tool("serper__search")], autoload=True)
+    store = store_at(tmp_path, threshold=4, autoload=("turn_list", "serper__search"))
+    merge(store, "ours", "plugin", [tool("turn_list"), tool("cabinet_search")])
+    merge(store, "serper", "mcp", [tool("serper__search")])
     merge(
         store,
         "arxiv",
         "mcp",
         [tool("arxiv__old"), tool("arxiv__new"), tool("arxiv__also")],
     )
-    for name in ("arxiv__old", "arxiv__new", "arxiv__also"):
+    for name in ("cabinet_search", "arxiv__old", "arxiv__new", "arxiv__also"):
         store.set_load(name, LOADED)
+    stamp(store, "cabinet_search", "2025-12-31T00:00:00+00:00")
     stamp(store, "arxiv__old", "2026-01-01T00:00:00+00:00")
     stamp(store, "arxiv__also", "2026-01-02T00:00:00+00:00")
     stamp(store, "arxiv__new", "2026-01-03T00:00:00+00:00")
 
-    taken = store.evict(["ours", "serper", "arxiv"], autoload=["serper"])
+    taken = store.evict(["ours", "serper", "arxiv"])
 
-    assert taken == ["arxiv__old"], "the oldest of the three, and only it"
+    assert taken == ["cabinet_search", "arxiv__old"], "the oldest two, and only those"
     loaded = {row[0]: row[2] for row in rows_in(store)}
-    assert loaded["turn_list"] == LOADED
-    assert loaded["serper__search"] == LOADED
+    assert loaded["turn_list"] == LOADED, "on the list, so the budget cannot take it"
+    assert loaded["serper__search"] == LOADED, "somebody else's, but on the list too"
 
 
 def test_the_budget_counts_what_the_model_is_holding(tmp_path) -> None:

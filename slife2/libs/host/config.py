@@ -1466,18 +1466,12 @@ class ToolServerSettings:
     #: hub process from starting at all.  This is how a slow, paid or
     #: currently-broken server stays in the file without being in the way.
     enabled: bool = True
-    #: Every tool this server offers starts **loaded** and is never evicted,
-    #: where the default is that they are on demand — the model finds one with
-    #: `tool_search` and puts it in its list with `func_tool_load`.  v1's flag,
-    #: in v1's place and with v1's meaning, and the reason it is worth having: a
-    #: server whose tools are wanted every turn should not cost a search and a
-    #: load, and one with ninety tools should not cost a prompt.
     #:
-    #: A flag rather than a load state for the same reason `enabled` is: the
-    #: file says what the operator decided, and `load_status` — which the model
-    #: decides — lives in the catalogue, where a reconcile can never overwrite
-    #: it by accident.
-    autoload: bool = False
+    #: **There is no `autoload` here any more.**  Whether a tool starts in the
+    #: model's list is a fact about the *tool*, not about the server that offers
+    #: it: one server may offer ninety endpoints of which two are wanted every
+    #: turn, and a flag here could only say "all of them".  The names live in
+    #: `tool_load.autoload`, where the model calls them by.
 
     @property
     def transport(self) -> str:
@@ -1504,23 +1498,62 @@ class ToolServerSettings:
 #: reason to differ.
 DEFAULT_TOOL_LOAD = 100
 
+#: The tools every configuration starts with in the model's list, **and the one
+#: part of `tool_load.autoload` that is not the operator's choice**.
+#:
+#: Each is here because something *else* refers to it by name, so a list without
+#: it would not be a smaller list — it would be a broken one:
+#:
+#: * `tool_search` and `func_tool_load` are how a model reaches anything that is
+#:   not already in front of it.  A model that has quietly lost them has no way
+#:   to find the rest, which is the failure DESIGN.md §4.1 is built around.
+#: * `_func_tool_unload` and `_check_new_input` are written into conversations as
+#:   tool pairs — the turn-boundary trim and a message delivered inside a running
+#:   turn.  A pair names a tool the request declares, so a request that omitted
+#:   one is a 400 the model could not have avoided.
+#: * `skill_use` reads the playbooks every session is meant to reach for.
+#:
+#: **Spelled here rather than imported from the hub**, because this module is a
+#: library and `slife2.plugins.toolhub.server` is a server — the same split
+#: `slife2.plugins.toolhub.server.SKILL_USE` documents.  The two spellings are held
+#: together by `tests/libs/host/test_config.py`; what the hub adds on its side is
+#: the other fact about the same names, that the model may not unload them
+#: (`ALWAYS_LOADED`).
+REQUIRED_AUTOLOAD: tuple[str, ...] = (
+    "tool_search",
+    "func_tool_load",
+    "_func_tool_unload",
+    "_check_new_input",
+    "skill_use",
+)
+
 
 @dataclass(frozen=True)
 class ToolLoadSettings:
-    """The `tool_load:` section — how many function tools the model may hold.
+    """The `tool_load:` section — what the model starts holding, and the cap.
 
     **A cap, because the list goes out with every request.**  The tools the model
     has loaded are re-sent on every model call, so an unbounded loaded set is an
     unbounded prompt — and the thing that makes the bound bearable is that being
     evicted costs a `tool_search` and a `func_tool_load`, not a capability.
 
-    Eviction never touches a tool of ours (a plugin's) or a server marked
-    `autoload: true`: those are loaded because the operator said so, and a
-    budget that could take `turn_read` away is the failure DESIGN.md §4.3 is
-    about.  See `slife2.libs.store.catalogue.ToolStore.injectable`.
+    **`autoload` is the list that starts loaded and is never evicted.**  It is a
+    list of *tool names*, as the model calls them (`turn_read`, or
+    `serper__search` for somebody else's server), because that is the unit the
+    decision is about: a plugin's set grows, and not every tool in it is wanted
+    every turn.  Everything not named here — a plugin's tools included — is
+    discoverable by `tool_search` and callable once found, and is a candidate for
+    the budget.
+
+    The names in `REQUIRED_AUTOLOAD` must be present: a configuration that leaves
+    one out fails the start rather than quietly producing a model that cannot
+    manage its own list.  The operator's own entries are added to those; the
+    shipped `slife2.yaml` names the working set this machine's agent uses every
+    session.
     """
 
     threshold: int = DEFAULT_TOOL_LOAD
+    autoload: tuple[str, ...] = REQUIRED_AUTOLOAD
 
 
 #: How much of one tool result a model is handed.  **One number for both sides
@@ -2866,6 +2899,13 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
     zero is a tool list that is always empty, which is not a configuration to
     accept quietly — the model would have `tool_search` and no way to keep what
     it found.
+
+    **`autoload` is a list of tool names, and it has to keep the required ones.**
+    The required set is what the system works by (`REQUIRED_AUTOLOAD`), and a
+    config that drops one is refused here rather than at the first turn where a
+    harness pair names a tool the request does not declare.  Writing the section
+    without `autoload` keeps the default set; writing it adds to the required
+    set only by being a superset, never by replacing it.
     """
     if raw is None:
         return base
@@ -2876,7 +2916,20 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
             f"tool_load.threshold: {threshold} would evict every tool the model "
             f"loads, leaving it a search it cannot keep"
         )
-    return ToolLoadSettings(threshold=threshold)
+    autoload = (
+        _string_list(section.get("autoload"), "tool_load.autoload")
+        if "autoload" in section
+        else base.autoload
+    )
+    if any(not name.strip() for name in autoload):
+        raise ConfigError("tool_load.autoload: a tool name cannot be blank")
+    missing = [name for name in REQUIRED_AUTOLOAD if name not in autoload]
+    if missing:
+        raise ConfigError(
+            f"tool_load.autoload: missing {', '.join(missing)} — the system "
+            f"works by these, so they must stay in the list"
+        )
+    return ToolLoadSettings(threshold=threshold, autoload=autoload)
 
 
 def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
@@ -3281,7 +3334,6 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
         headers=_deferred_secrets(raw.get("headers"), f"mcp.{name}.headers"),
         cwd=str(raw.get("cwd") or ""),
         enabled=_enabled(raw, f"mcp.{name}"),
-        autoload=raw.get("autoload") is True,
     )
 
 
@@ -3339,7 +3391,6 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
         env=env,
         cwd=str(raw.get("cwd") or ""),
         enabled=_enabled(raw, f"rest-api.{name}"),
-        autoload=raw.get("autoload") is True,
     )
 
 

@@ -198,7 +198,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         cwd: str = "",
         description: str = "",
         enabled: bool = True,
-        autoload: bool = False,
     ) -> dict[str, Any]:
         """Add or update an MCP server under `mcp:` (upsert).
 
@@ -220,8 +219,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
                 when left out.
             description: What it is for, for whoever reads the config.
             enabled: Connect it now. False writes the entry switched off.
-            autoload: Every tool it offers starts in your list and is never
-                evicted.
 
         Returns:
             `name` and `enabled`; `state`, one of `ready`, `connecting`,
@@ -242,7 +239,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
                 "cwd": cwd or None,
                 "description": description or None,
                 "enabled": enabled,
-                "autoload": autoload or None,
             },
         )
         return await apply_and_report(homes.current(), settings, words=WORDS)
