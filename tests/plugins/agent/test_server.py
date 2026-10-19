@@ -2858,14 +2858,15 @@ async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_
 async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
     context, hub
 ) -> None:
-    """The prompt names the ways to answer; the schema stays on the tools.
+    """The prompt names the reply tools; their schema stays on the tools.
 
     A subagent's answer has to leave by `subagent_send_message`,
-    `subagent_broadcast` or, in a group, `subagent_group_send_message`, and
-    naming them here is what points a fresh conversation at the right ones.
-    *How* to answer — `task_response` and `message_type` — belongs to the tool
-    descriptions, where the model already reads the arguments; repeating it
-    here would be a second schema kept in step by hand.
+    `subagent_broadcast` or `subagent_group_send_message`, and naming them here
+    is what points a fresh conversation at the right ones.  *How* to answer —
+    `task_response` and `message_type` — and the group's casual-silence rule
+    belong to the tool descriptions, where the model already reads the
+    arguments; repeating them here would be a second schema kept in step by
+    hand.
     """
     backend = FakeBackend(text_turn("hello"))
     server = build_server(
@@ -2878,7 +2879,6 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
     assert "subagent_send_message" in prompt
     assert "subagent_broadcast" in prompt
     assert "subagent_group_send_message" in prompt
-    assert "you do not have to answer every one" in prompt
     assert "task_response" not in prompt
     assert "message_type" not in prompt
 
