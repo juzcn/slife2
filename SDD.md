@@ -17,8 +17,10 @@ implementation detail. Where this document and the code disagree, the code is
 authoritative, and this document must be corrected to state the rule again rather
 than the incidental value.
 
-The user-facing description of the system is [README.md](README.md). The record
-of design decisions and measurements is [DESIGN.md](DESIGN.md).
+The user-facing description of the system is [README.md](README.md). The working
+record of design decisions, rejected alternatives, and measurements is
+[DESIGN.md](DESIGN.md); it is explanatory, and where it and this document
+disagree, this document is authoritative.
 
 ## Contents
 
@@ -33,10 +35,12 @@ of design decisions and measurements is [DESIGN.md](DESIGN.md).
 9. [Inbound work](#9-inbound-work)
 10. [Terminal](#10-terminal)
 11. [Configuration and environment](#11-configuration-and-environment)
-12. [Project structure and development](#12-project-structure-and-development)
-13. [Open issues and deferred capabilities](#13-open-issues-and-deferred-capabilities)
+12. [Operations](#12-operations)
+13. [Project structure and development](#13-project-structure-and-development)
+14. [Open issues and deferred capabilities](#14-open-issues-and-deferred-capabilities)
 - [Appendix A. Invariants](#appendix-a-invariants)
 - [Appendix B. Plugin registry](#appendix-b-plugin-registry)
+- [Appendix C. Fallback register](#appendix-c-fallback-register)
 
 ---
 
@@ -95,7 +99,7 @@ providers, and the WeChat bridge.
 | Reference | Use |
 |---|---|
 | [README.md](README.md) | User manual and normative description of user-facing behavior. |
-| [DESIGN.md](DESIGN.md) | Decision record: alternatives considered, measurements, and rationale. |
+| [DESIGN.md](DESIGN.md) | Working record: alternatives considered, measurements, and rationale. Explanatory, not normative. |
 | Model Context Protocol specification | Wire protocol implemented by every server. |
 | A2A-over-MQTT published profile | Wire protocol used by the peer and subagent networks. |
 | OpenAI Chat Completions API | Model wire protocol. |
@@ -116,10 +120,11 @@ providers, and the WeChat bridge.
 ### 1.7 Document structure
 
 Sections 2–4 describe the architecture and lifecycle. Sections 5–10 describe the
-runtime subsystems. Section 11 describes configuration and storage. Section 12
-describes the project structure and development process. Section 13 records open
-issues and deferred capabilities. Appendix A states the invariants. Appendix B
-lists the plugin registry.
+runtime subsystems. Sections 11–12 describe configuration, storage, and
+operations. Section 13 describes the project structure and development process.
+Section 14 records open issues and deferred capabilities. Appendix A states the
+invariants, Appendix B lists the plugin registry, and Appendix C is the fallback
+register.
 
 ## 2. System overview
 
@@ -430,6 +435,36 @@ correctly and being mistaken for the intended server.
 There is no `[refused]` marker. A refusal is the call's status, not a word in its
 text.
 
+### 3.8 Protocol revision compatibility
+
+Four facts about the 2026-07-28 MCP revision bind every plugin and client:
+
+1. **`ping` is gone.** A conforming server answers it with `Method not found`,
+   and the specification names no replacement liveness probe. Identity comes
+   from the connection handshake: the client reads `server_info.name`, falling
+   back to a `tools/list` membership check only when a server reports no name.
+   A bare connection test would accept a different server on the same port.
+2. **There are no sessions.** `Mcp-Session-Id` and `initialize` were removed
+   from Streamable HTTP; a request carries its version and capabilities in
+   `_meta` (§3.2).
+3. **Change notifications are opt-in.** `notifications/tools/list_changed`
+   reaches only a client that has opened `subscriptions/listen`. Against
+   FastMCP 4.0.11, `Client` exposes no call that opens one, and a FastMCP server
+   advertises `tools.listChanged: false` and answers the listen request with
+   `Method not found`. The hub therefore re-reads an aged listing instead of
+   waiting for a notification.
+4. **A result that is not pushed must ride its request.** With no push channel,
+   a queued caller waits on its own call, and the inbox is capped because that
+   wait has a client-side timeout.
+
+**Message size.** MCP `tools/call` is request/response, and the client SDK
+refuses an SSE event over 1 MiB (`DEFAULT_MAX_SSE_EVENT_SIZE`). Our own hops use
+a transport with no ceiling, because a daemon this system started is bounded by
+the model's context — `rebuild` and `transcript` send exactly that list. The
+gateway to an external MCP server keeps the SDK's ceiling: an external server is
+a peer, and the ceiling protects a process from a peer making it buffer an
+unbounded message.
+
 ## 4. Machine and agent lifecycle
 
 ### 4.1 Configuration as the system description
@@ -507,6 +542,8 @@ releases if the holder dies.
 - `--headless` is recorded in the claim so the agent server can render an
   appropriate system prompt.
 - Which data directory a name used previously is not remembered.
+- A sanitized name becomes a filename. A name that reduces to nothing is
+  refused; writing to a surprising path is worse than saying no.
 
 ### 4.4 `status` and `down`
 
@@ -778,9 +815,10 @@ back is `dump_read`, which does carry the mark.
 
 #### 5.2.5 Fallbacks
 
-Exactly one step in this path has a registered fallback: an unreadable answer to
-the dump discriminator leaves the conversation with the first window, which is
-what a model asking for the beginning would have received.
+Exactly one step in this path has a fallback registered in Appendix C: an
+unreadable answer to the dump discriminator leaves the conversation with the
+first window, which is what a model asking for the beginning would have
+received.
 
 Every other step MUST succeed. Keeping the output, writing it, and reading the
 window back fail the turn loudly if they fail. The alternative — a conversation
@@ -892,10 +930,16 @@ Its answer is a selection, never a dump.
 Rules:
 
 - **An unreadable reply is not a decision.** `parse` returns `None`, and the turn
-  runs on the context it already has. This is the registered fallback for every
-  way the discriminator call can fail.
+  runs on the context it already has. This is the fallback registered in
+  Appendix C for every way the discriminator call can fail.
 - **A kept turn and a recalled turn are joined by id, in time order.**
   `normalise_ids` collapses duplicates to their first position.
+- **The live-context list's order is authoritative.** Reads replay it as written
+  and never re-sort, because the list encodes what was kept, dropped, and
+  recalled, and a selection is not always contiguous.
+- **`send_message` answers with every key present**, including `refused` on the
+  path where nothing could be refused. A caller that has to test for a key gets
+  a `KeyError` on the one branch nobody exercised.
 - **A rebuilt turn carries a footnote** naming its id, channel, and span
   (`turn_note`), so a model can distinguish it from a turn it just said.
 - **The turn-to-messages builder is one function** (`messages_from_turns`), shared
@@ -933,6 +977,23 @@ unanswered tool call in the history.
 The model's tool result is authoritative. Display chunks are not: progress
 notifications may be dropped, delayed, or coalesced without affecting the
 conversation.
+
+### 5.7 Images
+
+An attached image is live state, not record. The turn log keeps:
+
+- the sentence that named the file;
+- the tool answer naming it;
+- a note saying the image was attached and how large it was.
+
+The bytes never enter the row. A rebuilt conversation is therefore text; a turn
+that needs the picture again attaches it again from the named path.
+
+A failed image attachment is dropped from the live conversation with the same
+note the record keeps, and the error says so. A provider that refuses an image
+refuses every request that carries it; a failed turn's messages are re-sent by
+every later turn, so one bad attachment could otherwise make the conversation
+unusable.
 
 ## 6. Model backends
 
@@ -1299,6 +1360,16 @@ path is stored rather than derived, so a change to the naming rule orphans
 nothing that already exists. Every caller-supplied path is resolved against the
 cabinet root and refused if it leaves it.
 
+A subject that is not already lowercase carries a short digest in its filename.
+`Python.md` and `python.md` are one file on Windows and macOS, so two notes
+sharing one file would let the second write replace the first's Markdown while
+both rows stayed correct.
+
+A file's bytes are never indexed. What is indexed is what the file is: its name,
+the paths that place it, and a summary once one is written. A file embedded from
+its summary alone leaves every summary-less file with no vector, which the sync
+pass then reports forever as a document it cannot catch up.
+
 A dump is the one kind no cabinet tool writes. The harness saves a tool output
 too large for the conversation; the dump is a file on disk with a row indexing
 it. `dump_read` is the one way back.
@@ -1429,6 +1500,13 @@ Rules specific to this system:
 7. **An inbound response-typed message is acknowledged and dropped.** A peer that
    streams its result reaches the response topic. A stray `task_response` on the
    request topic is not a new task.
+8. **A wildcard broker address is refused.** `0.0.0.0`, `::`, or empty is every
+   interface, not the machine's loopback broker; starting mosquitto there with
+   anonymous access would publish every topic and accept tasks from anybody on
+   the network.
+9. **`provider:` is a hard constraint.** Mosquitto is the only broker this build
+   speaks; any other value is a configuration error, not a silently disabled
+   feature.
 
 The five model-facing tools are:
 
@@ -1473,6 +1551,10 @@ It does not have the turn that started it, because `restore` reads the stored
 turn list and a turn is written only when it ends. The description must restate
 the relevant context.
 
+A task may start another task, because the tool set is one catalogue and
+nothing filters it. `agent-task.max_running` bounds concurrency, not total work
+over time.
+
 The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. If no window is showing the conversation, the
 result is `undelivered` and the log records that rather than running a turn for
@@ -1483,7 +1565,10 @@ nobody.
 `plugins/schedule/` starts work nobody asked for at the moment it starts.
 
 `schedule/expressions.py` is the only module that knows cron. It owns the
-timezone policy and the error contract for the system.
+timezone policy and the error contract for the system. The five fields are
+trivial and the corners are not: `day_or` makes restricted day-of-month and
+day-of-week a union, and `strict` cross-field validation rejects `0 9 31 2 *`
+before it is stored as an enabled task that can never fire.
 
 The data model has two tables:
 
@@ -1568,6 +1653,9 @@ the caller decides what to do about it.
 - **A connection has two states on screen**: online and offline. The reasons live
   in the status tool. A line that tried to state them would be a line about the
   plugin's internals.
+- **Model output is plain text.** Nothing a model produces is parsed as markup;
+  a `[bold]` a model wrote is seven characters on screen, not a formatting
+  instruction.
 - **A restored conversation is the server's.** `transcript` is read once when the
   window opens. The window keeps no copy, so what it shows after a reconnect is
   what the server has. A failed read is not an empty conversation; that
@@ -1587,6 +1675,9 @@ that state.
 Losing the race is not an error. The turn may have ended a moment earlier. A
 client that raised over it would call a prompt that arrived too late a connection
 failure.
+
+A refusal mounts no tool panel, because a panel that appeared and then said
+"denied" would tell a reader the tool ran.
 
 ### 10.4 Interface language
 
@@ -1629,6 +1720,29 @@ process. The daemon is shared and outlives any one window; it was not started wi
 `--lang`, so it follows the OS locale rather than the flag. A machine whose OS
 language and `--lang` agree — which is every machine that does not pass the flag —
 never sees the difference.
+
+### 10.5 Unattended operation
+
+An agent is on the peer network while a window holds its `join` call. Everything
+else already works without a terminal: a channel's hand-over goes to the window,
+a scheduled trigger goes to the window, and a task's answer goes to the window.
+An agent nobody holds is offline, and that is the one thing a terminal was
+required for.
+
+`--headless` runs the same `SlifeApp` with Textual's headless driver: the same
+connections, the same queue, the same turns, the same prompts, nothing drawn and
+nothing printed. No branch of the window is conditional on the flag; it is a
+mode, not a second kind of agent.
+
+The model is told that nobody is there. The flag is written into the agent-name
+claim, which the agent server already reads to render the system prompt, and the
+template receives it as `headless`. No instance at all renders the same way: a
+peer tasking an agent nobody is running is the same situation.
+
+The output is deliberately nothing. Turns are recorded, so a window opened later
+restores the conversation, and presence is on the mesh where peers see it.
+Ctrl+C stops a headless run; a kill is honest too, because the broker's last
+will publishes the offline card.
 
 ## 11. Configuration and environment
 
@@ -1819,9 +1933,140 @@ A failed start reports the end of the log, because a real error message is worth
 more than a status code. The startup report goes to stdout; a plugin's own output
 goes to its log.
 
-## 12. Project structure and development
+### 11.8 Configuration edits
 
-### 12.1 Layers
+A model may edit the sections it can read. Every management tool writes through
+`libs/host/configfile.py`, the single writer described in §4.1; the result is
+validated by the same loader a start uses, and a refused entry is restored.
+
+A `set` writes the whole entry, not a patch. A field left out is a field the
+entry does not have, which is what makes switching an entry from `url` to
+`command` possible. `set_enabled` changes one field and reads the entry first.
+
+The model configuration is live: the agent server resolves a reference per turn,
+so an edit reaches the next conversation. `model_switch` is the one edit that
+moves the current conversation; a turn in flight finishes on the model it
+started with.
+
+There is no approval gate before a write. `mcp_set` with a `command:` records a
+program slife2 will start; the write is legible but not gated. The model's
+`_approve` is the only confirmation mechanism, and it is model-driven.
+
+## 12. Operations
+
+### 12.1 File tunnel
+
+`expose_local_image` returns a public HTTPS URL for a file, for a vision model
+or a chat API that cannot read the machine's disk.
+
+The plugin holds a registry of token to file, pinned to the file's device,
+inode, size, and modification time. A link stops working when:
+
+- the file changes;
+- `unexpose_local_image` is called;
+- the process exits.
+
+A share outlives the turn that made it.
+
+Three providers are supported:
+
+| Provider | Requirement | Behavior |
+|---|---|---|
+| ngrok | `NGROK_AUTHTOKEN` | Stable dev domain; free tier shows an interstitial to browsers. |
+| localhost.run | `ssh` | Random rotating hostname; TLS ends at the provider. |
+| cloudflare | `cloudflared` | Random hostname stable for the process. |
+
+An unknown `active:` provider degrades to ngrok with a warning, and
+`tunnel_status` reports the provider actually in use. A malformed shape is
+refused. The tunnel is a subordinate dependency; a name this build does not have
+must not keep the plugin from loading.
+
+A published URL is not a working URL. A transport that has lost the edge keeps
+its URL and answers HTTP 530, so reachability is checked separately and the tool
+refuses rather than handing out a dead link. A merely unreachable transport gets
+a heal window before being respawned, and an unanswerable liveness probe is not
+an outage.
+
+The tunnel publishes the MCP endpoint as well as `/share/{token}`. Any caller
+who knows the hostname can call `expose_local_image` and read any file the
+process can read. What stands between that and a stranger is the hostname's
+entropy; closing it properly requires an authorization story MCP does not carry
+here. A tunnel is a decision to make this machine reachable.
+
+### 12.2 Media
+
+A media provider is not a chat provider. Its models are declared per kind:
+image, video, tts, asr. A vendor may serve several kinds, so `kind` is a fact
+about the model and `api:` selects the wire adapter.
+
+Artifacts are written under the conversation's work directory: the agent's
+`media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork writes to
+its maker's. They never go to the process's working directory: the daemon's
+working directory is the runtime directory, which is reconstructible, and a
+generated file left there is the one file certain to be lost.
+
+`folder=` is contained inside that root. It is a model-written string;
+`folder="../../.."` would be a model choosing where on the operator's machine
+to write a file.
+
+Two adapters are supported:
+
+- `dashscope-aigc`: images, video, speech, transcription;
+- `openai-images`: image generation only; it refuses the other three by name.
+
+### 12.3 Text encoding and time
+
+A failed database write does not fail the turn; it loses the text. Content
+SQLite refuses is normalised first:
+
+- a valid UTF-16 surrogate pair is put back together;
+- a lone surrogate becomes U+FFFD.
+
+The UTF-16 codec is the one in the standard library that distinguishes the two.
+Every timestamp comes from one place: local time with an offset, seconds
+precision. One format is what keeps ordering and range bounds correct.
+
+### 12.4 Timeouts
+
+Every await that can block has a bound, and the bound belongs to the layer that
+awaits it. A callee never sets a total for its caller.
+
+There is no turn deadline and no default tool-call budget. A single number
+applied to every tool is wrong for most of them. What bounds a call is:
+
+- the model's `_timeout`;
+- the tool's own declared timeout;
+- nothing.
+
+Where a clock is needed and the work can legitimately be long, it is an
+inactivity bound rather than a wall clock. The model stream has one: 120 seconds
+of silence, reset by every chunk.
+
+`helpers/timeouts.py` is the single source of truth. It distinguishes:
+
+- **budgets**, which bound an await;
+- **cadences**, which say how often something runs.
+
+Consumers read values at call time, never into a module constant or a def-time
+default, so a test can patch one. `validate()` asserts the relations that fail
+silently, such as an outer bound shorter than an inner one, and fails at import.
+
+A gate (`tests/test_no_magic_timeouts.py`) rejects a time-style literal anywhere
+in `slife2/` or `tests/` unless it is in the registry or carries a `# timeouts:`
+note. The gate also rejects a registry lookup in a signature, because that reads
+the value once at import and is invisible to a patch.
+
+### 12.5 Daemons outlive builds
+
+Reuse is by identity: the launcher attaches to whatever answers to the expected
+name. A daemon from a previous build can answer the name check and still have
+the old tool signatures, so every turn fails until the stack is restarted.
+`slife2 down` is the remedy. A rename of a server or a tool must be accompanied
+by a stop.
+
+## 13. Project structure and development
+
+### 13.1 Layers
 
 The layering rule is stated in §2.5. Its purpose is that a module's kind is
 visible from its path:
@@ -1838,7 +2083,7 @@ and last place a plugin is named, and they exist for a person rather than for th
 launcher. Every daemon is started as `python -m <module>` in the interpreter and
 virtual environment that spawned it, not through a script on `PATH`.
 
-### 12.2 Test tree
+### 13.2 Test tree
 
 `tests/libs/`, `tests/clients/`, `tests/plugins/`, `tests/helpers/`,
 `tests/tui/`, and `tests/e2e/` mirror the package. One directory per layer, one
@@ -1854,7 +2099,7 @@ Shared doubles live in `tests/fakes.py`:
 A test module MUST NOT import another test module for a fixture. That is how two
 lanes end up disagreeing about the shape of a double.
 
-### 12.3 Test lanes
+### 13.3 Test lanes
 
 | Lane | Command | Contents |
 |---|---|---|
@@ -1880,7 +2125,7 @@ protocol boundary: a stub backend in the fast lane, a stub HTTP endpoint in the
 e2e lane. A change to what the system does with a model cannot pass unseen by
 changing only the fake.
 
-### 12.4 Static checks and CI
+### 13.4 Static checks and CI
 
 - `uv run ruff check .`
 - `uv run ruff format --check .`
@@ -1898,9 +2143,9 @@ CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
 The suite is the gate. Both lanes pass before a change is done. A bug found in the
 field arrives as a test that fails without the fix.
 
-## 13. Open issues and deferred capabilities
+## 14. Open issues and deferred capabilities
 
-### 13.1 Open issues
+### 14.1 Open issues
 
 1. **An interrupted peer task.** The SDK's `TERMINAL_KINDS` is wider than its
    name: `input_required` ends the requester's retry ladder. This system has no
@@ -1937,7 +2182,7 @@ field arrives as a test that fails without the fix.
    should be ranked against a person's notes is not settled.
    *Resolution would require:* a stated rule, not a query filter.
 
-### 13.2 Deferred capabilities
+### 14.2 Deferred capabilities
 
 The following are not implemented in this version:
 
@@ -1946,9 +2191,27 @@ The following are not implemented in this version:
 | Executing `cli:` entries | Entries are catalogued and discoverable; no tool runs them. `func_tool_load` reports that the entry is not callable. |
 | Executing playbook scripts | `skill_use` returns the playbook text; the model runs commands itself. |
 | Fetching a URL in `file_save` | `file_save` copies local files only. |
-| A `grep` search leg | The cabinet has keyword and semantic search only. |
-| An approval gate before configuration edits | `mcp_set` with a `command:` records a program without asking. |
-| A bound on total agent-task work | `agent-task.max_running` bounds concurrency only. |
+| A listing tool | A model must search instead of listing; `tool_search` does not promise a list it cannot give. |
+| Markdown rendering | Model output is plain text. |
+| Delta coalescing | One progress notification per token is sent. |
+| The pass behind the context ceiling | A very large turn can exceed the ceiling until the next selection. |
+| A cap on total agent-task work | `agent-task.max_running` bounds concurrency only; total work over time is unbounded. |
+| A cap on the number of conversations | A client can create conversations without a machine-wide limit. |
+| A visible agent-task progress line | The window has no line for a running task and no key that stops one; a person's only lever is to ask the model. |
+| A word to the model about the loaded set | A model may not use loading unless it reads the tool descriptions. |
+| A cap on scheduled tasks | `schedule_list`/`schedule_remove` make a runaway visible and stoppable; no cap exists. |
+| A word to the agent about unclosed runs | The agent must think to call `schedule_runs`; nothing announces a missed run. |
+| A trigger nobody acted on | One turn's inattention leaves a run `pending`. |
+| Background work inside an agent task | `_async` is refused with an explanation. |
+| A client id on the turn record | No per-turn client id is stored. |
+| The window wire in a library | `libs/harness/handover.py` imports a server module. |
+| One config reader | A reader may not recognize the same problem twice. |
+| Selective re-embedding | A model change re-embeds every row. |
+| A `grep` search leg | Partial spellings and symbols rely on the two existing legs. |
+| A policy that forces approval | `skill_set` and `mcp_set` rely on model judgment. |
+| Device-code OAuth for tool servers | A server that needs a browser login cannot be configured. |
+| A discriminator result larger than its own window | Such a result fails the turn loudly. |
+| A bound on tool-call arguments | A model can write an unbounded argument into the conversation. |
 
 ## Appendix A. Invariants
 
@@ -1977,8 +2240,8 @@ Each invariant is stated as an assertion. A change that violates one is a defect
    a silent peer are three different facts, and each is named where it is read.
 
 7. **A failure that affects the design's behavior hard-fails rather than falling
-   back.** Every remaining fallback is registered, scoped, and states what it
-   does not cover.
+   back.** Every remaining fallback is registered in Appendix C, scoped, and
+   states what it does not cover.
 
 8. **One rule, one place.** A name, a path, a cap, a sentence, or a vocabulary
    that two modules need is stated once and imported, never copied.
@@ -2032,3 +2295,60 @@ The probe tool for each plugin is the tool that identifies it when its
 `server_info` does not carry the expected name. The four model backends probe
 `stream_chat`; the peer and subagent network plugins probe `peer_agent_list` and
 `subagent_list`; the other plugins probe their first stable, argument-free tool.
+
+## Appendix C. Fallback register
+
+A fallback is a design behaviour, and it is the one kind that is invisible when
+wrong. Falling back is allowed; falling back undeclared is not.
+
+A registered fallback states:
+
+1. what it does;
+2. what it gives up;
+3. what it does not cover;
+4. where the failure goes.
+
+| Situation | Fallback | Gives up | Does not cover | Failure goes to |
+|---|---|---|---|---|
+| No `slife2.yaml` | Built-in default configuration | The operator's sections | A file that exists and does not parse (refused) | `status` prints the model in use |
+| A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
+| A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
+| A call had no client to make it | Reconnect and make the first attempt | One round trip | A call that went out and then failed, which is never repeated | The tool's error text |
+| The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
+| Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
+| A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
+| An image is refused by a provider | Drop the pixels, keep the note | The bytes in the live conversation | The record, which never had them | The note and the error |
+| Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
+| A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
+| Unknown `file-tunnel.active` | Degrade to ngrok with a warning | The operator's intent | A malformed shape (refused) | The warning and `tunnel_status` |
+| A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
+| A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
+| A turn file from an older schema | Create an empty table and run | The turns on disk | A file this build wrote | One `logger.error` naming the file |
+| A stored tool schema will not parse | Serve the tool with no arguments | The arguments | A schema that parses | The tool's own error |
+| A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
+| A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
+| An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | Bad rows, handled per pass | The error naming the path |
+| A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
+| A bookkeeping write fails | Log and continue | The record | Nothing; the write is attempted or not | A warning naming the path |
+| A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
+| A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
+| The checkout marker is absent | Use `~/.slife2` | The checkout's data directory | An override, which wins | A missing database or config |
+| A stale `media.defaults:` entry | Use the first model of the kind | The operator's default | A wrong-kind or unknown-provider reference (refused) | The answer's own `provider/model` |
+| A `SKILL.md` header will not parse | Read as a skill with no header | The declared name, description, and requirements | A header that is a mapping | A warning naming the parse error |
+| A CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, or one found nowhere | The resolved path in `tunnel_status` |
+| A progress line cannot be read | Drop it; default counts to zero | The difference between unmeasured and zero | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
+| A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
+| A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server | The probe's log and the launcher's conflict report |
+| `taskkill` could not run | Poll the pid and report | Why the force failed | A process that survives the poll | The pid the caller then polls |
+| A tool answer is not JSON-serialisable | Render a string form of the value (`default=str`) | The object's exact shape | An answer JSON can encode, or `None` | The rendered text in the record |
+| A lone surrogate reaches tool text | Escape it | Nothing the model needs | Text that is not a surrogate | Nothing; the request survives |
+| The post-turn trim cannot reach the hub | Skip the trim | The trim for that turn; the set stays over budget | The next turn, which fails loudly on a dead hub | A warning; an error for a task |
+| A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
+| The trim tool is missing or unreadable | Answer empty, log the reason | The trim and the names the model would have seen | A trim the hub answers | A warning in the server log |
+| Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | Nothing; a teardown must not replace the caller's work |
+| The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
+
+Everything not in this register is a defect. A path that substitutes a weaker
+behaviour and is not here is an undeclared fallback. A fallback that stops being
+needed is deleted rather than left standing, because a designed path that never
+runs is a designed path that has stopped being tested.

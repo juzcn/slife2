@@ -179,7 +179,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "zh": "给 {agent} 发消息…",
     },
     # The status bar's connection word.  Two states on screen and no more; the
-    # reasons are `system_health`'s (`sdd.md` §9.2).
+    # reasons are `system_health`'s (`SDD.md` §9.2).
     "connection_connecting": {
         "en": "connecting",
         "zh": "连接中",

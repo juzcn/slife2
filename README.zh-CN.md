@@ -7,7 +7,7 @@
 agent 主循环、工具 hub、模型后端、记忆以及每一项能力，都是 slife2 启动并共享的
 MCP server。
 
-本文件是用户手册。系统设计见 [sdd.md](sdd.md)，设计决策与实测记录见
+本文件是用户手册。系统设计见 [SDD.md](SDD.md)，设计决策与实测记录见
 [DESIGN.md](DESIGN.md)。
 
 **目录**

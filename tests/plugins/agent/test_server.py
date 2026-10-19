@@ -2693,7 +2693,7 @@ async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
     The local network holds a place for a maker's *own* subagents and no further
     in (`slife2.plugins.a2a.server.place_for`), so a member of a member would be
     a conversation with nothing listening for it — a refusal from the tool rather
-    than a subagent that exists and can never answer (sdd §12.8).
+    than a subagent that exists and can never answer (SDD §12.8).
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()

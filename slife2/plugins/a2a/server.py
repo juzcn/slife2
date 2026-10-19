@@ -20,7 +20,7 @@ whole of the difference between the two instances of this module.  Everything th
 local one adds is the part a peer without a process needs: a place held for it by
 somebody else (:data:`MEMBER`), a road that is not a window (`run_turn`), and a
 send path that gives the receiver its place before it publishes (`send_message`).
-`sdd` §3.5 and DESIGN.md §1.10 are where those are argued.
+`SDD` §3.5 and DESIGN.md §1.10 are where those are argued.
 
 **§1.2: the drain tool was the seam, and the seam is gone.**  v1's harness polled
 `__a2a_drain_incoming` once a second and injected what it found into the agent's
@@ -1209,7 +1209,7 @@ def build_server(
 
         Empty for a subagent on the remote network, and that is not a gap: a
         remote peer sees an agent name, a subagent is not an instance and never
-        claimed one (sdd §3.5), so its maker is the name anybody out there knows.
+        claimed one (SDD §3.5), so its maker is the name anybody out there knows.
         """
         found = request_client(ctx)
         if found is None or not found[0]:

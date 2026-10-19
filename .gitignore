@@ -208,7 +208,7 @@ agents/
 # The designer's own memory of intent, which is not part of what this repository
 # publishes.
 #
-# sdd.md and DESIGN.md cite it as one of the four documents, and it stays that —
+# SDD.md and DESIGN.md cite it as one of the four documents, and it stays that —
 # in the checkout it is written in.  What leaves is the *copy*: it is a notebook
 # revised on the machine that wrote it, nobody else's to edit, and a published
 # copy can only be the version that was true the day it was pushed.  The

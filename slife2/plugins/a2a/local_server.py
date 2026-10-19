@@ -1,7 +1,7 @@
 """slife2-subagent — the local network, which is the same mesh one section over.
 
 An agent reaches two kinds of agent, and they are different in kind rather than
-in namespace (sdd §3.5): its **remote** peers, which may be on another machine
+in namespace (SDD §3.5): its **remote** peers, which may be on another machine
 and on a broker somebody else runs, and the **subagents** it made, which are
 directories under its own.  Both are served by `slife2.plugins.a2a.server` — the
 protocol, the mesh, the envelopes and the five tools are one implementation —

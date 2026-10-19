@@ -9,7 +9,7 @@ only a client: the agent loop, the tool hub, the model backends, memory, and
 every capability are MCP servers that slife2 starts and shares.
 
 This file is the user manual. The system design is described in
-[sdd.md](sdd.md); the decisions and measurements behind it are recorded in
+[SDD.md](SDD.md); the decisions and measurements behind it are recorded in
 [DESIGN.md](DESIGN.md).
 
 **Contents**

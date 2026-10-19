@@ -8,7 +8,7 @@ and a model name from the config.
 **This server keeps the conversations**, and it addresses each one by
 `(agent, subagent)` — the same pair every other server in this system keys its
 own state by.  `subagent=""` is the agent's own conversation; anything else is
-one of its subagents, an agent it made and owns (`subagent_set`, sdd §3.5).  A
+one of its subagents, an agent it made and owns (`subagent_set`, SDD §3.5).  A
 caller submits a user message under that key and gets
 that turn's answer back.  The management surface a client uses is
 `send_message`, `reset`, `transcript` (what a window that has just opened asks
@@ -203,7 +203,7 @@ Compressor = Callable[[LLMBackend, ClientId], Compress]
 FORGET = "forget"
 
 #: The two tools that make and unmake a subagent — the whole of what this adds to
-#: the mesh's vocabulary, and two verbs rather than four (sdd §3.5): a subagent
+#: the mesh's vocabulary, and two verbs rather than four (SDD §3.5): a subagent
 #: is *made* and *unmade*, and everything else it can do, it does with the tools
 #: an agent has.
 #:
@@ -689,7 +689,7 @@ class Loop:
     #: with the thing it was about.  Its reason was written down: *a subagent is a
     #: means to an end inside one turn of its parent's conversation*, so its round
     #: trips were not written, and the file its store named was a schema and
-    #: nothing more.  A subagent *owns* its conversation now (sdd §3.5) — it has a
+    #: nothing more.  A subagent *owns* its conversation now (SDD §3.5) — it has a
     #: directory, a cabinet and a memory of its own, and `subagent_remove` deletes
     #: them — so every conversation this server holds is recorded, in the store its
     #: own key names.  The worker the old rule was for was never built: nothing in
@@ -3741,7 +3741,7 @@ def build_server(
             # local network's membership is the maker's *own* subagents
             # (`subagent_dirs`, under the agent's own `subagents/`), and a place is
             # what makes a member
-            # reachable at all (`slife2.plugins.a2a.server.place_for`).  sdd §12.8
+            # reachable at all (`slife2.plugins.a2a.server.place_for`).  SDD §12.8
             # holds the rule this depends on.
             raise ToolError(
                 "a subagent cannot make a subagent: the local network holds a "

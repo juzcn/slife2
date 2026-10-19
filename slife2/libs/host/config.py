@@ -210,7 +210,7 @@ TASK_LIST = "task_list"
 class Net:
     """One of the two networks — everything about it that a *name* decides.
 
-    sdd §3.5's two are different in kind: the agent↔agent one carries an agent's
+    SDD §3.5's two are different in kind: the agent↔agent one carries an agent's
     **remote** peers, the agent↔its-subagents one carries its **local** ones.  A
     record rather than prose, because each field is a name that crosses a process
     boundary and two of them have to agree: the section the plugin reads, the
@@ -722,7 +722,7 @@ PLUGINS: tuple[Plugin, ...] = (
         port=24040,
     ),
     # The **local** network: the same module, one port over, and the other half
-    # of sdd §3.5's pair.  It is here rather than absent for `a2a`'s reason read
+    # of SDD §3.5's pair.  It is here rather than absent for `a2a`'s reason read
     # the other way round: a machine reaches its own subagents, and `subagent_*`
     # is a feature the config can turn on by writing the section — while the
     # *port* is nobody's decision, so it is written down with every other one.
@@ -1250,7 +1250,7 @@ class SubagentSettings:
 
     Read by `slife2-agent`, which is where the two tools that make and unmake a
     subagent live (`slife2.libs.host.launcher` starts no plugin for this: a
-    subagent is not a process, so it has no server and no address — sdd §3.5).
+    subagent is not a process, so it has no server and no address — SDD §3.5).
 
     Everything else about a subagent is an agent's and comes out of `agent:`, for
     `AgentTaskSettings`' reason one class up: a subagent is an agent that belongs
@@ -2000,7 +2000,7 @@ class Config:
     agent_task: AgentTaskSettings = field(default_factory=AgentTaskSettings)
     #: How many subagents one agent may have, from `subagent:`.  Read by
     #: `slife2-agent`, which owns the two tools that make and unmake one — there
-    #: is no plugin for this, because a subagent is not a process (sdd §3.5).
+    #: is no plugin for this, because a subagent is not a process (SDD §3.5).
     subagent: SubagentSettings = field(default_factory=SubagentSettings)
     #: How a conversation's context is decided, from `context:`.  Read by
     #: `slife2-context`, which is the plugin that owns the turn log.

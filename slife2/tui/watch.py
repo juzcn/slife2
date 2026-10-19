@@ -76,7 +76,7 @@ class WatchScreen(Screen[None]):
     That last part is the design rather than a missing feature: a subagent is
     reached by its maker, and a person looking over its shoulder is a reader.
     Typing into a watched conversation would make this a window in the sense the
-    architecture refuses (`sdd.md` §4.5), and it would also be the one input on
+    architecture refuses (`SDD.md` §4.5), and it would also be the one input on
     this screen whose destination is not the thing it appears to be.
     """
 
