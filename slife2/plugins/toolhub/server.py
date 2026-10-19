@@ -1658,11 +1658,7 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
 #: model's list holds is decided elsewhere, so the wording was a promise about
 #: somebody else's state made by a description that cannot see it.  What a model
 #: needs from here is what this search is and what its two inputs mean.
-TOOL_SEARCH_DESCRIPTION = (
-    "Find a tool by what it does, across the whole catalogue — including tools "
-    "whose server is off or is not answering, and not only the ones you have "
-    "loaded."
-)
+TOOL_SEARCH_DESCRIPTION = "Find a tool by what it does, across the whole catalogue."
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
     "type": "object",

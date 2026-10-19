@@ -219,8 +219,15 @@ SUBAGENT_SAME = {
 
 #: Tools registered from description constants rather than a docstring.
 SOURCE_OVERRIDES = {
-    "tool_search": {"file": "slife2/plugins/toolhub/server.py", "line": 1866},
-    "func_tool_load": {"file": "slife2/plugins/toolhub/server.py", "line": 1876},
+    "tool_search": {"file": "slife2/plugins/toolhub/server.py", "line": 1862},
+    "func_tool_load": {"file": "slife2/plugins/toolhub/server.py", "line": 1872},
+}
+
+#: Those two descriptions live in source constants, so the catalogue can lag a
+#: change to them until the hub next starts.  The source is the current answer.
+DESCRIPTION_CONSTANTS = {
+    "tool_search": "TOOL_SEARCH_DESCRIPTION",
+    "func_tool_load": "FUNC_TOOL_LOAD_DESCRIPTION",
 }
 
 #: Parameters the docstring and the schema both leave unexplained.
@@ -299,6 +306,24 @@ def ast_tools(root: Path) -> dict[str, dict]:
                         "doc": ast.get_docstring(node) or "",
                     },
                 )
+    return found
+
+
+def ast_constants(root: Path) -> dict[str, str]:
+    """String constants in the toolhub server, by name."""
+    path = root / "slife2" / "plugins" / "toolhub" / "server.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            found[target.id] = node.value.value
     return found
 
 
@@ -394,6 +419,7 @@ def params_table(schema: dict, notes: dict[str, str]) -> str:
 def build_document(root: Path, db: Path) -> str:
     """The whole of `TOOLS.md`, as the text to write."""
     tools = ast_tools(root)
+    constants = ast_constants(root)
     connection = sqlite3.connect(db)
     try:
         rows = list(
@@ -452,6 +478,9 @@ def build_document(root: Path, db: Path) -> str:
             ]
         )
         for name, description, schema in entries:
+            description = constants.get(
+                DESCRIPTION_CONSTANTS.get(name, ""), description
+            )
             lookup = SUBAGENT_SAME.get(name, name)
             source = tools.get(lookup) or SOURCE_OVERRIDES.get(lookup)
             if source is None and lookup.startswith("_"):
