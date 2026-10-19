@@ -178,8 +178,12 @@ RETURNS = {
         "many members were notified) and `note`."
     ),
     "peer_agent_group_list": (
-        "`agent_name`, `groups` — rows of `group`, `owner`, `members` and "
-        "`role` (`owner` or `member`) — and `error`."
+        "`agent_name`, `groups` — rows of `group`, `owner` and `role` (`owner` "
+        "or `member`) — and `error`."
+    ),
+    "peer_agent_group_member_list": (
+        "`group`, `owner`, `members` (including the owner), `role` (`owner` or "
+        "`member`) and `error`."
     ),
     "peer_agent_group_remove": "`group`, `disbanded` and `sent`.",
     "peer_agent_group_leave": (
@@ -233,6 +237,7 @@ SUBAGENT_SAME = {
     "subagent_broadcast": "peer_agent_broadcast",
     "subagent_group_set": "peer_agent_group_set",
     "subagent_group_list": "peer_agent_group_list",
+    "subagent_group_member_list": "peer_agent_group_member_list",
     "subagent_group_remove": "peer_agent_group_remove",
     "subagent_group_leave": "peer_agent_group_leave",
     "subagent_group_send_message": "peer_agent_group_send_message",
@@ -268,6 +273,7 @@ PARAM_NOTES: dict[str, dict[str, str]] = {
         "group": "The group's name; the handle every group tool uses.",
         "members": "The member names to pull in; you are added as owner.",
     },
+    "peer_agent_group_member_list": {"group": "The group whose members to list."},
     "peer_agent_group_remove": {"group": "The group to disband."},
     "peer_agent_group_leave": {"group": "The group to leave."},
     "peer_agent_group_send_message": {

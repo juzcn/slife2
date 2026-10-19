@@ -206,14 +206,16 @@ BROADCAST = "broadcast"
 TASK_LIST = "task_list"
 
 #: The group-chat verbs, one family on both networks.  **The group is a named
-#: roster with an owner**, and these five are the whole of what a member can do
+#: roster with an owner**, and these six are the whole of what a member can do
 #: with one: create/update it (`group_set`), read what this conversation knows
-#: (`group_list`), disband it (`group_remove`, owner only), leave it
+#: (`group_list`), read who is in it (`group_member_list` — the separate member
+#: read, as in a chat app), disband it (`group_remove`, owner only), leave it
 #: (`group_leave`, the caller itself), and speak in it (`group_send_message`).
 #: A group's wire vocabulary is its own (`Net.group_marker` / `group_channel`),
 #: not the direct-message one.
 GROUP_SET = "group_set"
 GROUP_LIST = "group_list"
+GROUP_MEMBER_LIST = "group_member_list"
 GROUP_REMOVE = "group_remove"
 GROUP_LEAVE = "group_leave"
 GROUP_SEND_MESSAGE = "group_send_message"

@@ -580,7 +580,7 @@ clears it.
 Delivery is QoS 0, and the consequences are stated rather than softened: a
 member that is not listening misses the message, the sender is never a
 recipient (both skipped in the fan-out and suppressed by MQTT No Local), and
-`group_list` is what this conversation has persisted, not a live check. The
+`group_member_list` is what this conversation has persisted, not a live check. The
 state is per member because there is no shared database to own it; every
 cross-member fact has to be a wire event, and every member has to be able to
 converge from what it receives.

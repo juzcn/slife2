@@ -45,6 +45,7 @@ from slife2.libs.host.config import (
     CANCEL_TASK,
     GROUP_LEAVE,
     GROUP_LIST,
+    GROUP_MEMBER_LIST,
     GROUP_REMOVE,
     GROUP_SEND_MESSAGE,
     GROUP_SET,
@@ -95,6 +96,7 @@ from slife2.plugins.a2a.server import (
     PEER_CANCEL_TASK,
     PEER_GROUP_LEAVE,
     PEER_GROUP_LIST,
+    PEER_GROUP_MEMBER_LIST,
     PEER_GROUP_REMOVE,
     PEER_GROUP_SEND_MESSAGE,
     PEER_GROUP_SET,
@@ -236,7 +238,7 @@ def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
     assert REMOTE.tool(LIST) == "peer_agent_list"
     # The two families are named by their relationship, not by a wire: the two
     # names differ in the prefix and agree in the verb, on every one of them —
-    # the original five and the group five.
+    # the original five and the group six.
     for verb in (
         SEND_MESSAGE,
         CANCEL_TASK,
@@ -245,6 +247,7 @@ def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
         TASK_LIST,
         GROUP_SET,
         GROUP_LIST,
+        GROUP_MEMBER_LIST,
         GROUP_REMOVE,
         GROUP_LEAVE,
         GROUP_SEND_MESSAGE,
@@ -1801,6 +1804,7 @@ async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         PEER_CANCEL_TASK,
         PEER_GROUP_LEAVE,
         PEER_GROUP_LIST,
+        PEER_GROUP_MEMBER_LIST,
         PEER_GROUP_REMOVE,
         PEER_GROUP_SEND_MESSAGE,
         PEER_GROUP_SET,
@@ -1858,6 +1862,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
             TASK_LIST,
             GROUP_SET,
             GROUP_LIST,
+            GROUP_MEMBER_LIST,
             GROUP_REMOVE,
             GROUP_LEAVE,
             GROUP_SEND_MESSAGE,
@@ -1906,9 +1911,12 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     assert "every other member" in group_send.description
     assert LOCAL.group_marker in group_send.description
     assert REMOTE.group_marker not in group_send.description
-    assert "`from` (the sender), the group, its owner and every member" in (
-        group_send.description
-    )
+    assert "`from` (the sender), the group and its owner" in group_send.description
+    assert "members are a" in group_send.description
+    assert "separate read" in group_send.description
+    assert LOCAL.tool(GROUP_MEMBER_LIST) in group_send.description
+    assert LOCAL.tool(GROUP_MEMBER_LIST) in by_name[LOCAL.tool(GROUP_LIST)].description
+    assert "members" in by_name[LOCAL.tool(GROUP_MEMBER_LIST)].description
 
 
 @pytest.mark.asyncio
@@ -3383,17 +3391,15 @@ def test_group_vocabulary_is_the_networks_own() -> None:
     assert REMOTE.tool(GROUP_SET) == "peer_agent_group_set"
     assert LOCAL.tool(GROUP_SEND_MESSAGE) == "subagent_group_send_message"
 
-    text = group_store.group_marker(REMOTE, PEER, GROUP, PEER, (PEER, AGENT))
+    text = group_store.group_marker(REMOTE, PEER, GROUP, PEER)
     assert text == (
         '[PeerAgentGroup:{"from": "jill", "group": "builders", '
-        '"owner": "jill", "members": ["jill", "jack"], '
-        '"type": "group_message"}] '
+        '"owner": "jill", "type": "group_message"}] '
     )
     assert group_store.group_marker_payload(text, REMOTE) == {
         "from": PEER,
         "group": GROUP,
         "owner": PEER,
-        "members": [PEER, AGENT],
         "type": "group_message",
     }
     assert (
@@ -3401,7 +3407,7 @@ def test_group_vocabulary_is_the_networks_own() -> None:
         == "peer_agent_group:builders:jill"
     )
     # A group name may contain a bracket; the reader must not stop at it.
-    odd = group_store.group_marker(LOCAL, PEER, "a]b", PEER, (PEER,))
+    odd = group_store.group_marker(LOCAL, PEER, "a]b", PEER)
     assert group_store.group_marker_payload(odd, LOCAL)["group"] == "a]b"
 
 
@@ -3694,8 +3700,7 @@ async def test_a_group_message_arrives_on_the_group_channel(window: Window) -> N
     assert handed["channel"] == "peer_agent_group:builders:jill"
     assert handed["text"].startswith(
         '[PeerAgentGroup:{"from": "jill", "group": "builders", '
-        '"owner": "jill", "members": ["jill", "jack"], '
-        '"type": "group_message"}] '
+        '"owner": "jill", "type": "group_message"}] '
     )
     assert session.groups.get(GROUP).owner == PEER
     assert session.groups.get(GROUP).members == (PEER, AGENT)
@@ -3731,8 +3736,7 @@ async def test_a_local_group_message_wears_subagent_group_from_the_maker(
     assert turn["channel"] == "subagent_group:builders:jack"
     assert turn["prompt"].startswith(
         '[SubagentGroup:{"from": "jack", "group": "builders", '
-        '"owner": "jack", "members": ["jack", "tester"], '
-        '"type": "group_message"}] '
+        '"owner": "jack", "type": "group_message"}] '
     )
 
 
@@ -3797,6 +3801,9 @@ async def test_group_tools_on_the_peer_network(
             listed = await client.call_tool(
                 PEER_GROUP_LIST, {}, meta=client_meta(AGENT)
             )
+            members_read = await client.call_tool(
+                PEER_GROUP_MEMBER_LIST, {"group": GROUP}, meta=client_meta(AGENT)
+            )
             spoke = await client.call_tool(
                 PEER_GROUP_SEND_MESSAGE,
                 {"group": GROUP, "message": "@jill hello"},
@@ -3805,6 +3812,12 @@ async def test_group_tools_on_the_peer_network(
             left = await client.call_tool(
                 PEER_GROUP_LEAVE, {"group": GROUP}, meta=client_meta(AGENT)
             )
+            with pytest.raises(ToolError, match="no group named"):
+                await client.call_tool(
+                    PEER_GROUP_MEMBER_LIST,
+                    {"group": GROUP},
+                    meta=client_meta(AGENT),
+                )
             await client.call_tool(
                 PEER_GROUP_SET,
                 {"group": "other", "members": [PEER]},
@@ -3827,10 +3840,14 @@ async def test_group_tools_on_the_peer_network(
             {
                 "group": GROUP,
                 "owner": AGENT,
-                "members": [AGENT, PEER, "bob"],
                 "role": "owner",
             }
         ]
+        assert members_read.data["group"] == GROUP
+        assert members_read.data["owner"] == AGENT
+        assert members_read.data["members"] == [AGENT, PEER, "bob"]
+        assert members_read.data["role"] == "owner"
+        assert members_read.data["error"] == ""
         assert spoke.data["sent"] == 2
         assert published[1][1]["kind"] == group_store.GROUP_MESSAGE
         assert published[1][1]["text"] == "@jill hello"
@@ -3953,7 +3970,10 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
     assert "@all" in description
     assert "A mention is attention, not delivery" in description
     assert "still receives the message" in description
-    assert "`from` (the sender), the group, its owner and every member" in description
+    assert "`from` (the sender), the group and its owner" in description
+    assert "members are a" in description
+    assert "separate read" in description
+    assert PEER_GROUP_MEMBER_LIST in description
 
 
 @pytest.mark.asyncio

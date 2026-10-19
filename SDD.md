@@ -587,9 +587,10 @@ A subagent:
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
 After creation, it is reached over the local network with the same operations
-as a peer agent, under `subagent_*` names: the direct five, and the five group
-tools (`subagent_group_set`, `subagent_group_list`, `subagent_group_remove`,
-`subagent_group_leave`, `subagent_group_send_message`).
+as a peer agent, under `subagent_*` names: the direct five, and the six group
+tools (`subagent_group_set`, `subagent_group_list`,
+`subagent_group_member_list`, `subagent_group_remove`, `subagent_group_leave`,
+`subagent_group_send_message`).
 
 A message reaches a subagent the same way one reaches an agent: it is submitted
 to the shared agent server's inbox, and a message that arrives while a turn is
@@ -1546,10 +1547,10 @@ Rules specific to this system:
 14. **Group messages have their own vocabulary.** The peer network uses the
     `PeerAgentGroup` channel and marker; the local network uses
     `SubagentGroup`, for the maker and its subagents alike. The marker carries
-    `from` (the sender), the group, its owner and every member, so a reader can
-    answer, see the group's roster and mention someone without another call.
-    The wire payload carries the same fields and adds the generation id and the
-    kind; control events use the wire only and never become a marker.
+    `from` (the sender), the group and its owner. The roster is a separate read
+    (`group_member_list`), so a large group is not repeated in every message; the wire
+    payload carries it because membership has to converge from traffic. Control
+    events use the wire only and never become a marker.
 15. **Mentions are text, not delivery.** `@name` and `@all` address members the
     way a chat group does. They are attention: every other member still
     receives the message.
@@ -1566,6 +1567,7 @@ The model-facing tools are:
 - `peer_agent_broadcast`;
 - `peer_agent_group_set`;
 - `peer_agent_group_list`;
+- `peer_agent_group_member_list`;
 - `peer_agent_group_remove`;
 - `peer_agent_group_leave`;
 - `peer_agent_group_send_message`.

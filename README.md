@@ -915,7 +915,8 @@ the model reads.
 | `peer_agent_task_list` | List open tasks: those waiting for an answer and those still owed one. |
 | `peer_agent_broadcast` | Send a fire-and-forget event to every peer. |
 | `peer_agent_group_set` | Create a group and pull in the members you name; you become its owner. Calling it again as owner replaces the roster. |
-| `peer_agent_group_list` | List the groups this conversation knows, with owner and members. |
+| `peer_agent_group_list` | List the groups this conversation knows, with owner and your role. |
+| `peer_agent_group_member_list` | List a group's owner and members. |
 | `peer_agent_group_remove` | Disband a group you own. |
 | `peer_agent_group_leave` | Leave a group on your own; if you are the owner, ownership passes to the first remaining member. |
 | `peer_agent_group_send_message` | Send a fire-and-forget message to every other member of a group. `@name` and `@all` address members, as in a chat group. |
@@ -941,10 +942,10 @@ with none.
 A group is a named roster with an owner, created by `peer_agent_group_set`; no
 invitation or acceptance is involved. Group messages are delivered as
 fire-and-forget events to every other member — never back to the sender — and
-arrive with a `[PeerAgentGroup:{"from": …, "group": …, "owner": …,
-"members": […]}]` marker on the `peer_agent_group:<group>:<sender>` channel.
-The marker carries the roster, so every member can see who else is in the group
-and whom to mention. Each member keeps what it has
+arrive with a `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker on
+the `peer_agent_group:<group>:<sender>` channel.  Viewing the members is a
+separate read — `peer_agent_group_member_list` — as it is in a chat app, so a
+large group is not repeated in every message. Each member keeps what it has
 learned in `agents/<agent>/groups.yaml`, so groups survive a restart. A member
 that is offline when a group message is sent misses it; `peer_agent_group_list`
 is the local truth, not a live check. Only the owner can change the roster or
@@ -987,9 +988,9 @@ A subagent is created with `subagent_set` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations
 as a peer agent, under `subagent_*` names: `subagent_send_message`,
 `subagent_cancel_task`, `subagent_list`, `subagent_task_list`,
-`subagent_broadcast`, and the five group tools `subagent_group_set`,
-`subagent_group_list`, `subagent_group_remove`, `subagent_group_leave`, and
-`subagent_group_send_message`. Group traffic on this network wears the
+`subagent_broadcast`, and the six group tools `subagent_group_set`,
+`subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`,
+`subagent_group_leave`, and `subagent_group_send_message`. Group traffic on this network wears the
 `[SubagentGroup:…]` marker and the `subagent_group:<group>:<sender>` channel,
 whether the sender is the maker or a sibling, and each member keeps its own
 `groups.yaml`.

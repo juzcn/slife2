@@ -822,7 +822,8 @@ agent 的 peer 是其他 agent，通过公开发布的 A2A-over-MQTT profile 通
 | `peer_agent_task_list` | 列出仍然打开的任务：等待回答的和仍欠回答的。 |
 | `peer_agent_broadcast` | 向每个 peer 发送即发即忘的事件。 |
 | `peer_agent_group_set` | 建群并拉入指定成员；调用者成为群主。群主再次调用可替换成员名单。 |
-| `peer_agent_group_list` | 列出此对话已知的群，含群主与成员。 |
+| `peer_agent_group_list` | 列出此对话已知的群，含群主与自己的角色。 |
+| `peer_agent_group_member_list` | 列出某个群的群主与成员。 |
 | `peer_agent_group_remove` | 解散自己拥有的群。 |
 | `peer_agent_group_leave` | 自主退群；群主退出时，群主身份转给第一个剩余成员。 |
 | `peer_agent_group_send_message` | 向群内其他所有成员发送即发即忘的消息。像聊天群一样，可用 `@name` 和 `@all` 称呼成员。 |
@@ -844,9 +845,10 @@ agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己�
 
 群是一个带群主的有名成员名单，通过 `peer_agent_group_set` 创建，不需要邀请或
 接受。群消息作为即发即忘事件投递给其他所有成员——绝不会回送给发送者——以
-`[PeerAgentGroup:{"from": …, "group": …, "owner": …,
-"members": […]}]` marker 到达，频道为 `peer_agent_group:<group>:<sender>`。
-marker 带着成员名单，因此每个成员都能看到群里还有谁、可以 @ 谁。每个成员把学到的内容保存在
+`[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker 到达，频道为
+`peer_agent_group:<group>:<sender>`。查看成员是单独的操作
+（`peer_agent_group_member_list`），就像聊天软件一样，因此大群不会在每条消息里
+重复整份名单。每个成员把学到的内容保存在
 `agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
 会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或
 解散群；成员的退出方式是 `peer_agent_group_leave`。
@@ -882,9 +884,10 @@ subagent 是属于另一个 agent 的 agent。它拥有创建者的工具集、�
 subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建后，它通过
 本地网络使用与 peer agent 相同的操作访问，名称为 `subagent_*`：
 `subagent_send_message`、`subagent_cancel_task`、`subagent_list`、
-`subagent_task_list`、`subagent_broadcast`，以及五个群工具
-`subagent_group_set`、`subagent_group_list`、`subagent_group_remove`、
-`subagent_group_leave`、`subagent_group_send_message`。这张网上的群消息无论
+`subagent_task_list`、`subagent_broadcast`，以及六个群工具
+`subagent_group_set`、`subagent_group_list`、`subagent_group_member_list`、
+`subagent_group_remove`、`subagent_group_leave`、
+`subagent_group_send_message`。这张网上的群消息无论
 发送者是创建者还是兄弟 subagent，都佩戴 `[SubagentGroup:…]` marker 和
 `subagent_group:<group>:<sender>` 频道，每个成员保有自己的 `groups.yaml`。
 

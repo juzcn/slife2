@@ -92,6 +92,7 @@ from slife2.libs.host.config import (
     CANCEL_TASK,
     GROUP_LEAVE,
     GROUP_LIST,
+    GROUP_MEMBER_LIST,
     GROUP_REMOVE,
     GROUP_SEND_MESSAGE,
     GROUP_SET,
@@ -165,6 +166,7 @@ PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
 #: tests and the tool documentation rather than being magic in a decorator.
 PEER_GROUP_SET = REMOTE.tool(GROUP_SET)
 PEER_GROUP_LIST = REMOTE.tool(GROUP_LIST)
+PEER_GROUP_MEMBER_LIST = REMOTE.tool(GROUP_MEMBER_LIST)
 PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
 PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
 PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
@@ -904,7 +906,7 @@ def _wire(session: Session) -> None:
         if not result.deliver:
             return
         session.post(
-            f"{group_store.group_marker(session.net, event.sender, event.group, event.owner, event.members)}"
+            f"{group_store.group_marker(session.net, event.sender, event.group, event.owner)}"
             f"{event.text}",
             event.sender,
             f"a group message from {event.sender} in {event.group}",
@@ -2186,13 +2188,17 @@ def build_server(
         meta=FOR_THE_MODEL,
     )
     async def peer_agent_group_list(ctx: Context) -> dict[str, Any]:
-        """List the groups this conversation knows, owner and members.
+        """List the groups this conversation knows, their owner and your role.
 
         This is the member's own persisted knowledge, not a live presence
         query: a group is listed because this conversation learned or made it,
         and `role` says whether it is yours to disband.  A member that was
         removed while this conversation was away may still be listed until the
         next control or group message arrives — nothing to poll.
+
+        **The members are a separate read** — the group member list tool — as
+        they are in a chat app: the group list is the names, and a large
+        group's roster is not repeated for every group.
 
         `error` is the local file's problem when it has one (a corrupt store
         is set aside, not silently overwritten), or the network's switch when
@@ -2208,7 +2214,6 @@ def build_server(
             {
                 "group": one.name,
                 "owner": one.owner,
-                "members": list(one.members),
                 "role": "owner" if one.owner == session.mesh.agent_name else "member",
             }
             for one in sorted(
@@ -2218,6 +2223,43 @@ def build_server(
         return {
             "agent_name": safe_name(session.mesh.agent_name),
             "groups": listed,
+            "error": error,
+        }
+
+    @mcp.tool(
+        name=net.tool(GROUP_MEMBER_LIST),
+        description=describe_tool(net, GROUP_MEMBER_LIST),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_member_list(ctx: Context, group: str) -> dict[str, Any]:
+        """List the members of a group this conversation knows.
+
+        **The separate member read**, the one a chat app opens when somebody
+        taps the group name.  The message marker no longer repeats the roster
+        (`groups.group_marker`), so this is how a model sees who is in a group
+        and whom it can `@`.
+
+        It reads the member's own persisted record, never the network: a
+        member that was removed while this conversation was away may still be
+        listed until the next control or group message arrives.  An unknown
+        group is refused with the group list tool named, because a name this
+        conversation never learned is the wrong name rather than an empty
+        group.
+        """
+        sender, mine = speaker(ctx)
+        session = session_of(sender, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        settings = mesh_settings()
+        error = session.groups.load_error
+        if not error and not settings.configured:
+            error = switch_off(net)
+        return {
+            "group": found.name,
+            "owner": found.owner,
+            "members": list(found.members),
+            "role": "owner" if found.owner == session.mesh.agent_name else "member",
             "error": error,
         }
 
@@ -2492,18 +2534,28 @@ _TOOL_TEXTS: dict[str, str] = {
         "\n"
         "Every member's group list learns the roster from a group-set event.\n"
         "That notice is fire-and-forget: a member not on the network now may\n"
-        "miss it, but the next group message carries the roster."
+        "miss it, but the next group message updates their group list."
     ),
     GROUP_LIST: (
         "List the group chats this conversation knows — ones you made and ones\n"
         "you were pulled into.\n"
         "\n"
-        'Every row is `{{"group": …, "owner": …, "members": […], "role":\n'
-        '"owner"|"member"}}`. `role` says whether the group is yours to\n'
-        "disband. This is what this conversation has persisted locally, not a\n"
-        "live check of who is connected.\n"
+        'Every row is `{{"group": …, "owner": …, "role": "owner"|"member"}}`.\n'
+        "`role` says whether the group is yours to disband. The members are a\n"
+        "separate read: `{group_member_list}`. This is what this conversation\n"
+        "has persisted locally, not a live check of who is connected.\n"
         "\n"
         "`error` says when the local record could not be read."
+    ),
+    GROUP_MEMBER_LIST: (
+        "List the members of a group this conversation knows.\n"
+        "\n"
+        "Returns `group`, `owner`, `members` (including the owner), your `role`\n"
+        "(`owner` or `member`) and `error`. This is the separate member read,\n"
+        "as in a chat app: the message marker does not repeat the roster, so a\n"
+        "large group is not copied into every message. `{group_list}` shows\n"
+        "the groups you know. This is what this conversation has persisted\n"
+        "locally, not a live check of who is connected."
     ),
     GROUP_REMOVE: (
         "Disband a group you own.\n"
@@ -2524,8 +2576,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "\n"
         "**A reply is this call**: ending a turn sends nothing. You are never\n"
         "one of the recipients. The message arrives with a {group_marker}\n"
-        "naming `from` (the sender), the group, its owner and every member, so\n"
-        "you can see whom to address. Address people with `@name` as in a chat\n"
+        "naming `from` (the sender), the group and its owner. The members are a\n"
+        "separate read — `{group_member_list}` — so a large group is not\n"
+        "repeated in every message. Address people with `@name` as in a chat\n"
         "group:\n"
         "`@researcher` puts that member's name in the message, and `@all`\n"
         "addresses everyone. A mention is attention, not delivery — every other\n"
@@ -2642,6 +2695,8 @@ def describe_tool(net: Net, verb: str) -> str:
         send=net.tool(SEND_MESSAGE),
         cancel=net.tool(CANCEL_TASK),
         group_leave=net.tool(GROUP_LEAVE),
+        group_list=net.tool(GROUP_LIST),
+        group_member_list=net.tool(GROUP_MEMBER_LIST),
         **words,
     )
 
