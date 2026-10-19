@@ -33,7 +33,7 @@ Source: [`slife2/plugins/agent/server.py`](slife2/plugins/agent/server.py)
 
 ### `_check_new_input`
 
-[`slife2/plugins/agent/server.py:2325`](slife2/plugins/agent/server.py#L2325)
+[`slife2/plugins/agent/server.py:2367`](slife2/plugins/agent/server.py#L2367)
 
 The message that arrived while the turn was running, verbatim.
 
@@ -52,7 +52,7 @@ A string: the first message waiting for this conversation, verbatim, or `"Nothin
 
 ### `attach_image`
 
-[`slife2/plugins/agent/server.py:2261`](slife2/plugins/agent/server.py#L2261)
+[`slife2/plugins/agent/server.py:2303`](slife2/plugins/agent/server.py#L2303)
 
 Add the image parts a vision model reads to the request.
 
@@ -73,7 +73,7 @@ could not be read, each naming the source and the reason.
 
 ### `model_list`
 
-[`slife2/plugins/agent/server.py:2482`](slife2/plugins/agent/server.py#L2482)
+[`slife2/plugins/agent/server.py:2524`](slife2/plugins/agent/server.py#L2524)
 
 List the models this config defines.
 
@@ -95,7 +95,7 @@ when the config names none.
 
 ### `model_remove`
 
-[`slife2/plugins/agent/server.py:2669`](slife2/plugins/agent/server.py#L2669)
+[`slife2/plugins/agent/server.py:2711`](slife2/plugins/agent/server.py#L2711)
 
 Remove one model, named `provider/model`.
 
@@ -117,7 +117,7 @@ went with it, which happens when this was its last model.
 
 ### `model_set`
 
-[`slife2/plugins/agent/server.py:2537`](slife2/plugins/agent/server.py#L2537)
+[`slife2/plugins/agent/server.py:2579`](slife2/plugins/agent/server.py#L2579)
 
 Add or update one model, creating its provider.
 
@@ -152,7 +152,7 @@ provider for that protocol was already configured.
 
 ### `model_switch`
 
-[`slife2/plugins/agent/server.py:2757`](slife2/plugins/agent/server.py#L2757)
+[`slife2/plugins/agent/server.py:2799`](slife2/plugins/agent/server.py#L2799)
 
 Make `provider/model` the model this system runs on, at once.
 
@@ -176,7 +176,7 @@ already running this server moved onto it from their next turn.
 
 ### `subagent_remove`
 
-[`slife2/plugins/agent/server.py:3420`](slife2/plugins/agent/server.py#L3420)
+[`slife2/plugins/agent/server.py:3462`](slife2/plugins/agent/server.py#L3462)
 
 Unmake a subagent, and take everything it wrote with it.
 
@@ -207,7 +207,7 @@ gone and it is gone.
 
 ### `subagent_set`
 
-[`slife2/plugins/agent/server.py:3296`](slife2/plugins/agent/server.py#L3296)
+[`slife2/plugins/agent/server.py:3338`](slife2/plugins/agent/server.py#L3338)
 
 Make a subagent: an agent of your own, named, with its own memory.
 
@@ -835,7 +835,7 @@ Source: [`slife2/plugins/context/server.py`](slife2/plugins/context/server.py)
 
 ### `turn_list`
 
-[`slife2/plugins/context/server.py:392`](slife2/plugins/context/server.py#L392)
+[`slife2/plugins/context/server.py:400`](slife2/plugins/context/server.py#L400)
 
 Browse what was said before, newest first, one line per turn.
 
@@ -861,7 +861,7 @@ per turn — and `total`, how many turns the window holds, so
 
 ### `turn_read`
 
-[`slife2/plugins/context/server.py:440`](slife2/plugins/context/server.py#L440)
+[`slife2/plugins/context/server.py:448`](slife2/plugins/context/server.py#L448)
 
 One turn in full, by the id `turn_list` gave you.
 
@@ -1916,7 +1916,7 @@ Source: [`slife2/plugins/wechat/server.py`](slife2/plugins/wechat/server.py)
 
 ### `wechat_check_status`
 
-[`slife2/plugins/wechat/server.py:1635`](slife2/plugins/wechat/server.py#L1635)
+[`slife2/plugins/wechat/server.py:1649`](slife2/plugins/wechat/server.py#L1649)
 
 How the WeChat link is, and who a reply goes to.
 
@@ -1941,7 +1941,7 @@ and that peer is the account this login belongs to.
 
 ### `wechat_login`
 
-[`slife2/plugins/wechat/server.py:1613`](slife2/plugins/wechat/server.py#L1613)
+[`slife2/plugins/wechat/server.py:1627`](slife2/plugins/wechat/server.py#L1627)
 
 Get a QR code that logs this agent into WeChat.
 
@@ -1965,7 +1965,7 @@ long the code lasts.
 
 ### `wechat_logout`
 
-[`slife2/plugins/wechat/server.py:1689`](slife2/plugins/wechat/server.py#L1689)
+[`slife2/plugins/wechat/server.py:1703`](slife2/plugins/wechat/server.py#L1703)
 
 Disconnect WeChat and forget the saved login.
 
@@ -1985,7 +1985,7 @@ not), and `login_file`, the path it was at.
 
 ### `wechat_send_message`
 
-[`slife2/plugins/wechat/server.py:1658`](slife2/plugins/wechat/server.py#L1658)
+[`slife2/plugins/wechat/server.py:1672`](slife2/plugins/wechat/server.py#L1672)
 
 Send a WeChat message to somebody who has written to you.
 
