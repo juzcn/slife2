@@ -624,17 +624,31 @@ class Wechat:
 
     async def close(self) -> None:
         """Take down every loop, keep-alive and in-flight turn."""
+        cancelled: list[asyncio.Task[Any]] = []
         for session in self._sessions.values():
-            self._cancel(session.poll)
+            cancelled.extend(
+                task
+                for task in (
+                    session.poll,
+                    *session.typing.values(),
+                    session.qr_task,
+                    *session.inflight,
+                )
+                if task is not None
+            )
             session.poll = None
-            for task in session.typing.values():
-                self._cancel(task)
             session.typing.clear()
-            self._cancel(session.qr_task)
             session.qr_task = None
-            for task in list(session.inflight):
-                self._cancel(task)
             session.inflight.clear()
+        for task in cancelled:
+            self._cancel(task)
+        # **Await them, rather than only cancelling them.**  A cancelled task
+        # the loop never runs again ends with its coroutine un-awaited, and the
+        # garbage collector reports one at shutdown — the `Wechat._poll`
+        # warning a TUI test used to collect.  `return_exceptions` keeps one
+        # task's failure from hiding the others.
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
 
     @staticmethod
     def _cancel(task: asyncio.Task[Any] | None) -> None:
