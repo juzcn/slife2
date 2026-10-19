@@ -552,6 +552,50 @@ accept tasks from anybody on the network.
 speaks; any other value is a configuration error, not a silently disabled
 feature.
 
+#### 6.3.1 Group chat
+
+A group is a named roster with an owner, on either network. The design choice
+that carries it is the **directed event topic**: `event/{org}/{unit}/member:<name>`,
+one per recipient, subscribed by that member alone. It was chosen over three
+alternatives:
+
+- **a per-group topic** needs dynamic subscriptions and a per-group subscribe
+  lifecycle in the reconnect loop, and a member that missed the invitation is
+  not subscribed to the messages that would teach it the group;
+- **the request path** gives every group message a task lifecycle and a reply
+  ladder it has no use for — a group message expects no answer, and the ladder
+  would report `UNREACHABLE` for a conversation nobody owed an answer;
+- **the broadcast wildcard** would deliver every group's bytes to every member
+  of the namespace, and they would be dropped on receipt rather than at the
+  broker.
+
+The directed topic needs no subscription state beyond the fixed
+`member:<own name>`, so a member that missed a control still receives the next
+group message. The payload carries the roster and a **gid**; that is what lets
+a message teach a group the receiver never saw invited, while a delayed message
+cannot resurrect one it left. A tombstone remembers `(name, gid)` for the
+transition where this member stopped belonging; only an owner's `group_set`
+clears it.
+
+Delivery is QoS 0, and the consequences are stated rather than softened: a
+member that is not listening misses the message, the sender is never a
+recipient (both skipped in the fan-out and suppressed by MQTT No Local), and
+`group_list` is what this conversation has persisted, not a live check. The
+state is per member because there is no shared database to own it; every
+cross-member fact has to be a wire event, and every member has to be able to
+converge from what it receives.
+
+Two smaller rules follow from the rest of the system:
+
+- **A fork is never a member.** It is a temporary copy of its maker's
+  conversation and ends with the next start; a roster naming one would keep
+  addressing a name nobody answers. `group_set` refuses it before publishing,
+  `place_for_group` will not wake it, and the receive path drops its traffic.
+- **Mentions are text.** `@name` and `@all` are attention, as in a chat group;
+  the roster decides delivery. Parsing them into a filter would make a
+  message's audience depend on its words, which is the one thing a group's
+  roster must decide.
+
 ### 6.4 Agent tasks
 
 **Rule:** SDD §9.3.

@@ -5,7 +5,7 @@ slife2's own tools — the `plugin` category of the tool catalogue. External
 
 Arguments are the wire schemas the hub advertises. A tool's answer is not part
 of that schema, so every entry says what it returns. Generated from
-`agents/tools.db` (79 tools) by `scripts/gen_tools_doc.py`.
+`agents/tools.db` (89 tools) by `scripts/gen_tools_doc.py`.
 
 ## Contents
 
@@ -17,11 +17,11 @@ of that schema, so every entry says what it returns. Generated from
 - [File tunnel](#file-tunnel) (2)
 - [MCP configuration](#mcp-configuration) (5)
 - [Media](#media) (4)
-- [Peer agent network](#peer-agent-network) (5)
+- [Peer agent network](#peer-agent-network) (10)
 - [REST configuration](#rest-configuration) (5)
 - [Schedule](#schedule) (6)
 - [Skills](#skills) (5)
-- [Subagent network](#subagent-network) (5)
+- [Subagent network](#subagent-network) (10)
 - [Tool catalogue](#tool-catalogue) (3)
 - [WeChat](#wechat) (4)
 
@@ -1167,13 +1167,13 @@ Source: [`slife2/plugins/a2a/server.py`](slife2/plugins/a2a/server.py)
 
 ### `peer_agent_broadcast`
 
-[`slife2/plugins/a2a/server.py:1702`](slife2/plugins/a2a/server.py#L1702)
+[`slife2/plugins/a2a/server.py:1901`](slife2/plugins/a2a/server.py#L1901)
 
 Publish a fire-and-forget event to every peer agent.
 
 Nobody answers one and it is delivered at most once, so it is for
 information somebody may act on and not for anything you need a reply
-to — use `peer_agent_send_message` for that. It arrives as a `[PeerAgent:…` of type
+to — use `peer_agent_send_message` for that. It arrives as a `[PeerAgent:…]` of type
 'broadcast', with no task and no completion.
 
 **Parameters**
@@ -1188,7 +1188,7 @@ to — use `peer_agent_send_message` for that. It arrives as a `[PeerAgent:…` 
 
 ### `peer_agent_cancel_task`
 
-[`slife2/plugins/a2a/server.py:1507`](slife2/plugins/a2a/server.py#L1507)
+[`slife2/plugins/a2a/server.py:1706`](slife2/plugins/a2a/server.py#L1706)
 
 Withdraw a task you sent to another peer agent.
 
@@ -1208,9 +1208,120 @@ process never sent.
 
 `peer`, `task_id` and `status` — `cancelled`, `completed`, `failed` or `not_found`.
 
+### `peer_agent_group_leave`
+
+[`slife2/plugins/a2a/server.py:2150`](slife2/plugins/a2a/server.py#L2150)
+
+Leave a group you are in — your own decision, no one's approval.
+
+If you are the owner, ownership passes to the first remaining member;
+if nobody remains, the group is disbanded. The other members are
+notified, and the group disappears from your list.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to leave. |
+
+**Returns**
+
+`group`, `left`, `owner` and `members` after the leave, and `sent`; a last-member leave also says `disbanded`.
+
+### `peer_agent_group_list`
+
+[`slife2/plugins/a2a/server.py:2063`](slife2/plugins/a2a/server.py#L2063)
+
+List the group chats this conversation knows — ones you made and ones
+you were pulled into.
+
+Every row is `{"group": …, "owner": …, "members": […], "role":
+"owner"|"member"}`. `role` says whether the group is yours to
+disband. This is what this conversation has persisted locally, not a
+live check of who is connected.
+
+`error` says when the local record could not be read.
+
+**Parameters**
+
+No parameters.
+
+**Returns**
+
+`agent_name`, `groups` — rows of `group`, `owner`, `members` and `role` (`owner` or `member`) — and `error`.
+
+### `peer_agent_group_remove`
+
+[`slife2/plugins/a2a/server.py:2104`](slife2/plugins/a2a/server.py#L2104)
+
+Disband a group you own.
+
+Only the owner can do this; a member's way out is `peer_agent_group_leave`,
+which hands the group on rather than ending it. The members are
+notified and the group disappears from your list.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to disband. |
+
+**Returns**
+
+`group`, `disbanded` and `sent`.
+
+### `peer_agent_group_send_message`
+
+[`slife2/plugins/a2a/server.py:2219`](slife2/plugins/a2a/server.py#L2219)
+
+Send a message to every other member of a group you belong to.
+
+**A reply is this call**: ending a turn sends nothing. You are never
+one of the recipients. Address people with `@name` as in a chat group:
+`@researcher` puts that member's name in the message, and `@all`
+addresses everyone. A mention is attention, not delivery — every other
+member still receives the message. Delivery is fire-and-forget — no
+task, no completion — so a member that is not on the network now may
+miss it. Use `peer_agent_send_message` when you need an answer.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to speak in. |
+| `message` | `string` | yes | — | The words; `@name` and `@all` address members, as in a chat group. |
+
+**Returns**
+
+`group`, `sent` (how many other members were published to) and `note`.
+
+### `peer_agent_group_set`
+
+[`slife2/plugins/a2a/server.py:1972`](slife2/plugins/a2a/server.py#L1972)
+
+Create a group chat and pull in the peer agents you name. **You become
+its owner**, and the roster is the whole membership — nobody has to
+accept. Calling this again on a group you own replaces the roster (the
+way to add or remove someone); a member leaves with `peer_agent_group_leave`.
+
+Members are notified with a `[PeerAgentGroup:…]` of type 'group_set'. That
+notice is fire-and-forget: a member not on the network now may miss it,
+but the next group message carries the roster.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group's name; the handle every group tool uses. |
+| `members` | `array<string>` | yes | — | The member names to pull in; you are added as owner. |
+
+**Returns**
+
+`group`, `owner`, `members` (the roster, owner first), `sent` (how many members were notified) and `note`.
+
 ### `peer_agent_list`
 
-[`slife2/plugins/a2a/server.py:1531`](slife2/plugins/a2a/server.py#L1531)
+[`slife2/plugins/a2a/server.py:1730`](slife2/plugins/a2a/server.py#L1730)
 
 List the peer agents — you first, then each by name.
 
@@ -1232,16 +1343,16 @@ No parameters.
 
 ### `peer_agent_send_message`
 
-[`slife2/plugins/a2a/server.py:1425`](slife2/plugins/a2a/server.py#L1425)
+[`slife2/plugins/a2a/server.py:1624`](slife2/plugins/a2a/server.py#L1624)
 
 Send a message to another peer agent. **A reply is this call**: ending a turn
 sends nothing to the other side.
 
 `message_type` decides what it is. 'task_request' (the default) asks for
 work and returns an id straight away — the answer arrives later, on its
-own, as a `[PeerAgent:…` of type 'task_response'. Never wait for it and
+own, as a `[PeerAgent:…]` of type 'task_response'. Never wait for it and
 never poll: there is nothing to poll. 'task_response' completes a task
-somebody sent you, and needs the `task_id` from that task's `[PeerAgent:…`
+somebody sent you, and needs the `task_id` from that task's `[PeerAgent:…]`
 marker. 'message' is a plain conversation — no task, no completion, and
 the reply arrives as a message.
 
@@ -1260,7 +1371,7 @@ the reply arrives as a message.
 
 ### `peer_agent_task_list`
 
-[`slife2/plugins/a2a/server.py:1660`](slife2/plugins/a2a/server.py#L1660)
+[`slife2/plugins/a2a/server.py:1859`](slife2/plugins/a2a/server.py#L1859)
 
 List the tasks you have open on the peer network.
 
@@ -1725,7 +1836,7 @@ Source: [`slife2/plugins/a2a/server.py`](slife2/plugins/a2a/server.py)
 
 ### `subagent_broadcast`
 
-[`slife2/plugins/a2a/server.py:1702`](slife2/plugins/a2a/server.py#L1702)
+[`slife2/plugins/a2a/server.py:1901`](slife2/plugins/a2a/server.py#L1901)
 
 Publish a fire-and-forget event to every member of your subagent network.
 
@@ -1746,7 +1857,7 @@ to — use `subagent_send_message` for that. It arrives as a `[Agent:…]` or `[
 
 ### `subagent_cancel_task`
 
-[`slife2/plugins/a2a/server.py:1507`](slife2/plugins/a2a/server.py#L1507)
+[`slife2/plugins/a2a/server.py:1706`](slife2/plugins/a2a/server.py#L1706)
 
 Withdraw a task you sent to another member of your subagent network —
 one of the subagents in it, or your agent if you are one of them.
@@ -1767,9 +1878,120 @@ process never sent.
 
 `peer`, `task_id` and `status` — `cancelled`, `completed`, `failed` or `not_found`.
 
+### `subagent_group_leave`
+
+[`slife2/plugins/a2a/server.py:2150`](slife2/plugins/a2a/server.py#L2150)
+
+Leave a group you are in — your own decision, no one's approval.
+
+If you are the owner, ownership passes to the first remaining member;
+if nobody remains, the group is disbanded. The other members are
+notified, and the group disappears from your list.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to leave. |
+
+**Returns**
+
+`group`, `left`, `owner` and `members` after the leave, and `sent`; a last-member leave also says `disbanded`.
+
+### `subagent_group_list`
+
+[`slife2/plugins/a2a/server.py:2063`](slife2/plugins/a2a/server.py#L2063)
+
+List the group chats this conversation knows — ones you made and ones
+you were pulled into.
+
+Every row is `{"group": …, "owner": …, "members": […], "role":
+"owner"|"member"}`. `role` says whether the group is yours to
+disband. This is what this conversation has persisted locally, not a
+live check of who is connected.
+
+`error` says when the local record could not be read.
+
+**Parameters**
+
+No parameters.
+
+**Returns**
+
+`agent_name`, `groups` — rows of `group`, `owner`, `members` and `role` (`owner` or `member`) — and `error`.
+
+### `subagent_group_remove`
+
+[`slife2/plugins/a2a/server.py:2104`](slife2/plugins/a2a/server.py#L2104)
+
+Disband a group you own.
+
+Only the owner can do this; a member's way out is `subagent_group_leave`,
+which hands the group on rather than ending it. The members are
+notified and the group disappears from your list.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to disband. |
+
+**Returns**
+
+`group`, `disbanded` and `sent`.
+
+### `subagent_group_send_message`
+
+[`slife2/plugins/a2a/server.py:2219`](slife2/plugins/a2a/server.py#L2219)
+
+Send a message to every other member of a group you belong to.
+
+**A reply is this call**: ending a turn sends nothing. You are never
+one of the recipients. Address people with `@name` as in a chat group:
+`@researcher` puts that member's name in the message, and `@all`
+addresses everyone. A mention is attention, not delivery — every other
+member still receives the message. Delivery is fire-and-forget — no
+task, no completion — so a member that is not on the network now may
+miss it. Use `subagent_send_message` when you need an answer.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group to speak in. |
+| `message` | `string` | yes | — | The words; `@name` and `@all` address members, as in a chat group. |
+
+**Returns**
+
+`group`, `sent` (how many other members were published to) and `note`.
+
+### `subagent_group_set`
+
+[`slife2/plugins/a2a/server.py:1972`](slife2/plugins/a2a/server.py#L1972)
+
+Create a group chat and pull in the members of your subagent network you name. **You become
+its owner**, and the roster is the whole membership — nobody has to
+accept. Calling this again on a group you own replaces the roster (the
+way to add or remove someone); a member leaves with `subagent_group_leave`.
+
+Members are notified with a `[SubagentGroup:…]` of type 'group_set'. That
+notice is fire-and-forget: a member not on the network now may miss it,
+but the next group message carries the roster.
+
+**Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `group` | `string` | yes | — | The group's name; the handle every group tool uses. |
+| `members` | `array<string>` | yes | — | The member names to pull in; you are added as owner. |
+
+**Returns**
+
+`group`, `owner`, `members` (the roster, owner first), `sent` (how many members were notified) and `note`.
+
 ### `subagent_list`
 
-[`slife2/plugins/a2a/server.py:1531`](slife2/plugins/a2a/server.py#L1531)
+[`slife2/plugins/a2a/server.py:1730`](slife2/plugins/a2a/server.py#L1730)
 
 List the members of your subagent network —
 you first, then each by name.
@@ -1793,7 +2015,7 @@ No parameters.
 
 ### `subagent_send_message`
 
-[`slife2/plugins/a2a/server.py:1425`](slife2/plugins/a2a/server.py#L1425)
+[`slife2/plugins/a2a/server.py:1624`](slife2/plugins/a2a/server.py#L1624)
 
 Send a message to another member of your subagent network —
 one of the subagents in it, or your agent if you are one of them. **A reply is this call**: ending a turn
@@ -1822,7 +2044,7 @@ the reply arrives as a message.
 
 ### `subagent_task_list`
 
-[`slife2/plugins/a2a/server.py:1660`](slife2/plugins/a2a/server.py#L1660)
+[`slife2/plugins/a2a/server.py:1859`](slife2/plugins/a2a/server.py#L1859)
 
 List the tasks you have open on the subagent network.
 

@@ -43,6 +43,11 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     BROADCAST,
     CANCEL_TASK,
+    GROUP_LEAVE,
+    GROUP_LIST,
+    GROUP_REMOVE,
+    GROUP_SEND_MESSAGE,
+    GROUP_SET,
     LIST,
     LOCAL,
     LOCAL_AGENT,
@@ -60,6 +65,7 @@ from slife2.libs.host.paths import (
 from slife2.libs.host.runtime import read_record
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.plugins.a2a import broker
+from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import server as a2a_server
 from slife2.plugins.a2a.inbound_store import InboundStore
 from slife2.plugins.a2a.mesh import (
@@ -87,6 +93,11 @@ from slife2.plugins.a2a.server import (
     MAX_QUEUED,
     PEER_BROADCAST,
     PEER_CANCEL_TASK,
+    PEER_GROUP_LEAVE,
+    PEER_GROUP_LIST,
+    PEER_GROUP_REMOVE,
+    PEER_GROUP_SEND_MESSAGE,
+    PEER_GROUP_SET,
     PEER_LIST,
     PEER_SEND_MESSAGE,
     PEER_TASK_LIST,
@@ -224,8 +235,20 @@ def test_the_two_networks_say_the_same_things_in_their_own_words() -> None:
     assert LOCAL.tool(LIST) == "subagent_list"
     assert REMOTE.tool(LIST) == "peer_agent_list"
     # The two families are named by their relationship, not by a wire: the two
-    # names differ in the prefix and agree in the verb, on every one of the five.
-    for verb in (SEND_MESSAGE, CANCEL_TASK, LIST, BROADCAST, TASK_LIST):
+    # names differ in the prefix and agree in the verb, on every one of them —
+    # the original five and the group five.
+    for verb in (
+        SEND_MESSAGE,
+        CANCEL_TASK,
+        LIST,
+        BROADCAST,
+        TASK_LIST,
+        GROUP_SET,
+        GROUP_LIST,
+        GROUP_REMOVE,
+        GROUP_LEAVE,
+        GROUP_SEND_MESSAGE,
+    ):
         assert LOCAL.tool(verb).removeprefix("subagent_") == verb
         assert REMOTE.tool(verb).removeprefix("peer_agent_") == verb
     assert "a2a" not in REMOTE.tool(SEND_MESSAGE), "the wire is not the model's word"
@@ -1514,16 +1537,19 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
 async def test_a_member_does_not_receive_its_own_broadcast(
     monkeypatch: pytest.MonkeyPatch, subagent: str
 ) -> None:
-    """**No Local is what keeps the echo off the wire; the sender check is not.**
+    """**No Local keeps an event off its publisher's own subscription.**
 
-    The outbound client publishes `broadcast` and subscribes the event wildcard
-    on the same connection, so without the MQTT v5 subscription option the
-    broker hands the member back its own event — a handler call, a queue entry,
-    a channel and only then the `sender` comparison that throws it away.  No
-    Local is the promise that it never arrives, and it is asked for on the event
-    wildcard alone: the readiness card comes from the responder's *other*
-    connection, and replies come from a peer.  Both meshes are covered because
-    an agent and a subagent are one code path and two identities.
+    The outbound client publishes broadcasts and group events and subscribes
+    their topics on the same connection, so without the MQTT v5 subscription
+    option the broker hands the member back its own publication — a handler
+    call, a queue entry, a channel and only then the `sender` comparison that
+    throws it away.  No Local is the promise that it never arrives.
+
+    **Two exact topics, not the old wildcard.**  `broadcast` is everyone's and
+    `member:<own>` is this member's alone; the wildcard would have delivered
+    every group's traffic to every member of the namespace.  The readiness
+    card comes from the responder's *other* connection, and replies come from a
+    peer, so neither of those subscriptions is No Local.
     """
     mesh = A2AMesh(default_config().peer_agent, AGENT, subagent=subagent)
     broker = _OneMessageBroker(
@@ -1535,13 +1561,18 @@ async def test_a_member_does_not_receive_its_own_broadcast(
 
     await mesh._run_outbound()
 
-    events = [sub for sub in broker.subscriptions if sub[0] == mesh._topics.event("+")]
-    assert len(events) == 1, "the event wildcard is subscribed exactly once"
-    _, qos, options = events[0]
-    assert qos == 0, "qos and options cannot be combined; the QoS rides options"
-    assert options is not None, "the event subscription carries no options"
-    assert options.noLocal is True, "the broker would echo our own broadcast"
-    assert options.QoS == 1, "the subscription's QoS moved into the options"
+    broadcast = mesh._topics.event("broadcast")
+    directed = mesh._topics.event(f"member:{mesh.agent_name}")
+    events = [sub for sub in broker.subscriptions if sub[0] in (broadcast, directed)]
+    assert sorted(sub[0] for sub in events) == sorted([broadcast, directed])
+    assert not any(sub[0] == mesh._topics.event("+") for sub in broker.subscriptions), (
+        "the wildcard would deliver every group's traffic to every member"
+    )
+    for _, qos, options in events:
+        assert qos == 0, "qos and options cannot be combined; the QoS rides options"
+        assert options is not None, "the event subscription carries no options"
+        assert options.noLocal is True, "the broker would echo our own publication"
+        assert options.QoS == 1, "the subscription's QoS moved into the options"
 
 
 @pytest.mark.asyncio
@@ -1753,10 +1784,10 @@ def build(**overrides: Any) -> FastMCP:
 
 
 @pytest.mark.asyncio
-async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
-    """v1's four, plus the one that reads what they left behind.  `__check` has
-    no port — v2 has no system_health and what it reported is `peer_agent_list`'
-    answer.
+async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
+    """v1's four, the one that reads what they left behind, and the group five.
+    `__check` has no port — v2 has no system_health and what it reported is
+    `peer_agent_list`' answer.
 
     `join` is here and is deliberately not one of them: it crosses a process
     boundary for a *window* (it is held open, and holding it is what keeps the
@@ -1765,24 +1796,22 @@ async def test_the_five_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     """
     tools = await build().list_tools()
     by_name = {t.name: t for t in tools}
-    assert sorted(by_name) == [
-        FORGET,
-        JOIN,
+    model_names = [
         PEER_BROADCAST,
         PEER_CANCEL_TASK,
+        PEER_GROUP_LEAVE,
+        PEER_GROUP_LIST,
+        PEER_GROUP_REMOVE,
+        PEER_GROUP_SEND_MESSAGE,
+        PEER_GROUP_SET,
         PEER_LIST,
         PEER_SEND_MESSAGE,
         PEER_TASK_LIST,
     ]
+    assert sorted(by_name) == sorted([FORGET, JOIN, *model_names])
 
     model_tools = [name for name, tool in by_name.items() if for_the_model(tool.meta)]
-    assert sorted(model_tools) == [
-        PEER_BROADCAST,
-        PEER_CANCEL_TASK,
-        PEER_LIST,
-        PEER_SEND_MESSAGE,
-        PEER_TASK_LIST,
-    ]
+    assert sorted(model_tools) == sorted(model_names)
     assert not for_the_model(by_name[JOIN].meta), "a window's call, not the model's"
     assert not for_the_model(by_name[FORGET].meta), (
         "and a removal's is the agent server's"
@@ -1819,15 +1848,22 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     ).list_tools()
     by_name = {t.name: t for t in tools}
 
-    assert sorted(by_name) == [
-        FORGET,
-        JOIN,
-        LOCAL.tool(BROADCAST),
-        LOCAL.tool(CANCEL_TASK),
-        LOCAL.tool(LIST),
-        LOCAL.tool(SEND_MESSAGE),
-        LOCAL.tool(TASK_LIST),
+    local_tools = [
+        LOCAL.tool(verb)
+        for verb in (
+            SEND_MESSAGE,
+            CANCEL_TASK,
+            LIST,
+            BROADCAST,
+            TASK_LIST,
+            GROUP_SET,
+            GROUP_LIST,
+            GROUP_REMOVE,
+            GROUP_LEAVE,
+            GROUP_SEND_MESSAGE,
+        )
     ]
+    assert sorted(by_name) == sorted([FORGET, JOIN, *local_tools])
     assert PEER_SEND_MESSAGE not in by_name, "and not the remote network's names"
 
     send = by_name[LOCAL.tool(SEND_MESSAGE)]
@@ -1859,6 +1895,16 @@ async def test_the_local_instance_serves_the_local_network() -> None:
         "every member of your subagent network"
         in by_name[LOCAL.tool(BROADCAST)].description
     )
+    # The group tools keep the same vocabulary, and their envelope is the
+    # network's group marker — never the remote one.
+    group_set = by_name[LOCAL.tool(GROUP_SET)]
+    assert "members of your subagent network" in group_set.description
+    assert LOCAL.group_marker in group_set.description
+    assert REMOTE.group_marker not in group_set.description
+    group_send = by_name[LOCAL.tool(GROUP_SEND_MESSAGE)]
+    assert "@name" in group_send.description
+    assert "@all" in group_send.description
+    assert "every other member" in group_send.description
 
 
 @pytest.mark.asyncio
@@ -3274,3 +3320,627 @@ async def test_forget_gives_up_a_members_place(
     assert connected == [AGENT, "tester", "tester"], (
         "the place was not given up: the same session answered the second send"
     )
+
+
+# ── groups: the vocabulary, the store, the wire, and the five tools ─────────
+#
+# A group is a named roster with an owner.  Its state is the member's own —
+# every member persists what it learned under its own directory — and every
+# cross-member fact travels as a directed event on `member:<name>`.  The tests
+# below are in four layers: the vocabulary, the store's rules, the mesh's
+# routing, and the tools that write.
+
+GROUP = "builders"
+GID = "g1"
+
+
+def group_event(
+    kind: str = group_store.GROUP_MESSAGE,
+    *,
+    sender: str = PEER,
+    owner: str = PEER,
+    members: tuple[str, ...] = (PEER, AGENT),
+    gid: str = GID,
+    group: str = GROUP,
+    text: str = "hello",
+) -> dict[str, Any]:
+    """One group wire event, shaped the way the mesh publishes it."""
+    return {
+        "sender": sender,
+        "kind": kind,
+        "group": group,
+        "owner": owner,
+        "gid": gid,
+        "members": list(members),
+        "text": text,
+    }
+
+
+def directed(payload: dict[str, Any], to: str) -> FakeMessage:
+    """An event on *to*'s directed topic — the only place group traffic lands."""
+    return FakeMessage(
+        f"a2a/v1/event/default/default/member:{to}",
+        json.dumps(payload).encode(),
+    )
+
+
+def test_group_vocabulary_is_the_networks_own() -> None:
+    """Two networks, two group words, and the sender's kind does not choose."""
+    assert REMOTE.group_channel == "peer_agent_group"
+    assert REMOTE.group_marker == "[PeerAgentGroup:"
+    assert REMOTE.group_bubble == "PeerAgentGroup"
+    assert LOCAL.group_channel == "subagent_group"
+    assert LOCAL.group_marker == "[SubagentGroup:"
+    assert LOCAL.group_bubble == "SubagentGroup"
+    # The local network's maker is the same group speaker as its subagents.
+    assert LOCAL_AGENT.group_channel == LOCAL.group_channel
+    assert LOCAL_AGENT.group_marker == LOCAL.group_marker
+    assert LOCAL_AGENT.group_bubble == LOCAL.group_bubble
+    assert REMOTE.tool(GROUP_SET) == "peer_agent_group_set"
+    assert LOCAL.tool(GROUP_SEND_MESSAGE) == "subagent_group_send_message"
+
+    text = group_store.group_marker(REMOTE, PEER, GROUP)
+    assert text == (
+        '[PeerAgentGroup:{"from": "jill", "group": "builders", '
+        '"type": "group_message"}] '
+    )
+    assert group_store.group_marker_payload(text, REMOTE) == {
+        "from": PEER,
+        "group": GROUP,
+        "type": "group_message",
+    }
+    assert (
+        group_store.group_channel_for(REMOTE, GROUP, PEER)
+        == "peer_agent_group:builders:jill"
+    )
+    # A group name may contain a bracket; the reader must not stop at it.
+    odd = group_store.group_marker(LOCAL, PEER, "a]b")
+    assert group_store.group_marker_payload(odd, LOCAL)["group"] == "a]b"
+
+
+def test_group_and_member_names_are_validated_for_their_uses() -> None:
+    assert group_store.valid_group_name("builders")
+    assert group_store.valid_group_name("研发 小组")
+    assert not group_store.valid_group_name("a:b"), (
+        "the channel split would be ambiguous"
+    )
+    assert not group_store.valid_group_name("a/b")
+    assert not group_store.valid_group_name("a+b")
+    assert not group_store.valid_group_name("a#b")
+    assert not group_store.valid_group_name("a\x00b")
+    assert not group_store.valid_group_name("")
+    assert not group_store.valid_group_name(" padded ")
+    assert group_store.valid_member_name("a:b"), "a sender's colon is not a split"
+    assert not group_store.valid_member_name("a/b"), "a member is a topic segment"
+    assert group_store.clean_members("alice", ["bob", "alice", "bob"]) == (
+        "alice",
+        "bob",
+    )
+    with pytest.raises(group_store.GroupError):
+        group_store.clean_members("alice", ["a/b"])
+
+
+def test_group_state_round_trips_through_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "groups.yaml"
+    store = group_store.GroupStore(path)
+    store.learn(
+        group_store.GroupEvent(
+            group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+        )
+    )
+    store.add_tombstone("old-project", "g0")
+    store.save()
+
+    again = group_store.GroupStore.load(path)
+    assert again.get(GROUP).members == (PEER, AGENT)
+    assert again.get(GROUP).owner == PEER
+    assert again.is_tombstoned("old-project", "g0")
+
+
+def test_a_corrupt_group_file_is_set_aside_not_overwritten(tmp_path: Path) -> None:
+    path = tmp_path / "groups.yaml"
+    path.write_text("groups: [not-a-mapping", encoding="utf-8")
+
+    store = group_store.GroupStore.load(path)
+
+    assert store.groups == {}
+    assert not path.exists(), "the unreadable file was left where a write would meet it"
+    assert path.with_name("groups.yaml.corrupt").read_text(encoding="utf-8") == (
+        "groups: [not-a-mapping"
+    )
+
+
+def test_a_group_message_teaches_the_group_and_is_delivered() -> None:
+    store = group_store.GroupStore()
+    event = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+    )
+
+    result = group_store.apply_event(store, event, AGENT)
+
+    assert result.deliver and result.changed
+    assert store.get(GROUP).members == (PEER, AGENT)
+
+
+def test_a_foreign_or_stale_group_event_cannot_change_the_roster() -> None:
+    """A sender not in the roster, a stale gid, and a member's seizure all fail."""
+    store = group_store.GroupStore()
+    learned = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+    )
+    group_store.apply_event(store, learned, AGENT)
+
+    foreign = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE,
+        "eve",
+        GROUP,
+        PEER,
+        GID,
+        (PEER, AGENT, "eve"),
+        "let me in",
+    )
+    assert not group_store.apply_event(store, foreign, AGENT).deliver
+    assert store.get(GROUP).members == (PEER, AGENT)
+
+    stale = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE, PEER, GROUP, PEER, "g2", (PEER, AGENT), "old"
+    )
+    assert not group_store.apply_event(store, stale, AGENT).deliver
+
+    seizure = group_store.GroupEvent(
+        group_store.KIND_SET, AGENT, GROUP, AGENT, GID, (PEER, AGENT, "eve"), ""
+    )
+    assert not group_store.apply_event(store, seizure, AGENT).changed
+    assert store.get(GROUP).owner == PEER
+
+
+def test_an_owner_set_can_remove_a_member_and_a_tombstone_stops_a_late_message() -> (
+    None
+):
+    store = group_store.GroupStore()
+    group_store.apply_event(
+        store,
+        group_store.GroupEvent(
+            group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+        ),
+        AGENT,
+    )
+
+    removed = group_store.GroupEvent(
+        group_store.KIND_SET, PEER, GROUP, PEER, GID, (PEER,), ""
+    )
+    result = group_store.apply_event(store, removed, AGENT)
+
+    assert result.changed and not result.deliver
+    assert store.get(GROUP) is None
+    assert store.is_tombstoned(GROUP, GID), "the late message must not resurrect it"
+
+    late = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE,
+        PEER,
+        GROUP,
+        PEER,
+        GID,
+        (PEER, AGENT),
+        "still there?",
+    )
+    assert not group_store.apply_event(store, late, AGENT).deliver
+    assert store.get(GROUP) is None
+
+    # The owner's `group_set` is the re-invitation: it clears the tombstone.
+    reinvited = group_store.GroupEvent(
+        group_store.KIND_SET, PEER, GROUP, PEER, GID, (PEER, AGENT), ""
+    )
+    assert group_store.apply_event(store, reinvited, AGENT).changed
+    assert store.get(GROUP).members == (PEER, AGENT)
+    assert not store.is_tombstoned(GROUP, GID)
+
+
+def test_an_owner_leaving_hands_the_group_to_the_first_remaining_member() -> None:
+    store = group_store.GroupStore()
+    group_store.apply_event(
+        store,
+        group_store.GroupEvent(
+            group_store.GROUP_MESSAGE,
+            PEER,
+            GROUP,
+            PEER,
+            GID,
+            (PEER, AGENT, "bob"),
+            "hi",
+        ),
+        AGENT,
+    )
+
+    # The departing owner hands it to the first remaining member in roster
+    # order, which is jack here.
+    leave = group_store.GroupEvent(
+        group_store.KIND_LEAVE, PEER, GROUP, AGENT, GID, (AGENT, "bob"), ""
+    )
+    result = group_store.apply_event(store, leave, AGENT)
+
+    assert result.changed
+    assert store.get(GROUP).owner == AGENT
+    assert store.get(GROUP).members == (AGENT, "bob")
+
+
+def test_a_disband_is_owner_only_and_a_late_one_does_not_drop_a_new_group() -> None:
+    store = group_store.GroupStore()
+    group_store.apply_event(
+        store,
+        group_store.GroupEvent(
+            group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+        ),
+        AGENT,
+    )
+
+    not_owner = group_store.GroupEvent(
+        group_store.KIND_DISBANDED, AGENT, GROUP, AGENT, GID, (PEER, AGENT), ""
+    )
+    assert not group_store.apply_event(store, not_owner, AGENT).changed
+    assert store.get(GROUP) is not None
+
+    gone = group_store.GroupEvent(
+        group_store.KIND_DISBANDED, PEER, GROUP, PEER, GID, (PEER, AGENT), ""
+    )
+    assert group_store.apply_event(store, gone, AGENT).changed
+    assert store.get(GROUP) is None
+
+    # The name is free again with a new gid, and the old disband cannot touch it.
+    fresh = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE,
+        PEER,
+        GROUP,
+        PEER,
+        "g2",
+        (PEER, AGENT),
+        "new group",
+    )
+    assert group_store.apply_event(store, fresh, AGENT).deliver
+    assert not group_store.apply_event(store, gone, AGENT).changed
+    assert store.get(GROUP).gid == "g2"
+
+
+def test_group_events_are_read_only_on_the_members_own_topic() -> None:
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    messages: list[dict[str, Any]] = []
+    controls: list[dict[str, Any]] = []
+    mesh.on_group_message = messages.append
+    mesh.on_group_control = controls.append
+    payload = group_event()
+
+    mesh._handle_event(directed(payload, AGENT))
+    assert len(messages) == 1
+
+    mesh._handle_event(directed(payload, PEER))
+    assert len(messages) == 1, "another member's directed topic is not ours"
+
+    mesh._handle_event(
+        FakeMessage(
+            "a2a/v1/event/default/default/broadcast", json.dumps(payload).encode()
+        )
+    )
+    assert len(messages) == 1, "a directed event is not a broadcast"
+
+    mesh._handle_event(directed(group_event(group_store.KIND_SET, text=""), AGENT))
+    assert len(controls) == 1
+    assert len(messages) == 1, "a control is not a message"
+
+
+@pytest.mark.asyncio
+async def test_group_fanout_is_one_directed_event_per_member_never_the_sender() -> None:
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict[str, Any], int]] = []
+
+        async def publish(self, topic: str, payload: str, qos: int = 0) -> None:
+            self.sent.append((topic, json.loads(payload), qos))
+
+    recorder = Recorder()
+    mesh._outbound = recorder  # type: ignore[assignment]
+    mesh._connected = True
+
+    sent = await mesh.group_fanout(
+        [PEER, "bob", AGENT, PEER],
+        kind=group_store.GROUP_MESSAGE,
+        group=GROUP,
+        owner=PEER,
+        members=(PEER, "bob", AGENT),
+        gid=GID,
+        text="hi",
+    )
+
+    assert sent == 2, "the sender is not a recipient, and a duplicate is one name"
+    assert [topic for topic, _, _ in recorder.sent] == [
+        mesh._topics.event(f"member:{PEER}"),
+        mesh._topics.event("member:bob"),
+    ]
+    for _, payload, qos in recorder.sent:
+        assert qos == 0
+        assert payload["sender"] == AGENT
+        assert payload["group"] == GROUP
+        assert payload["members"] == [PEER, "bob", AGENT]
+
+    recorder.sent.clear()
+    with pytest.raises(group_store.GroupError):
+        await mesh.group_fanout(
+            ["a/b"],
+            kind=group_store.GROUP_MESSAGE,
+            group=GROUP,
+            owner=PEER,
+            members=(PEER, AGENT),
+            gid=GID,
+            text="hi",
+        )
+    assert recorder.sent == [], "a bad name must not leave a partial fan-out"
+
+
+@pytest.mark.asyncio
+async def test_a_group_message_arrives_on_the_group_channel(window: Window) -> None:
+    session = wired(window=window)
+    session.mesh._handle_event(directed(group_event(), AGENT))
+    await drain_until_idle(session, window=window)
+
+    handed = window.handed[-1]
+    assert handed["channel"] == "peer_agent_group:builders:jill"
+    assert handed["text"].startswith(
+        '[PeerAgentGroup:{"from": "jill", "group": "builders", '
+        '"type": "group_message"}] '
+    )
+    assert session.groups.get(GROUP).owner == PEER
+    assert session.groups.get(GROUP).members == (PEER, AGENT)
+
+
+@pytest.mark.asyncio
+async def test_a_group_control_changes_the_store_and_starts_no_turn(
+    window: Window,
+) -> None:
+    session = wired(window=window)
+    session.mesh._handle_event(
+        directed(group_event(group_store.KIND_SET, text=""), AGENT)
+    )
+    await drain_until_idle(session, window=window)
+
+    assert session.groups.get(GROUP).owner == PEER
+    assert window.handed == [], "membership bookkeeping is not a conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_local_group_message_wears_subagent_group_from_the_maker(
+    tmp_path: Path, agent_server: AgentServer
+) -> None:
+    """The maker and a sibling both read `SubagentGroup`; the sender is `@`-named."""
+    session = local_member(tmp_path, subagent="tester")
+    payload = group_event(sender=AGENT, owner=AGENT, members=(AGENT, "tester"))
+    session.mesh._handle_event(directed(payload, "tester"))
+    await drain_until_idle(session, agent=agent_server)
+
+    turn = agent_server.turns[-1]
+    assert turn["agent"] == AGENT
+    assert turn["subagent"] == "tester"
+    assert turn["channel"] == "subagent_group:builders:jack"
+    assert turn["prompt"].startswith(
+        '[SubagentGroup:{"from": "jack", "group": "builders", '
+        '"type": "group_message"}] '
+    )
+
+
+def test_a_fork_never_receives_group_traffic(tmp_path: Path) -> None:
+    session = local_member(tmp_path, subagent="forked")
+    session.fork = True
+    payload = group_event(sender=AGENT, owner=AGENT, members=(AGENT, "forked"))
+
+    session.mesh._handle_event(directed(payload, "forked"))
+
+    assert session.queue.empty()
+    assert session.groups.get(GROUP) is None
+
+
+@pytest.mark.asyncio
+async def test_a_learned_group_is_saved_and_a_restart_reads_it(
+    tmp_path: Path, window: Window
+) -> None:
+    with in_home(tmp_path):
+        path = group_store.groups_path(AGENT)
+        session = Session(
+            agent=AGENT,
+            net=REMOTE,
+            mesh=A2AMesh(default_config().peer_agent, AGENT),
+            groups=group_store.GroupStore.load(path),
+        )
+        _wire(session)
+        session.mesh._handle_event(directed(group_event(), AGENT))
+        await drain_until_idle(session, window=window)
+
+        assert path.is_file()
+        again = group_store.GroupStore.load(path)
+        assert again.get(GROUP).members == (PEER, AGENT)
+
+
+@pytest.mark.asyncio
+async def test_group_tools_on_the_peer_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Create, list, speak, leave, and disband — through the real registrations."""
+    published: list[tuple[list[str], dict[str, Any]]] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def fanout(self: Any, recipients: Any, **kwargs: Any) -> int:
+        targets = sorted(name for name in set(recipients) if name != self.agent_name)
+        published.append((targets, kwargs))
+        return len(targets)
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "group_fanout", fanout)
+
+    with in_home(tmp_path):
+        server = build(on_the_mesh=True)
+        async with Client(server) as client:
+            made = await client.call_tool(
+                PEER_GROUP_SET,
+                {"group": GROUP, "members": [PEER, "bob"]},
+                meta=client_meta(AGENT),
+            )
+            listed = await client.call_tool(
+                PEER_GROUP_LIST, {}, meta=client_meta(AGENT)
+            )
+            spoke = await client.call_tool(
+                PEER_GROUP_SEND_MESSAGE,
+                {"group": GROUP, "message": "@jill hello"},
+                meta=client_meta(AGENT),
+            )
+            left = await client.call_tool(
+                PEER_GROUP_LEAVE, {"group": GROUP}, meta=client_meta(AGENT)
+            )
+            await client.call_tool(
+                PEER_GROUP_SET,
+                {"group": "other", "members": [PEER]},
+                meta=client_meta(AGENT),
+            )
+            removed = await client.call_tool(
+                PEER_GROUP_REMOVE, {"group": "other"}, meta=client_meta(AGENT)
+            )
+
+        assert made.data["owner"] == AGENT
+        assert made.data["members"] == [AGENT, PEER, "bob"]
+        assert made.data["sent"] == 2
+        assert published[0][0] == sorted([PEER, "bob"])
+        assert published[0][1]["kind"] == group_store.KIND_SET
+        assert published[0][1]["group"] == GROUP
+        assert published[0][1]["owner"] == AGENT
+        assert published[0][1]["members"] == (AGENT, PEER, "bob")
+
+        assert listed.data["groups"] == [
+            {
+                "group": GROUP,
+                "owner": AGENT,
+                "members": [AGENT, PEER, "bob"],
+                "role": "owner",
+            }
+        ]
+        assert spoke.data["sent"] == 2
+        assert published[1][1]["kind"] == group_store.GROUP_MESSAGE
+        assert published[1][1]["text"] == "@jill hello"
+
+        assert left.data["left"] is True
+        assert left.data["owner"] == PEER
+        assert left.data["members"] == [PEER, "bob"]
+        assert (
+            group_store.GroupStore.load(group_store.groups_path(AGENT)).get(GROUP)
+            is None
+        )
+        assert removed.data["disbanded"] is True
+        assert (
+            group_store.GroupStore.load(group_store.groups_path(AGENT)).get("other")
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_local_group_roster_refuses_unknown_and_forked_members(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def fanout(self: Any, recipients: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "group_fanout", fanout)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        fork = subagent_file(AGENT, "forked")
+        fork.write_text("name: forked\nrole: test\nfork: true\n", encoding="utf-8")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="subagents"):
+                await client.call_tool(
+                    LOCAL.tool(GROUP_SET),
+                    {"group": GROUP, "members": ["nobody"]},
+                    meta=client_meta(AGENT),
+                )
+            with pytest.raises(ToolError, match="forked"):
+                await client.call_tool(
+                    LOCAL.tool(GROUP_SET),
+                    {"group": GROUP, "members": ["forked"]},
+                    meta=client_meta(AGENT),
+                )
+            with pytest.raises(ToolError, match="forked subagent"):
+                await client.call_tool(
+                    LOCAL.tool(GROUP_SET),
+                    {"group": GROUP, "members": ["tester"]},
+                    meta=client_meta(AGENT, "forked"),
+                )
+
+
+@pytest.mark.asyncio
+async def test_only_the_owner_can_change_or_disband_a_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def fanout(self: Any, recipients: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "group_fanout", fanout)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        write_subagent(AGENT, "tester2")
+        tester_path = group_store.groups_path(AGENT, "tester")
+        tester_store = group_store.GroupStore(tester_path)
+        tester_store.learn(
+            group_store.GroupEvent(
+                group_store.KIND_SET,
+                AGENT,
+                GROUP,
+                AGENT,
+                GID,
+                (AGENT, "tester"),
+                "",
+            )
+        )
+        tester_store.save()
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="belongs to"):
+                await client.call_tool(
+                    LOCAL.tool(GROUP_SET),
+                    {"group": GROUP, "members": ["tester2"]},
+                    meta=client_meta(AGENT, "tester"),
+                )
+            with pytest.raises(ToolError, match="only the owner"):
+                await client.call_tool(
+                    LOCAL.tool(GROUP_REMOVE),
+                    {"group": GROUP},
+                    meta=client_meta(AGENT, "tester"),
+                )
+            left = await client.call_tool(
+                LOCAL.tool(GROUP_LEAVE),
+                {"group": GROUP},
+                meta=client_meta(AGENT, "tester"),
+            )
+
+        assert left.data["left"] is True
+        assert left.data["members"] == [AGENT]
+        assert group_store.GroupStore.load(tester_path).get(GROUP) is None
+
+
+@pytest.mark.asyncio
+async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
+    tools = {tool.name: tool for tool in await build().list_tools()}
+
+    description = tools[PEER_GROUP_SEND_MESSAGE].description
+
+    assert "@name" in description
+    assert "@all" in description
+    assert "A mention is attention, not delivery" in description
+    assert "still receives the message" in description

@@ -69,6 +69,7 @@ import logging
 import random
 import re
 import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import NewType
 
@@ -89,6 +90,7 @@ from paho.mqtt.subscribeoptions import SubscribeOptions
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings
+from slife2.plugins.a2a import groups
 from slife2.plugins.a2a.inbound_store import InboundStore, iso_now
 from slife2.plugins.a2a.task_store import get_store
 from slife2.tui import notes
@@ -560,7 +562,7 @@ def _reply_state(data: dict) -> str:
 class A2AMesh:
     """Standard A2A mesh driver — inbound responder + thin outbound client.
 
-    The plugin sets the five callbacks, then :meth:`connect` /
+    The plugin sets its callbacks, then :meth:`connect` /
     :meth:`disconnect`.  Tools call :meth:`send_message`, :meth:`cancel_task`,
     :meth:`list_agents`, :meth:`complete_task`.
     """
@@ -658,6 +660,12 @@ class A2AMesh:
         # known only to the model.  Never a control signal.
         self.on_peer_cancel = lambda task_id, peer: None
         self.on_broadcast_event = lambda sender, text: None
+        # Group traffic: a message for the conversation, and a control that
+        # only changes what this member knows.  Both carry the validated wire
+        # payload as one dict — the plugin owns the group semantics
+        # (`slife2.plugins.a2a.groups`), the mesh owns the transport.
+        self.on_group_message = lambda data: None
+        self.on_group_control = lambda data: None
 
     # ── Connection ──────────────────────────────────────────────────────
 
@@ -1003,25 +1011,37 @@ class A2AMesh:
                         self._topics.reply(self.agent_name, "+"),
                         qos=1,
                     )
-                    # **No Local, so a broadcast is not delivered to the member
-                    # that sent it.**  This client is both the publisher of our
-                    # events (`broadcast`) and the subscriber of the wildcard
-                    # they land on, and MQTT v5 otherwise forwards a client its
-                    # own publications.  The No Local subscription option is the
-                    # broker's promise not to, which is the layer that can keep
-                    # it: the event never crosses the wire into a handler, a
-                    # queue, a channel or a turn.  The payload's `sender` check
-                    # in `_handle_event` stays as the receiver's own guard: it is
-                    # what refuses an event that *names* us without this client
-                    # having published it — somebody else's claim about who
-                    # spoke, which No Local cannot see.
+                    # **No Local, so a member's own event is not delivered
+                    # back to it.**  This client is both the publisher of our
+                    # events and the subscriber of the topics they land on, and
+                    # MQTT v5 otherwise forwards a client its own publications.
+                    # The option is the broker's promise not to, which is the
+                    # layer that can keep it: the event never crosses the wire
+                    # into a handler, a queue, a channel or a turn.  The
+                    # payload's `sender` check in `_handle_event` stays as the
+                    # receiver's own guard: it is what refuses an event that
+                    # *names* us without this client having published it —
+                    # somebody else's claim about who spoke, which No Local
+                    # cannot see.
+                    #
+                    # **Two exact topics, not a wildcard.**  `broadcast` is
+                    # everyone's; `member:<our name>` is ours alone.  A group
+                    # event is published to one recipient's member topic, so a
+                    # non-member never receives it — the old `event("+")`
+                    # wildcard would have delivered every group's traffic to
+                    # every member of the namespace.  Nothing else publishes an
+                    # event id in this build.
                     #
                     # The other two subscriptions are deliberately not No Local:
                     # the card `_responder_ready` waits for is published by the
                     # *responder's* connection, a different client id, and
                     # replies come from a peer.
                     await client.subscribe(
-                        self._topics.event("+"),
+                        self._topics.event("broadcast"),
+                        options=SubscribeOptions(qos=1, noLocal=True),
+                    )
+                    await client.subscribe(
+                        self._topics.event(f"member:{self.agent_name}"),
                         options=SubscribeOptions(qos=1, noLocal=True),
                     )
                     self._outbound = client
@@ -1104,24 +1124,43 @@ class A2AMesh:
             self._handle_event(msg)
 
     def _handle_event(self, msg) -> None:
-        """Fire-and-forget broadcast event (no reply, no task_id).
+        """One fire-and-forget event: a broadcast, or group traffic to us.
 
-        The payload carries ``{"sender": …, "text": …}`` so receivers can
-        attribute a broadcast whose topic's final segment is the shared
-        ``broadcast`` id (not the publisher's address).
+        **The topic's final segment is the address.**  ``broadcast`` is
+        everyone's; ``member:<our name>`` is ours alone, and that is where
+        group traffic is published.  The payload's ``kind`` then says whether
+        a directed event is a group message or a control.  The full shape is
+        the plugin's to validate (``groups.parse_event``); this only refuses
+        what must never reach a callback.
+
+        The sender check is not an echo filter — No Local keeps our own
+        publications off this subscription (`_run_outbound`) — but the
+        receiver's guard against somebody else naming us as the sender.
         """
         data = _decode_payload(msg)
-        if data is None:
-            return  # a broadcast we don't recognise is dropped
+        if not isinstance(data, dict):
+            return
         sender = data.get("sender", "")
-        text = data.get("text", "")
-        if sender == self.agent_name:
-            # Not our own echo — No Local keeps that off this subscription
-            # (`_run_outbound`) — but somebody else's claim that we spoke.
+        if not isinstance(sender, str) or not sender or sender == self.agent_name:
             return
-        if not text:
+        try:
+            tail = msg.topic.value.rsplit("/", 1)[-1]
+        except (AttributeError, IndexError):
             return
-        self.on_broadcast_event(sender or "unknown", text)
+        if tail == "broadcast":
+            text = data.get("text", "")
+            if isinstance(text, str) and text:
+                self.on_broadcast_event(sender, text)
+            return
+        if tail != f"member:{self.agent_name}":
+            return
+        kind = data.get("kind")
+        if kind == groups.GROUP_MESSAGE:
+            text = data.get("text")
+            if isinstance(text, str) and text:
+                self.on_group_message(data)
+        elif kind in groups.GROUP_KINDS:
+            self.on_group_control(data)
 
     def _handle_discovery(self, msg) -> None:
         topic = msg.topic.value
@@ -1508,7 +1547,7 @@ class A2AMesh:
 
         Subscribers receive it as an inbound ``[PeerAgent:…]`` event without a
         task_id — no reply is expected.  **The sender is not one of them**: the
-        event wildcard is subscribed with MQTT v5's No Local option
+        event topic is subscribed with MQTT v5's No Local option
         (`_run_outbound`), so the broker does not forward this publication back
         to the client that made it.  The payload's ``sender`` is therefore the
         receiver's attribution, and `_handle_event` keeps it as a guard against
@@ -1519,6 +1558,67 @@ class A2AMesh:
             ensure_ascii=False,
         )
         await self._publish_plain(self._topics.event("broadcast"), payload, qos=0)
+
+    async def group_fanout(
+        self,
+        recipients: Iterable[str],
+        *,
+        kind: str,
+        group: str,
+        owner: str,
+        members: Sequence[str],
+        gid: str,
+        text: str = "",
+    ) -> int:
+        """Publish one group event to each recipient — never to the sender.
+
+        **One topic per recipient**, ``event("member:<name>")``, which is the
+        subscription every member has and nobody else does.  That is what makes
+        a group members-only without a per-group subscription: a non-member's
+        broker session never matches the topic at all.
+
+        **Every name is validated before the first publish.**  A bad name is a
+        topic that cannot be published; discovering that halfway through a
+        roster would leave a partial fan-out behind, which is the one shape a
+        fire-and-forget fan-out must not have.  The sender is injected here
+        rather than taken from the caller, so a member cannot forge ``from``.
+
+        QoS 0 and no correlation: this is a conversation, not a task.  A member
+        that is offline or whose outbound connection drops simply misses it,
+        which the tool's description says.  Returns how many were published.
+        """
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw in recipients:
+            if not isinstance(raw, str):
+                raise groups.GroupError("a group member name must be a string.")
+            if not raw or raw == self.agent_name or raw in seen:
+                continue
+            if not groups.valid_member_name(raw):
+                raise groups.GroupError(
+                    f"{raw!r} is not a member name this network can address."
+                )
+            seen.add(raw)
+            targets.append(raw)
+        body = json.dumps(
+            {
+                "sender": self.agent_name,
+                "kind": kind,
+                "group": group,
+                "owner": owner,
+                "gid": gid,
+                "members": list(members),
+                "text": text,
+            },
+            ensure_ascii=False,
+        )
+        for name in targets:
+            await self._publish_plain(
+                self._topics.event(f"member:{name}"),
+                body,
+                qos=0,
+            )
+        return len(targets)
 
     async def _publish_plain(
         self,

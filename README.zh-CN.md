@@ -821,6 +821,11 @@ agent 的 peer 是其他 agent，通过公开发布的 A2A-over-MQTT profile 通
 | `peer_agent_list` | 列出此 agent（排第一），然后按名字列出每个 peer。 |
 | `peer_agent_task_list` | 列出仍然打开的任务：等待回答的和仍欠回答的。 |
 | `peer_agent_broadcast` | 向每个 peer 发送即发即忘的事件。 |
+| `peer_agent_group_set` | 建群并拉入指定成员；调用者成为群主。群主再次调用可替换成员名单。 |
+| `peer_agent_group_list` | 列出此对话已知的群，含群主与成员。 |
+| `peer_agent_group_remove` | 解散自己拥有的群。 |
+| `peer_agent_group_leave` | 自主退群；群主退出时，群主身份转给第一个剩余成员。 |
+| `peer_agent_group_send_message` | 向群内其他所有成员发送即发即忘的消息。像聊天群一样，可用 `@name` 和 `@all` 称呼成员。 |
 
 `task_request` 立即返回 id；结果稍后作为一条带有
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker 的消息
@@ -836,6 +841,14 @@ agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己�
 `peer_agent_list` 获取。窗口持有 `join` 调用期间，agent 就在 mesh 上；
 `--headless` 在没有窗口的情况下持有同一个调用。入站任务不持久化：进行中的
 任务保存在内存中，重启后从零开始。
+
+群是一个带群主的有名成员名单，通过 `peer_agent_group_set` 创建，不需要邀请或
+接受。群消息作为即发即忘事件投递给其他所有成员——绝不会回送给发送者——以
+`[PeerAgentGroup:{"from": …, "group": …}]` marker 到达，频道为
+`peer_agent_group:<group>:<sender>`。每个成员把学到的内容保存在
+`agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
+会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或
+解散群；成员的退出方式是 `peer_agent_group_leave`。
 
 当配置的 broker 在本机且不存在时，会自动启动；只有 slife2 启动的 broker 才会随
 整套服务停止。系统安装的 broker 或手动启动的 broker 不会被碰。无法服务的 broker
@@ -866,9 +879,13 @@ subagent 是属于另一个 agent 的 agent。它拥有创建者的工具集、�
 `subagent_remove` 会拒绝 subagent 调用者。
 
 subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建后，它通过
-本地网络使用与 peer agent 相同的五个操作访问，名称为 `subagent_*`：
+本地网络使用与 peer agent 相同的操作访问，名称为 `subagent_*`：
 `subagent_send_message`、`subagent_cancel_task`、`subagent_list`、
-`subagent_task_list` 和 `subagent_broadcast`。
+`subagent_task_list`、`subagent_broadcast`，以及五个群工具
+`subagent_group_set`、`subagent_group_list`、`subagent_group_remove`、
+`subagent_group_leave`、`subagent_group_send_message`。这张网上的群消息无论
+发送者是创建者还是兄弟 subagent，都佩戴 `[SubagentGroup:…]` marker 和
+`subagent_group:<group>:<sender>` 频道，每个成员保有自己的 `groups.yaml`。
 
 | 键 | 含义 |
 |---|---|
@@ -883,6 +900,8 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 只读取创建者的 turn log 作为上下文，不向其中写入；文件柜和媒体也共享创建者的。
 fork 是会话级（session-lived）的，就像创建者在当前会话中的一个临时分身：
 agent server 下次启动时会删除上一会话留下的所有 fork 记录，名称重新可用。
+**fork 不能被拉进群**：它是临时的，名单里留下它就会一直向一个没人应答的名字
+发送；`subagent_group_set` 会拒绝 fork，fork 的群消息也会被丢弃。
 微信和 peer agent 网络属于 agent，不属于 subagent；定时任务也留在 agent 上。
 树只到一层：subagent 不能创建或移除 subagent，因为本地网络只为其创建者自己的
 subagent 保留位置，再下一层没有位置。

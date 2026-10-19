@@ -641,12 +641,12 @@ def work_dir(agent: str, subagent: str = "") -> Path:
     ``subagent=""`` is the maker's own conversation, which uses the agent's
     directory like a fork does.
     """
-    if subagent and not _forked(agent, subagent):
+    if subagent and not forked(agent, subagent):
         return agent_dir(agent, subagent)
     return agent_dir(agent)
 
 
-def _forked(agent: str, subagent: str) -> bool:
+def forked(agent: str, subagent: str) -> bool:
     """Whether *subagent* was made as a fork, read from its own record.
 
     A missing or unreadable record is not a fork: the directory is then the

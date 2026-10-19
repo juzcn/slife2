@@ -4,7 +4,7 @@ An agent reaches two kinds of agent, and they are different in kind rather than
 in namespace (SDD §3.5): its **remote** peers, which may be on another machine
 and on a broker somebody else runs, and the **subagents** it made, which are
 directories under its own.  Both are served by `slife2.plugins.a2a.server` — the
-protocol, the mesh, the envelopes and the five tools are one implementation —
+protocol, the mesh, the envelopes and the tools are one implementation —
 and what this module is is that server told *which* network to be: its own
 section (`subagent:`), its own names (`subagent_*`), its own channel and its own
 envelope word.

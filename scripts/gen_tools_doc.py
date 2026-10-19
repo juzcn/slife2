@@ -173,6 +173,22 @@ RETURNS = {
         "`since` — and `error`."
     ),
     "peer_agent_broadcast": "`broadcast` (the event sent) and `note`.",
+    "peer_agent_group_set": (
+        "`group`, `owner`, `members` (the roster, owner first), `sent` (how "
+        "many members were notified) and `note`."
+    ),
+    "peer_agent_group_list": (
+        "`agent_name`, `groups` — rows of `group`, `owner`, `members` and "
+        "`role` (`owner` or `member`) — and `error`."
+    ),
+    "peer_agent_group_remove": "`group`, `disbanded` and `sent`.",
+    "peer_agent_group_leave": (
+        "`group`, `left`, `owner` and `members` after the leave, and `sent`; a "
+        "last-member leave also says `disbanded`."
+    ),
+    "peer_agent_group_send_message": (
+        "`group`, `sent` (how many other members were published to) and `note`."
+    ),
     "schedule_set": (
         "The task row: `name`, `description`, `cron`, `timezone`, `enabled`, "
         "`created_at`, `last_due` and `next_run`."
@@ -208,13 +224,18 @@ RETURNS = {
     ),
 }
 
-#: The subagent network serves the same five A2A tools under its own names.
+#: The subagent network serves the same A2A tools under its own names.
 SUBAGENT_SAME = {
     "subagent_send_message": "peer_agent_send_message",
     "subagent_cancel_task": "peer_agent_cancel_task",
     "subagent_list": "peer_agent_list",
     "subagent_task_list": "peer_agent_task_list",
     "subagent_broadcast": "peer_agent_broadcast",
+    "subagent_group_set": "peer_agent_group_set",
+    "subagent_group_list": "peer_agent_group_list",
+    "subagent_group_remove": "peer_agent_group_remove",
+    "subagent_group_leave": "peer_agent_group_leave",
+    "subagent_group_send_message": "peer_agent_group_send_message",
 }
 
 #: The hub's own descriptions live in source constants, so the catalogue can lag
@@ -243,6 +264,18 @@ PARAM_NOTES: dict[str, dict[str, str]] = {
         "task_id": "The task to withdraw.",
     },
     "peer_agent_broadcast": {"event": "The event to publish."},
+    "peer_agent_group_set": {
+        "group": "The group's name; the handle every group tool uses.",
+        "members": "The member names to pull in; you are added as owner.",
+    },
+    "peer_agent_group_remove": {"group": "The group to disband."},
+    "peer_agent_group_leave": {"group": "The group to leave."},
+    "peer_agent_group_send_message": {
+        "group": "The group to speak in.",
+        "message": (
+            "The words; `@name` and `@all` address members, as in a chat group."
+        ),
+    },
     "schedule_set": {
         "name": "The task's name, used by every other schedule tool.",
         "description": "What to do when it comes due, and what done looks like.",

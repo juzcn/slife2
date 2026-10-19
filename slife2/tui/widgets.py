@@ -62,7 +62,7 @@ from slife2.libs.harness.markers import strip as strip_marker
 # imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
-from slife2.libs.host.config import LOCAL, LOCAL_AGENT
+from slife2.libs.host.config import LOCAL, LOCAL_AGENT, REMOTE
 from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
 from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
@@ -94,6 +94,14 @@ MARKERS: tuple[str, ...] = (
     # Two markers because the *sender's* kind decides the word; one list
     # because this window strips every envelope it knows.
     LOCAL_AGENT.marker,
+    # **The group envelopes are their own pair**, and they are *not* the
+    # sender's word: every group message on the remote network wears
+    # `[PeerAgentGroup:` and every one on the local network `[SubagentGroup:`,
+    # whether the sender is the maker or a sibling.  `LOCAL_AGENT` inherits the
+    # local group marker through `dataclasses.replace`, so two entries cover
+    # both speakers.
+    REMOTE.group_marker,
+    LOCAL.group_marker,
 )
 
 #: So `_add` can hand back the widget type it was given.
@@ -143,6 +151,21 @@ def is_own_channel(channel: str) -> bool:
     return channel in ("", WINDOW_CHANNEL)
 
 
+def _group_bubble(bubble: str, channel: str) -> str:
+    """`PeerAgentGroup(alice@builders)> ` from a group channel.
+
+    The channel is ``<group_channel>:<group>:<sender>``.  A group name is
+    validated to exclude ``:``, so the first colon after the channel is the
+    group's end; the sender is everything after it, colon and all, because a
+    member's name is not this parser's to rewrite.
+    """
+    rest = channel.split(":", 1)[1]
+    group, _, sender = rest.partition(":")
+    if not sender:
+        return f"{bubble}({group})> "
+    return f"{bubble}({sender}@{group})> "
+
+
 def channel_prefix(channel: str) -> str:
     """What a turn's channel is called on screen.
 
@@ -190,6 +213,18 @@ def channel_prefix(channel: str) -> str:
         # from, which is why every message this plugin hands over names a task —
         # including the reconciliation, which is sent per task for this reason.
         return f"Scheduled({channel.split(':', 1)[1]})> "
+    if channel.startswith(f"{REMOTE.group_channel}:"):
+        # A group on the peer network.  The bubble names the sender *and* the
+        # group, because a group turn's channel is the only place either can be
+        # recovered: the marker is stripped before drawing, and the words alone
+        # do not say who in the group spoke.
+        return _group_bubble(REMOTE.group_bubble, channel)
+    if channel.startswith(f"{LOCAL.group_channel}:"):
+        # A group on the local network.  The sender is `@`-named inside the
+        # word the *network* owns: a maker and a sibling both speak here, and
+        # the group vocabulary deliberately does not tell them apart
+        # (`slife2.libs.host.config.LOCAL.group_bubble`).
+        return _group_bubble(LOCAL.group_bubble, channel)
     if channel.startswith(f"{PEER_CHANNEL}:"):
         # A peer agent.  The name is in the channel because a hand-over carries
         # the channel and the words and nothing else — the marker beside the

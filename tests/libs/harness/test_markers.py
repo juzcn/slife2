@@ -164,6 +164,46 @@ def test_a_scheduled_trigger_says_which_task_came_due() -> None:
     assert channel_prefix(SCHEDULE_CHANNEL) == f"{SCHEDULE_CHANNEL}> "
 
 
+def test_a_group_message_names_its_sender_and_its_group() -> None:
+    """**The group word and the sender, because a group turn is either.**
+
+    A group's channel is `<group_channel>:<group>:<sender>` and the marker is
+    stripped before drawing, so the channel is the only place the window can
+    recover who in the group spoke.  The sender is `@`-named inside the word
+    the *network* owns: a maker and its subagents both read `SubagentGroup`.
+    """
+    from slife2.libs.host.config import LOCAL, REMOTE
+
+    assert (
+        channel_prefix("peer_agent_group:builders:alice")
+        == "PeerAgentGroup(alice@builders)> "
+    )
+    assert (
+        channel_prefix("subagent_group:builders:jack")
+        == "SubagentGroup(jack@builders)> "
+    )
+    # The group name is validated to exclude `:`; a sender may contain one and
+    # keeps everything after the group's colon.
+    assert (
+        channel_prefix("peer_agent_group:builders:a:b")
+        == "PeerAgentGroup(a:b@builders)> "
+    )
+    assert REMOTE.group_marker in MARKERS
+    assert LOCAL.group_marker in MARKERS
+    assert (
+        markers.strip(
+            '[PeerAgentGroup:{"from": "alice", "group": "builders"}] hi', *MARKERS
+        )
+        == "hi"
+    )
+    assert (
+        markers.strip(
+            '[SubagentGroup:{"from": "jack", "group": "builders"}] hi', *MARKERS
+        )
+        == "hi"
+    )
+
+
 def test_the_two_channels_a_window_already_knew_are_unchanged() -> None:
     """The window's own turns are the person's, and WeChat keeps the spelling
     v1 gave its bubble — one less thing to relearn."""

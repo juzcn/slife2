@@ -182,28 +182,41 @@ DEFAULT_AGENT = "slife2"
 #: only to override this.
 SUBAGENT_ORG = "subagent"
 
-#: The five tools a network offers the model, by verb.  **Here rather than in the
+#: The tools a network offers the model, by verb.  **Here rather than in the
 #: plugin that serves them**, because one of them is also what the launcher
 #: probes with (`expected_tool`) and a probe looking for a name the server does
 #: not serve is a server that never starts.  `Net.tool` is the other half:
 #: `peer_agent_send_message` and `subagent_send_message` are one verb and two
 #: networks.
 #:
-#: **All five are shared**, and what a network calls its members is its `prefix`
-#: (`peer_agent_`, `subagent_`) — so `list` is `peer_agent_list` on one side and
-#: `subagent_list` on the other.  `list_agents` was the remote network's own word
-#: for the roster, and it is gone: it named *agents* while every other word that
-#: network teaches says *peer agents*, and the name a model calls is not the
-#: place for the protocol's vocabulary.
+#: **All of them are shared**, and what a network calls its members is its
+#: `prefix` (`peer_agent_`, `subagent_`) — so `list` is `peer_agent_list` on one
+#: side and `subagent_list` on the other.  `list_agents` was the remote network's
+#: own word for the roster, and it is gone: it named *agents* while every other
+#: word that network teaches says *peer agents*, and the name a model calls is
+#: not the place for the protocol's vocabulary.
 SEND_MESSAGE = "send_message"
 CANCEL_TASK = "cancel_task"
 LIST = "list"
 BROADCAST = "broadcast"
-#: **The fifth, and the one that is not v1's.**  A task is a thing this
-#: conversation is waiting on or owes an answer to, and after a restart — or
-#: after an answer that arrived as a message nobody connected to the id — the
-#: only way to ask what is still open was to remember.
+#: **The fifth of the original set, and the one that is not v1's.**  A task is a
+#: thing this conversation is waiting on or owes an answer to, and after a
+#: restart — or after an answer that arrived as a message nobody connected to
+#: the id — the only way to ask what is still open was to remember.
 TASK_LIST = "task_list"
+
+#: The group-chat verbs, one family on both networks.  **The group is a named
+#: roster with an owner**, and these five are the whole of what a member can do
+#: with one: create/update it (`group_set`), read what this conversation knows
+#: (`group_list`), disband it (`group_remove`, owner only), leave it
+#: (`group_leave`, the caller itself), and speak in it (`group_send_message`).
+#: A group's wire vocabulary is its own (`Net.group_marker` / `group_channel`),
+#: not the direct-message one.
+GROUP_SET = "group_set"
+GROUP_LIST = "group_list"
+GROUP_REMOVE = "group_remove"
+GROUP_LEAVE = "group_leave"
+GROUP_SEND_MESSAGE = "group_send_message"
 
 
 @dataclass(frozen=True)
@@ -250,6 +263,16 @@ class Net:
     marker: str
     #: What the window calls a line from this network's sender.
     bubble: str
+    #: The same three words for a **group** conversation.  A group is not a
+    #: third network: it carries the same members over the same mesh, and its
+    #: vocabulary differs only so a receiver can tell a group message from a
+    #: direct one at the first word and in the channel.  `LOCAL_AGENT` inherits
+    #: these through `replace`, which is deliberate: group vocabulary is the
+    #: network's, not the sender's, so a maker and its subagents both read
+    #: `SubagentGroup`.
+    group_channel: str
+    group_marker: str
+    group_bubble: str
     #: Whether every agent of this network meets its peers in one namespace.
     #: True for the remote network — a room somebody shares — and false for a
     #: subagent network, where the mesh is the agent's (`namespace`, which is
@@ -330,6 +353,9 @@ REMOTE = Net(
     channel="peer_agent",
     marker="[PeerAgent:",
     bubble="PeerAgent",
+    group_channel="peer_agent_group",
+    group_marker="[PeerAgentGroup:",
+    group_bubble="PeerAgentGroup",
 )
 
 #: The local network: an agent and the subagents it made, which are directories
@@ -368,6 +394,9 @@ LOCAL = Net(
     channel="subagent",
     marker="[Subagent:",
     bubble="Subagent",
+    group_channel="subagent_group",
+    group_marker="[SubagentGroup:",
+    group_bubble="SubagentGroup",
     # One mesh per agent: see `Net.namespace`.
     shared_namespace=False,
 )

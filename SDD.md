@@ -586,8 +586,10 @@ A subagent:
 - is addressed by the second half of a client id: `(maker, name)`.
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
-After creation, it is reached over the local network with the same five
-operations as a peer agent, under `subagent_*` names.
+After creation, it is reached over the local network with the same operations
+as a peer agent, under `subagent_*` names: the direct five, and the five group
+tools (`subagent_group_set`, `subagent_group_list`, `subagent_group_remove`,
+`subagent_group_leave`, `subagent_group_send_message`).
 
 #### 4.5.1 Directory and record
 
@@ -597,7 +599,10 @@ own `cabinet/` and `media/` there. A fork has only the record: it is a copy of
 its maker's conversation held in memory, so it stores no turns, reads the
 maker's turn log for context without writing it, and shares the maker's cabinet
 and media. That record is removed when the agent server next starts: a fork is
-session-lived, and the start of a session ends the forks of the last one. A
+session-lived, and the start of a session ends the forks of the last one.
+**A fork is never a group member**: it is temporary, so a roster naming one
+would keep addressing a name nobody answers; creation refuses it, placement
+does not wake it, and its group traffic is dropped. A
 subagent has no external identity of its own: WeChat and the peer-agent network
 belong to the agent, and scheduling stays with the agent too.
 
@@ -1516,14 +1521,46 @@ Rules specific to this system:
     publication back to it. The sender named in the payload is the receiver's
     attribution; an event that names this member but was published by somebody
     else is refused rather than treated as its own.
+11. **A group is a named roster with an owner, kept per member.** The owner
+    creates it and names the members; there is no invitation or acceptance.
+    Every member persists its own YAML record under its own directory, and
+    learns the roster from group traffic. Only the owner may replace the roster
+    or disband the group; a member's way out is leaving.
+12. **Leaving is autonomous, including for the owner.** A member leaves itself,
+    with no one's approval. An owner's departure transfers the group to the
+    first remaining member in roster order, or disbands it when nobody remains.
+    A fork is never a member: it is temporary, so a roster naming one would
+    keep addressing a name nobody answers.
+13. **Group traffic is directed, fire-and-forget, and never returns to its
+    sender.** One QoS 0 event per recipient on that recipient's own topic; the
+    other members receive it and the sender does not. A member that is not
+    listening misses it. Every event carries the roster and a generation id, so
+    a member that missed a control learns the group from the next message, and
+    a delayed event cannot resurrect a group the member left or the owner
+    disbanded.
+14. **Group messages have their own vocabulary.** The peer network uses the
+    `PeerAgentGroup` channel and marker; the local network uses
+    `SubagentGroup`, for the maker and its subagents alike. The marker names the
+    sender and the group.
+15. **Mentions are text, not delivery.** `@name` and `@all` address members the
+    way a chat group does. They are attention: every other member still
+    receives the message.
+16. **Membership controls are silent.** A join, leave or disband changes the
+    local record and nothing else; the conversation learns the current roster
+    from the group list tool or from the next group message.
 
-The five model-facing tools are:
+The model-facing tools are:
 
 - `peer_agent_send_message`;
 - `peer_agent_cancel_task`;
 - `peer_agent_list`;
 - `peer_agent_task_list`;
-- `peer_agent_broadcast`.
+- `peer_agent_broadcast`;
+- `peer_agent_group_set`;
+- `peer_agent_group_list`;
+- `peer_agent_group_remove`;
+- `peer_agent_group_leave`;
+- `peer_agent_group_send_message`.
 
 `peer_agent_task_list` reports two states:
 

@@ -914,6 +914,11 @@ the model reads.
 | `peer_agent_list` | List this agent first, then every peer by name. |
 | `peer_agent_task_list` | List open tasks: those waiting for an answer and those still owed one. |
 | `peer_agent_broadcast` | Send a fire-and-forget event to every peer. |
+| `peer_agent_group_set` | Create a group and pull in the members you name; you become its owner. Calling it again as owner replaces the roster. |
+| `peer_agent_group_list` | List the groups this conversation knows, with owner and members. |
+| `peer_agent_group_remove` | Disband a group you own. |
+| `peer_agent_group_leave` | Leave a group on your own; if you are the owner, ownership passes to the first remaining member. |
+| `peer_agent_group_send_message` | Send a fire-and-forget message to every other member of a group. `@name` and `@all` address members, as in a chat group. |
 
 A `task_request` returns an id immediately; the result arrives later as a
 message with a `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]`
@@ -932,6 +937,16 @@ available through `peer_agent_list`. An agent is on the mesh while a window hold
 its `join` call; `--headless` holds the same call without a window. No inbound
 record is persisted: in-flight tasks are held in memory, and a restart starts
 with none.
+
+A group is a named roster with an owner, created by `peer_agent_group_set`; no
+invitation or acceptance is involved. Group messages are delivered as
+fire-and-forget events to every other member — never back to the sender — and
+arrive with a `[PeerAgentGroup:{"from": …, "group": …}]` marker on the
+`peer_agent_group:<group>:<sender>` channel. Each member keeps what it has
+learned in `agents/<agent>/groups.yaml`, so groups survive a restart. A member
+that is offline when a group message is sent misses it; `peer_agent_group_list`
+is the local truth, not a live check. Only the owner can change the roster or
+disband the group; a member's way out is `peer_agent_group_leave`.
 
 The broker is started automatically when the configured one is local and absent,
 and stopped with the stack only if slife2 started it. A system broker or one
@@ -967,10 +982,15 @@ it a message. Its two membership tools, `subagent_set` and `subagent_remove`,
 refuse a subagent caller.
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
-Once created, it is addressed over the local network with the same five
-operations as a peer agent, under `subagent_*` names: `subagent_send_message`,
-`subagent_cancel_task`, `subagent_list`, `subagent_task_list`, and
-`subagent_broadcast`.
+Once created, it is addressed over the local network with the same operations
+as a peer agent, under `subagent_*` names: `subagent_send_message`,
+`subagent_cancel_task`, `subagent_list`, `subagent_task_list`,
+`subagent_broadcast`, and the five group tools `subagent_group_set`,
+`subagent_group_list`, `subagent_group_remove`, `subagent_group_leave`, and
+`subagent_group_send_message`. Group traffic on this network wears the
+`[SubagentGroup:…]` marker and the `subagent_group:<group>:<sender>` channel,
+whether the sender is the maker or a sibling, and each member keeps its own
+`groups.yaml`.
 
 | Key | Meaning |
 |---|---|
@@ -986,7 +1006,10 @@ memory as a copy of the maker's, and reads the maker's turn log for context. It
 writes nothing there, and it also shares the maker's cabinet and media. A fork
 is session-lived — a temporary stand-in for the maker — and when the agent
 server next starts it removes every fork record left by the previous session,
-so the name is free again. WeChat and the peer-agent network belong to the
+so the name is free again. **A fork cannot be pulled into a group**: it is
+temporary, so a roster naming it would keep addressing a name nobody answers;
+`subagent_group_set` refuses one, and group traffic for a fork is dropped.
+WeChat and the peer-agent network belong to the
 agent, not the subagent; scheduling also stays with the agent. The tree stops at
 one level: a subagent cannot create or remove a subagent, because the local
 network holds a place for the maker's own subagents and nothing holds a place

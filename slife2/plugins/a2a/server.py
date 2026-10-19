@@ -76,7 +76,7 @@ import contextlib
 import json
 import logging
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -90,6 +90,11 @@ from slife2.libs.host.config import (
     AGENT_SERVER_NAME,
     BROADCAST,
     CANCEL_TASK,
+    GROUP_LEAVE,
+    GROUP_LIST,
+    GROUP_REMOVE,
+    GROUP_SEND_MESSAGE,
+    GROUP_SET,
     LIST,
     LOCAL,
     LOCAL_AGENT,
@@ -102,7 +107,7 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import home, in_home, subagent_dirs
+from slife2.libs.host.paths import forked, home, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -112,6 +117,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
+from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
 from slife2.plugins.a2a.mesh import (
@@ -134,7 +140,7 @@ SERVER_NAME = REMOTE.server_name
 #: `slife2-a2a` is the plugin that serves it.
 CONFIG_KEY = REMOTE.key
 
-#: The remote network's five tools, named.  **`PEER_*` and not `A2A_*`**, because
+#: The remote network's tools, named.  **`PEER_*` and not `A2A_*`**, because
 #: what a model is handed is the semantic side of `Net`: this process speaks A2A,
 #: and the model is told it is talking to peer agents (`slife2.libs.host.config.REMOTE`
 #: is where that split is argued).  Two things that look like omissions are not: a
@@ -153,6 +159,15 @@ PEER_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
 PEER_LIST = REMOTE.tool(LIST)
 PEER_BROADCAST = REMOTE.tool(BROADCAST)
 PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
+
+#: The remote network's group tools.  The local instance registers its own
+#: from the same verbs (`net.tool`), which is why these are spelled out for the
+#: tests and the tool documentation rather than being magic in a decorator.
+PEER_GROUP_SET = REMOTE.tool(GROUP_SET)
+PEER_GROUP_LIST = REMOTE.tool(GROUP_LIST)
+PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
+PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
+PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
 
 #: The tool that puts an agent *on* the mesh — and it is not the model's.  A
 #: window calls it and holds it open; see `join` for why the mesh's membership
@@ -226,6 +241,7 @@ A2A_TYPES = (
     "cancel_task",
     "message",
     "broadcast",
+    "group_message",
 )
 
 #: How many inbound messages may be waiting for a hand-over.  v1's bound on its
@@ -423,6 +439,17 @@ class Session:
     #: agent`), so it is also what a delivery that is not the window's has to
     #: address its turn with (`run_turn`).
     subagent: str = ""
+    #: Whether this member was made as a **fork** — a temporary copy of its
+    #: maker's conversation.  Read once when the session is built
+    #: (`paths.forked`), because the record does not change while a session
+    #: lives.  A fork is never a group member: it ends with the next start and
+    #: would leave a name behind that its maker's roster still addressed.
+    fork: bool = False
+    #: The groups this member knows, loaded from the member's own
+    #: `groups.yaml` (`slife2.plugins.a2a.groups`).  A directly constructed
+    #: Session in a test gets the in-memory store; only `session_of` loads the
+    #: file.
+    groups: group_store.GroupStore = field(default_factory=group_store.GroupStore)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
     #: is the only place the reason survives to `peer_agent_list` — otherwise it
@@ -479,6 +506,7 @@ class Session:
         what: str,
         *,
         note: bool = False,
+        group: str = "",
     ) -> None:
         """Queue one line for the writer — a message, or a note with `note`.
 
@@ -494,13 +522,19 @@ class Session:
         draws it in the window that is showing this agent and goes no further
         (`slife2.libs.harness.handover.note_to_window`), so it is never a turn and never
         stored.
+
+        `group` says the line arrived in a named group, and is what the writer
+        turns into the group's channel; empty is every other kind of delivery.
+        It is part of the queue tuple beside `peer` because the two are what
+        the channel is made from and nothing else in the pipeline can recover
+        the group from the text (the marker is stripped for display).
         """
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.queue.get_nowait()
             logger.warning("a2a_delivery_overflow dropped=1 peer=%s", peer)
         with contextlib.suppress(asyncio.QueueFull):
-            self.queue.put_nowait((text, peer, what, note))
+            self.queue.put_nowait((text, peer, what, note, group))
 
 
 async def _hold_open(ctx: Context) -> None:
@@ -810,11 +844,91 @@ def _wire(session: Session) -> None:
             f"a broadcast from {sender}",
         )
 
+    def save_groups() -> None:
+        """Persist what the last event taught this member.
+
+        **A receive path must not die on a disk**, so a write failure is logged
+        and the in-memory store stands: the message is still delivered, and the
+        next successful write reconciles the file.  The mutating tools take the
+        other half of this rule — their save failure is a `ToolError`, because
+        there the caller asked for the change and has to know it did not stick.
+        """
+        try:
+            session.groups.save()
+        except (OSError, group_store.GroupError) as exc:
+            logger.error(
+                "a2a_group_store_unwritable agent=%s: %s",
+                describe((session.agent, session.subagent)),
+                exc,
+            )
+
+    def on_group_message(data: dict[str, Any]) -> None:
+        """A group message: learn the roster, then hand the words to the turn.
+
+        **A fork is dropped here as well as refused at `group_set`.**  A fork is
+        a temporary copy of its maker's conversation; a stale roster that still
+        named it must not wake it for a group it can never belong to.
+
+        The store is updated before delivery, so a member that missed the
+        invitation has the group's name in `group_list` when it answers.  The
+        marker and channel use the validated wire names verbatim — `safe_name`
+        would collapse whitespace and silently rename an identity the store and
+        the roster both key by.
+        """
+        if session.fork:
+            logger.debug(
+                "a2a_group_message_fork agent=%s — dropped",
+                describe((session.agent, session.subagent)),
+            )
+            return
+        event = group_store.parse_event(data)
+        if event is None or event.kind != group_store.GROUP_MESSAGE:
+            logger.warning(
+                "a2a_group_event_invalid agent=%s — dropped",
+                describe((session.agent, session.subagent)),
+            )
+            return
+        result = group_store.apply_event(session.groups, event, session.mesh.agent_name)
+        if result.changed:
+            save_groups()
+        if not result.deliver:
+            return
+        session.post(
+            f"{group_store.group_marker(session.net, event.sender, event.group)}"
+            f"{event.text}",
+            event.sender,
+            f"a group message from {event.sender} in {event.group}",
+            group=event.group,
+        )
+
+    def on_group_control(data: dict[str, Any]) -> None:
+        """A group control: change what this member knows, tell nobody.
+
+        Membership changes are silent by design — the conversation learns the
+        current roster through `group_list`, and a note per join/leave would
+        spend a window line and a model's attention on bookkeeping.  The next
+        group message carries the same roster anyway.
+        """
+        if session.fork:
+            return
+        event = group_store.parse_event(data)
+        if event is None or event.kind not in group_store.GROUP_KINDS:
+            logger.warning(
+                "a2a_group_event_invalid agent=%s — dropped",
+                describe((session.agent, session.subagent)),
+            )
+            return
+        result = group_store.apply_event(session.groups, event, session.mesh.agent_name)
+        if result.changed:
+            save_groups()
+
     session.mesh.on_inbound_task = on_inbound_task
     session.mesh.on_task_completion = on_task_completion
     session.mesh.on_agent_change = on_agent_change
     session.mesh.on_peer_cancel = on_peer_cancel
     session.mesh.on_broadcast_event = on_broadcast_event
+    session.mesh.on_group_message = on_group_message
+    session.mesh.on_group_control = on_group_control
 
 
 async def _drain(
@@ -859,7 +973,7 @@ async def _drain(
     failure is logged and dropped, and the loop goes on to the next.
     """
     while True:
-        text, peer, what, note = await session.queue.get()
+        text, peer, what, note, group = await session.queue.get()
         try:
             if note:
                 if session.subagent:
@@ -891,6 +1005,16 @@ async def _drain(
                         "a2a_note_no_window agent=%s line=%s", session.agent, what
                     )
                 continue
+            # **Group traffic wears the network's group vocabulary, not the
+            # sender's.**  On the local network the maker and its subagents
+            # both read `SubagentGroup`; the sender is `@`-named inside it.  A
+            # direct message keeps the old rule (`sender_net`), where the
+            # maker and a sibling do wear different words.
+            channel = (
+                group_store.group_channel_for(session.net, group, peer)
+                if group
+                else channel_for(sender_net(session, peer), peer)
+            )
             try:
                 if session.subagent:
                     said = await run_turn(
@@ -898,7 +1022,7 @@ async def _drain(
                         session.agent,
                         session.subagent,
                         text,
-                        channel_for(sender_net(session, peer), peer),
+                        channel,
                         client=agent_client,
                     )
                     # The length and not the words: the member's answer is its
@@ -915,7 +1039,7 @@ async def _drain(
                         config,
                         session.agent,
                         text,
-                        channel_for(sender_net(session, peer), peer),
+                        channel,
                         what=what,
                         window_client=window_client,
                     )
@@ -1085,6 +1209,12 @@ def build_server(
                     net=net,
                     mesh=mesh_for(agent, subagent),
                     subagent=subagent,
+                    # A fork's record is read once; it ends with the next start
+                    # and is never a group member.
+                    fork=forked(agent, subagent) if subagent else False,
+                    groups=group_store.GroupStore.load(
+                        group_store.groups_path(agent, subagent)
+                    ),
                 )
             _wire(found)
             found.writer = asyncio.create_task(writer_in(where, found))
@@ -1272,6 +1402,38 @@ def build_server(
         for peer in sorted(membership(agent)):
             await connected(agent, MEMBER, peer)
 
+    async def place_for_group(
+        agent: str, peers: Iterable[str], speaker_name: str
+    ) -> None:
+        """Give every local recipient a place before a group fan-out.
+
+        **`place_for` cannot do this, and the gap is the maker**: it connects a
+        *subagent* by its name, so a group sent by a subagent to a roster that
+        includes its maker would publish to the maker's topic with nobody
+        subscribed — the same silent loss `place_for` exists to prevent, one
+        name over.  The maker's session is the empty-subagent one and is
+        connected explicitly here.
+
+        **A fork is skipped.**  `group_set` refuses to put one in a roster; this
+        is the other half of that rule, for a stale roster that still names one:
+        a temporary conversation must not be woken for a group it can never
+        belong to.
+        """
+        if net is not LOCAL:
+            return
+        for peer in sorted(set(peers)):
+            if not peer or peer == speaker_name:
+                continue
+            if peer == agent:
+                await connected(agent, USED, "")
+            elif peer in membership(agent):
+                if forked(agent, peer):
+                    logger.debug(
+                        "a2a_group_fork_skipped agent=%s member=%s", agent, peer
+                    )
+                    continue
+                await connected(agent, MEMBER, peer)
+
     def start_broker(config_now: Config) -> None:
         """Bring the mesh's broker up, or refuse the start.
 
@@ -1279,7 +1441,7 @@ def build_server(
         an absent broker is a missing dependency rather than a preference.  One
         that will not serve raises out of the lifespan — this plugin failing to
         start, which is `slife2` refusing to start rather than handing the model
-        five tools attached to nothing (`slife2/plugins/a2a/broker.py`).
+        tools attached to nothing (`slife2/plugins/a2a/broker.py`).
 
         **Nothing else happens at start.**  Nothing joins the mesh (a window does
         that, `join`), and nothing is announced: a restart has no inbound bridges
@@ -1758,6 +1920,361 @@ def build_server(
             "note": "Sent — fire-and-forget, no reply expected.",
         }
 
+    # ── Groups ──────────────────────────────────────────────────────────
+    #
+    # A group is a named roster with an owner (`slife2.plugins.a2a.groups`).
+    # The state is per member — each conversation persists what it learned,
+    # never another member's — and every cross-member fact travels on the
+    # wire as a directed event.  The tools below are the only writers; the
+    # receive path (`_wire`) is the other half.
+
+    def refuse_fork(agent: str, mine: str) -> None:
+        """A forked subagent is temporary, so it is never part of a group."""
+        if net is LOCAL and mine and forked(agent, mine):
+            raise ToolError(
+                "a forked subagent is temporary and cannot take part in groups."
+            )
+
+    def unknown_group(group: str) -> ToolError:
+        return ToolError(
+            f"no group named {group!r} — {net.tool(GROUP_LIST)} shows the ones "
+            f"this conversation knows."
+        )
+
+    def save_group_store(session: Session) -> None:
+        """Persist a change the caller asked for; a failure is the caller's."""
+        try:
+            session.groups.save()
+        except (OSError, group_store.GroupError) as exc:
+            raise ToolError(f"the group could not be saved: {exc}") from exc
+
+    def group_roster_for_local(agent: str, roster: tuple[str, ...]) -> None:
+        """Refuse a local roster naming anything but real, non-fork members."""
+        known = membership(agent) | {agent}
+        unknown = [name for name in roster if name not in known]
+        if unknown:
+            raise ToolError(
+                f"{', '.join(repr(name) for name in unknown)} is not a member of "
+                f"this local network — a group may name the agent {agent!r} "
+                f"itself or one of its subagents."
+            )
+        forks = [name for name in roster if name != agent and forked(agent, name)]
+        if forks:
+            raise ToolError(
+                f"{', '.join(repr(name) for name in forks)} is a forked "
+                f"subagent; a fork is temporary and cannot join a group."
+            )
+
+    @mcp.tool(
+        name=net.tool(GROUP_SET),
+        description=describe_tool(net, GROUP_SET),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_set(
+        ctx: Context, group: str, members: list[str]
+    ) -> dict[str, Any]:
+        """Create a group chat and pull in the members you name.
+
+        **You become the owner.**  The roster is the whole membership — there
+        is no invitation or acceptance, and calling this again on a group you
+        own replaces it (the only way to add or remove someone).  Every other
+        member is notified; the notice is fire-and-forget, and the next group
+        message carries the same roster, so a member that missed it still
+        learns the group.
+
+        On the local network a member must be the maker itself or one of its
+        subagents, and a **forked** subagent is refused: a fork is a temporary
+        copy of its maker's conversation and ends with the next start, so a
+        roster naming one would keep addressing a name nobody answers.
+        """
+        sender, mine = speaker(ctx)
+        refuse_fork(sender, mine)
+        me = member_name(sender, mine)
+        try:
+            if not group_store.valid_group_name(group):
+                raise group_store.GroupError(
+                    f"{group!r} is not a group name — it must be 1-"
+                    f"{group_store.MAX_GROUP_NAME} characters, with no control "
+                    f"characters and no '/' '+' '#' or ':'."
+                )
+            roster = group_store.clean_members(me, members)
+        except group_store.GroupError as exc:
+            raise ToolError(str(exc)) from exc
+        if len(roster) < 2:
+            raise ToolError("a group needs at least one member besides you.")
+        if net is LOCAL:
+            group_roster_for_local(sender, roster)
+        session = session_of(sender, mine)
+        existing = session.groups.get(group)
+        if existing is not None and existing.owner != me:
+            raise ToolError(
+                f"the group {group!r} belongs to {existing.owner}; only its "
+                f"owner can change the roster."
+            )
+        session = await connected(sender, USED, mine)
+        existing = session.groups.get(group)
+        if existing is not None and existing.owner != me:
+            raise ToolError(
+                f"the group {group!r} belongs to {existing.owner}; only its "
+                f"owner can change the roster."
+            )
+        gid = existing.gid if existing is not None else session.groups.new_gid()
+        event = group_store.GroupEvent(
+            kind=group_store.KIND_SET,
+            sender=me,
+            group=group,
+            owner=me,
+            gid=gid,
+            members=roster,
+        )
+        session.groups.learn(event)
+        # Persisted before anything is published: the roster is this member's
+        # own state, and a send that failed must not leave the owner believing
+        # a group exists that its file does not have.
+        save_group_store(session)
+        recipients = set(roster)
+        if existing is not None:
+            recipients |= set(existing.members)
+        await place_for_group(sender, recipients, me)
+        sent = await session.mesh.group_fanout(
+            recipients,
+            kind=group_store.KIND_SET,
+            group=group,
+            owner=me,
+            members=roster,
+            gid=gid,
+        )
+        return {
+            "group": group,
+            "owner": me,
+            "members": list(roster),
+            "sent": sent,
+            "note": (
+                "Created and the others were notified. Group messages are "
+                "fire-and-forget; a member not on the network now may miss "
+                "the notice and learn the group from the next message."
+            ),
+        }
+
+    @mcp.tool(
+        name=net.tool(GROUP_LIST),
+        description=describe_tool(net, GROUP_LIST),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_list(ctx: Context) -> dict[str, Any]:
+        """List the groups this conversation knows, owner and members.
+
+        This is the member's own persisted knowledge, not a live presence
+        query: a group is listed because this conversation learned or made it,
+        and `role` says whether it is yours to disband.  A member that was
+        removed while this conversation was away may still be listed until the
+        next control or group message arrives — nothing to poll.
+
+        `error` is the local file's problem when it has one (a corrupt store
+        is set aside, not silently overwritten), or the network's switch when
+        its section is absent.  A read never dials.
+        """
+        sender, mine = speaker(ctx)
+        session = session_of(sender, mine)
+        settings = mesh_settings()
+        error = session.groups.load_error
+        if not error and not settings.configured:
+            error = switch_off(net)
+        listed = [
+            {
+                "group": one.name,
+                "owner": one.owner,
+                "members": list(one.members),
+                "role": "owner" if one.owner == session.mesh.agent_name else "member",
+            }
+            for one in sorted(
+                session.groups.groups.values(), key=lambda found: found.name
+            )
+        ]
+        return {
+            "agent_name": safe_name(session.mesh.agent_name),
+            "groups": listed,
+            "error": error,
+        }
+
+    @mcp.tool(
+        name=net.tool(GROUP_REMOVE),
+        description=describe_tool(net, GROUP_REMOVE),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_remove(ctx: Context, group: str) -> dict[str, Any]:
+        """Disband a group you own.
+
+        Only the owner may do this; a member's way out is `group_leave`, which
+        hands the group on rather than ending it.  Every member is notified and
+        the group disappears from your local list.
+        """
+        sender, mine = speaker(ctx)
+        refuse_fork(sender, mine)
+        me = member_name(sender, mine)
+        session = session_of(sender, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if found.owner != me:
+            raise ToolError(
+                f"only the owner ({found.owner}) can disband {group!r}; a "
+                f"member leaves with {net.tool(GROUP_LEAVE)}."
+            )
+        session = await connected(sender, USED, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if found.owner != me:
+            raise ToolError(
+                f"only the owner ({found.owner}) can disband {group!r}; a "
+                f"member leaves with {net.tool(GROUP_LEAVE)}."
+            )
+        session.groups.forget(found)
+        save_group_store(session)
+        await place_for_group(sender, found.members, me)
+        sent = await session.mesh.group_fanout(
+            found.members,
+            kind=group_store.KIND_DISBANDED,
+            group=group,
+            owner=me,
+            members=found.members,
+            gid=found.gid,
+        )
+        return {"group": group, "disbanded": True, "sent": sent}
+
+    @mcp.tool(
+        name=net.tool(GROUP_LEAVE),
+        description=describe_tool(net, GROUP_LEAVE),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_leave(ctx: Context, group: str) -> dict[str, Any]:
+        """Leave a group you are in — your own decision, no one's approval.
+
+        If you are the owner, ownership passes to the first remaining member in
+        the roster; if nobody remains, the group is disbanded.  The others are
+        notified, and the group disappears from your local list.
+        """
+        sender, mine = speaker(ctx)
+        refuse_fork(sender, mine)
+        me = member_name(sender, mine)
+        session = session_of(sender, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if me not in found.members:
+            raise ToolError(f"you are not a member of the group {group!r}.")
+        session = await connected(sender, USED, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if me not in found.members:
+            raise ToolError(f"you are not a member of the group {group!r}.")
+        remaining = tuple(member for member in found.members if member != me)
+        if not remaining:
+            session.groups.forget(found)
+            save_group_store(session)
+            return {
+                "group": group,
+                "left": True,
+                "disbanded": True,
+                "sent": 0,
+            }
+        owner = remaining[0] if found.owner == me else found.owner
+        updated = group_store.Group(
+            name=group,
+            owner=owner,
+            members=remaining,
+            gid=found.gid,
+            updated=found.updated,
+        )
+        # **The leaver's own copy goes**, whoever they were.  The remaining
+        # members learn the new roster from the control; a member that kept a
+        # group it had left would still list it and still try to speak in it.
+        # The tombstone it leaves is what refuses a delayed old message, and
+        # an owner's `group_set` (the re-invitation) clears it.
+        session.groups.forget(found)
+        save_group_store(session)
+        await place_for_group(sender, remaining, me)
+        sent = await session.mesh.group_fanout(
+            remaining,
+            kind=group_store.KIND_LEAVE,
+            group=group,
+            owner=updated.owner,
+            members=updated.members,
+            gid=updated.gid,
+        )
+        return {
+            "group": group,
+            "left": True,
+            "owner": updated.owner,
+            "members": list(updated.members),
+            "sent": sent,
+        }
+
+    @mcp.tool(
+        name=net.tool(GROUP_SEND_MESSAGE),
+        description=describe_tool(net, GROUP_SEND_MESSAGE),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_group_send_message(
+        ctx: Context, group: str, message: str
+    ) -> dict[str, Any]:
+        """Send a message to every other member of a group you belong to.
+
+        **A reply is this call**: ending a turn sends nothing.  The sender is
+        never one of the recipients.  Delivery is fire-and-forget — no task,
+        no completion — so a member that is not listening now may miss it; use
+        the direct send tool when you need an answer.
+
+        The message is delivered to each member as a group message on the
+        group's own channel, and in the local network every subagent in the
+        roster is given its place before the fan-out.
+
+        **Mentions are written into the words**, WeChat-style: ``@name``
+        addresses a member and ``@all`` addresses every member.  A mention is
+        attention, not a delivery filter — every other member still receives
+        the message, which is also what keeps the tool's contract simple: the
+        roster decides who is delivered to, and the text decides who is being
+        asked.  The recipients read the mention as part of the message; the
+        harness does not parse it.
+        """
+        sender, mine = speaker(ctx)
+        refuse_fork(sender, mine)
+        if not isinstance(message, str) or not message.strip():
+            raise ToolError("a group message cannot be empty.")
+        me = member_name(sender, mine)
+        session = session_of(sender, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if me not in found.members:
+            raise ToolError(f"you are not a member of the group {group!r}.")
+        session = await connected(sender, USED, mine)
+        found = session.groups.get(group)
+        if found is None:
+            raise unknown_group(group)
+        if me not in found.members:
+            raise ToolError(f"you are not a member of the group {group!r}.")
+        await place_for_group(sender, found.members, me)
+        sent = await session.mesh.group_fanout(
+            found.members,
+            kind=group_store.GROUP_MESSAGE,
+            group=found.name,
+            owner=found.owner,
+            members=found.members,
+            gid=found.gid,
+            text=message,
+        )
+        return {
+            "group": group,
+            "sent": sent,
+            "note": (
+                "Sent — fire-and-forget to every other member; nobody replies "
+                "to this call."
+            ),
+        }
+
     return mcp
 
 
@@ -1781,17 +2298,15 @@ def _ensure_windows_selector_loop() -> None:
             pass
 
 
-#: What the five tools say, **with the words that differ per network left as
-#: holes**.  One text per verb and two word-sets (`_NET_WORDS`), because a second
-#: copy of this reasoning is a second copy to keep in step — and because the
-#: thing that must differ between the networks is the *vocabulary* a model is
-#: taught, which is what the holes are: who it is talking to, and what an
-#: envelope looks like.
+#: What the tools say, **with the words that differ per network left as holes**.
+#: One text per verb and two word-sets (`_NET_WORDS`), because a second copy of
+#: this reasoning is a second copy to keep in step — and because the thing that
+#: must differ between the networks is the *vocabulary* a model is taught, which
+#: is what the holes are: who it is talking to, and what an envelope looks like.
 #:
-#: **Keyed by the remote network's verb for the roster**, while the *name* the
-#: local instance serves it under is the local network's (`net.roster_tool`):
-#: the two networks are different things that happen to share an implementation,
-#: and the holes below are where each of them says which thing it is.
+#: **Keyed by the verb**, while each network serves it as `Net.tool(verb)`: the
+#: two networks are different things that happen to share an implementation, and
+#: the holes below are where each of them says which thing it is.
 _TOOL_TEXTS: dict[str, str] = {
     SEND_MESSAGE: (
         "Send a message to {them}. **A reply is this call**: ending a turn\n"
@@ -1845,6 +2360,52 @@ _TOOL_TEXTS: dict[str, str] = {
         "\n"
         "An answer that already arrived is not listed; it is in this conversation."
     ),
+    GROUP_SET: (
+        "Create a group chat and pull in the {group_them} you name. **You become\n"
+        "its owner**, and the roster is the whole membership — nobody has to\n"
+        "accept. Calling this again on a group you own replaces the roster (the\n"
+        "way to add or remove someone); a member leaves with `{group_leave}`.\n"
+        "\n"
+        "Members are notified with a {group_marker} of type 'group_set'. That\n"
+        "notice is fire-and-forget: a member not on the network now may miss it,\n"
+        "but the next group message carries the roster."
+    ),
+    GROUP_LIST: (
+        "List the group chats this conversation knows — ones you made and ones\n"
+        "you were pulled into.\n"
+        "\n"
+        'Every row is `{{"group": …, "owner": …, "members": […], "role":\n'
+        '"owner"|"member"}}`. `role` says whether the group is yours to\n'
+        "disband. This is what this conversation has persisted locally, not a\n"
+        "live check of who is connected.\n"
+        "\n"
+        "`error` says when the local record could not be read."
+    ),
+    GROUP_REMOVE: (
+        "Disband a group you own.\n"
+        "\n"
+        "Only the owner can do this; a member's way out is `{group_leave}`,\n"
+        "which hands the group on rather than ending it. The members are\n"
+        "notified and the group disappears from your list."
+    ),
+    GROUP_LEAVE: (
+        "Leave a group you are in — your own decision, no one's approval.\n"
+        "\n"
+        "If you are the owner, ownership passes to the first remaining member;\n"
+        "if nobody remains, the group is disbanded. The other members are\n"
+        "notified, and the group disappears from your list."
+    ),
+    GROUP_SEND_MESSAGE: (
+        "Send a message to every other member of a group you belong to.\n"
+        "\n"
+        "**A reply is this call**: ending a turn sends nothing. You are never\n"
+        "one of the recipients. Address people with `@name` as in a chat group:\n"
+        "`@researcher` puts that member's name in the message, and `@all`\n"
+        "addresses everyone. A mention is attention, not delivery — every other\n"
+        "member still receives the message. Delivery is fire-and-forget — no\n"
+        "task, no completion — so a member that is not on the network now may\n"
+        "miss it. Use `{send}` when you need an answer."
+    ),
 }
 
 #: The holes, per network.  `roster` is the one that says what a model is
@@ -1869,6 +2430,8 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         "name": "the peer network",
         "section": "`peer_agent:`",
         "marker": "`[PeerAgent:…]`",
+        "group_them": "peer agents",
+        "group_marker": "`[PeerAgentGroup:…]`",
         "offline": (
             "Offline entries are the ones that have said they are leaving, so\n"
             "they are listed rather than hidden."
@@ -1904,6 +2467,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         # wears the *sender's* word, and both a maker and a sibling can answer
         # this conversation (`sender_net`, which is where the choice is made).
         "marker": "`[Agent:…]` or `[Subagent:…]`",
+        # Group traffic is the one thing where the sender's kind does not
+        # choose the word: every member of this network reads `SubagentGroup`.
+        "group_them": "members of your subagent network",
+        "group_marker": "`[SubagentGroup:…]`",
         "offline": (
             "A member is listed whether or not it is awake: `offline` means\n"
             "nothing is listening for it at this moment, and a message to it\n"
@@ -1947,6 +2514,7 @@ def describe_tool(net: Net, verb: str) -> str:
     return _TOOL_TEXTS[verb].format(
         send=net.tool(SEND_MESSAGE),
         cancel=net.tool(CANCEL_TASK),
+        group_leave=net.tool(GROUP_LEAVE),
         **words,
     )
 
