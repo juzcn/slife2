@@ -3,32 +3,27 @@
 # One file, read by the launcher and every server. A missing file means the
 # built-in defaults; an unreadable one stops the start and names the mistake.
 #
-# The file holds no secrets. Credentials are references resolved when used:
-#
-#     shell env  ->  credstore  ->  literal default
-#
-# `${VAR}` and `${VAR:-default}` read the shell and then the OS keyring.
-# `keyring:<service>/<key>` reads the keyring directly. An unresolved reference
-# is left verbatim and fails at the API call, where the error can name it.
+# Keep secrets out. `${VAR}`, `${VAR:-default}` and `keyring:<service>/<key>`
+# are resolved from the shell environment, credstore or the OS keyring.
 
-# Shift every server port by this much in WSL2 mirrored mode; ignored
-# elsewhere. 0 disables it. The MQTT broker is shared and not shifted.
+# Shift every server port by this much under WSL2 mirrored networking; ignored
+# elsewhere. 0 disables it. The MQTT broker is not shifted.
 wsl_port_offset: 100
 
 servers:
-  # One process per wire protocol; the address is 127.0.0.1:<port>/mcp.
+  # One process per entry, each at 127.0.0.1:<port>/mcp.
   openai-completions: {port: 24001}
   anthropic-messages: {port: 24002}
   openai-responses: {port: 24003}
   embeddings: {port: 24004}
-  # The agent loop, the context store and the tool set.
+  # The agent loop, context store and tool set.
   agent: {port: 24000}
   context: {port: 24010}
   toolhub: {port: 24020}
-  # The two families that hold other people's servers.
+  # MCP and REST servers.
   mcp-tools: {port: 24033}
   restapi-tools: {port: 24034}
-  # The two families built from documents.
+  # Commands and playbooks.
   cli-server: {port: 24032}
   skills-server: {port: 24031}
   # Capabilities.
@@ -82,8 +77,7 @@ providers:
           - image
         context_window: 1048576
         max_tokens: 131072
-        # This gateway rejects the standard thinking shape while reasoning
-        # natively, so send no thinking field.
+        # This gateway rejects the standard thinking field.
         compat:
           thinking: omit
 
@@ -101,18 +95,16 @@ providers:
         context_window: 983616
         max_tokens: 131072
 
-  # The Responses protocol is a separate provider entry with
-  # `api: openai-responses`, not a flag on chat completions.
+  # Responses is its own provider entry: `api: openai-responses`.
 
 # The model a new conversation starts on, as `provider/model`.
 default: deepseek/deepseek-flash
 
 agent:
-  # Model calls per turn. 0 or absent means no cap: the turn ends when the
-  # model stops asking for tools.
+  # Model calls per turn. 0 or absent means no cap.
   max_iterations: 0
-  # A Jinja2 template, looked up relative to this file. `{{ agent_name }}` and
-  # `{{ headless }}` are available. Omit to use the shipped template.
+  # A Jinja2 template beside this file. `{{ agent_name }}` and `{{ headless }}`
+  # are available; omit to use the shipped template.
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -120,24 +112,18 @@ agent-task:
   max_running: 4
 
 subagent:
-  # Subagents per agent. The tree stops at one level: a subagent cannot create
-  # or remove a subagent. A non-fork subagent owns its turns.db, cabinet and
-  # media under its own directory; a fork stores no turns and only reads the
-  # maker's turn log, shares the maker's cabinet and media, and is removed when
-  # the agent server next starts. A subagent has no external identity: no WeChat
-  # login and no peer_agent presence. Schedule stays with the agent.
+  # Subagents per agent. The tree stops at one level.
   max_running: 32
-  # The local network. The unit is always the agent's name, so writing `unit:`
-  # is refused; `org` may be set to group meshes. This is also the broker
-  # `peer_agent:` falls back to when it names none.
+  # The local subagent network: `broker`, plus `org` to group meshes. `unit:`
+  # is not a setting; `peer_agent:` uses this broker when it names none.
   provider: mosquitto
   broker:
     host: localhost
     port: 1883
 
 embeddings:
-  # OpenAI-compatible embedding endpoints. The vector width is discovered at
-  # runtime; changing the model rebuilds the index on the next start.
+  # OpenAI-compatible embedding endpoints. The width is discovered; changing
+  # the model re-embeds the index on the next start.
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
@@ -147,8 +133,7 @@ embeddings:
       base_url: https://api.siliconflow.cn/v1
       model: BAAI/bge-m3
       api_key: ${SILICONFLOW_API_KEY}
-  # A provider id, not `provider/model`. An unknown value falls back to the
-  # first provider.
+  # The provider in use, by id. Omit to use the first.
   active_model: siliconflow
 
 context:
@@ -163,20 +148,20 @@ context:
   timeout: 20.0
 
 tool_load:
-  # Above this many loaded tools, the least recently called are unloaded at a
-  # turn boundary. Our own tools and `autoload` sources are never evicted.
+  # Above this many loaded tools, the least recently used are unloaded at a
+  # turn boundary. slife2's own tools and `autoload` sources are never evicted.
   threshold: 100
 
 tool_result:
-  # A result over this is stored whole as a dump; the conversation carries a
-  # selection of its lines. `dump_read` obeys the same budget. Minimum 128.
+  # A result over this is kept whole as a dump; the conversation carries a
+  # window of its lines. `dump_read` obeys the same budget. Minimum 128.
   tokens: 8000
 
 mcp:
-  # Other people's MCP servers. `command` starts a process; `url` connects to
-  # one already running. `autoload: true` starts its tools loaded;
-  # `enabled: false` keeps an entry configured but never connects it. Each tool
-  # arrives as `{name}__{tool}`.
+  # External MCP servers. `command` starts a process; `url` connects to one
+  # already running. `autoload: true` starts its tools loaded; `enabled: false`
+  # keeps the entry configured but not connected. Tools arrive as
+  # `{name}__{tool}`.
   serper:
     command: npx
     args:
@@ -225,8 +210,6 @@ mcp:
       - -y
       - '@playwright/mcp@latest'
       - --headless
-    # Starts confined to the data directory; there is no --allow-path
-    # equivalent.
     description: Playwright MCP server (official Microsoft) — headless browser automation via accessibility snapshots. Supports navigation, clicks, typing, screenshots, form filling, file uploads, and JavaScript execution.
   context7:
     command: npx
@@ -319,8 +302,8 @@ rest-api:
     description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
 
 cli:
-  # Programs already installed. Each entry is a catalogue row (`cli:<name>`)
-  # and is not callable yet. `install` is shown when the command is missing.
+  # Programs already installed. Each entry is a catalogue row (`cli:<name>`),
+  # not a callable tool; `install` is shown when the command is missing.
   yt-dlp:
     command: yt-dlp
     description: 'yt-dlp is a powerful command-line video downloader supporting 1000+ sites including YouTube, Twitter/X, Bilibili, TikTok, etc. Common usage: yt-dlp <URL> to download best quality; yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 <URL> for best quality merged MP4; yt-dlp --list-formats <URL> to list available formats; yt-dlp -f <format_id> <URL> for specific format. Supports cookies, subtitles, playlists, and more.'
@@ -337,17 +320,17 @@ cli:
 
 skills:
   # Playbooks live in skills/<name>/SKILL.md. This section supplies the
-  # environment a skill declares in its header. Nothing runs the scripts yet;
-  # `skill_use` reports a missing key before the model acts on it.
+  # environment each playbook declares. Scripts are not run; `skill_use`
+  # refuses a missing key.
   baidu-search:
     env:
       BAIDU_API_KEY: ${BAIDU_API_KEY}
 
 media:
-  # `kind` is what a model is for: image, video, tts, asr. `api` selects the
-  # wire adapter (`dashscope-aigc` or `openai-images`). A model of a kind its
-  # adapter cannot serve is refused. `defaults` is used when a call names no
-  # model; `params` and `voice` are the model's own defaults.
+  # `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
+  # (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
+  # refused. `defaults` applies when a call names no model; `params` and `voice`
+  # are the model's own defaults.
   defaults:
     image: bailian_personal/wan2.7-image
     video: bailian_personal/happyhorse-1.1-t2v
@@ -387,9 +370,9 @@ media:
 
 file-tunnel:
   # Exactly one provider is active; the others stay configured and inert.
-  # `expose_local_image` hands out a public URL served through this tunnel.
-  # An unknown provider falls back to ngrok with a warning, and `tunnel_status`
-  # reports the provider actually in use.
+  # `expose_local_image` serves a local file through the tunnel. An unknown
+  # `active` falls back to ngrok with a warning; `tunnel_status` reports the
+  # provider in use.
   active: cloudflare
   providers:
     ngrok:
@@ -401,18 +384,16 @@ file-tunnel:
       remote_port: 80
     cloudflare:
       binary: ${CLOUDFLARED_BINARY:-cloudflared}
-      # cloudflared defaults to quic; http2 avoids QUIC failures behind a
-      # proxy or TUN adapter.
+      # http2 avoids QUIC failures behind a proxy or TUN adapter.
       protocol: ${CLOUDFLARED_PROTOCOL:-http2}
 
 peer_agent:
-  # The peer network is enabled by this section's presence. `broker` names
-  # another machine's broker; left out, the subagent network's address is used.
-  # A local broker is started when absent, and stopped by the last instance out
-  # or `slife2 down` only if slife2 started it.
+  # Presence enables the peer network. `broker` names another machine's broker;
+  # left out, the subagent network's address is used. A local broker is started
+  # when absent and stopped with the stack only if slife2 started it.
   #
-  # `provider: mosquitto` is the only supported broker; `org` and `unit` are the
-  # topic namespace that tells two groups on one broker apart.
+  # `provider: mosquitto` is the only broker; `org` and `unit` are the topic
+  # namespace that separates groups on one broker.
   provider: mosquitto
   # broker: {host: localhost, port: 1883}
   org: default
