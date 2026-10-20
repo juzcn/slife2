@@ -522,8 +522,13 @@ async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
     # so the split is the whole point of this schema — and both being `required`
     # is what stops one of the two legs from silently never running
     # (`TOOL_SEARCH_PARAMETERS`).  This assertion named `query` for a while after
-    # that field was gone.
-    assert set(search["parameters"]["properties"]) == {"keywords", "sentences"}
+    # that field was gone.  `unloaded_only` is the optional third: it narrows a
+    # search, and is not one of the two the legs need.
+    assert set(search["parameters"]["properties"]) == {
+        "keywords",
+        "sentences",
+        "unloaded_only",
+    }
     assert search["parameters"]["required"] == ["keywords", "sentences"]
     # It is a source of tools and not a tool server: there is no connection
     # here for `servers()` to report on.
@@ -1369,6 +1374,34 @@ async def test_a_match_in_a_tools_returns_text_says_returns_not_parameters() -> 
     rows = json.loads(answer["text"])["results"]
     row = next(one for one in rows if one["name"] == "turn_list")
     assert row["matched"] == "returns", row
+
+
+@pytest.mark.asyncio
+async def test_tool_search_unloaded_only_hides_what_the_list_already_holds() -> None:
+    """**The default is unchanged; the flag is the discovery view.**
+
+    `tool_search` still searches everything unless the caller asks otherwise —
+    the best answer may be a tool already in the list, and `loaded` says so on
+    the row.  `unloaded_only` is the explicit "show me what I do not have".
+    """
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()})
+    ) as hub:
+        everything = await call(
+            hub, "tool_search", {"keywords": ["echo"], "sentences": []}
+        )
+        only = await call(
+            hub,
+            "tool_search",
+            {"keywords": ["echo"], "sentences": [], "unloaded_only": True},
+        )
+
+    everything_names = {
+        row["name"] for row in json.loads(everything["text"])["results"]
+    }
+    only_names = {row["name"] for row in json.loads(only["text"])["results"]}
+    assert "fake__echo" in everything_names, "the loaded tool is part of the default"
+    assert "fake__echo" not in only_names, "and the flag is what hides it"
 
 
 def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:

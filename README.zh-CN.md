@@ -553,7 +553,8 @@ server。`slife2-mcp-tools` 持有 `mcp:` 连接，`slife2-restapi-tools` 持有
 
 hub 提供三个集合级工具：
 
-- `tool_search` 按关键词和语义搜索整个目录。
+- `tool_search` 按关键词和语义搜索整个目录。传 `unloaded_only` 可排除已经在
+  清单中的工具；skill 和 CLI 条目没有加载状态，仍然包含在内。
 - `func_tool_load` 将一个或多个工具放入模型看到的清单。
 - `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
 

@@ -1272,6 +1272,12 @@ Filters narrow the result and never decide it. They are applied in SQL rather
 than after fusion, because rank orders every match and cutting to the limit
 first would drop rows the filter would have kept.
 
+`unloaded_only` is the one filter that is not an equality: it means
+`load_status != 'loaded'`, so a skill or a CLI entry — which has no load state
+and is never in the model's list — is still found. The default stays the whole
+catalogue: the best answer may be a tool the model already holds, and `loaded`
+on the row says so.
+
 ### 7.6 Result contract
 
 Everything the model reads is a surface. A tool's answer is as important as its

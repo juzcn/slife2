@@ -1039,6 +1039,42 @@ def test_a_tool_is_found_by_a_word_only_its_returns_text_carries(tmp_path) -> No
     )
 
 
+def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
+    tmp_path,
+) -> None:
+    """**The filter is `!= loaded`, not `== unloaded`.**
+
+    A skill and a CLI entry have no load state (`n/a`) and are never in the
+    model's list, so a caller asking for what it does not hold must still be
+    shown them.  The equality spelling would return neither, silently — the two
+    families are exactly what the filter is for.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "ours",
+        "plugin",
+        [
+            tool("ours__held", "Shared word."),
+            tool("ours__waiting", "Shared word."),
+        ],
+    )
+    merge(store, "skills", "skill", [tool("skill:alpha", "Shared word.")])
+    merge(store, "cli", "cli", [tool("cli:alpha", "Shared word.")])
+    store.set_load("ours__held", LOADED)
+
+    everything = asyncio.run(store.search(keywords=["shared"], embedder=EMBEDDER))
+    only = asyncio.run(
+        store.search(keywords=["shared"], embedder=EMBEDDER, unloaded_only=True)
+    )
+
+    all_names = {row["name"] for row in everything["results"]}
+    only_names = {row["name"] for row in only["results"]}
+    assert {"ours__held", "ours__waiting", "skill:alpha", "cli:alpha"} <= all_names
+    assert "ours__held" not in only_names, "a tool already in the list is hidden"
+    assert {"ours__waiting", "skill:alpha", "cli:alpha"} <= only_names
+
+
 def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
     """**A column added to the index is a shape change, not a rules change.**
 

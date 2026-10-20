@@ -1452,6 +1452,7 @@ class ToolStore:
         source_id: str = "",
         status: str = "",
         load_status: str = "",
+        unloaded_only: bool = False,
     ) -> dict[str, Any]:
         """Tools matching the *words* and the *sentences* given, best first.
 
@@ -1492,6 +1493,12 @@ class ToolStore:
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is
         switched off" becomes answerable rather than a guess.
+
+        **`unloaded_only` means "not in the model's list", not an equality.**
+        The clause is `load_status != 'loaded'`, so `n/a` — a skill or a CLI
+        entry, which has no load state and is never in the list — is included.
+        Writing it as `load_status = 'unloaded'` would silently drop both, and
+        the caller asking for what it does not have would be shown neither.
         """
         limit = page_limit(limit, MAX_TOOL_PAGE)
         clauses, values = _tool_filters(
@@ -1500,6 +1507,8 @@ class ToolStore:
             status=status,
             load_status=load_status,
         )
+        if unloaded_only:
+            clauses.append(f"load_status != '{LOADED}'")
         if not keywords and not any(s.strip() for s in sentences):
             rows = [
                 _search_dict(row)

@@ -607,7 +607,9 @@ declarations, names the tools, gates them, and routes calls back.
 
 The hub serves three set-level tools:
 
-- `tool_search` searches the whole catalogue by keyword and by meaning.
+- `tool_search` searches the whole catalogue by keyword and by meaning. Pass
+  `unloaded_only` to leave out the tools already in the list; skills and CLI
+  entries have no load state and are still included.
 - `func_tool_load` puts one or more tools into the list shown to the model.
 - `_func_tool_unload` removes tools from that list. The harness also calls it
   at a turn boundary to enforce the budget.

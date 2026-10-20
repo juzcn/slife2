@@ -1621,6 +1621,14 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
                 "when you have none."
             ),
         },
+        "unloaded_only": {
+            "type": "boolean",
+            "description": (
+                "Only tools not in your list now — a tool you already hold is "
+                "not shown. Skills and CLI entries have no load state and are "
+                "included. Omit for the whole catalogue."
+            ),
+        },
     },
     # Both, and that is the design: the two legs want different inputs, so a
     # model made to answer both has told the search which one it means — and a
@@ -1637,7 +1645,8 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
 #: needs from here is what this search is and what its two inputs mean.
 TOOL_SEARCH_DESCRIPTION = (
     "Find a tool by what it does, across the whole catalogue — including MCP, "
-    "REST API, CLI and SKILL tools."
+    "REST API, CLI and SKILL tools. By default it includes tools already in "
+    "your list; `unloaded_only` narrows it to the rest."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
@@ -1776,7 +1785,13 @@ def local_tools(
         # fact that this tool has nothing to add: the same call is both legs
         # whether the model gave it one list or two.
         found = await catalogue.search(
-            keywords=keywords, sentences=sentences, limit=SEARCH_LIMIT
+            keywords=keywords,
+            sentences=sentences,
+            limit=SEARCH_LIMIT,
+            # Booleans from a model are JSON booleans; `is True` is what keeps a
+            # string "false" from reading as a filter that hides everything it
+            # was asked to show.
+            unloaded_only=arguments.get("unloaded_only") is True,
         )
         return _results(found)
 
