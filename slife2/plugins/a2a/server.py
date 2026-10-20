@@ -1492,6 +1492,40 @@ def build_server(
         """
         return {directory.name for directory in subagent_dirs(agent)}
 
+    def addressable(agent: str) -> set[str]:
+        """The names a send on the subagent network may address.
+
+        **On this network a name is a directory, so an unknown one is not a
+        peer that may appear later** — it is a typo or a member that was
+        removed.  `membership` is the whole of it, plus the caller's own agent
+        name: a subagent addresses its maker that way (the maker has no
+        directory under its own `subagents/`), and a maker addressing itself
+        is a real, listening identity rather than a ghost.  The remote network
+        has no such authoritative look: its roster is retained cards, and a
+        peer that has not published one yet is still addressable.
+        """
+        return membership(agent) | {agent}
+
+    def refuse_unknown_member(agent: str, peer: str) -> None:
+        """Refuse a local send to a name that is not one of `addressable`'s.
+
+        **Before the mesh is dialled and before anything is published.**  A
+        send to a name nobody holds cannot be delivered by the requester
+        ladder, only reported as unreachable after it has been retried three
+        times; the answer that would have told the model was a notice from a
+        member that never existed (`on_task_completion`).  The roster here is
+        a filesystem read and complete, so the call fails now and names the
+        members the model may address instead.
+        """
+        names = addressable(agent)
+        if peer in names:
+            return
+        roster = ", ".join(sorted(names)) if names else "none"
+        raise ToolError(
+            f"{peer!r} is not a member of this subagent network "
+            f"(members: {roster}). {LOCAL.tool(LIST)} reads the roster."
+        )
+
     async def place_for(agent: str, peer: str) -> bool:
         """Give *peer* its place on this network, when it is one of *agent*'s.
 
@@ -1774,6 +1808,21 @@ def build_server(
         be another agent on this machine or one somewhere else; the mesh does not
         tell you which, and nothing you send depends on it.
 
+        **The answer says `status: unverified`, because the profile is async.**
+        The first publish has left when this returns; whether the peer saw it is
+        unknown until it answers, and a send that is never answered comes back
+        as a notice in this conversation when the requester ladder runs out.
+        The id is acceptance, not a receipt.
+
+        **On the subagent network a name that is not a member is refused before
+        anything is published.**  Membership there is the directory set
+        (`membership`), so an unknown name is a typo or a removed member rather
+        than a peer that may appear later; `place_for` cannot give it a place,
+        and the ladder's only possible ending is a notice attributed to a name
+        that never existed.  The peer network has no authoritative roster — a
+        peer that has not published its card yet is still addressable — so there
+        the send stays asynchronous and `status` carries the uncertainty.
+
         **The receiver's place is made here when the network is the local one.**
         Everything else that is on a network is on it because somebody is there —
         a window holding a `join`, a peer's own process — and a subagent is the
@@ -1797,6 +1846,18 @@ def build_server(
                 "task_id is required for message_type='task_response' — it "
                 "is the [PeerAgent:…] marker's task_id."
             )
+        # **The subagent network's roster is complete, so an unknown name is a
+        # refusal rather than a send that will time out.**  The peer network has
+        # no authoritative roster (a peer may not have published its card yet),
+        # so its sends stay asynchronous and say so in `status`.  A machine with
+        # no section is left to `connected` for the refusal that names its own
+        # switch; there is no roster to read on a network that is off.
+        if (
+            net is LOCAL
+            and message_type != "task_response"
+            and mesh_settings().configured
+        ):
+            refuse_unknown_member(sender, agent)
         session = await connected(sender, USED, mine)
         if message_type == "task_response":
             answer = session.mesh.complete_task(task_id, message, False)
@@ -1810,18 +1871,30 @@ def build_server(
         sent = await session.mesh.send_message(
             agent, message, message_type=message_type
         )
+        # **The id is acceptance, not delivery.**  The standard profile is
+        # async-native: the first publish completed, and whether the peer saw it
+        # is unknown until it answers (or the requester ladder runs out and
+        # sends the notice this task's completion callback owns).  Saying so is
+        # the difference between a model that waits for an answer and one that
+        # reads a task id as a receipt.
         if message_type == "message":
             return {
                 "peer": agent,
                 "task_id": sent,
                 "message_type": message_type,
-                "note": "No task created — the reply arrives as a message.",
+                "status": "unverified",
+                "note": "Accepted for delivery, not delivered — the reply "
+                "arrives as a message if the peer answers, and a notice "
+                "arrives here if it is never reached.",
             }
         return {
             "peer": agent,
             "task_id": sent,
             "message_type": message_type,
-            "note": "The result will arrive in this conversation.",
+            "status": "unverified",
+            "note": "Accepted for delivery, not delivered — the result "
+            "arrives in this conversation if the peer answers, and a notice "
+            "arrives here if it is never reached.",
         }
 
     @mcp.tool(
@@ -2484,7 +2557,12 @@ _TOOL_TEXTS: dict[str, str] = {
         "never poll: there is nothing to poll. 'task_response' completes a task\n"
         "somebody sent you, and needs the `task_id` from that task's {marker}\n"
         "marker. 'message' is a plain conversation — no task, no completion, and\n"
-        "the reply arrives as a message."
+        "the reply arrives as a message.\n"
+        "\n"
+        "The id and `status` are about *acceptance*, not delivery: the first\n"
+        "publish has left when this returns, so `status` is 'unverified' until a\n"
+        "reply arrives, and a notice arrives here if the requester retry ladder\n"
+        "runs out. {addressing}"
     ),
     CANCEL_TASK: (
         "Withdraw a task you sent to {them}.\n"
@@ -2619,6 +2697,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "Offline entries are the ones that have said they are leaving, so\n"
             "they are listed rather than hidden."
         ),
+        "addressing": (
+            "A name that is not on the roster may be a peer that has not\n"
+            "appeared yet; the send is still accepted."
+        ),
     },
     LOCAL.key: {
         # **The members are an agent and the subagents it made, and every one of
@@ -2659,6 +2741,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "nothing is listening for it at this moment, and a message to it\n"
             "wakes it."
         ),
+        "addressing": (
+            "A name that is not a member of this network is refused before\n"
+            "anything is sent; `{list}` reads the roster."
+        ),
     },
 }
 
@@ -2693,7 +2779,11 @@ def describe_tool(net: Net, verb: str) -> str:
     were meant to avoid.  So the words a model reads are this network's, and the
     reasoning behind them is written once above.
     """
-    words = _NET_WORDS[net.key]
+    words = dict(_NET_WORDS[net.key])
+    # The addressing sentence may name this network's roster tool, and a value
+    # substituted by `format` is not formatted again — so its one hole is
+    # filled here rather than left literal in the model's schema.
+    words["addressing"] = words["addressing"].format(list=net.tool(LIST))
     return _TOOL_TEXTS[verb].format(
         send=net.tool(SEND_MESSAGE),
         cancel=net.tool(CANCEL_TASK),

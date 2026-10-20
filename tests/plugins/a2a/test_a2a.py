@@ -1203,7 +1203,7 @@ async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
 ) -> None:
     """**The promise `peer_agent_send_message` makes is the one this keeps.**
 
-    The tool answers "The result will arrive in this conversation", so a send
+    The tool promises that a result will arrive in this conversation, so a send
     that dies on the retry ladder with one `warning` leaves the model waiting
     for an arrival nothing will bring — and the task row `pending` for ever.
     The ladder's last word now takes the completion callback a terminal reply
@@ -1376,8 +1376,8 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     A connect attempt on a mesh whose link had just dropped began with
     `disconnect()`, which cancelled every `_deliver` task and cleared the
     correlation routes — so a send that was between two rungs of its ladder
-    (with both `peer_agent_send_message`'s "The result will arrive in this
-    conversation" and the retry profile still standing) died there: no terminal
+    (with both `peer_agent_send_message`'s promise that the result will arrive
+    in this conversation and the retry profile still standing) died there: no terminal
     reply could route afterwards (`a2a_reply_unknown_corr`, its correlation
     gone), no `UNREACHABLE` notice came out of the ladder, and the task row
     stayed `pending` for ever.  The teardown a *reconnect* makes is a revival —
@@ -1824,6 +1824,10 @@ async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     # thing no conversation can state about itself is that ending a turn sends
     # nothing, so the tool that *is* the reply says so.
     assert "A reply is this call" in by_name[PEER_SEND_MESSAGE].description
+    # The remote roster is not authoritative, so its schema says the id is
+    # acceptance: `status` stays unverified until a reply arrives.
+    assert "'unverified'" in by_name[PEER_SEND_MESSAGE].description
+    assert "not on the roster" in by_name[PEER_SEND_MESSAGE].description
 
 
 @pytest.mark.asyncio
@@ -1890,6 +1894,12 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     assert "agent on your subagent" not in send.description, (
         "nor the wrong word for them"
     )
+    # **The refusal and the async truth are in the schema**, because a model can
+    # only learn them from the tool it is about to call: a name outside the
+    # roster is refused, and the id is acceptance rather than delivery.
+    assert "refused before" in send.description
+    assert LOCAL.tool(LIST) in send.description
+    assert "'unverified'" in send.description
     assert LOCAL.tool(SEND_MESSAGE) in by_name[LOCAL.tool(BROADCAST)].description
     # The other two say *member* for the same reason, and one of them is the
     # question a model asks before it has a name to use at all.
@@ -2848,7 +2858,7 @@ async def test_a_send_to_a_subagent_gives_it_its_place_before_publishing(
         write_subagent(AGENT, "tester")
         server = local_build(configured=True)
         async with Client(server) as client:
-            await client.call_tool(
+            answer = await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": "tester", "message": "please do this"},
                 meta=client_meta(AGENT),
@@ -2856,6 +2866,88 @@ async def test_a_send_to_a_subagent_gives_it_its_place_before_publishing(
 
     assert places == [AGENT, "tester"], "the receiver's place was not taken first"
     assert published == [f"{AGENT}->tester"], "the send did not go out as the maker"
+    # The id is acceptance, not receipt: the profile is async-native, and a
+    # model that reads the id as "delivered" waits for a result that may never
+    # come while the ladder is still retrying.
+    assert answer.data["status"] == "unverified"
+    assert "Accepted for delivery, not delivered" in answer.data["note"]
+
+
+@pytest.mark.asyncio
+async def test_a_local_send_to_a_name_that_is_not_a_member_is_refused_before_publishing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**On the subagent network the roster is complete, so a typo is a refusal.**
+
+    `membership` is the directory set: a name outside it is not a peer that may
+    appear later, it is a typo or a removed member.  Publishing anyway could
+    only spend the requester ladder and end in a notice attributed to a member
+    that never existed — the fake-success failure Jack's black-box run found
+    (2026-10-20).  The refusal happens before the mesh is dialled, so it costs
+    no broker traffic and names the members the model can address.
+    """
+    places: list[str] = []
+    published: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        places.append(self.agent_name)
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        published.append(f"{self.agent_name}->{agent}")
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            with pytest.raises(
+                ToolError, match="not a member of this subagent network"
+            ):
+                await client.call_tool(
+                    LOCAL.tool(SEND_MESSAGE),
+                    {"agent": "xiaoyou", "message": "hello"},
+                    meta=client_meta(AGENT),
+                )
+
+    assert places == [], "the broker was dialled for a name that cannot exist"
+    assert published == [], "a name that is not a member was published to"
+
+
+@pytest.mark.asyncio
+async def test_a_remote_send_to_an_unlisted_name_is_accepted_but_says_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The peer network's roster is not authoritative, so its send is honest
+    about the uncertainty.**  A peer may not have published its card yet; the
+    profile is async-native, so the id means the first publish left this
+    process.  `status: unverified` is what stops that from reading as a receipt.
+    """
+    published: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def send_message(self: Any, agent: str, message: str, **kwargs: Any) -> str:
+        published.append(f"{self.agent_name}->{agent}")
+        return TASK
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    async with Client(build(on_the_mesh=True)) as client:
+        answer = await client.call_tool(
+            PEER_SEND_MESSAGE,
+            {"agent": "ghost-agent-xyz-not-exist", "message": "hello"},
+            meta=client_meta(AGENT),
+        )
+
+    assert published == [f"{AGENT}->ghost-agent-xyz-not-exist"]
+    assert answer.data["status"] == "unverified"
+    assert "Accepted for delivery, not delivered" in answer.data["note"]
 
 
 @pytest.mark.asyncio

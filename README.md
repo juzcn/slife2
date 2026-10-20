@@ -578,9 +578,11 @@ newest first, one line per turn, with `since`/`until` accepting an ISO date or a
 phrase such as `yesterday`, `last month`, or `3 days ago`, and `limit`/`offset`
 paging against `total`. `turn_search` takes the same time window, returns the
 same line plus a `similarity` score, and has no `offset` — it answers with the
-best matches, not a page of everything. None of the three takes an agent
-argument: the call itself carries the conversation, so a model reads its own
-history and nothing else.
+best matches, not a page of everything. Its `query` words rank exact matches
+first but are not a filter: with no sentence they are also read by meaning, so a
+hit may not contain them and a low `similarity` says so. None of the three takes
+an agent argument: the call itself carries the conversation, so a model reads
+its own history and nothing else.
 
 `turn_summarize` writes a summary and tags onto a turn — the one being run, or
 an earlier one by id — so the keyword search can find it. They join the text
@@ -823,8 +825,10 @@ returns a file's text and refuses a PDF, image, or archive by saying what it is.
 Text in another encoding is decoded and the encoding is named in the answer.
 
 `cabinet_search` accepts the same two inputs as `tool_search`: `keywords` are
-words that must all be present, and `sentences` are questions matched by
-meaning. Several sentences are several questions, and each can only add results.
+words to look for, and `sentences` are questions matched by meaning. The words
+are not a filter: a keywords-only call routes them to both legs, so a hit may
+come from meaning without containing them, and `matched_in` says when they were
+found. Several sentences are several questions, and each can only add results.
 `cabinet_summarize` writes a description for a document; writing one for a file
 or an image re-embeds it, because the description is part of what its vector is
 built from.
@@ -954,9 +958,11 @@ the model reads.
 
 A `task_request` returns an id immediately; the result arrives later as a
 message with a `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]`
-marker. There is nothing to poll. `task_response` completes a task this agent
-was sent, using the `task_id` from the marker. The direction is carried by
-`from`; `agent_name` is the agent's own identity.
+marker. The id and `status: "unverified"` describe acceptance, not delivery; a
+send that nothing answers comes back as an unreachable notice when the requester
+retry ladder runs out. There is nothing to poll. `task_response` completes a
+task this agent was sent, using the `task_id` from the marker. The direction is
+carried by `from`; `agent_name` is the agent's own identity.
 
 There is one mesh per agent, because the agent name is the MQTT client id and the
 last segment of the request topic. Two agents on one machine are two peers. An
@@ -1023,10 +1029,12 @@ as a peer agent, under `subagent_*` names: `subagent_send_message`,
 `subagent_cancel_task`, `subagent_list`, `subagent_task_list`,
 `subagent_broadcast`, and the six group tools `subagent_group_set`,
 `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`,
-`subagent_group_leave`, and `subagent_group_send_message`. Group traffic on this network wears the
-`[SubagentGroup:…]` marker and the `subagent_group:<group>:<sender>` channel,
-whether the sender is the maker or a sibling, and each member keeps its own
-`groups.yaml`.
+`subagent_group_leave`, and `subagent_group_send_message`. The membership is the
+directory set, so a send naming anything that is not a member is refused before
+it is published; `subagent_list` reads the roster. Group traffic on this network
+wears the `[SubagentGroup:…]` marker and the `subagent_group:<group>:<sender>`
+channel, whether the sender is the maker or a sibling, and each member keeps its
+own `groups.yaml`.
 
 | Key | Meaning |
 |---|---|
@@ -1202,6 +1210,14 @@ The fast lane needs no API key and no running server. Models are faked, and
 servers are driven over FastMCP's in-memory transport: real MCP messages and
 progress notifications, with no port bound. Integration tests bind ephemeral
 ports, so the suite can run beside a live stack.
+
+On Windows, `uv run pytest` cannot run beside a live stack: `uv` rewrites the
+entry points in `.venv\Scripts\` on every run, and a running instance holds
+`slife2.exe` open (`os error 32`). Use the environment's interpreter instead:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
 
 The end-to-end lane starts the real stack as processes: the launcher, seventeen
 daemons, a configuration on disk, and a stub OpenAI-compatible provider. It

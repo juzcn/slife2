@@ -500,9 +500,16 @@ def build_server(
         meaning leg measured the turn, `null` when only its words matched.
         Read one whole with `turn_read`.
 
+        **A hit need not contain the query words.**  The meaning leg ranks the
+        nearest turns whether or not they carry them, and a low `similarity`
+        says the words were not found; there is no exact-only mode, so a
+        nonsense query can come back with the history's closest turns.
+
         Args:
-            query: Words that must all be present — names, paths, an exact
-                string. Also read by meaning when `sentences` is empty.
+            query: Words to look for — names, paths, an exact string. They rank
+                turns that carry them first, but they are not a filter: when
+                `sentences` is empty the same words are also read by meaning, so
+                a hit may be a turn that does not contain them.
             sentences: What to recall, in your own words, one sentence per idea.
                 Read by meaning; another sentence is another chance to be found.
             since: Lower bound on when the turn was written — an ISO date or

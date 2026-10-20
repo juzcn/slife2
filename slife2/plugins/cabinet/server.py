@@ -1115,9 +1115,19 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         also read by meaning as a sentence made of them. Give neither to browse
         what is there, newest first.
 
+        **A hit need not contain the words.**  The meaning leg ranks the
+        nearest documents whether or not they carry them, and adding a sentence
+        only adds rows; `matched_in` says when the words were found, and
+        `similarity` says how close a meaning hit came. There is no exact-only
+        mode, and an empty page means the filters left nothing to rank — not
+        that nothing was close.
+
         Args:
-            keywords: Words that must appear. A path like `files/docs/spec.pdf`
-                works here.
+            keywords: Words to look for — a path like `files/docs/spec.pdf`
+                works here. They rank documents that carry them first, but
+                they are not a filter: with no sentence, the same words are
+                also read by meaning, so a hit may be a document that does not
+                contain them.
             sentences: What you are looking for, asked normally. One per
                 question you have.
             kind: `note`, `diary`, `file`, `report`, `dump` or `image` — the

@@ -528,7 +528,9 @@ skills:
 接受 ISO 日期或 `yesterday`、`last month`、`3 days ago` 之类的说法，
 `limit`/`offset` 按 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的
 一行外加 `similarity` 分数，并且没有 `offset`——它回答的是最匹配的几轮，而不是
-窗口内的全部轮次。三个工具都不接受 agent 参数：调用本身携带对话身份，因此模型
+窗口内的全部轮次。它的 `query` 词把包含这些词的轮次排在前面，但不是过滤器：没有
+句子时，同一组词也会按语义读取，所以命中可能并不包含它们，较低的 `similarity`
+就是这种情形的说明。三个工具都不接受 agent 参数：调用本身携带对话身份，因此模型
 只能读取自己的历史。
 
 `turn_summarize` 把摘要和标签写到某一轮上——当前正在运行的一轮，或按 id 指定的
@@ -738,10 +740,11 @@ Markdown 文件（`notes/`、`diary/`、`reports/`），无需 slife2 即可打�
 `file_read` 返回文件文本，遇到 PDF、图片或压缩包会说出它是什么而拒绝。其他编码
 的文本会被解码，并在回答中说明编码。
 
-`cabinet_search` 接受与 `tool_search` 相同的两种输入：`keywords` 是必须全部出现
-的词，`sentences` 是按语义匹配的问题。多个句子就是多个问题，每个问题只会增加
-结果。`cabinet_summarize` 为文档写描述；为文件或图片写描述会重新嵌入它，因为
-描述是构建其向量所用材料的一部分。
+`cabinet_search` 接受与 `tool_search` 相同的两种输入：`keywords` 是要找的词，
+`sentences` 是按语义匹配的问题。词不是过滤器：只给词时，同一组词也会被当作句子
+交给语义腿，所以命中可能来自语义而并不包含这些词；`matched_in` 说明词确实在哪里
+被找到。多个句子就是多个问题，每个问题只会增加结果。`cabinet_summarize` 为文档
+写描述；为文件或图片写描述会重新嵌入它，因为描述是构建其向量所用材料的一部分。
 
 `file_save` 复制本机已有的文件，不获取 URL。文件柜没有 `grep` 搜索腿。
 
@@ -853,8 +856,10 @@ agent 的 peer 是其他 agent，通过公开发布的 A2A-over-MQTT profile 通
 
 `task_request` 立即返回 id；结果稍后作为一条带有
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker 的消息
-到达。没有需要轮询的东西。`task_response` 使用 marker 中的 `task_id` 完成此
-agent 收到的任务。方向由 `from` 表示；`agent_name` 是 agent 自己的身份。
+到达。id 和 `status: "unverified"` 表示的是“已接受”，不是“已送达”；若无人应答，
+请求方的重试阶梯耗尽后会送来一条 unreachable 通知。没有需要轮询的东西。
+`task_response` 使用 marker 中的 `task_id` 完成此 agent 收到的任务。方向由 `from`
+表示；`agent_name` 是 agent 自己的身份。
 
 每个 agent 有一张 mesh，因为 agent 名称就是 MQTT client id 和请求主题的最后
 一段。同一台机器上的两个 agent 是两个 peer。一个 agent 从两个地方被访问时，
@@ -911,7 +916,8 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 `subagent_task_list`、`subagent_broadcast`，以及六个群工具
 `subagent_group_set`、`subagent_group_list`、`subagent_group_member_list`、
 `subagent_group_remove`、`subagent_group_leave`、
-`subagent_group_send_message`。这张网上的群消息无论
+`subagent_group_send_message`。成员身份就是目录集合，因此发给任何非成员的
+消息会在发布前被拒绝；`subagent_list` 读取花名册。这张网上的群消息无论
 发送者是创建者还是兄弟 subagent，都佩戴 `[SubagentGroup:…]` marker 和
 `subagent_group:<group>:<sender>` 频道，每个成员保有自己的 `groups.yaml`。
 
@@ -1073,6 +1079,14 @@ uv run pyright
 快车道不需要 API key，也不需要运行中的 server。模型是假的，server 通过 FastMCP
 的内存传输驱动：真实的 MCP 消息和进度通知，不绑定端口。集成测试绑定临时端口，
 因此测试套件可以在正在运行的服务旁边运行。
+
+在 Windows 上，`uv run pytest` 无法与正在运行的实例并存：`uv` 每次运行都会重写
+`.venv\Scripts\` 下的入口，而运行中的实例占着 `slife2.exe`（`os error 32`）。
+请改用虚拟环境里的解释器：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
 
 端到端车道将真实整套服务作为进程启动：launcher、十七个守护进程、磁盘上的配置，
 以及一个桩 OpenAI 兼容 provider。它验证启动顺序、跨进程轮次、工具路由、进度

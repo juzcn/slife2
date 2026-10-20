@@ -61,8 +61,9 @@ RECALL_REPLY: dict[str, Any] = {
             "Default true; set false when the input names nothing."
         ),
         "query": (
-            "Words that must all be present — names, paths, exact strings. Also "
-            "the meaning query when there is no sentence. Omit for no words."
+            "Words the keyword leg should find — names, paths, exact strings. "
+            "Without a sentence they are also the meaning query, so a recall "
+            "may come back without carrying them. Omit for no words."
         ),
         "since": "Start of a period, in the grammar the turn headers use.",
         "until": "End of a period.",
@@ -259,9 +260,10 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | 
     of a single request — "about X, last month" — so they arrive together in one
     object rather than as a list of searches.  The question has two spellings:
     `sentences` are read by meaning (each one a separate question, and one that
-    cannot cost a turn an earlier one found), while `query` is the words that
-    must all be present — names, paths, exact strings — and the meaning fallback
-    when there is no sentence.  `prompt_as_sentence` says whether the person's
+    cannot cost a turn an earlier one found), while `query` is the words the
+    keyword leg asks for — names, paths, exact strings — and the meaning
+    fallback when there is no sentence, which is why a recalled turn may not
+    carry them.  `prompt_as_sentence` says whether the person's
     input is read beside those sentences; it defaults to true, and false is for
     an input that names nothing — "hi", "continue", "what about the other one?".
 

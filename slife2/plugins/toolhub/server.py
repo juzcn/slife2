@@ -1613,16 +1613,21 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             # Three short sentences, and each one is a fact about this search
-            # rather than advice about how to use it: what the words must be
-            # true of, which words are worth giving, and what empty means.  The
-            # warning this used to carry ("guessing at words makes it find
-            # nothing") was true while a keywords-only call was answered by the
-            # keyword leg alone; with the routing in `ToolStore.search` a
-            # guess costs nothing, so the sentence had become false and would
-            # only talk a model out of the words it was sure of.
+            # rather than advice about how to use it: what the words rank, which
+            # words are worth giving, and what empty means.  The warning this
+            # used to carry ("guessing at words makes it find nothing") was true
+            # while a keywords-only call was answered by the keyword leg alone;
+            # with the routing in `ToolStore.search` a guess costs nothing, so
+            # the sentence had become false and would only talk a model out of
+            # the words it was sure of.  **And the words are not a filter**: a
+            # keywords-only call reads them through both legs, so the result may
+            # not carry them — saying "must contain" here promised the opposite
+            # of what the search does.
             "description": (
-                "Words a tool's own text must contain, every one of them — "
-                "'screenshot', 'pdf'. Empty when you have none."
+                "Words a tool's own text is likely to carry — 'screenshot', "
+                "'pdf'. They rank exact matches first but are not a filter: with "
+                "no sentence they are also read by meaning. Empty when you have "
+                "none."
             ),
         },
         "sentences": {

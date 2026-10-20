@@ -1281,8 +1281,13 @@ is no longer there. Nothing is written when nothing was removed.
 
 `tool_search` takes two kinds of input:
 
-- **`keywords`**: words that must all be present. The keyword leg is for names,
-  paths, and symbols.
+- **`keywords`**: words to look for. The keyword leg is for names, paths, and
+  symbols, and ranks documents carrying all of them first — but it is not a
+  filter. A keywords-only call joins them into one sentence and reads it
+  through both legs, because a word form the text does not carry would
+  otherwise find nothing (`ToolStore.search` measured 23/36 to 34–36 on the
+  tool catalogue); a hit may therefore come from meaning without carrying the
+  words.
 - **`sentences`**: questions matched by meaning. Each sentence is a separate
   question, and another question is another chance to be found; it cannot cost a
   row an earlier result.
@@ -1634,6 +1639,15 @@ Rules specific to this system:
     from the group member list tool, or from the next group message's wire
     event. Membership is not activity: a member that never answers is still a
     member.
+17. **A local send names a member; a remote send says it is unverified.** On
+    the subagent network membership is the directory set, so an unknown name
+    cannot be delivered by any later mechanism — the send is refused before it
+    is published rather than retried and reported against a name that never
+    existed. The peer network has no authoritative roster (a peer may not have
+    published its card yet), so its sends stay asynchronous and return
+    `status: "unverified"`: the id means acceptance and publication, not
+    receipt. A send that is never answered ends as an `UNREACHABLE` notice in
+    the conversation.
 
 The model-facing tools are:
 
