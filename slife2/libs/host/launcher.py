@@ -33,7 +33,7 @@ from pathlib import Path
 from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
-from slife2.clients.toolclient import LIST_TOOLS, remote_tools
+from slife2.clients.toolclient import LIST_TOOLS, remote_catalogue
 from slife2.libs.host.config import (
     LOCAL,
     LOCAL_SERVERS,
@@ -276,21 +276,31 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
 async def _open_catalogue_async(url: str) -> int:
     """Ask the hub for this home's tool list, which is what builds its catalogue.
 
-    `remote_tools` reads the answer the way the agent server does — strictly, so
-    a hub that answered with something this build cannot read is a failure rather
-    than an empty tool set — and the tools it hands back are dropped here: what
-    this call is *for* is the hub opening the calling home's `agents/tools.db`
-    and writing the machine's tool set into it.
+    `remote_catalogue` reads the answer the way the agent server does —
+    strictly, so a hub that answered with something this build cannot read is a
+    failure rather than an empty tool set — and the tools it hands back are
+    dropped here: what this call is *for* is the hub opening the calling home's
+    `agents/tools.db` and writing the machine's tool set into it.
+
+    **The number is the catalogue's, not the list's.**  The list is the loaded
+    set, which is a different (smaller) fact; the window's status bar shows the
+    catalogue's size, and this is the ask that can hand it one before a turn
+    exists — so the same answer serves both.
     """
     client = await open_server(url, name=TOOLHUB_SERVER_NAME, fallback_tool=LIST_TOOLS)
     try:
-        return len(await remote_tools(client))
+        return (await remote_catalogue(client)).total
     finally:
         await close_server(client)
 
 
 def open_catalogue(config: Config) -> int:
     """Make this home's tool catalogue, and answer how many tools it holds.
+
+    **Holds, not offers the model**: the answer counts every row the file has,
+    skills and CLI entries included and a source that is down among them
+    (`slife2.libs.store.catalogue.ToolStore.count`).  It is the number the
+    window puts in its status bar, so the start-up line and the bar agree.
 
     **A home is formed when an agent starts in it**, and the catalogue is the
     part of that this process cannot write itself: `agents/tools.db` belongs to
@@ -307,7 +317,7 @@ def open_catalogue(config: Config) -> int:
     the *home's* and not an agent's — one directory may hold several agents and
     they share it — so no agent is named here, and the hub needs none.
 
-    Raises whatever `open_server` or `remote_tools` raises, which is a
+    Raises whatever `open_server` or `remote_catalogue` raises, which is a
     `ConnectionError` naming what could not be reached or what could not be read.
     **Deliberately not caught**: a hub that cannot say what the model may call is
     this system come apart, and the caller's job is to say so rather than to start

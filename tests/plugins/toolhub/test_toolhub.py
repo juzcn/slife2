@@ -286,6 +286,49 @@ async def test_a_skill_is_a_row_so_a_search_can_find_it(isolated_runtime: Path) 
 
 
 @pytest.mark.asyncio
+async def test_the_total_is_the_catalogue_s_size_not_the_model_s_list(
+    isolated_runtime: Path,
+) -> None:
+    """The status bar's number counts what a skill and a CLI entry are: rows.
+
+    Neither is callable and neither has a load state, so neither appears in
+    `tools` — and both are things the catalogue holds, which is the question the
+    total answers.  The test puts one of each in and asserts the total is at
+    least two larger than the list, which is the difference a display shows.
+    """
+    write_skill(
+        isolated_runtime,
+        "browser-harness",
+        description="Drive a browser and take screenshots.",
+        body="Use CDP to click, type and capture.",
+    )
+    hub = hub_with_documents(
+        {
+            "browser-harness": {
+                "command": "browser-harness",
+                "description": "Direct browser control via CDP.",
+            }
+        }
+    )
+
+    async with Client(hub) as client:
+        listed = await client.call_tool("list_tools", {})
+        found = await call(
+            client, "tool_search", {"keywords": ["browser"], "sentences": []}
+        )
+
+    payload = listed.data
+    # Both documents exist and can be found...
+    assert "skill:browser-harness" in found["text"]
+    assert "cli:browser-harness" in found["text"]
+    # ...neither is a tool the model holds...
+    assert not [name for name in names(payload) if ":" in name]
+    # ...and both are in the number the bar shows.
+    assert isinstance(payload["total"], int)
+    assert payload["total"] >= len(payload["tools"]) + 2
+
+
+@pytest.mark.asyncio
 async def test_a_skill_dropped_in_later_is_findable_at_once(
     isolated_runtime: Path,
 ) -> None:

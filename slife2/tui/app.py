@@ -70,6 +70,7 @@ from slife2.libs.host.config import DEFAULT_AGENT, Config
 from slife2.libs.turn.events import (
     MessageCutIn,
     ToolApprovalRequested,
+    ToolsCounted,
     TurnEvent,
     TurnFinished,
 )
@@ -262,6 +263,7 @@ class SlifeApp(App[None]):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
+        tool_count: int = 0,
         models: Sequence[ModelChoice] = (),
         control_url: str = "",
         mesh_url: str = "",
@@ -297,6 +299,14 @@ class SlifeApp(App[None]):
         #: a model cannot read.
         self._thinking = thinking
         self._vision = vision
+        #: How many tools the catalogue held when this window opened, from the
+        #: start-up ask that makes the catalogue (`slife2._open_catalogue`).
+        #: **`0` is "nobody has said yet"**, not an empty catalogue: the hub
+        #: always holds at least its own tools, so the bar shows nothing until
+        #: the first ask answers — and the start-up ask is that answer for a
+        #: window launched the ordinary way.  A turn's own refreshes replace it
+        #: live (`ToolsCounted`).
+        self._tool_count = tool_count
         #: The models the picker offers: the config's, as it was when this
         #: window opened.  Held rather than re-read at the key, because the
         #: window is not a reader of that file — and because a list that grew
@@ -1031,11 +1041,18 @@ class SlifeApp(App[None]):
 
         **The display half is `slife2.tui.draw.draw`'s**, shared with the screen
         that watches a conversation the window is not running, so a watched turn
-        and a typed one cannot render differently.  The two events that are the
-        *window's* — the approval prompt and the bill in the status bar — are
-        handled here, because they are facts about this view rather than about
-        the conversation.
+        and a typed one cannot render differently.  The events that are the
+        *window's* — the approval prompt, the bill in the status bar, and the
+        catalogue's size — are handled here, because they are facts about this
+        view rather than about the conversation.
         """
+        if isinstance(event, ToolsCounted):
+            # The hub's answer to the ask this model call was built from; the
+            # loaded list's length is a different number and deliberately not
+            # what the bar shows (`slife2.libs.turn.events.ToolsCounted`).
+            self._tool_count = event.total
+            self._refresh_status()
+            return
         if isinstance(event, ToolApprovalRequested):
             # **The turn is parked on this**, so it is answered off the message
             # pump rather than in it — see `_ask_approval`.
@@ -1348,4 +1365,5 @@ class SlifeApp(App[None]):
             context_window=self._context_window,
             thinking=self._thinking,
             vision=self._vision,
+            tools=self._tool_count,
         )

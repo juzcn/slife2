@@ -104,7 +104,8 @@ from slife2.clients.gateway import flatten
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
-    remote_tools,
+    ToolListing,
+    remote_catalogue,
     trim_answer,
     unload_tools,
 )
@@ -159,6 +160,7 @@ from slife2.libs.turn.context import turn_note, with_note
 from slife2.libs.turn.events import (
     ContextChosen,
     ToolApprovalRequested,
+    ToolsCounted,
     TurnEvent,
     TurnObserver,
     encode,
@@ -167,7 +169,7 @@ from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.prompt import render as render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, Tool, ToolRegistry
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolRegistry
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -1244,8 +1246,8 @@ def build_server(
 
         return compress
 
-    async def turn_tools(client_id: ClientId) -> list[Tool]:
-        """What the model may call, asked of the hub.
+    async def turn_tools(client_id: ClientId) -> ToolListing:
+        """What the model may call, and how big the catalogue is, asked of the hub.
 
         Asked **before every model call**, not once per turn: the turn's tool
         list goes out with each request to the model, so each request asks
@@ -1266,10 +1268,17 @@ def build_server(
         reads *this* conversation's.  That is the one thing this process knows
         and the model does not, and it is why the binding happens here rather
         than in an argument — see `slife2.clients.toolclient`.
-        """
-        return await remote_tools(await hub(), client_id)
 
-    async def registry(client_id: ClientId) -> ToolRegistry:
+        The answer carries the catalogue's size as well as the list, because the
+        same ask is the only one that refreshes the declarations and therefore
+        the only moment the two numbers are both current.  See `registry`, which
+        is where the size is reported to a display.
+        """
+        return await remote_catalogue(await hub(), client_id)
+
+    async def registry(
+        client_id: ClientId, observer: TurnObserver | None = None
+    ) -> ToolRegistry:
         """What the model may call: the hub's tools, plus the mechanism's own.
 
         **Two tools are added here rather than served by the hub**, and they are
@@ -1280,8 +1289,24 @@ def build_server(
         outside the catalogue: the budget cannot unload them and `tool_search`
         cannot find them, which is what a tool the mechanism itself needs
         deserves (v1's system tools sat in every registry the same way).
+
+        **`observer` is where the catalogue's size goes**, and it is optional
+        because this is also called to build a loop before a turn exists
+        (`make_loop`) — there is no display to tell yet, and the window already
+        has a count from the start-up ask (`slife2._open_catalogue`).  When the
+        loop re-reads the list before a model call it passes its own observer,
+        so the bar follows the hub rather than a snapshot from boot.
+
+        **The count is the catalogue's and the registry's is not.**  `len` of
+        what is returned would include the two mechanism tools and exclude every
+        skill and CLI entry, so it is neither "the hub's tools" nor "the tools
+        that exist".  `ToolsCounted` carries the hub's own total, and the two
+        numbers are allowed to differ (events.py says why).
         """
-        return ToolRegistry(await turn_tools(client_id) + async_tools())
+        found = await turn_tools(client_id)
+        if observer is not None:
+            await AgentLoop._emit(observer, ToolsCounted(found.total))
+        return ToolRegistry(found.tools + async_tools())
 
     def turn_annotation(
         messages: list[dict[str, Any]],
@@ -1394,6 +1419,7 @@ def build_server(
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compressor: Compressor | None = None,
+        observer: TurnObserver | None = None,
     ) -> AgentLoop:
         return AgentLoop(
             active,
@@ -1407,7 +1433,9 @@ def build_server(
             # see `turn_tools`.  Bound to the key for the same reason the first
             # call is: every refresh has to hand back tools for *this*
             # conversation, and a bare `registry` would forget whose it was.
-            refresh=partial(registry, client_id),
+            # The observer rides along so each refresh can report the
+            # catalogue's size on the turn's own stream (`registry`).
+            refresh=partial(registry, client_id, observer),
             # None when this turn's caller cannot be asked — see `Pending.watched`
             # and `ask`, which is the other half of this.
             approve=approve,
@@ -1428,6 +1456,7 @@ def build_server(
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compressor: Compressor | None = None,
+        observer: TurnObserver | None = None,
     ) -> AgentLoop:
         """The agent loop for a conversation, bound to that conversation.
 
@@ -1443,10 +1472,20 @@ def build_server(
         shared backend carrying this conversation's `(agent, subagent)`, so the
         key reaches the model server on every call without splitting the cache
         per conversation and without `loop.py` ever learning that keys exist.
+
+        `observer` is this turn's, and it is handed on for one reason: the
+        tool-list refresh runs inside the loop, and the catalogue's size has to
+        reach the display on the same stream as everything else (`registry`).
         """
         if backend is not None:
             return await make_loop(
-                backend, client_id, loop.max_iterations, approve, deliver, compressor
+                backend,
+                client_id,
+                loop.max_iterations,
+                approve,
+                deliver,
+                compressor,
+                observer,
             )
 
         reference = loop.model
@@ -1481,6 +1520,7 @@ def build_server(
             approve,
             deliver,
             compressor,
+            observer,
         )
 
     # --- the registry --------------------------------------------------------
@@ -2486,6 +2526,9 @@ def build_server(
             # anything to say about: the callback's first act is to measure, and
             # a result that fits costs a comparison rather than a call.
             compress_for,
+            # So the tool list's size reaches the display on this turn's own
+            # stream, each time the list is re-read before a model call.
+            observer,
         )
         cancelled = False
         try:

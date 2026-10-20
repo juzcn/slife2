@@ -42,6 +42,7 @@ from slife2.libs.turn.events import (
     ToolApprovalRequested,
     ToolCallFinished,
     ToolCallStarted,
+    ToolsCounted,
     TurnFinished,
 )
 from slife2.libs.turn.watch import Closed, Snapshot, TurnStarted, WatchItem
@@ -195,6 +196,10 @@ class WatchScreen(Screen[None]):
                 # A watched turn runs unattended (`watched=False`), so the loop
                 # emits none.  Drawing nothing is the right answer for one that
                 # arrived anyway: the person watching cannot answer it.
+                return
+            case ToolsCounted():
+                # The window's status bar is the only reader of this, and this
+                # screen has none (`slife2.tui.draw` says the same on its side).
                 return
             case (
                 ContextChosen()

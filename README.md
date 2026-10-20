@@ -377,6 +377,14 @@ The status bar also reports the context size left by the last model call and
 its fraction of the model's window. Before each turn, a note names what the
 context decision kept and what it recalled from the turn log.
 
+It reports `tools N` as well: how many entries the catalogue holds, every
+category included, so skills and CLI entries are counted and so are the tools of
+a server that is down. This is the catalogue's size, not the length of the list
+the model is holding — a tool nobody has loaded is still a tool that exists. The
+number is read on the same ask that fetches the model's tool list, so it is as
+current as the last model call, and the start-up line names the same number
+before the window opens.
+
 ### Images
 
 Name an image file in a sentence:

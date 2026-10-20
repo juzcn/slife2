@@ -60,6 +60,7 @@ from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX, turn_footnote
 from slife2.libs.turn.events import (
     MessageCutIn,
     TextDelta,
+    ToolsCounted,
     TurnEvent,
     TurnFinished,
     decode,
@@ -2825,10 +2826,19 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     # learned it last would be showing one turn's context under another turn's
     # answer.
     assert kinds[0] == "ContextChosen"
+    assert "ToolsCounted" in kinds
     assert "TextDelta" in kinds
     assert "ToolCallStarted" in kinds
     assert "ToolCallFinished" in kinds
     assert kinds[-1] == "TurnFinished"
+
+    # **The size of the catalogue, not the length of the list beside it.**
+    # This turn's model list is `tool_then_answer`'s tools, which is a handful;
+    # the count is the hub's own whole-catalogue answer, and it is asked again
+    # with each model call — two of them here.
+    counted = [event for event in seen if isinstance(event, ToolsCounted)]
+    catalogued = await hub.call_tool("list_tools", {})
+    assert [event.total for event in counted] == [catalogued.data["total"]] * 2
 
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]

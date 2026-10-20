@@ -850,6 +850,19 @@ class Catalogue:
         """
         return await off_loop((await self.store()).source_counts, list(live))
 
+    async def total(self) -> int:
+        """How many tools the catalogue holds, all categories included.
+
+        **The number a display shows, and it is not `servers()`' sum.**  Those
+        are the model-facing rows grouped by source; a skill and a CLI
+        entry are rows this catalogue holds and no server offered, and leaving
+        them out would be a smaller answer than the question — "how many tools
+        are there" is about everything `ToolStore.merge` has been given, not
+        about what a model could call this moment.  See `ToolStore.count`, which
+        is the query and the argument.
+        """
+        return await off_loop((await self.store()).count)
+
     async def search(self, **arguments: Any) -> dict[str, Any]:
         """Both legs of a tool search, fused.  See `ToolStore.search`.
 
@@ -2895,6 +2908,14 @@ def build_server(
             `tools`: one entry per tool the model may call, with `name` as the
             model will call it, the `server` it came from, the upstream's own
             `tool` name, and the JSON Schema its arguments must match.
+
+            `total`: how many tools the catalogue holds — **every category**,
+            so skills and CLI entries are in it, and so are the rows of a source
+            that is down or switched off.  The list above is the model's *loaded*
+            set; this is the size of the catalogue it was chosen from, and it is
+            carried here because the ask that reads the list is the ask that has
+            already refreshed the declarations (`refresh`), so a display can
+            show a current number without a second question of its own.
         """
         # Ask for connects that are not running, then give the ones that are a
         # moment: a tool server that is still starting is left out of this
@@ -2934,7 +2955,13 @@ def build_server(
                 )
             )
         found = await catalogue.injectable(live_sources())
-        return {"tools": [tool.to_wire() for tool in advertised(found)]}
+        return {
+            "tools": [tool.to_wire() for tool in advertised(found)],
+            # After the gate, and from the same store: the model's list is one
+            # number and the catalogue's size is another, and a caller that
+            # wanted only the first reads `tools` and ignores this.
+            "total": await catalogue.total(),
+        }
 
     @mcp.tool
     async def call_tool(

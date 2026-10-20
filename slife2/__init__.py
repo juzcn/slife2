@@ -327,8 +327,8 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
-def _open_catalogue(config: Config) -> int:
-    """Make this home's tool catalogue, and report it as one line of the start.
+def _open_catalogue(config: Config) -> int | None:
+    """Make this home's tool catalogue, report it, and answer how big it is.
 
     **A home is formed when an agent starts in it**, and `agents/tools.db` is the
     part of that this process cannot write itself: the hub is the file's one
@@ -338,6 +338,13 @@ def _open_catalogue(config: Config) -> int:
     instead was nothing at all until a model turn happened to ask, so a directory
     an agent had been started in held its config, the `agents/` and `skills/`
     `_open_home` makes, and no tool set.
+
+    **The count is returned rather than only printed**, because the status bar
+    wants it before a turn exists: the window opens on the same number the
+    start-up line names, and `ToolsCounted` keeps it current afterwards.  `None`
+    is the failure the return code used to be, and it is a distinct value rather
+    than `0`: a catalogue that could not be built is not a catalogue with no
+    tools, and a bar showing `0` would say the wrong one.
 
     Printed for `_ensure`'s reason: this is a step that takes a second, and a
     start-up report that goes quiet while it runs is a report that cannot say
@@ -368,7 +375,7 @@ def _open_catalogue(config: Config) -> int:
         # client attached to a WSL server, say).  Both are start-up answers, not
         # tracebacks; the message names the fix.
         print(f"slife2: the tool catalogue could not be built: {exc}", file=sys.stderr)
-        return 2
+        return None
     _report(
         "",
         "catalogue",
@@ -376,7 +383,7 @@ def _open_catalogue(config: Config) -> int:
         f"{count} tool(s)",
         time.monotonic() - started,
     )
-    return 0
+    return count
 
 
 def _open_home() -> None:
@@ -604,6 +611,11 @@ def main(argv: list[str] | None = None) -> int:
                 # every port moves so that the native Windows stack keeps the
                 # documented ones.
                 print(f"  port offset: {offset}")
+            # What the status bar starts on, from the ask that makes the
+            # catalogue.  `0` is "no answer yet" and is what the bar draws
+            # nothing for; the start-up path below always replaces it with a
+            # count before the window opens, and a turn keeps it current.
+            tool_count = 0
             code = _ensure(config, config_path)
             if code == 0:
                 # **And the home is made whole before the window opens.**  One
@@ -611,8 +623,13 @@ def main(argv: list[str] | None = None) -> int:
                 # `agents/tools.db` is the hub's file, so asking is the only way
                 # to make it exist, and a `--data-dir` an agent is started in has
                 # its tool set from the first moment rather than from the first
-                # message.  See `_open_catalogue`.
-                code = _open_catalogue(config)
+                # message.  See `_open_catalogue`, which answers the count the
+                # bar shows as well as making the file.
+                found = _open_catalogue(config)
+                if found is None:
+                    code = 2
+                else:
+                    tool_count = found
             if code == 0:
                 app = SlifeApp(
                     tui_url(config, args.url),
@@ -625,6 +642,10 @@ def main(argv: list[str] | None = None) -> int:
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
+                    # How many tools the catalogue holds, from the ask that
+                    # made it — the bar's first number, replaced live by each
+                    # turn's refresh.
+                    tool_count=tool_count,
                     # Every model the config defines, for the picker `Ctrl+S`
                     # opens.  Built here rather than by the window, because this
                     # read of the file is the one that already happened: the

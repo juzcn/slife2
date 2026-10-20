@@ -65,6 +65,28 @@ class ContextChosen:
 
 
 @dataclass(frozen=True)
+class ToolsCounted:
+    """How many tools the catalogue holds, as the hub answered the last ask.
+
+    **A fact about the set, not about the request.**  The list that goes out
+    with a model call is the *loaded* subset, so its length is not this: a tool
+    the model has not loaded, and a skill or a CLI entry — which have no load
+    state at all — are still tools that exist.  `total` is the size of the
+    catalogue the loaded set was chosen from, which is the number a display can
+    show without pretending it is the model's list.
+
+    **Emitted before every model call, not once per turn**, because that is when
+    the list is asked for.  The hub's answer is as fresh as that ask and no
+    fresher — there is no timer behind it, deliberately (`slife2.plugins.toolhub.server`:
+    freshness is "the next ask tries again").  So an unchanged count arrives
+    again with each call; a display overwrites its own number and the wire cost
+    is an integer per call.
+    """
+
+    total: int
+
+
+@dataclass(frozen=True)
 class TextDelta:
     """A piece of the assistant's visible answer."""
 
@@ -200,6 +222,7 @@ class TurnFinished:
 
 TurnEvent = (
     ContextChosen
+    | ToolsCounted
     | TextDelta
     | ThinkingDelta
     | ToolCallStarted
@@ -254,6 +277,11 @@ def encode(event: TurnEvent) -> str:
     match event:
         case ContextChosen(kept=kept, recalled=recalled):
             payload = {"t": "context", "kept": kept, "recalled": recalled}
+        case ToolsCounted(total=total):
+            # One integer per model call; a short key like every other,
+            # because the volume this convention is for is per token and this
+            # is not, but a second spelling of "the count" would be.
+            payload = {"t": "tools", "n": total}
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -355,6 +383,10 @@ def decode(message: str) -> TurnEvent | None:
                 kept=int(payload.get("kept") or 0),
                 recalled=int(payload.get("recalled") or 0),
             )
+        case "tools" if isinstance(payload.get("n"), int) and not isinstance(
+            payload.get("n"), bool
+        ):
+            return ToolsCounted(total=payload["n"])
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):

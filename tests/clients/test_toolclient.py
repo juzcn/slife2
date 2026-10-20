@@ -22,6 +22,7 @@ from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
     LIST_TOOLS,
     UpstreamTool,
+    remote_catalogue,
     remote_tools,
     trim_answer,
     unload_tools,
@@ -73,7 +74,14 @@ class FakeHub:
     async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
         self.calls.append((name, arguments or {}))
         if name == LIST_TOOLS:
-            return answer(self.junk if self.junk is not None else {"tools": self.tools})
+            return answer(
+                self.junk
+                if self.junk is not None
+                # The loaded list and the catalogue's size are different facts;
+                # the fake keeps them equal only because this module is about
+                # reading the answer, not about the difference.
+                else {"tools": self.tools, "total": len(self.tools)}
+            )
         if name == CALL_TOOL:
             return answer({"text": "answered", "ok": True})
         raise AssertionError(f"the agent asked for {name!r}")
@@ -90,6 +98,23 @@ async def test_a_listed_tool_becomes_a_tool_the_loop_can_run() -> None:
     assert [tool.spec.name for tool in tools] == ["fake__echo"]
     assert tools[0].spec.description == "[fake] Echo it back."
     assert "text" in tools[0].spec.parameters["properties"]
+    assert hub.calls == [(LIST_TOOLS, {})]
+
+
+@pytest.mark.asyncio
+async def test_the_catalogue_s_size_is_read_beside_the_list() -> None:
+    """Two numbers, one answer, and they are not the same fact.
+
+    The list is what the model holds; the total is every row the catalogue has,
+    skills and CLI entries included.  The agent server shows the second in the
+    status bar and the first goes to the model, so reading them from one payload
+    is what keeps them from being two asks that could disagree.
+    """
+    hub = FakeHub()
+    listed = await remote_catalogue(hub)
+
+    assert [tool.spec.name for tool in listed.tools] == ["fake__echo"]
+    assert listed.total == 1
     assert hub.calls == [(LIST_TOOLS, {})]
 
 
@@ -164,6 +189,12 @@ async def test_a_refusal_with_no_text_still_says_which_tool() -> None:
         # belongs.
         {"tools": ["fake__echo"]},
         {"tools": [None]},
+        # **And the count is part of the shape.**  A missing one read as zero
+        # would put "no tools" on the bar of a catalogue that is full; a
+        # non-integer is the same wrong build the cases above name.
+        {"tools": []},
+        {"tools": [], "total": "many"},
+        {"tools": [], "total": None},
     ],
 )
 async def test_a_payload_this_build_cannot_read_is_loud(junk: Any) -> None:

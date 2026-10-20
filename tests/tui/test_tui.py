@@ -32,6 +32,7 @@ from slife2.libs.turn.events import (
     ToolApprovalRequested,
     ToolCallFinished,
     ToolCallStarted,
+    ToolsCounted,
     TurnFinished,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
@@ -1868,6 +1869,56 @@ async def test_status_bar_shows_the_agent_the_model_and_the_context() -> None:
     # No window configured for this model, so a count and no percentage.
     assert "42" in bar
     assert "%" not in bar
+
+
+async def test_the_status_bar_shows_the_catalogue_s_size_from_the_start() -> None:
+    """The number is the hub's, and it is there before the first turn.
+
+    The start-up ask that makes the catalogue is what knows it
+    (`slife2._open_catalogue`), so a window opened the ordinary way has it
+    immediately rather than waiting for a model call to report one.
+    """
+    client = FakeAgentClient(answering("hello"))
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        tool_count=253,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert "tools 253" in status(app)
+
+
+async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
+    """The bar follows the hub, and the number is not the model's list.
+
+    A count of 253 against a one-tool list is the whole point: skills and CLI
+    entries are rows the catalogue holds and no server offered, so a display
+    that showed the loaded list's length would be answering a different
+    question.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolsCounted(total=253))
+        on_event(TextDelta("ok"))
+        on_event(
+            TurnFinished(
+                text="ok",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            )
+        )
+        return "ok"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "tools 253" in status(app)
+        # The count is the bar's fact, not a line in the transcript.
+        assert "tools 253" not in shown(app)
 
 
 async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:

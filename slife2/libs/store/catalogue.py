@@ -1401,6 +1401,28 @@ class ToolStore:
             ).fetchone()
         return _tool_dict(row) if row else None
 
+    def count(self) -> int:
+        """How many tools this catalogue holds — **every category, every source**.
+
+        **Not `source_counts`' sum, and the difference is the point.**  Those
+        counts are the model-facing rows (`FUNCTION_CATEGORIES`) grouped by
+        source, which is what `servers()` reports; a skill or a CLI entry is a
+        row the catalogue holds and no server offered, and a count that left
+        them out would be a smaller answer to "how many tools are there".
+        (`CATEGORIES` is the whole of what a row may be.)
+
+        **Load state does not enter it.**  Loading moves a row within the set;
+        this is the size of the set.  Neither does a source's health: a server
+        that is down keeps its rows on purpose (`merge` and `forget_source` argue
+        that), and they are still tools the catalogue has — which is why a search
+        can still find them.
+
+        One `COUNT(*)` over the table, so it is cheap enough for a display to
+        ask on the same path that reads the model's list.
+        """
+        with self._connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM tool").fetchone()[0])
+
     def source_counts(self, sources: Sequence[str]) -> dict[str, dict[str, int]]:
         """Per source: how many tools it has, and how many the model holds.
 

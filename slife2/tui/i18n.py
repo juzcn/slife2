@@ -436,6 +436,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "{n} queued",
         "zh": "{n} 个排队中",
     },
+    # How many tools the catalogue holds — every category, so a skill and a
+    # CLI entry count.  The label leads in both languages, which also keeps the
+    # number where the eye expects it beside the other counts.
+    "status_tools": {
+        "en": "tools {n}",
+        "zh": "工具 {n}",
+    },
     # The one dim row's key hint.  **The key caps stay English** — `Esc`, `Ctrl+S`
     # — because they are what is printed on the keyboard and a translated one
     # breaks the key-to-action scan; the words after them are the words.

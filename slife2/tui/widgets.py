@@ -1925,6 +1925,7 @@ class StatusBar(Static):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
+        tools: int = 0,
         connected: bool = True,
     ) -> None:
         parts: list[str] = []
@@ -1945,6 +1946,16 @@ class StatusBar(Static):
             parts.append(f"[{PALETTE['dim']}]{t('status_queued', n=queued)}[/]")
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
+
+        # **The catalogue's size, not the model's loaded list.**  The number
+        # beside the model is what toolhub holds — every category, so skills and
+        # CLI entries are in it, and so are the rows of a server that is down —
+        # and it is the hub's own answer to the last ask, not a count this
+        # window keeps (`slife2.libs.turn.events.ToolsCounted`).  Zero is
+        # "nobody has said yet" rather than an empty catalogue: the hub always
+        # holds its own tools, so the bar says nothing until it knows.
+        if tools:
+            parts.append(f"[{PALETTE['dim']}]{t('status_tools', n=tools)}[/]")
 
         # What the model *is*, as opposed to what it is doing — which is why
         # these are dim words beside its name rather than coloured states:

@@ -23,10 +23,13 @@ The contract
 ------------
 Three tool names, one payload shape, and one rule about failure:
 
-* `list_tools` → `{"tools": [UpstreamTool, ...]}`, the whole set in one call.
-  One call rather than one per server, because the only caller wants all of
-  them: the agent builds a registry, and a registry with half the tools in it is
-  not a smaller answer, it is a wrong one.
+* `list_tools` → `{"tools": [UpstreamTool, ...], "total": int}`, the whole set
+  in one call, and the size of the catalogue it was chosen from.  One call
+  rather than one per server, because the only caller wants all of them: the
+  agent builds a registry, and a registry with half the tools in it is not a
+  smaller answer, it is a wrong one.  `total` is the *catalogue's* count — every
+  category, skills and CLI entries included, loaded or not — and not the length
+  of the list beside it, which is only what the model holds now.
 * `call_tool` → `{"text": str, "ok": bool}`.  **A failure is a value, not an
   exception**: an upstream that refused the call is one caller's bad data, which
   the model gets to read and act on.  `ok` is carried separately so the
@@ -134,10 +137,29 @@ class UpstreamTool:
         )
 
 
-async def remote_tools(
+@dataclass(frozen=True)
+class ToolListing:
+    """What `list_tools` answered: the model's tools, and the catalogue's size.
+
+    **Two numbers because they answer two questions.**  `tools` is the loaded
+    set — what the next request carries — and `total` is every row the catalogue
+    holds, which is what a status display shows.  A tool nobody has loaded is
+    still a tool that exists, and a skill or a CLI entry is neither loadable nor
+    callable through `call_tool` and is still a row.
+
+    A value rather than a tuple so the two halves are named where they are read:
+    the agent server hands the list to the loop and the count to a display, and
+    a reader of `[0]`/`[1]` has to remember which is which.
+    """
+
+    tools: list[Tool]
+    total: int
+
+
+async def remote_catalogue(
     client: Client, client_id: tuple[str, str] | None = None
-) -> list[Tool]:
-    """Every tool the hub offers, as tools the loop can run.
+) -> ToolListing:
+    """What the hub offers, and how large the catalogue behind it is.
 
     `client_id` is the conversation these tools will be run for, and it is bound
     *here* rather than passed by the model — see `_proxy`.  Optional because a
@@ -173,10 +195,33 @@ async def remote_tools(
     for raw in listed:
         if not isinstance(raw, dict) or not str(raw.get("name") or ""):
             raise unreadable("the toolhub", "return a tool list", raw)
-    return [
-        Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
-        for entry in (UpstreamTool.from_wire(raw) for raw in listed)
-    ]
+    total = payload.get("total")
+    # **A missing count is a build this one cannot read, not zero.**  `total`
+    # is what a display shows, and reading an absent key as `0` would put "no
+    # tools" on the bar of a catalogue that is full — the same mistake
+    # `slife2.libs.plugin.protocol.unreadable` exists to refuse.
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise unreadable("the toolhub", "return the catalogue's size", payload)
+    return ToolListing(
+        tools=[
+            Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
+            for entry in (UpstreamTool.from_wire(raw) for raw in listed)
+        ],
+        total=total,
+    )
+
+
+async def remote_tools(
+    client: Client, client_id: tuple[str, str] | None = None
+) -> list[Tool]:
+    """Every tool the hub offers, as tools the loop can run.
+
+    The list half of :func:`remote_catalogue`, for the callers that have no
+    display to feed — the agent-task server, and tests.  It is one call and one
+    reader: the total is read and dropped here, and `remote_catalogue` is where
+    both halves are checked.
+    """
+    return (await remote_catalogue(client, client_id)).tools
 
 
 async def unload_tools(client: Client) -> dict[str, Any]:
@@ -303,7 +348,9 @@ __all__ = [
     "FUNC_TOOL_UNLOAD",
     "LIST_TOOLS",
     "SEPARATOR",
+    "ToolListing",
     "UpstreamTool",
+    "remote_catalogue",
     "remote_tools",
     "trim_answer",
     "unload_tools",

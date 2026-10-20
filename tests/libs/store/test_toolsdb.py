@@ -557,6 +557,32 @@ def test_the_count_of_what_the_model_holds_is_gated_on_liveness(tmp_path) -> Non
     assert store.source_counts([]) == {"arxiv": {"tools": 2, "loaded": 0}}
 
 
+def test_the_catalogue_s_total_counts_every_category_and_every_health(
+    tmp_path,
+) -> None:
+    """The status bar's number is the size of the file, not the model's list.
+
+    Three facts are outside it and each is somebody else's question: a skill and
+    a CLI entry are rows with no connection behind them, a source that is down
+    keeps its rows on purpose, and a load moves a row *within* the set rather
+    than out of it.  So the total is larger than `source_counts`' sum by exactly
+    the two documents, and nothing about loading or health moves it.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search"), tool("arxiv__other")])
+    merge(store, "skills", "skill", [tool("skill:browser")])
+    merge(store, "cli", "cli", [tool("cli:yt-dlp")])
+
+    assert store.count() == 4
+    store.set_load("arxiv__search", LOADED)
+    assert store.count() == 4, "loading moves a row within the set"
+    store.set_source_state("arxiv", STATUS_ERROR)
+    assert store.count() == 4, "a down source keeps its rows on purpose"
+
+    # The other number, for contrast: `servers()` reports the model-facing rows.
+    assert sum(one["tools"] for one in store.source_counts([]).values()) == 2
+
+
 def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
     """A name beginning with `_` is the machinery's, and the gate keeps it back.
 

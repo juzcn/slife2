@@ -22,6 +22,7 @@ from slife2.libs.turn.events import (
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
+    ToolsCounted,
     TurnFinished,
     decode,
     encode,
@@ -41,6 +42,9 @@ EVENTS = [
     # The discriminator's answer, which arrives before any of the rest and is
     # the only event a turn has that is about the context rather than the work.
     ContextChosen(kept=12, recalled=3),
+    # The catalogue's size, which is not the model's list: skills and CLI
+    # entries are rows and are counted, loaded or not.
+    ToolsCounted(total=253),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
     # The iteration counter, and the two keys that are omitted at zero: the first
@@ -119,6 +123,9 @@ def test_decode_returns_none_for_foreign_json() -> None:
     assert decode('{"t": "unknown", "d": "x"}') is None
     # Right tag, wrong payload type.
     assert decode('{"t": "text", "d": 42}') is None
+    # A count that is not a number is not this build's count: reading it as
+    # zero would put "no tools" on the bar.
+    assert decode('{"t": "tools", "n": "many"}') is None
 
 
 CHUNKS = [

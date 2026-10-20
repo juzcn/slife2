@@ -396,6 +396,17 @@ The threshold is 100 and has not been re-measured against a real twenty-server
 configuration. On-demand loading is the mechanism; the observation that would
 move the number has not been taken.
 
+**The catalogue's size is a second number and the status bar shows it.** The
+list the model holds is a subset — skills and CLI entries are rows with no load
+state at all — so a count of it answers a different question from "how many
+tools are there". `list_tools` carries both: `tools` is the list, `total` is
+every row in the file, a down source's included. Carrying it on that answer is
+what keeps the number current without a timer: the ask that reads the list is
+the ask that has just refreshed the declarations, and the hub's freshness rule
+is "the next ask tries again" (`slife2.plugins.toolhub.server`). The window's
+start-up ask returns the same total, so the bar has a number before a turn
+exists, and each model call replaces it.
+
 ### 4.4 Search
 
 **Rule:** SDD §7.5.

@@ -590,8 +590,9 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
     process that opened it — so a home's catalogue cannot be made by writing it
     here.  What makes it is asking the hub the question a turn asks
     (`list_tools`), which is what `open_catalogue` is: the same call, the same
-    reader (`slife2.clients.toolclient.remote_tools`), and the count of what came
-    back.
+    reader (`slife2.clients.toolclient.remote_catalogue`), and **the catalogue's
+    count** rather than the length of the list that came back — the two are
+    different numbers, and the status bar shows the first.
 
     **And the home is on it, not an agent.**  `Peer.call_tool` adds this process's
     home to every call it makes, and that is what the hub resolves the file
@@ -621,7 +622,11 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
                     "parameters": {},
                 }
                 for name in ("tool_search", "func_tool_load")
-            ]
+            ],
+            # Larger than the list on purpose: the loaded set is two tools and
+            # the catalogue the window's bar reports holds more — skills, CLI
+            # entries, the rest of the hub's own.
+            "total": 17,
         }
 
     async def dial(url: str, **kwargs: Any) -> Any:
@@ -633,7 +638,8 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
     monkeypatch.setattr(launcher, "open_server", dial)
     config = default_config()
 
-    assert launcher.open_catalogue(config) == 2
+    # The total the hub answered, not the two tools that were in its list.
+    assert launcher.open_catalogue(config) == 17
     assert seen["url"] == config.server("toolhub").url
     assert home_of(seen["meta"]) == str(data_dir())
 

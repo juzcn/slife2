@@ -1190,6 +1190,13 @@ The catalogue is a library (`libs/store/catalogue.py`), opened in-process by the
 hub. The hub is its only writer. One SQLite file per home
 (`<data>/agents/tools.db`) is the catalogue.
 
+`list_tools` answers two numbers: `tools`, the list the model is holding, and
+`total`, the size of the catalogue. They are different facts. `total` counts
+every category — a skill and a CLI entry are rows with no load state — and every
+source, including one that is down and keeps its rows on purpose. It is read on
+the ask that already refreshes the declarations, which is what makes it current
+without a timer, and the terminal's status bar shows it.
+
 ### 7.2 Sources and declarations
 
 A plugin that owns a configuration section holds the connections that section
@@ -1779,6 +1786,9 @@ the caller decides what to do about it.
 - **A connection has two states on screen**: online and offline. The reasons live
   in the status tool. A line that tried to state them would be a line about the
   plugin's internals.
+- **The status bar's `tools` count is the catalogue's size**, not the loaded
+  list's length. The hub reports it beside the list on the same ask; the window
+  replaces its number with the one the last model call was built from.
 - **Model output is plain text.** Nothing a model produces is parsed as markup;
   a `[bold]` a model wrote is seven characters on screen, not a formatting
   instruction.
