@@ -325,12 +325,16 @@ async def test_replacing_a_skill_leaves_no_half_written_one(
 
 
 @pytest.mark.asyncio
-async def test_removing_a_skill_takes_the_folder_and_leaves_the_entry(
+async def test_removing_a_skill_takes_the_folder_and_its_entry(
     isolated_runtime: Path,
 ) -> None:
-    """The `skills:` entry is what the playbook is *given*, and it is the
-    operator's — so uninstalling the files does not throw away the wiring that
-    re-installing them needs, and a name with no folder is not a mistake.
+    """**The `skills:` entry describes this skill, so it goes with the folder.**
+
+    It is the playbook's `env` and switch; a skill that is uninstalled and an
+    entry that still says what it is given are two halves of one thing apart,
+    and the section would grow a row per thing ever installed.  `skill_set`
+    writes the entry again — with the env it is given, or with the operator's
+    when it is not — so removing it loses no wiring that a reinstall needs.
 
     A name the folder does not have is **refused**, though: nothing was deleted,
     so a `skill_remove` that answered as ordinary text would arrive with `ok`
@@ -349,8 +353,74 @@ async def test_removing_a_skill_takes_the_folder_and_leaves_the_entry(
 
     assert answer == {"name": "one", "removed": True}
     assert not (isolated_runtime / "skills" / "one").exists()
-    assert "SOME_KEY" in (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+    assert "SOME_KEY" not in (isolated_runtime / "slife2.yaml").read_text(
+        encoding="utf-8"
+    ), "the entry went with the folder"
     assert "is not installed" in str(missing.value)
+
+
+@pytest.mark.asyncio
+async def test_installing_a_skill_writes_the_env_it_is_given(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The `skills:` entry is half of what installing a skill means.**
+
+    The other half is the folder.  `skill_set` used to write only files, so a
+    model that installed a playbook declaring `requires.env` had no way to
+    supply the value and the next `skill_use` reported a key nobody could set.
+    The entry is read-modify-written rather than replaced: the switch is
+    `skill_set_enabled`'s and a reinstall must not turn a skill back on.
+
+    An install that omits `env` keeps what is there, and `{}` is the explicit
+    clear — the two answers a caller needs on a reinstall.
+    """
+    monkeypatch.setenv("SOME_KEY", "a-real-key")
+    config_on_disk(
+        isolated_runtime,
+        CONFIG + "skills:\n  one:\n    enabled: false\n",
+    )
+    needy = (
+        "---\n"
+        "name: one\n"
+        "metadata: {h: {requires: {env: [SOME_KEY]}}}\n"
+        "---\n\nThe body.\n"
+    )
+    async with Client(build_server(load())) as client:
+        first = await ask(
+            client,
+            "skill_set",
+            name="one",
+            files=files(needy),
+            env={"SOME_KEY": "${SOME_KEY}"},
+        )
+        written = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+        listed = await ask(client, "skill_list")
+
+        # Omitted: the entry the operator has is left alone.
+        await ask(client, "skill_set", name="one", files=files(needy))
+        kept = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+
+        # Empty: the explicit clear, and the switch still survives.
+        await ask(
+            client,
+            "skill_set",
+            name="one",
+            files=files(needy),
+            env={},
+        )
+        cleared = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
+
+    assert first == {"name": "one", "state": "off", "files": 1}
+    assert "SOME_KEY" in written and "a-real-key" not in written, (
+        "the reference is written, not the secret it resolves to"
+    )
+    assert "enabled: false" in written, "the switch is not this tool's to reset"
+    assert "are met" in listed["skills"][0]["requirements"], (
+        "the resolved value reaches the listing at once"
+    )
+    assert "SOME_KEY" in kept
+    assert "SOME_KEY" not in cleared
+    assert "enabled: false" in cleared
 
 
 @pytest.mark.asyncio

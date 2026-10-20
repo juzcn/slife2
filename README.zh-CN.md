@@ -611,7 +611,9 @@ Playbook 位于 `<data>/skills/<name>/SKILL.md`。`slife2-skills` 提供 `skill_
 `skills/`；该工具每次调用都会读取磁盘，因此不需要重启。
 
 Skill 可以在头部声明环境变量要求。值来自 `skills:` 配置节，通过和其他秘密相同的
-链解析。如果缺少 key，`skill_use` 会在模型执行依赖它的指令之前报告。
+链解析。如果缺少 key，`skill_use` 会在模型执行依赖它的指令之前报告。`skill_set`
+在收到 `env:` 时写入该条目的环境变量（重装时省略则保留原值），`skill_remove`
+则连同目录一起删除该条目。
 
 `cli:` 条目描述本机已经安装的程序。每个条目都是目录中的一行（`cli:yt-dlp`），
 因此 `tool_search` 可以按功能找到它。该行不是可调用工具，也没有加载状态。目前

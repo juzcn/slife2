@@ -43,8 +43,10 @@ from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     SKILLS_SERVER_NAME,
     Config,
+    ConfigError,
     SkillSettings,
     load_cached,
+    resolve_secret,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
@@ -355,7 +357,11 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         return listed(rows, "skills", limit, offset, cap=LIST_PAGE)
 
     @mcp.tool(name="skill_set", meta=FOR_THE_MODEL)
-    async def skill_set(name: str, files: list[dict[str, str]]) -> dict[str, Any]:
+    async def skill_set(
+        name: str,
+        files: list[dict[str, str]],
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Install or replace a skill: write a playbook onto this machine.
 
         `SKILL.md` is the playbook and has to be one of the paths; anything else
@@ -364,16 +370,26 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         relative to the skill's directory. A skill of the same name is replaced
         in one step.
 
+        `env` is the `skills:` entry the playbook is given: the names its
+        scripts read, each a `${VAR}` or `keyring:` reference or a literal
+        value. Omit it on a reinstall to keep the operator's entry; pass `{}` to
+        clear it. A switch already on the entry is kept either way.
+
         Args:
             name: The directory it lives in — what `skill_use` takes.
             files: The files to write, each `{"path": "SKILL.md", "content":
                 "..."}`. Paths are relative to the skill's own directory, and
                 one that leaves it is refused.
+            env: What the playbook's scripts are given. A `${VAR}` resolves
+                through the environment and the credential store when the
+                playbook is used; a `keyring:` reference is resolved here, so a
+                credential that is not stored fails this call.
 
         Returns:
-            `name`, `state` (`on`), and `files`, how many were written. A
-            refused install raises instead, so a success means the folder is
-            there.
+            `name`, `state` (`on`, or `off` when the entry was already switched
+            off and this call kept it that way), and `files`, how many were
+            written. A refused install raises instead, so a success means the
+            folder is there.
         """
         # **Refused by raising, like `skill_use`** — see that tool for why `ok`
         # false and not a `[refused]` sentence: a refusal is a failure the caller
@@ -382,34 +398,121 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         # two.
         if not name.strip():
             raise ToolError("a skill needs a name")
+        # **Resolved before anything changes.**  A `keyring:` reference with no
+        # credential behind it is a config the next start would refuse, and
+        # resolving it here is what makes that this call's failure rather than
+        # one discovered later.  A `${VAR}` that is not set remains the
+        # reference it was written as, and `skill_use` reports it missing.
+        try:
+            supplied = (
+                {str(key): resolve_secret(value) for key, value in env.items()}
+                if env is not None
+                else None
+            )
+        except ConfigError as exc:
+            raise ToolError(str(exc)) from exc
         try:
             installed = skills.install(name.strip(), files)
         except ValueError as exc:
             raise ToolError(f"{name!r} was not installed: {exc}") from exc
         except OSError as exc:
             raise ToolError(f"could not write {name!r}: {exc}") from exc
+        if env is not None:
+            _write_env(name.strip(), env, supplied or {})
+        key = _key_for(name.strip(), skills.find(name.strip()), home_entries())
+        current = home_entries().get(key)
         logger.info("skill_set name=%s dir=%s", name, installed)
-        return {"name": name, "state": "on", "files": len(files)}
+        return {
+            "name": name,
+            "state": "off" if current is not None and not current.enabled else "on",
+            "files": len(files),
+        }
+
+    def _write_env(
+        name: str, env: Mapping[str, str], supplied: Mapping[str, str]
+    ) -> None:
+        """Write the `skills:` entry's `env`, keeping the switch, and mirror it.
+
+        **Read-modify-write, not a whole-entry `upsert`**, for `cli_set`'s
+        reason: the entry has a field this call does not own (`enabled`, which
+        `skill_set_enabled` writes), and replacing the entry would silently
+        switch a skill the operator had taken out of the way back on.  The write
+        goes through `configfile.update_entry`, so it is the same lock and the
+        same loader validation as every other config edit.
+
+        **The mirror is updated from what was written**, not from the argument:
+        a concurrent edit may have added a switch, and the value `skill_use`
+        reads next must be the one the file now holds.  `supplied` is the
+        resolved form of `env` — what a reload would have produced — because the
+        mirror is read by `skill_use` and `skill_list` without another load.
+        """
+        key = _key_for(name, skills.find(name), home_entries())
+        written: dict[str, Any] = {}
+
+        def change(current: dict[str, Any]) -> dict[str, Any] | None:
+            updated = dict(current)
+            if env:
+                updated["env"] = dict(env)
+            else:
+                updated.pop("env", None)
+            written.update(updated)
+            return updated or None
+
+        try:
+            configfile.update_entry(SECTION, key, change)
+        except ConfigError as exc:
+            # The skill is installed; the entry is not, and the file is as it
+            # was.  Saying both is what lets a caller retry the half that
+            # failed without wondering about the half that worked.
+            raise ToolError(
+                f"{name!r} is installed, but its `skills:` entry was not written: "
+                f"{exc}"
+            ) from exc
+        mirror = homes.current()
+        if written:
+            mirror.entries[key] = SkillSettings(
+                env=dict(supplied), enabled=written.get("enabled") is not False
+            )
+        else:
+            mirror.forgotten(key)
 
     @mcp.tool(name="skill_remove", meta=FOR_THE_MODEL)
     async def skill_remove(name: str) -> dict[str, Any]:
-        """Uninstall a skill: delete its directory and everything in it.
+        """Uninstall a skill: delete its directory and its `skills:` entry.
 
-        The `skills:` entry naming what it was given stays, and `skill_set`
-        installs it again.
+        The entry goes with the folder: it is *this* skill's `env` and switch,
+        and leaving it behind is a section that describes a playbook nothing can
+        read. The key is the one `skill_use` was reading — an entry filed under
+        the playbook's own name rather than its directory's is removed under
+        that name. A name with no folder is refused: nothing was deleted, so the
+        call failed.
 
         Args:
             name: The skill to remove.
 
         Returns:
-            `name` and `removed`, which a success makes true. A name with no
-            folder is refused: nothing was deleted, so the call failed.
+            `name` and `removed`, which a success makes true.
         """
+        skill = skills.find(name.strip())
+        if skill is None:
+            raise ToolError(f"'{name}' is not installed — see `skill_list`.")
+        key = _key_for(name.strip(), skill, home_entries())
+        # **The entry first.**  It is the half a lock or an unreadable file can
+        # refuse, and a call that failed there must leave the folder for the
+        # next attempt; the folder is gone one step later and a retry of *it*
+        # has nothing to find.
+        try:
+            configfile.remove(SECTION, key)
+        except ConfigError as exc:
+            raise ToolError(str(exc)) from exc
+        homes.current().forgotten(key)
         try:
             removed = skills.remove(name.strip())
         except ValueError as exc:
             raise ToolError(f"{name!r} was not removed: {exc}") from exc
         if not removed:
+            # `find` said it was there; a folder that vanished between the two
+            # reads is the same refusal the old single check made.
             raise ToolError(f"'{name}' is not installed — see `skill_list`.")
         logger.info("skill_removed name=%s", name)
         return {"name": name, "removed": True}

@@ -677,7 +677,9 @@ disk on every call, so no restart is needed.
 A skill can declare environment requirements in its header. The values come from
 the `skills:` section, resolved through the same chain as any other secret.
 `skill_use` reports a missing key before the model runs an instruction that
-depends on it.
+depends on it. `skill_set` writes that entry's `env:` when it is given one —
+omit it on a reinstall to keep what is there — and `skill_remove` deletes the
+entry along with the folder.
 
 `cli:` entries describe programs already installed on the machine. Every entry is
 a catalogue row (`cli:yt-dlp`), so `tool_search` can find it by what it does.
