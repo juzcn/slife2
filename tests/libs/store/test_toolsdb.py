@@ -20,6 +20,7 @@ import sqlite3
 
 import pytest
 
+from slife2.libs.store import textindex
 from slife2.libs.store.catalogue import (
     LOADED,
     NA,
@@ -28,6 +29,7 @@ from slife2.libs.store.catalogue import (
     STATUS_ERROR,
     UNLOADED,
     ToolStore,
+    tool_document,
 )
 from slife2.libs.store.index import fuse_ranked
 from tests.fakes import StubEmbedder
@@ -778,6 +780,13 @@ def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
         "turn_list": "`entries` — one per turn.\n`total` — how many.",
     }
     assert store.route("turn_list")["returns"].startswith("`entries`")
+    # And it is part of what the row's *vector* is made of, which is the half a
+    # semantic search reads.  The keyword index is deliberately not given it.
+    document = tool_document(store.route("turn_list"))
+    assert "`entries` — one per turn." in document
+    absent = tool_document(store.route("arxiv__search"))
+    assert NA not in absent, "the absence sentinel is not text to embed"
+    assert absent.startswith("arxiv__search")
 
 
 # --- loading and the budget ---------------------------------------------------
@@ -1004,10 +1013,72 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
+def test_a_tool_is_found_by_a_word_only_its_returns_text_carries(tmp_path) -> None:
+    """**`returns` is in the keyword leg too**, which is the one place the two
+    legs' contracts differ.
+
+    The semantic document and the keyword index both hold the `Returns:` prose,
+    because a model may look for a tool by what it hands back — "which tool
+    returns the phase of the moon" — as well as by what it does.  A keyword
+    match is the precision half: the word is present in this row's text and
+    nowhere else's.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "cabinet",
+        "plugin",
+        [tool("moon_phase", "Report something.", returns="`phase` — of the moon.")],
+    )
+    merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
+
+    keyword = asyncio.run(store.search(keywords=["moon"], embedder=EMBEDDER))
+    assert keyword["results"][0]["name"] == "moon_phase"
+
+
+def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
+    """**A column added to the index is a shape change, not a rules change.**
+
+    The live FTS5 table from the build before `returns` has five columns, and an
+    insert built from the current six fails on it — so `_sync_text_index` drops
+    and recreates the table when its stamp moves, rather than `DELETE`ing rows
+    and putting them back into a table that cannot hold them.  The stamp here is
+    the one the previous build wrote.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "cabinet",
+        "plugin",
+        [tool("moon_phase", "Report something.", returns="`phase` — of the moon.")],
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DROP TABLE tool_fts")
+        connection.execute(
+            "CREATE VIRTUAL TABLE tool_fts USING fts5("
+            "name, description, category, source_id, schema, "
+            f"{textindex.FTS_TOKENIZE})"
+        )
+        connection.execute(
+            "INSERT INTO tool_fts(rowid, name, description, category, source_id,"
+            " schema) SELECT rowid, name, description, category, source_id, schema"
+            " FROM tool"
+        )
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'text_version'",
+            (textindex.RULES_VERSION,),
+        )
+
+    asyncio.run(store.sync_indexes(EMBEDDER))
+    keyword = asyncio.run(store.search(keywords=["moon"], embedder=EMBEDDER))
+
+    assert keyword["results"][0]["name"] == "moon_phase"
+
+
 def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) -> None:
     """`matched_in` is `line` or `rest`, and `rest` is the one that needed saying.
 
-    A row is indexed by five columns and a result line prints two of them, so a
+    A row is indexed by six columns and a result line prints two of them, so a
     row can carry `matched your words` with nothing in the printed text to check
     it against — measured on the report's own call, `skill:browser-harness`
     matched `read`/`file` through the playbook that rides in its `schema` column

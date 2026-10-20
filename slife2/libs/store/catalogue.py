@@ -211,14 +211,38 @@ def _check_values(ddl: str, column: str) -> set[str] | None:
 
 #: The version of what a tool row is *found* by and *about* is
 #: `slife2.libs.store.textindex.RULES_VERSION` — the same one the turns use, because it is
-#: the same `normalize`/`terms` that produce both.  A second constant here would
-#: be the second lever this module keeps saying it does not have.
+#: the same `normalize`/`terms` that produce both.  That is the shared contract;
+#: what the catalogue adds to it is `TOOL_FTS_VERSION` below (which fields this
+#: index holds), and the keyword index is stamped with the two together.
 #:
 #: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
 #: its name far more often than by anything else about it — "the calculator" and
 #: `calc` have to meet — so the name dominates and the schema, which is
-#: long and full of punctuation, counts for least.  v1's weights.
-BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5)
+#: long and full of punctuation, counts for least.  v1's weights, plus
+#: `returns` at the description's second tier: it is prose about the answer,
+#: and a model may look for a tool by what it hands back ("returns an image
+#: URL") as well as by what it does.
+BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5, 1.0)
+
+#: The columns the keyword index holds, in `BM25_WEIGHTS`'s order.
+_FTS_FIELDS = ("name", "description", "category", "source_id", "schema", "returns")
+
+#: The version of the keyword index's own **field list and weights**, beside the
+#: shared text rules in `slife2.libs.store.textindex.RULES_VERSION`.  A change
+#: here — a column added, a weight moved — makes the stored index the wrong
+#: index for its rows, and `_sync_text_index` rebuilds it when the stamp differs.
+#: Separate from `RULES_VERSION` because the turn and cabinet indexes share that
+#: one, and a catalogue column is not a reason to rebuild either of them.
+TOOL_FTS_VERSION = "2"
+
+#: The keyword table's DDL, in one place because two writers use it: the schema
+#: at open, and `_sync_text_index` when the field list has moved.  A version
+#: change means the table has a column the live one does not, and only a DROP
+#: and CREATE can give it one — `DELETE` is for a rules change, not a shape one.
+_FTS_SCHEMA = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS tool_fts USING fts5("
+    f"{', '.join(_FTS_FIELDS)}, {textindex.FTS_TOKENIZE})"
+)
 
 #: How many rows a tool search may return.  A cap rather than a preference:
 #: `limit` arrives from a model, and a model that asks for the whole catalogue
@@ -272,10 +296,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_load ON tool(load_status);
 -- not a column value, so there is nothing for an external-content index to
 -- point at.  The row is written by this module, in the same transaction as the
 -- row it indexes.
-CREATE VIRTUAL TABLE IF NOT EXISTS tool_fts USING fts5(
-    name, description, category, source_id, schema,
-    {textindex.FTS_TOKENIZE}
-);
+{_FTS_SCHEMA};
 
 -- Which tool a vector belongs to.  A row in `tool_vec` is a *chunk*, not a tool
 -- — `vec0` holds one vector per row, and a long schema embedded whole would
@@ -310,9 +331,6 @@ _SEARCH_COLUMNS = (
     "load_status",
 )
 
-#: The five columns the keyword index holds, in `BM25_WEIGHTS`'s order.
-_FTS_FIELDS = ("name", "description", "category", "source_id", "schema")
-
 
 def _in_list(values: Any) -> str:
     """A SQL `IN` list of quoted literals, from a set of constants."""
@@ -331,15 +349,48 @@ def _indexable(value: Any) -> str:
     return "" if text == NA else text
 
 
+#: The version of the text a tool's vector is made of — **the catalogue's own
+#: text contract, beside `textindex.RULES_VERSION`'s shared one.**
+#:
+#: `RULES_VERSION` covers what `normalize` and `terms` produce, and every corpus
+#: uses it; this covers *which columns* `tool_document` reads, which is a fact
+#: about this catalogue and about nothing else.  It is folded into the vector
+#: identity where the index is built, because a stored vector is a function of
+#: the text it was made from: adding `returns` makes every existing vector the
+#: wrong vector for its row, exactly as changing the model does, and the rebuild
+#: is the same one.  **Bump it with any change to `tool_document`** — including
+#: the order of what it joins, because the text is what the vector is of.
+TOOL_DOCUMENT_VERSION = "2"
+
+
+def _vector_identity(embedder: Embedder) -> str:
+    """What this catalogue's vector index was built with.
+
+    `vector_identity` is the model and the shared text rules; the suffix is the
+    catalogue's own document contract, which the other two corpora do not have.
+    Keeping it here rather than in `slife2.libs.store.index` is what makes a
+    change to `tool_document` rebuild this index and leave the turn and cabinet
+    indexes alone.
+    """
+    return f"{vector_identity(embedder)}|tool-document/{TOOL_DOCUMENT_VERSION}"
+
+
 def tool_document(row: Mapping[str, Any]) -> str:
     """The text a tool is *about*, which is what its vector is a vector of.
 
-    Name, description and the parameter schema, and nothing else: those are the
-    three things a model chooses a tool by, and the rest of the row is
-    bookkeeping (`source_id`, `status`) that describes the record rather than the
-    tool.  Through `storable` for the reason the turn's text is: this string
-    goes out as JSON on its way to an embedding model, and a lone surrogate
-    cannot be encoded.
+    Name, description, the answer's `Returns:` prose and the parameter schema,
+    and nothing else: those are the four things a model chooses a tool by, and
+    the rest of the row is bookkeeping (`source_id`, `status`) that describes the
+    record rather than the tool.  Through `storable` for the reason the turn's
+    text is: this string goes out as JSON on its way to an embedding model, and a
+    lone surrogate cannot be encoded.
+
+    **`returns` is in both legs.**  It is prose about what an answer holds, so
+    the semantic leg reads it as meaning; the keyword leg holds it too, because
+    "which tool returns the phase of the moon" is a question a model may write
+    in words, and the two legs should agree about what a row is about.  A change
+    to this function is a change to the vector identity
+    (`TOOL_DOCUMENT_VERSION`).
 
     **Every row has one, so every row has a vector.**  v1 asked whether the
     *schema* was worth embedding, because in v1 the column held the whole tool
@@ -349,6 +400,9 @@ def tool_document(row: Mapping[str, Any]) -> str:
     so the document never is either.
     """
     parts = [str(row.get("name") or ""), str(row.get("description") or "").strip()]
+    returned = _indexable(row.get("returns"))
+    if returned.strip():
+        parts.append(returned)
     schema = _indexable(row.get("schema"))
     if schema.strip():
         parts.append(schema)
@@ -748,14 +802,15 @@ class ToolStore:
                 }
                 if moved:
                     updates.append({**previous, **fields, "moved": sorted(moved)})
-                    # A description or a schema that moved is a document that
-                    # moved, and the vector it had is a vector of text that is
-                    # no longer there — those two are the whole of what
-                    # `tool_document` reads.  Anything else that moved (a
-                    # `remote_name`, a status) leaves the document identical, so
-                    # re-embedding it would buy a vector of the same text at the
-                    # price of an embedding call and a rewritten row.
-                    if moved.keys() & {"description", "schema"}:
+                    # A description, a schema or a returns text that moved is
+                    # a document that moved, and the vector it had is a vector
+                    # of text that is no longer there — those three are the
+                    # whole of what `tool_document` reads.  Anything else that
+                    # moved (a `remote_name`, a status) leaves the document
+                    # identical, so re-embedding it would buy a vector of the
+                    # same text at the price of an embedding call and a
+                    # rewritten row.
+                    if moved.keys() & {"description", "schema", "returns"}:
                         documents.append((name, tool_document(fields)))
                 # Except a row that stated its own: a merge re-enables what an
                 # older *config* switched off, and for these two families the
@@ -899,9 +954,13 @@ class ToolStore:
         being a hit.
         """
         connection.execute("DELETE FROM tool_fts WHERE rowid = ?", (rowid,))
+        # Built from `_FTS_FIELDS` rather than spelled out, so the insert and the
+        # DDL cannot disagree about the column list: the last change to one and
+        # not the other is the "5 columns but 6 values" failure of a shape change.
+        columns = ", ".join(_FTS_FIELDS)
+        marks = ", ".join("?" * (len(_FTS_FIELDS) + 1))
         connection.execute(
-            "INSERT INTO tool_fts(rowid, name, description, category,"
-            " source_id, schema) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO tool_fts(rowid, {columns}) VALUES ({marks})",
             (
                 rowid,
                 *(
@@ -1835,7 +1894,7 @@ class ToolStore:
             placed += len(vectors)
         return {
             "vectors": placed,
-            "identity": vector_identity(embedder),
+            "identity": _vector_identity(embedder),
         }
 
     def ensure_index(self, embedder: Embedder) -> None:
@@ -1852,7 +1911,7 @@ class ToolStore:
         catalogue's file has called its table `meta` since before the other two
         existed.
         """
-        identity = vector_identity(embedder)
+        identity = _vector_identity(embedder)
         with self._connect() as connection:
             rebuilt = rebuild_vector_index(
                 connection,
@@ -1874,21 +1933,32 @@ class ToolStore:
                 _write_tool_vectors(connection, name, rows)
 
     def _sync_text_index(self) -> None:
-        """Rebuild the keyword index when the rules that built it have changed.
+        """Rebuild the keyword index when what it holds or how it reads it moved.
+
+        **Two levers, one stamp.**  `textindex.RULES_VERSION` is the shared one
+        (what `normalize` and `terms` produce); `TOOL_FTS_VERSION` is this
+        catalogue's (which fields the index holds and how they are weighted).
+        Either changing means the stored index is the wrong index for its rows,
+        and both are answered the same way: build it again.
+
+        **A field-list change is a shape change, so this DROPs the table.**
+        `DELETE` is enough for a rules change and not for a column that was
+        added — the live FTS table would still have the old list, and the insert
+        built from `_FTS_FIELDS` would fail on it.  The DDL is `_FTS_SCHEMA`, the
+        same string the schema uses at open, so the two cannot drift.
 
         One condition, because the other case cannot happen: a row can only be
-        missing from this index if the version stamp says the rules match — and
-        then it cannot be, since the row is indexed in the transaction that
-        writes it.  A file with no stamp at all is the version-mismatch case,
-        and is rebuilt whole.
+        missing from this index if the stamp says the rules match — and then it
+        cannot be, since the row is indexed in the transaction that writes it.  A
+        file with no stamp at all is the version-mismatch case, and is rebuilt
+        whole.
         """
+        stamp = f"{textindex.RULES_VERSION}|tool-fields/{TOOL_FTS_VERSION}"
         with self._connect() as connection:
-            if (
-                index_meta(connection, "meta").get("text_version", "")
-                == textindex.RULES_VERSION
-            ):
+            if index_meta(connection, "meta").get("text_version", "") == stamp:
                 return
-            connection.execute("DELETE FROM tool_fts")
+            connection.execute("DROP TABLE IF EXISTS tool_fts")
+            connection.execute(_FTS_SCHEMA)
             for row in connection.execute("SELECT rowid AS rowid, * FROM tool"):
                 self._index(
                     connection,
@@ -1899,9 +1969,10 @@ class ToolStore:
                         "category": str(row["category"]),
                         "source_id": str(row["source_id"]),
                         "schema": str(row["schema"]),
+                        "returns": str(row["returns"]),
                     },
                 )
-            set_index_meta(connection, "meta", text_version=textindex.RULES_VERSION)
+            set_index_meta(connection, "meta", text_version=stamp)
 
     def tools_without_vectors(self, limit: int | None = None) -> list[tuple[str, str]]:
         """Rows the vector index does not hold, as `(name, document)`.
@@ -1921,7 +1992,7 @@ class ToolStore:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, t.name AS name, t.description AS description,"
-                " t.schema AS schema FROM tool t"
+                " t.schema AS schema, t.returns AS returns FROM tool t"
                 " LEFT JOIN tool_chunk c ON c.name = t.name"
                 " WHERE c.id IS NULL"
                 " ORDER BY t.rowid"
