@@ -229,6 +229,12 @@ is no sentence. Several sentences are several questions: each is embedded on
 its own, a turn keeps its best similarity across them, and a later sentence can
 only add a turn or raise one — never cost a turn an earlier sentence found.
 
+On the rebuilt log the 30-query set answered at hit@1 0.93, hit@10 0.97 and MRR
+0.94. Ten hand-written hard sentences were less decisive — phrase-only MRR
+0.82, sentence-only 0.71, both 0.76 — recovering the two artifact/output cases
+and costing one English subject phrase. The sentence is a shape the model may
+use, not one it must use.
+
 **Failure policy.** A timeout, provider error, or unreadable reply is not a
 decision. The turn runs on the context it already has. A missing store fails the
 turn. There is no switch to turn the decision off: an append-only context is
