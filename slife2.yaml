@@ -175,9 +175,11 @@ tool_load:
     - dump_read
     # Images.
     - attach_image
-    # One external tool, by its `{server}__{tool}` name — the list is per
-    # tool, so the rest of that server stays on demand.
-    - tavily-mcp__tavily_search
+    # Web search, by each server's `{server}__{tool}` name — the list is per
+    # tool, so the rest of each server stays on demand.
+    - serper__google_search
+    - deepseek-search__webSearch
+    - baidu-search__chatCompletions
     # Delegation and the subagent network.
     - subagent_set
     - subagent_list
@@ -323,6 +325,19 @@ mcp:
       - '@wonderwhy-er/desktop-commander@latest'
     description: 'Swiss-army-knife for your own machine: run terminal commands with streaming output, drive long-running and interactive processes, and read/write/search/edit files (diff-based surgical edits, ripgrep search, Excel/PDF/DOCX).'
 
+  deepseek-search:
+    command: npx
+    args:
+      - -y
+      - deepseek-websearch-mcp
+    env:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+    description: 'DeepSeek 官方 Search / Fetch API 的 MCP server（社区实现，MIT）。webSearch：联网搜索，支持 site:/after:/before: 等操作符与 freshness 时效过滤，结果附带发布日期、权威度(0-4)、相关性分；webFetch：抓取网页返回 Markdown。需在 platform.deepseek.com 申请 Key，经环境变量 DEEPSEEK_API_KEY 注入。'
+  baidu-search:
+    url: https://qianfan.baidubce.com/v2/ai_search/mcp
+    headers:
+      Authorization: Bearer ${BAIDU_API_KEY}
+    description: '百度智能云千帆「AI 搜索」官方 MCP Server（Streamable HTTP 远程端点）。工具 AIsearch：实时联网搜索，可选 model（ERNIE 等）由服务端大模型直接总结。鉴权：Authorization: Bearer <千帆/AppBuilder API Key（bce-v3/ALTAK-...）>，经环境变量 BAIDU_API_KEY 注入。'
 rest-api:
   # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
   # `command:` uses a proxy of your own instead. A large spec is worth
