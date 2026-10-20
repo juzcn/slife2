@@ -24,6 +24,7 @@ $script:State = $null
 $script:Action = 'install'
 $script:DryRun = $false
 $script:Failed = $false
+$script:ProgramHints = @()
 
 function Say([string]$Message) { Write-Host $Message }
 function Step([string]$Number, [string]$Message) { Write-Host ""; Write-Host "[$Number] $Message" }
@@ -305,7 +306,16 @@ function Get-Requirements {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $parts = $line.Split("`t")
         if ($parts.Count -ge 2) {
-            $requirements += [pscustomobject]@{ Executable = $parts[0]; Provenance = $parts[1] }
+            # The third field is a `cli:` entry's install line, present only
+            # when that entry is the program's sole claimant.  It is printed
+            # when the program is missing, not executed.
+            $hint = ''
+            if ($parts.Count -ge 3) { $hint = ($parts[2..($parts.Count - 1)] -join "`t") }
+            $requirements += [pscustomobject]@{
+                Executable = $parts[0]
+                Provenance = $parts[1]
+                InstallHint = $hint
+            }
         }
     }
     return $requirements
@@ -452,7 +462,10 @@ function Install-Dependencies([object[]]$Requirements) {
             'yt-dlp' { Ensure-UvTool 'yt-dlp' '3.13' }
             'browser-harness' { Ensure-UvTool 'browser-harness' '3.12' }
             default {
-                if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+                # A configured install line is the operator's answer for a
+                # program this script cannot provide; verification prints it
+                # rather than failing the run.  Without one, it is a gap.
+                if (-not (Get-Command $exe -ErrorAction SilentlyContinue) -and -not $requirement.InstallHint) {
                     Fail "$exe is missing and has no user-level installer ($($requirement.Provenance))"
                 }
             }
@@ -464,6 +477,17 @@ function Invoke-Verification([object[]]$Requirements) {
     foreach ($requirement in $Requirements) {
         if (Get-Command $requirement.Executable -ErrorAction SilentlyContinue) { continue }
         if ($requirement.Executable -eq 'mosquitto' -and (Test-BrokerListening)) { continue }
+        # The one miss that is the operator's to fix rather than a failed
+        # install, exactly as an unset credential is: the config carries the
+        # command, and the run reports success with the command printed.
+        if ($requirement.InstallHint) {
+            $script:ProgramHints += [pscustomobject]@{
+                Executable = $requirement.Executable
+                InstallHint = $requirement.InstallHint
+                Provenance = $requirement.Provenance
+            }
+            continue
+        }
         Fail "$($requirement.Executable) is missing ($($requirement.Provenance))"
     }
     if (Get-Command uv -ErrorAction SilentlyContinue) {
@@ -489,6 +513,15 @@ function Invoke-Verification([object[]]$Requirements) {
     # flag.  `-m slife2` is this environment's code and argparse handles it.
     & $script:Py -m slife2 --help | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail 'slife2 does not run' }
+}
+
+function Show-ProgramHints {
+    if ($script:ProgramHints.Count -eq 0) { return }
+    Say ''
+    Say '  programs: install the ones you have not set up:'
+    foreach ($program in $script:ProgramHints) {
+        Say ("    {0}    {1}    ({2})" -f $program.Executable, $program.InstallHint, $program.Provenance)
+    }
 }
 
 function Show-Credentials {
@@ -521,6 +554,7 @@ function Show-Next {
     }
     Say "  data:    $($script:HomeDir)"
     Say "  config:  $(Join-Path $script:HomeDir 'slife2.yaml')"
+    Show-ProgramHints
     Show-Credentials
 }
 

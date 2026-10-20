@@ -80,9 +80,10 @@ slife2 is built around four rules.
 
 slife2 is tested on Windows, macOS, and Linux.
 
-The installation script below installs every external program required by the
-current `slife2.yaml`, upgrades existing ones, and verifies the result. A manual
-installation uses Python 3.13 and uv alone.
+The installation script below installs the external programs the current
+`slife2.yaml` requires, upgrades existing ones, and verifies the result — and
+prints the configured install line for a missing `cli:` command it cannot
+provide. A manual installation uses Python 3.13 and uv alone.
 
 ### SQLite extension support
 
@@ -108,9 +109,15 @@ this Python's sqlite3 cannot load extensions
 
 ### External programs (required when configured)
 
-Every program named by the current configuration is required. The installer
+Every program named by a server, a tunnel or a skill is required. The installer
 provides each one at the user level and stops with the configuration entry named
 when a program is unavailable.
+
+A `cli:` entry is the exception: it records a program the machine may already
+have, and its `install:` line is a prompt rather than an instruction. When such
+a program is missing and the installer has no way to provide it, the run prints
+that line at the end — beside the `credstore set` hints — and still succeeds.
+A `cli:` entry with no `install:` line is still a required program.
 
 | Program | Named by | Provided by the installer |
 |---|---|---|
@@ -696,7 +703,9 @@ entry along with the folder.
 `cli:` entries describe programs already installed on the machine. Every entry is
 a catalogue row (`cli:yt-dlp`), so `tool_search` can find it by what it does.
 The row is not a callable tool and has no load state. No tool executes a `cli:`
-entry yet; `func_tool_load` reports that.
+entry yet; `func_tool_load` reports that. An entry's `install:` line is what is
+shown when the program is missing: the catalogue row carries it, and so does
+the installer's closing hint.
 
 `enabled: false` keeps an entry configured but never connects it. The value must
 be a real YAML boolean: `no`, `off`, and `'false'` are strings under YAML 1.2

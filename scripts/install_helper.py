@@ -3,10 +3,11 @@
 `seed` puts the shipped configuration where slife2 will read it, without ever
 overwriting a file the user already has.  `require` reads the *effective*
 configuration with the project's own loader and prints every external program
-it names, with the place that names it.  The installer maps those names to
-packages and installs them; nothing here installs anything.  `secrets` reads the
-same configuration for the credentials it cannot resolve, so the installer can
-say which `credstore set` commands would make it work.
+it names, with the place that names it — and, for a `cli:` entry, the line that
+installs it.  The installer maps those names to packages and installs them;
+nothing here installs anything.  `secrets` reads the same configuration for the
+credentials it cannot resolve, so the installer can say which `credstore set`
+commands would make it work.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --home <dir>
@@ -115,10 +116,27 @@ def _first_word(command: str) -> str:
     return words[0].strip("\"'") if words else ""
 
 
-def _add(needed: dict[str, set[str]], executable: str, origin: str) -> None:
+def _add(
+    needed: dict[str, set[str]],
+    hints: dict[str, str],
+    executable: str,
+    origin: str,
+    hint: str = "",
+) -> None:
+    """Record one program, and the config's own answer to "how do I get it".
+
+    The first hint wins: an executable named by two `cli:` entries is one
+    program, and one install command is enough to act on.
+    """
     executable = executable.strip()
-    if executable:
-        needed.setdefault(executable, set()).add(origin)
+    if not executable:
+        return
+    needed.setdefault(executable, set()).add(origin)
+    if hint:
+        # **One line per program.**  A tab or a newline in the operator's
+        # sentence would split the line the installers read, so the hint keeps
+        # its words and loses its layout.
+        hints.setdefault(executable, " ".join(hint.split()))
 
 
 #: The reference syntax `slife2.libs.host.config` resolves.  Kept here rather
@@ -185,12 +203,20 @@ def secrets(home: Path) -> int:
 
 
 def require(home: Path) -> int:
-    """Print `<executable><TAB><origin>` for every program the config names.
+    """Print `<executable><TAB><origin>[<TAB><install>]` for every program.
 
     **The effective configuration, not a copy of the shipped one.**  The home
     is set before the import so the project's own `load()` resolves the same
     `slife2.yaml` the server would; a checkout therefore yields the checkout's
     configuration, and an installed home yields its own.
+
+    **The third column is the `cli:` entry's `install:` line**, and only when
+    every origin naming the program is a `cli:` entry.  Those entries are the
+    one family the installer treats as a hint: it prints the line for a program
+    it cannot install, the way it prints `credstore set` for a credential.
+    A program an MCP server, a REST proxy, a tunnel or a skill names is
+    required — a hint beside it would read as permission to leave it missing —
+    so the third column is left off as soon as one such origin is present.
     """
     os.environ["SLIFE2_DATA_DIR"] = str(home)
 
@@ -205,16 +231,17 @@ def require(home: Path) -> int:
         return 2
 
     needed: dict[str, set[str]] = {}
-    _add(needed, "uv", "bootstrap")
-    _add(needed, "python", "bootstrap")
+    hints: dict[str, str] = {}
+    _add(needed, hints, "uv", "bootstrap")
+    _add(needed, hints, "python", "bootstrap")
 
     if config.peer_agent.configured and config.peer_agent.provider == "mosquitto":
-        _add(needed, "mosquitto", "peer_agent.provider")
+        _add(needed, hints, "mosquitto", "peer_agent.provider")
     if (
         config.subagent.network.configured
         and config.subagent.network.provider == "mosquitto"
     ):
-        _add(needed, "mosquitto", "subagent.provider")
+        _add(needed, hints, "mosquitto", "subagent.provider")
 
     # The provider classes own the default binary names; reading them here is
     # what keeps this helper from spelling `ssh`/`cloudflared` a second time.
@@ -231,14 +258,20 @@ def require(home: Path) -> int:
         options = config.file_tunnel.options_for(name)
         binary = str(options.get("binary") or tunnel_binaries.get(name, ""))
         if binary:
-            _add(needed, binary, f"file-tunnel.providers.{name}")
+            _add(needed, hints, binary, f"file-tunnel.providers.{name}")
 
     for name, entry in config.mcp.items():
-        _add(needed, _first_word(entry.command), f"mcp:{name}")
+        _add(needed, hints, _first_word(entry.command), f"mcp:{name}")
     for name, entry in config.rest_apis.items():
-        _add(needed, _first_word(entry.command), f"rest-api:{name}")
+        _add(needed, hints, _first_word(entry.command), f"rest-api:{name}")
     for name, entry in config.cli.items():
-        _add(needed, _first_word(entry.command), f"cli:{name}")
+        _add(
+            needed,
+            hints,
+            _first_word(entry.command),
+            f"cli:{name}",
+            hint=entry.install,
+        )
 
     skills = home / "skills"
     if skills.is_dir():
@@ -246,14 +279,36 @@ def require(home: Path) -> int:
 
         for skill in scan(skills):
             for executable in skill.requires.bins:
-                _add(needed, executable, f"skill:{skill.name}.requires.bins")
+                _add(
+                    needed,
+                    hints,
+                    executable,
+                    f"skill:{skill.name}.requires.bins",
+                )
 
     for executable in sorted(needed):
-        print(f"{executable}\t{','.join(sorted(needed[executable]))}")
+        origins = needed[executable]
+        line = f"{executable}\t{','.join(sorted(origins))}"
+        hint = hints.get(executable, "")
+        if hint and all(origin.startswith("cli:") for origin in origins):
+            line += f"\t{hint}"
+        print(line)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    # **UTF-8 on both streams, whatever the console code page is.**  The
+    # installers read one line per requirement, and a `cli:` hint is the
+    # operator's own sentence — Chinese here, but any language in principle.
+    # Windows would otherwise encode it in cp936 (or whatever the machine uses)
+    # while both scripts decode it as UTF-8 (`install.ps1` sets the console
+    # encoding for exactly this), splitting characters at the line boundary.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except AttributeError:  # pragma: no cover - a Python older than 3.7
+            pass
+
     parser = argparse.ArgumentParser(prog="install_helper.py")
     commands = parser.add_subparsers(dest="command", required=True)
 

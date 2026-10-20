@@ -25,6 +25,7 @@ ACTION=install
 DRY_RUN=0
 FAILED=0
 REQ_FILE=""
+PROGRAM_HINTS=""
 
 say() { printf '%s\n' "$*"; }
 step() { printf '[%s] %s\n' "$1" "$2"; }
@@ -368,8 +369,8 @@ EOF
     "$HOME/.local/bin/mosquitto" -h 2>&1 | grep -q "mosquitto version"
 }
 
-ensure_tool() {  # executable provenance
-    local exe=$1 why=$2 major
+ensure_tool() {  # executable provenance [install-hint]
+    local exe=$1 why=$2 hint=${3:-} major
     case "$exe" in
         mosquitto)
             if command -v mosquitto >/dev/null 2>&1; then
@@ -456,14 +457,19 @@ ensure_tool() {  # executable provenance
             fi
             ;;
         *)
-            command -v "$exe" >/dev/null 2>&1 || fail "$exe is missing and has no user-level installer ($why)"
+            command -v "$exe" >/dev/null 2>&1 && return 0
+            # A configured install line is the operator's answer for a program
+            # this script cannot provide; `verify` prints it rather than
+            # failing the run.  Without one, it is a gap.
+            [ -n "$hint" ] && return 0
+            fail "$exe is missing and has no user-level installer ($why)"
             ;;
     esac
 }
 
 install_dependencies() {
-    local seen=" uv python " exe why
-    while IFS=$(printf '\t') read -r exe why; do
+    local seen=" uv python " exe why hint
+    while IFS=$(printf '\t') read -r exe why hint; do
         [ -n "$exe" ] || continue
         case " $seen " in *" $exe "*) continue ;; esac
         seen="$seen$exe "
@@ -471,17 +477,26 @@ install_dependencies() {
             uv|python|python3|uvx)
                 command -v "$exe" >/dev/null 2>&1 || fail "$exe is missing ($why)"
                 ;;
-            *) ensure_tool "$exe" "$why" ;;
+            *) ensure_tool "$exe" "$why" "$hint" ;;
         esac
     done < "$REQ_FILE"
 }
 
 verify() {
-    local exe why
-    while IFS=$(printf '\t') read -r exe why; do
+    local exe why hint line
+    PROGRAM_HINTS=""
+    while IFS=$(printf '\t') read -r exe why hint; do
         [ -n "$exe" ] || continue
         command -v "$exe" >/dev/null 2>&1 && continue
         [ "$exe" = mosquitto ] && broker_listening && continue
+        # The one miss that is the operator's to fix rather than a failed
+        # install, exactly as an unset credential is: the config carries the
+        # command, and the run reports success with the command printed.
+        if [ -n "$hint" ]; then
+            printf -v line '%s\t%s\t%s\n' "$exe" "$hint" "$why"
+            PROGRAM_HINTS="${PROGRAM_HINTS}${line}"
+            continue
+        fi
         fail "$exe is missing ($why)"
     done < "$REQ_FILE"
     uv --version >/dev/null 2>&1 || fail "uv does not run"
@@ -495,6 +510,17 @@ verify() {
     # The module, not the console script: `slife2 --help` on PATH can be a
     # stale shim or function that runs the TUI instead of answering the flag.
     "$PY" -m slife2 --help >/dev/null 2>&1 || fail "slife2 does not run"
+}
+
+print_program_hints() {
+    local exe hint why
+    [ -n "${PROGRAM_HINTS:-}" ] || return 0
+    say ""
+    say "  programs: install the ones you have not set up:"
+    printf '%s' "$PROGRAM_HINTS" | while IFS=$(printf '\t') read -r exe hint why; do
+        [ -n "$exe" ] || continue
+        say "    $exe    $hint    ($why)"
+    done
 }
 
 print_credentials() {
@@ -532,6 +558,7 @@ print_next() {
     fi
     say "  data:    $HOME_DIR"
     say "  config:  $HOME_DIR/slife2.yaml"
+    print_program_hints
     print_credentials
 }
 

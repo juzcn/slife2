@@ -1666,7 +1666,9 @@ class CliToolSettings:
     #: a tool server's description is the operator's too, but its *tools'*
     #: descriptions come from the server itself.
     description: str = ""
-    #: How to install it, shown when it is missing.
+    #: How to install it, shown when it is missing — by the catalogue row and
+    #: by the installer, which treats a missing `cli:` program as this line's
+    #: prompt rather than as a failed installation.
     install: str = ""
     #: Where it came from — `url`, `type`, `version`, and whatever else whoever
     #: wrote the entry thought worth noting.

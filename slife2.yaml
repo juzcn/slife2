@@ -356,7 +356,8 @@ rest-api:
 
 cli:
   # Programs already installed. Each entry is a catalogue row (`cli:<name>`),
-  # not a callable tool; `install` is shown when the command is missing.
+  # not a callable tool; `install` is shown when the command is missing — by the
+  # catalogue, and by the installer for a program it cannot install itself.
   yt-dlp:
     command: yt-dlp
     description: 'yt-dlp is a powerful command-line video downloader supporting 1000+ sites including YouTube, Twitter/X, Bilibili, TikTok, etc. Common usage: yt-dlp <URL> to download best quality; yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 <URL> for best quality merged MP4; yt-dlp --list-formats <URL> to list available formats; yt-dlp -f <format_id> <URL> for specific format. Supports cookies, subtitles, playlists, and more.'

@@ -423,10 +423,12 @@ echo "cloudflared version $INSTALLED (built now)"
 
 
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
+    # The helper writes UTF-8 on every platform (a `cli:` hint may be any
+    # language); `text=True` alone would decode it with the Windows code page.
     return subprocess.run(
         [sys.executable, str(HELPER), "require", "--home", str(home)],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         cwd=ROOT,
     )
 
@@ -448,6 +450,7 @@ def test_requirements_cover_the_shipped_configuration() -> None:
         "uvx",
         "yt-dlp",
         "browser-harness",
+        "rg",
     } <= named
 
 
@@ -559,6 +562,45 @@ def test_requirements_report_unknown_commands_with_their_source(
     assert "yt-dlp\tcli:yt" in result.stdout
 
 
+def test_requirements_carry_a_cli_install_hint(tmp_path: Path) -> None:
+    """A `cli:` entry's install line is a prompt, not an installer.
+
+    The helper prints it as a third field so both installers can show it for a
+    program they cannot provide themselves, the way they show `credstore set`
+    for a credential.  The field is left off when another family names the same
+    program — a server's dependency is required, not optional — and when the
+    entry carries no install line, because there is nothing to print.
+    """
+    (tmp_path / "slife2.yaml").write_text(
+        "mcp:\n"
+        "  mystery:\n"
+        "    command: no-such-tool\n"
+        "cli:\n"
+        "  hunt:\n"
+        "    command: no-such-tool --fast\n"
+        "    install: brew install no-such-tool\n"
+        "  rg:\n"
+        "    command: rg\n"
+        "    install: choco install ripgrep\n"
+        "  plain:\n"
+        "    command: no-such-tool-plain\n",
+        encoding="utf-8",
+    )
+    result = _requirements(tmp_path)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert "no-such-tool\tcli:hunt,mcp:mystery" in lines
+    assert "rg\tcli:rg\tchoco install ripgrep" in lines
+    assert "no-such-tool-plain\tcli:plain" in lines
+
+
+def test_the_installers_print_install_hints_without_failing() -> None:
+    """Both scripts end with the same section for a program's own install line."""
+    phrase = "programs: install the ones you have not set up:"
+    for path in (SHELL, POWERSHELL):
+        assert phrase in path.read_text(encoding="utf-8"), path.name
+
+
 def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
     """The installer's hint, read off the file rather than resolved.
 
@@ -591,7 +633,7 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, str(HELPER), "secrets", "--home", str(tmp_path)],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         cwd=ROOT,
     )
 
@@ -626,7 +668,7 @@ def _seed(source: Path, home: Path, *extra: str) -> subprocess.CompletedProcess[
             *extra,
         ],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         cwd=ROOT,
     )
 
