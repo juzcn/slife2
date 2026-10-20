@@ -874,6 +874,86 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_sentence_recall_also_asks_with_the_persons_input() -> None:
+    """**The model's sentence is a paraphrase; the input is what it paraphrases.**
+
+    A recall asked in sentences gets at least two questions — the sentence and
+    the person's own words — so a paraphrase that misses cannot be the only way
+    the subject is found.  The input is not in the message list yet; `rebuild`
+    carries it separately for exactly this reason.
+    """
+    reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM],
+                "turn_ids": [],
+                "prompt": "工具",
+            },
+        )
+
+    assert answer.data["turn_ids"] == ids
+    assert answer.data["recalled"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() -> None:
+    """The input is not added beside a keyword phrase.
+
+    A query is already the meaning fallback; the keyword phrase is the
+    deliberate question, and a second raw question there can only reorder it.
+    The phrase is what both halves read; the input is not a third question.
+    """
+    reply = '{"context": "clear", "recall": {"query": "trump"}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM],
+                "turn_ids": [],
+                "prompt": "工具",
+            },
+        )
+
+    assert answer.data["turn_ids"] == [ids[1]]
+    assert answer.data["recalled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_period_recall_is_not_narrowed_by_the_input() -> None:
+    """A period asks for a time, not a subject; the input does not filter it."""
+    reply = '{"context": "clear", "recall": {"since": "yesterday"}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM],
+                "turn_ids": [],
+                "prompt": "工具",
+            },
+        )
+
+    assert answer.data["turn_ids"] == ids
+    assert answer.data["recalled"] == 2
+
+
+@pytest.mark.asyncio
 async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
     """**The words can fail without taking the question with them.**
 

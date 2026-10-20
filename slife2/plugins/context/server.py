@@ -819,7 +819,9 @@ def build_server(
         context (`slife2.libs.turn.context` is where that is argued).  What was
         kept is excluded from the recall: the decision's two halves are one
         answer, and a turn in both would spend a recall place on something the
-        union would collapse anyway.
+        union would collapse anyway.  When the decision asks in sentences, the
+        input is read by meaning beside them, so the model's paraphrase is never
+        the only way the subject is asked for.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -899,7 +901,7 @@ def build_server(
 
         recalled: list[int] = []
         if decision.recall is not None:
-            recalled = await _recall_into(store, decision.recall, base, model)
+            recalled = await _recall_into(store, decision.recall, base, model, prompt)
 
         target = decisions.union(base, recalled)
         if target == sorted(in_hand):
@@ -967,7 +969,11 @@ def build_server(
         }
 
     async def _recall_into(
-        store: TurnStore, condition: dict[str, Any], base: list[int], model: str
+        store: TurnStore,
+        condition: dict[str, Any],
+        base: list[int],
+        model: str,
+        prompt: str,
     ) -> list[int]:
         """Run one recall condition and fit its answer into the window.
 
@@ -987,6 +993,15 @@ def build_server(
         and a share of the budget on a turn the caller already holds.  The
         exclusion is handed to the store, which can look past those turns for
         more rather than filtering a short answer here.
+
+        **The person's own words are a question too.**  When the decision asked
+        in sentences, the input joins them: the model's sentence is a paraphrase
+        of what the input points at, and the meaning leg reads the input as it
+        stands.  That gives a sentence recall at least two questions, so the
+        paraphrase is never the only way the subject is found.  A keyword-only
+        recall keeps its query as the one meaning question — the phrase is the
+        deliberate one, and a second raw question there can only reorder it —
+        and a period recall is not narrowed by the input at all.
         """
         query = str(condition.get("query") or "")
         raw_sentences = condition.get("sentences")
@@ -1021,6 +1036,27 @@ def build_server(
             logger.info("recall_anchor_ignored anchor=%s", anchor)
             anchor = None
 
+        # **The person's own words are a question too.**  The discriminator's
+        # sentence is a paraphrase of what the input points at; the input is the
+        # text it was paraphrasing, and the meaning leg reads it as it stands.
+        # So a sentence recall asks the person's way as well — at least two
+        # questions — and the paraphrase is never the only way the subject is
+        # found.  A keyword-only recall keeps its query as the one meaning
+        # question (the phrase is the deliberate one, and a second raw question
+        # there can only reorder it), and a period recall is not narrowed by the
+        # input at all.
+        asker = await embedding.get() if (query or sentences) else None
+        if (
+            asker is not None
+            and sentences
+            and prompt.strip()
+            and prompt not in sentences
+        ):
+            if len(prompt) > asker.max_chars:
+                logger.info("recall_prompt_too_long chars=%d", len(prompt))
+            elif terms(prompt):
+                sentences = [*sentences, prompt]
+
         window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
         # the headroom *below*.  Summed here and not by the store: the store
@@ -1044,7 +1080,7 @@ def build_server(
         ranked = await store.recall(
             query=query,
             sentences=sentences,
-            embedder=await embedding.get() if (query or sentences) else None,
+            embedder=asker,
             since=since,
             until=until,
             anchor=anchor,

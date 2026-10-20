@@ -949,6 +949,10 @@ Rules:
   question per entry; `query` is the words the keyword leg requires and the
   meaning fallback when there is no sentence. A later sentence can only add a
   turn or raise one — never cost a turn an earlier sentence found.
+- **The person's input is a meaning question too.** When a recall asks in
+  sentences, the input joins them: the model's sentence is a paraphrase of what
+  the input points at. A keyword-only recall keeps its query as the one meaning
+  question; a period recall is not narrowed by the input.
 - **A recall is asked for what is missing.** The kept turns are excluded from
   its candidates — in SQL for the keyword and time legs, after fusion for the
   meaning leg — so a turn in both does not spend a recall place, a distance in

@@ -228,6 +228,10 @@ one, because the recall now has two spellings: `sentences` are read by meaning,
 is no sentence. Several sentences are several questions: each is embedded on
 its own, a turn keeps its best similarity across them, and a later sentence can
 only add a turn or raise one — never cost a turn an earlier sentence found.
+When the decision asks in sentences, the person's input is a second question:
+the model's sentence is a paraphrase of what the input points at, and the
+meaning leg reads the input as it stands. A keyword-only recall keeps its query
+as the one meaning question, and a period recall is not narrowed by the input.
 
 On the rebuilt log the 30-query set answered at hit@1 0.93, hit@10 0.97 and MRR
 0.94. Ten hand-written hard sentences were less decisive — phrase-only MRR
