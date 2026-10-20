@@ -390,6 +390,23 @@ async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
 
 
 @pytest.mark.asyncio
+async def test_search_takes_sentences_as_well_as_words() -> None:
+    """**The same two spellings the rebuild's recall has.**
+
+    A sentence is what the meaning leg wants; the words are what the keyword
+    leg wants.  A model that has only a sentence should not have to reduce it to
+    a keyword phrase that the AND will then refuse.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("工具 工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "turn_search", {"sentences": ["工具"]}, meta=client_meta("jack")
+        )
+
+    assert answer.data["entries"][0]["turn_id"] == 1
+
+
+@pytest.mark.asyncio
 async def test_search_honours_the_same_time_window_as_the_browse() -> None:
     """`since`/`until` reach the ranking, not only the listing."""
 
@@ -857,6 +874,41 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
+    """**The words can fail without taking the question with them.**
+
+    Dropping the whole recall because the *query* had no term was right while one
+    string served both legs: with a period beside it, the recall would otherwise
+    have run as a period recall.  A sentence is a question of its own, so only
+    the unusable words are dropped and the meaning half is answered.
+    """
+    reply = '{"recall": {"query": "***", "sentences": ["the very first thing"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(
+            client, "jack", ("the very first thing", "1"), ("something else", "2")
+        )
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "something else"},
+                    {"role": "assistant", "content": "2"},
+                ],
+                "turn_ids": [ids[1]],
+                "prompt": "what did we start with?",
+            },
+        )
+
+    assert answer.data["turn_ids"] == ids
+    assert answer.data["recalled"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_context_list_that_cannot_be_written_fails_the_turn(
     monkeypatch,
 ) -> None:
@@ -1158,6 +1210,7 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
             keep=[1],
             recall={
                 "query": "the very first",
+                "sentences": None,
                 "since": None,
                 "until": None,
                 "anchor": None,
@@ -1174,6 +1227,35 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
         '{"context": [1e999]}',
     ):
         assert parse(not_an_id) is None, not_an_id
+
+
+def test_a_recall_carries_sentences_as_separate_questions() -> None:
+    """**The meaning half has a shape of its own.**  `query` is the words the
+    keyword leg ANDs; a sentence has to go to the meaning leg alone, because a
+    six-word sentence asked for exactly matches nothing.  Blank sentences are
+    nothing asked, and a value that is not a list of strings is a reply the
+    build does not obey."""
+    from slife2.libs.turn.context import Decision, parse
+
+    assert parse(
+        '{"recall": {"sentences": ["the dean", "the anniversary"]}}'
+    ) == Decision(
+        recall={
+            "query": None,
+            "sentences": ["the dean", "the anniversary"],
+            "since": None,
+            "until": None,
+            "anchor": None,
+        }
+    )
+    blank = parse('{"recall": {"sentences": ["  "]}}')
+    assert blank is not None and blank.recall is None
+    for not_sentences in (
+        '{"recall": {"sentences": "the dean"}}',
+        '{"recall": {"sentences": [1]}}',
+        '{"recall": {"sentences": [null]}}',
+    ):
+        assert parse(not_sentences) is None, not_sentences
 
 
 # --- the four ways a rebuild keeps the context, and what the log says ---------

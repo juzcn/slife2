@@ -945,6 +945,10 @@ Rules:
   Appendix C for every way the discriminator call can fail.
 - **A kept turn and a recalled turn are joined by id, in time order.**
   `normalise_ids` collapses duplicates to their first position.
+- **A question has two spellings.** `sentences` are read by meaning, one
+  question per entry; `query` is the words the keyword leg requires and the
+  meaning fallback when there is no sentence. A later sentence can only add a
+  turn or raise one — never cost a turn an earlier sentence found.
 - **A recall is asked for what is missing.** The kept turns are excluded from
   its candidates — in SQL for the keyword and time legs, after fusion for the
   meaning leg — so a turn in both does not spend a recall place, a distance in

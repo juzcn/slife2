@@ -1153,6 +1153,7 @@ class TurnStore:
         self,
         *,
         query: str = "",
+        sentences: Sequence[str] = (),
         embedder: Embedder | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -1164,15 +1165,23 @@ class TurnStore:
 
         One of the store's three shapes, chosen by what the caller asked for:
 
-        * **a query** — the same hybrid as `search`, windowed, ranked by
+        * **a question** — the same hybrid as `search`, windowed, ranked by
           relevance.  `anchor` is not consulted here; relevance decides which end
           the caller spends from, and the caller is where that is logged.
-        * **no query, a window or an anchor** — ranked by *time* instead, from the
-          end `anchor` named (`newest` when it says nothing).  This branch has to
-          run before the hybrid one, and not for symmetry: an empty query reaches
-          the full-text index as a syntax error and embeds to noise.
+        * **no question, a window or an anchor** — ranked by *time* instead, from
+          the end `anchor` named (`newest` when it says nothing).  This branch has
+          to run before the hybrid one, and not for symmetry: an empty question
+          reaches the full-text index as a syntax error and embeds to noise.
         * **neither** — nothing, which is not an error: a recall with no
           condition is a caller that has not decided what to look for.
+
+        **`sentences` are the meaning questions; `query` is the words.**  Each
+        sentence is embedded on its own and a turn keeps its best similarity
+        across them (`_semantic_hits`), so a second sentence can only add a turn
+        or raise one.  `query` is the keyword leg's AND — names, paths,
+        identifiers, an exact string — and it is also the meaning query when no
+        sentence is given; that is the fallback a caller uses when it cannot put
+        the subject into a sentence.  A recall may carry either, or both.
 
         **What is returned is ranked pairs, not a selection.**  The count, the
         similarity floor and the token budget are the *caller's* — they depend on
@@ -1198,13 +1207,15 @@ class TurnStore:
         places they took can be refilled.
 
         Raises:
-            EmptyQuery: If the query holds no term.
+            EmptyQuery: If no sentence is given and the query holds no term.
             InvalidTimeBound: If a bound is in no grammar `slife2.helpers.timeutil`
                 speaks, for the reason `turns` gives.
         """
         limit = page_limit(limit)
         excluded = set(normalise_ids(exclude))
-        if not query.strip():
+        meaning = [sentence for sentence in sentences if sentence.strip()]
+        words = query.strip()
+        if not meaning and not words:
             if not since and not until and not anchor:
                 return []
             return await off_loop(
@@ -1218,24 +1229,36 @@ class TurnStore:
 
         if embedder is None:
             raise ValueError(
-                "a recall with a query has to be ranked by meaning, and no "
+                "a recall with a question has to be ranked by meaning, and no "
                 "embedder was given"
             )
-        expression = textindex.match_expression(query)
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
         over = min((limit + len(excluded)) * _OVERFETCH, MAX_SQL_VARS)
-        # The keyword leg is windowed and excluded in SQL (its `rank` orders
-        # every match, so limiting after the window is still the best inside
-        # it); the semantic leg is neither, and the fusion is filtered below.
-        keyword = await off_loop(
-            self._keyword_hits,
-            expression,
-            over,
-            [*clauses, *exclude_clauses],
-            [*params, *exclude_params],
-        )
-        semantic = await self._semantic_hits(query, embedder, over)
+        keyword: list[int] = []
+        if words:
+            try:
+                expression = textindex.match_expression(words)
+            except textindex.EmptyQuery:
+                # A query with no term is no keyword leg.  With a sentence
+                # beside it the recall still asks a question; without one the
+                # caller asked for a search that cannot run, and the store says
+                # so rather than answering the period it might have run instead.
+                if not meaning:
+                    raise
+            else:
+                # The keyword leg is windowed and excluded in SQL (its `rank`
+                # orders every match, so limiting after the window is still the
+                # best inside it); the semantic leg is neither, and the fusion
+                # is filtered below.
+                keyword = await off_loop(
+                    self._keyword_hits,
+                    expression,
+                    over,
+                    [*clauses, *exclude_clauses],
+                    [*params, *exclude_params],
+                )
+        semantic = await self._semantic_hits(meaning or [words], embedder, over)
         fused = [
             turn_id
             for turn_id, _ in fuse_ranked(
@@ -1524,7 +1547,7 @@ class TurnStore:
             # `list(...)` of the mapping, which is in nearest-first order: the
             # fusion wants a *ranking*, and the similarities the same call
             # measured are what `recall` gates on.
-            "semantic": list(await self._semantic_hits(query, embedder, over)),
+            "semantic": list(await self._semantic_hits([query], embedder, over)),
         }
         # Capped here and not on the legs: fusing takes the *union* of two lists
         # that are each already `over` long, and the next query binds one value
@@ -1556,9 +1579,16 @@ class TurnStore:
         return [int(row["turn_id"]) for row in rows]
 
     async def _semantic_hits(
-        self, query: str, embedder: Embedder, k: int
+        self, queries: Sequence[str], embedder: Embedder, k: int
     ) -> dict[int, float]:
-        """Turn ids by vector distance, nearest first.
+        """Turn ids by vector distance across one or more questions, nearest first.
+
+        **Several questions are several chances, and one must not cost another.**
+        Each sentence is embedded on its own — one `embed` call for the batch —
+        and each has its own KNN; a turn keeps its *best* similarity across
+        them.  A second sentence can therefore add a turn or raise a turn's
+        score, never lower one or remove it.  This is the rule the catalogue's
+        `sentences` already state, applied to turns.
 
         `k` counts **chunks**, not turns, which is why it is over-fetched: a
         turn with four chunks can occupy four of the k places, and the answer
@@ -1574,26 +1604,34 @@ class TurnStore:
         function of rank position and carries no magnitude to threshold
         (`recall`'s docstring is where that distinction is argued).
         """
-        # The **raw** query, not `textindex.normalize(query)`.  Normalization is
-        # the keyword leg's rule and it inserts a space between every pair of
+        # The **raw** questions, not `textindex.normalize(...)`.  Normalization
+        # is the keyword leg's rule and it inserts a space between every pair of
         # CJK characters, which is what makes them tokens there — and is
         # nonsense as text handed to a model, where it would ask for a vector of
         # `工 具` rather than of `工具`.  Measured: the normalized query landed
         # nearest the turns sharing *no* word with it.
-        vectors = await embedder.embed([query])
-        if len(vectors) != 1:
+        asked = [query for query in queries if query.strip()]
+        if not asked:
+            return {}
+        vectors = await embedder.embed(asked)
+        if len(vectors) != len(asked):
             # Refused rather than answered without the semantic half: there is
             # no degraded mode here, and a search that quietly lost one of its
             # two legs would answer a different question than the one asked.
             raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for one "
-                f"query, so this search cannot say what a turn was about"
+                f"the embedding model answered {len(vectors)} vectors for "
+                f"{len(asked)} question(s), so this search cannot say what a "
+                f"turn was about"
             )
-        return dict(
-            await off_loop(
-                self._nearest_turns, sqlite_vec.serialize_float32(vectors[0]), k
+        nearest: dict[int, float] = {}
+        for vector in vectors:
+            found = await off_loop(
+                self._nearest_turns, sqlite_vec.serialize_float32(vector), k
             )
-        )
+            for turn_id, similarity in found:
+                if similarity > nearest.get(turn_id, float("-inf")):
+                    nearest[turn_id] = similarity
+        return dict(sorted(nearest.items(), key=lambda item: (-item[1], item[0])))
 
     def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.

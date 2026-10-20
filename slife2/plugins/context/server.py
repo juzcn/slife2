@@ -483,7 +483,8 @@ def build_server(
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_search(
         ctx: Context,
-        query: str,
+        query: str = "",
+        sentences: list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
         limit: int = 10,
@@ -500,7 +501,10 @@ def build_server(
         Read one whole with `turn_read`.
 
         Args:
-            query: What the turn was about, or an exact string from its record.
+            query: Words that must all be present — names, paths, an exact
+                string. Also read by meaning when `sentences` is empty.
+            sentences: What to recall, in your own words, one sentence per idea.
+                Read by meaning; another sentence is another chance to be found.
             since: Lower bound on when the turn was written — an ISO date or
                 datetime, or one of: today, yesterday, tomorrow, now,
                 last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
@@ -515,14 +519,16 @@ def build_server(
             and `similarity` per hit, best first — and `limit`.
         """
         agent, subagent = _caller(ctx)
-        if not terms(query):
+        asked = [sentence.strip() for sentence in (sentences or []) if sentence.strip()]
+        if not asked and not terms(query):
             raise ToolError(
-                "turn_search needs something to look for — `turn_list` browses "
-                "the history without a query."
+                "turn_search needs something to look for — a sentence, a keyword "
+                "phrase, or `turn_list` to browse the history without one."
             )
         store = await store_of(agent, subagent)
         ranked = await store.recall(
             query=query,
+            sentences=asked,
             embedder=await embedding.get(),
             since=since,
             until=until,
@@ -961,7 +967,7 @@ def build_server(
         }
 
     async def _recall_into(
-        store: TurnStore, condition: dict[str, str | None], base: list[int], model: str
+        store: TurnStore, condition: dict[str, Any], base: list[int], model: str
     ) -> list[int]:
         """Run one recall condition and fit its answer into the window.
 
@@ -983,23 +989,33 @@ def build_server(
         more rather than filtering a short answer here.
         """
         query = str(condition.get("query") or "")
+        raw_sentences = condition.get("sentences")
+        sentences = [
+            str(sentence).strip()
+            for sentence in (raw_sentences if isinstance(raw_sentences, list) else [])
+            if str(sentence).strip()
+        ]
         if query and not terms(query):
-            # **A query with no term is not a query the store can run.**  The
-            # keyword leg refuses such a thing — `"***"`, `"—"` — with
-            # `EmptyQuery`, and the store's own contract is that an empty query
-            # reaching the full-text index is a syntax error and embeds to noise.
-            # Dropping the *query* and keeping the recall would run it as a
-            # *period* recall instead — a different selection from the one the
-            # model asked for — so the whole recall is dropped and the decision's
-            # other half, the keep-list, runs on its own, which is DESIGN.md §2.4's outcome
-            # when a rebuild cannot do its job: keep the context it had.
-            logger.info("recall_query_has_no_term")
-            return []
+            # **A query with no term is not a keyword leg.**  The keyword leg
+            # refuses such a thing — `"***"`, `"—"` — with `EmptyQuery`, and the
+            # store's own contract is that an empty query reaching the full-text
+            # index is a syntax error and embeds to noise.  With a sentence
+            # beside it the recall still asks a question, so only the query is
+            # dropped; without one, dropping the query and running the period
+            # would be a different selection from the one the model asked for,
+            # so the whole recall is dropped and the decision's other half, the
+            # keep-list, runs on its own — DESIGN.md §2.4's outcome when a
+            # rebuild cannot do its job: keep the context it had.
+            if not sentences:
+                logger.info("recall_query_has_no_term")
+                return []
+            logger.info("recall_query_dropped")
+            query = ""
         since = condition.get("since") or None
         until = condition.get("until") or None
         anchor = condition.get("anchor") or None
-        if query and anchor:
-            # Relevance decides which end a query is spent from, so an anchor
+        if (query or sentences) and anchor:
+            # Relevance decides which end a question is spent from, so an anchor
             # beside one is not consulted.  Logged rather than dropped silently,
             # because a model that wrote it meant something by it.
             logger.info("recall_anchor_ignored anchor=%s", anchor)
@@ -1027,7 +1043,8 @@ def build_server(
 
         ranked = await store.recall(
             query=query,
-            embedder=await embedding.get() if query else None,
+            sentences=sentences,
+            embedder=await embedding.get() if (query or sentences) else None,
             since=since,
             until=until,
             anchor=anchor,
@@ -1046,7 +1063,7 @@ def build_server(
         costs = await off_loop(_cost_of, store, order)
         if not window:
             return sorted(order)
-        fit = decisions.fit_budget if query else decisions.fit_window
+        fit = decisions.fit_budget if (query or sentences) else decisions.fit_window
         return fit(order, costs, budget)
 
     def _cost_of(store: TurnStore, turn_ids: list[int]) -> dict[int, int]:

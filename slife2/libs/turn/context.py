@@ -52,9 +52,13 @@ RECALL_REPLY: dict[str, Any] = {
         'none ("clear"), or the turn_ids to keep, e.g. [12, 15].'
     ),
     "recall": {
+        "sentences": (
+            "What to recall, in your own words, one sentence per idea. Read by "
+            "meaning. Omit when you have none."
+        ),
         "query": (
-            "Words and short phrases naming the subject, not the input. "
-            "Omit for no search."
+            "Words that must all be present — names, paths, exact strings. Also "
+            "the meaning query when there is no sentence. Omit for no words."
         ),
         "since": "Start of a period, in the grammar the turn headers use.",
         "until": "End of a period.",
@@ -70,7 +74,7 @@ RECALL_REPLY: dict[str, Any] = {
 ANCHORS = ("newest", "oldest")
 
 #: The fields of a recall condition, in the order they are read.
-RECALL_KEYS = ("query", "since", "until", "anchor")
+RECALL_KEYS = ("query", "sentences", "since", "until", "anchor")
 
 #: What the reply says to keep *all* of the turns in hand, and *none* of them.
 #: Two spellings for keeping everything, because a model that says `"keep"` has
@@ -133,7 +137,7 @@ class Decision:
     """
 
     keep: list[int] | None = None
-    recall: dict[str, str | None] | None = None
+    recall: dict[str, str | list[str] | None] | None = None
 
     @property
     def asks_for_nothing(self) -> bool:
@@ -237,14 +241,16 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
     return REJECTED
 
 
-def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
+def _recall(raw: Any) -> dict[str, str | list[str] | None] | _Rejected | None:
     """The `recall` field, as one condition.
 
-    **One condition, never several.**  A period and a query are the two halves of
-    a single request — "about X, last month" — so they arrive together in one
-    object rather than as a list of searches, and the three shapes a store can
-    answer (a period, a query, a query within a period) are the three ways of
-    filling it in.
+    **One condition, never several.**  A period and a question are the two halves
+    of a single request — "about X, last month" — so they arrive together in one
+    object rather than as a list of searches.  The question has two spellings:
+    `sentences` are read by meaning (each one a separate question, and one that
+    cannot cost a turn an earlier one found), while `query` is the words that
+    must all be present — names, paths, exact strings — and the meaning fallback
+    when there is no sentence.
 
     A key this build does not know is dropped rather than refused: the reply
     surface is written into the instruction, and a model that added a field of
@@ -261,7 +267,16 @@ def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
         return None
     if not isinstance(raw, dict):
         return REJECTED
+    sentences = raw.get("sentences")
+    if sentences is not None:
+        if not isinstance(sentences, list) or not all(
+            isinstance(sentence, str) for sentence in sentences
+        ):
+            return REJECTED
+        sentences = [sentence for sentence in sentences if sentence.strip()]
     for key in RECALL_KEYS:
+        if key == "sentences":
+            continue
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
             return REJECTED
@@ -281,6 +296,9 @@ def _recall(raw: Any) -> dict[str, str | None] | _Rejected | None:
         if bound and not can_place(bound, role=key):
             return REJECTED
     condition = {key: raw.get(key) for key in RECALL_KEYS}
+    # The filtered list, not the raw one: a list of blank sentences is a field
+    # present and empty, and `any` below has to read it as nothing asked.
+    condition["sentences"] = sentences
     # Nothing filled in is the same answer as no `recall` field at all, and it
     # has to be normalised here: a store asked for nothing at all cannot answer,
     # and "asked and given nothing" must not become an error downstream.

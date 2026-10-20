@@ -446,7 +446,7 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    nearest = await store._semantic_hits("工具", embedder, 3)
+    nearest = await store._semantic_hits(["工具"], embedder, 3)
 
     # A mapping, in nearest-first order: the *order* is what the fusion reads and
     # the value is the similarity a recall gates on, so both halves are asserted
@@ -479,6 +479,26 @@ async def test_a_turn_with_several_chunks_is_a_hit_once(tmp_path) -> None:
 
     hits = await store.search("工具", embedder=embedder)
     assert _ids(hits) == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_second_sentence_can_only_add_a_turn(tmp_path) -> None:
+    """Several questions are several chances; one cannot cost another's find.
+
+    Each sentence is embedded on its own and a turn keeps its best similarity
+    across them, so a turn only the second sentence names is still found — and
+    the first sentence's turn is not lowered or removed by the second.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    for said in ("工具", "trump", "计算"):
+        await store.save_turn(
+            messages=[{"role": "user", "content": said}], embedder=embedder
+        )
+
+    ranked = await store.recall(sentences=["工具", "trump"], embedder=embedder)
+
+    assert [turn_id for turn_id, _ in ranked][:2] == [1, 2]
 
 
 @pytest.mark.asyncio

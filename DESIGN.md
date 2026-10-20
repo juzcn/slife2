@@ -219,9 +219,15 @@ Measurements on the live turn log:
 | A word-shaped query | Fired on 10 of 15; found the target on 9. |
 | The meaning leg | Found the target in 32 of 32 recall queries, first in 25. |
 
-So the instruction asks for a word-shaped query. The meaning leg is unharmed by
-it: a compact word list ranks the same as the sentence it came from (36/36 and
-the same MRR on the 130-tool catalogue).
+So the keyword field asks for a word-shaped query: a sentence handed to that
+leg would AND every word it contains and match nothing. The meaning leg does not
+need one — a compact word list ranked the same as the sentence it came from on
+the catalogue (36/36 and the same MRR) — but it is no longer forced to read
+one, because the recall now has two spellings: `sentences` are read by meaning,
+`query` is the words the keyword leg ANDs and the meaning fallback when there
+is no sentence. Several sentences are several questions: each is embedded on
+its own, a turn keeps its best similarity across them, and a later sentence can
+only add a turn or raise one — never cost a turn an earlier sentence found.
 
 **Failure policy.** A timeout, provider error, or unreadable reply is not a
 decision. The turn runs on the context it already has. A missing store fails the

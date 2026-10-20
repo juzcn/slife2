@@ -21,16 +21,21 @@ of them carries is answered from memory or from nothing, and every turn kept is
 spent from the same window the recall is.
 
 What to recall from the turn log — "recall": leave it out for nothing, or fill it
-in for one condition — a period (since / until), a query, or a query within a
-period.
+in for one condition — a period (since / until), a question, or a question within
+a period.
 
-The "query" holds what turn recall needs — the words and short phrases that name
-the subject — matched against the stored turns by a hybrid of full-text and
-semantic search: the words exactly, the meaning by meaning. Name the subject
-rather than pasting the input in, because the words are asked for all at once: a
-sentence is matched only by a turn holding every term of it, while the meaning
-half reads the query as it stands either way. A pasted input is not refused; it
-is answered by meaning alone. "management school dean" is the shape.
+A question has two spellings, and either may be omitted.
+
+The "sentences" hold what you want to recall, in your own words, one sentence
+per idea — "the turn where we decided the dean of the management school". They
+are read by meaning, so they need not share words with the stored turn. Several
+sentences are several questions; another question is another chance to be found
+and cannot cost a turn an earlier one found.
+
+The "query" holds words that must all be present — names, paths, identifiers, a
+command, an error string. It is the fallback when you cannot put the subject
+into a sentence, and then it is also read by meaning. "management school dean"
+is the shape.
 
 "since" and "until" take a date, or any of: today, yesterday, this week, last
 week, this month, last month, this year, last year, "N days ago", "N weeks ago",
@@ -78,31 +83,37 @@ to drop it.
   input Let's look at our earliest conversations
     → {"recall": {"anchor": "oldest"}}
 
-7. Keep part and recall a query — the turn that answered this has left the
+7. Keep part and recall a question — the turn that answered this has left the
 context, and the tool dumps around it are dead weight.
 
   input Who did you say was the dean of the management school?
-    → {"context": [27, 28], "recall": {"query": "management school dean"}}
+    → {"context": [27, 28], "recall": {"sentences": ["the dean of the management school"]}}
 
-8. Keep none and recall a query within a period — a topic, and when.
+8. Keep none and recall a question within a period — a topic, and when.
 
   input What did we say about the anniversary last week?
-    → {"context": "clear", "recall": {"query": "anniversary", "since": "last week"}}
+    → {"context": "clear", "recall": {"sentences": ["what we said about the anniversary"], "since": "last week"}}
 
-9. Keep them and recall a query in a period that has passed — a topic, and both
-ends of it.
+9. Keep them and recall a question in a period that has passed — a topic, and
+both ends of it.
 
   input What did we say about the anniversary last month?
-    → {"recall": {"query": "anniversary", "since": "last month", "until": "this month"}}
+    → {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
-10. Keep them and recall a query for a follow-up — its subject is in the
-conversation above, so carry it into the query.
+10. Keep them and recall a question for a follow-up — its subject is in the
+conversation above, so carry it into the sentence.
 
   input What about the other one?
-    → {"recall": {"query": "the other school"}}
+    → {"recall": {"sentences": ["the other school"]}}
 
-11. Keep none and recall a query — nothing in hand carries this input, and the
-subject is one the turn log may.
+11. Keep none and recall a question — nothing in hand carries this input, and
+the subject is one the turn log may.
 
   input What about the alumni fund?
+    → {"context": "clear", "recall": {"sentences": ["the alumni fund"]}}
+
+12. Keep none and recall the words exactly — a name, a path or an exact string
+that no sentence says better.
+
+  input Which turn was about the alumni fund?
     → {"context": "clear", "recall": {"query": "alumni fund"}}
