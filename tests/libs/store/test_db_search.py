@@ -279,6 +279,33 @@ def test_the_two_indexes_do_not_hold_the_same_text() -> None:
     assert "水电站" not in embed_text(messages)
 
 
+def test_tool_calls_and_results_are_what_a_turn_is_found_by() -> None:
+    """**The exact leg's material, and the reason the vector does not hold it.**
+
+    A path, an error string, a command or a hash is named literally by the query
+    that wants it; an embedding of machine output is a poor handle on any of
+    them.  So the keyword text keeps the calls and the results whole, while
+    `embed_text` keeps the turn's own voice — the two legs are complements.
+    """
+    messages = [
+        {"role": "user", "content": "算一下"},
+        {
+            "role": "assistant",
+            "content": "算好了",
+            "tool_calls": [
+                {"id": "c1", "function": {"name": "calc", "arguments": '{"e": "99*8"}'}}
+            ],
+        },
+        {"role": "tool", "content": "792", "tool_call_id": "c1"},
+    ]
+
+    text = searchable_text(messages)
+
+    assert "calc" in text and "99*8" in text and "792" in text
+    assert "calc" not in embed_text(messages)
+    assert "99*8" not in embed_text(messages) and "792" not in embed_text(messages)
+
+
 # --- the keyword leg ----------------------------------------------------------
 
 
@@ -300,6 +327,34 @@ async def test_an_english_word_and_a_number_are_found(tmp_path) -> None:
 
     assert 2 in _ids(await store.search("trump", embedder=embedder))
     assert 3 in _ids(await store.search("792", embedder=embedder))
+
+
+@pytest.mark.asyncio
+async def test_a_term_that_survives_only_in_a_tool_result_is_found(tmp_path) -> None:
+    """The exact leg's half of the complement: a result term is its to find.
+
+    The vector deliberately gives the result up — it is evidence, not what the
+    turn was about — and the keyword index keeps it whole, so a query naming a
+    value, a path or a command prints the turn back.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await store.save_turn(
+        messages=[
+            {"role": "user", "content": "算一下"},
+            {
+                "role": "assistant",
+                "content": "算好了",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "calc", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "content": "792", "tool_call_id": "c1"},
+        ],
+        embedder=StubEmbedder(),
+    )
+
+    assert store._keyword_hits(textindex.match_expression("792"), 10, [], []) == [1]
+    assert store._keyword_hits(textindex.match_expression("calc"), 10, [], []) == [1]
 
 
 @pytest.mark.asyncio
@@ -585,6 +640,39 @@ async def test_a_changed_vector_text_contract_rebuilds_the_index(
 
     assert sum(len(call) for call in embedder.calls) > embedded
     assert store.index_status(embedder)["ready"]
+
+
+@pytest.mark.asyncio
+async def test_a_changed_keyword_text_contract_rebuilds_the_index(
+    tmp_path, monkeypatch
+) -> None:
+    """**The fields are part of the keyword stamp, not only the tokenizer.**
+
+    `textindex.RULES_VERSION` says what a term is; it does not say that a row
+    now holds the tool calls and results.  Without the second half of the stamp,
+    an old file would keep rows built from the old fields and a term only a
+    result holds would be unsearchable for ever — silently, since the row count
+    still matches the turn count.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE turn_fts SET search = 'stale'")
+        connection.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value)"
+            " VALUES ('text_version', 'old')"
+        )
+
+    monkeypatch.setattr(db, "SEARCH_TEXT_VERSION", "next")
+    store._sync_text_index()
+
+    with sqlite3.connect(store.path) as connection:
+        indexed = connection.execute("SELECT search FROM turn_fts").fetchone()[0]
+        stamp = connection.execute(
+            "SELECT value FROM index_meta WHERE key = 'text_version'"
+        ).fetchone()[0]
+    assert indexed == searchable_text(CORPUS[0])
+    assert stamp == f"next|{textindex.RULES_VERSION}"
 
 
 @pytest.mark.asyncio

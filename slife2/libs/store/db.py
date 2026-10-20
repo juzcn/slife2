@@ -518,9 +518,25 @@ def _cut(text: str, chars: int) -> str:
 # everything a person would look for it with, and it is *about* what the turn
 # itself said — the person's question, the model's reasoning, and the answer it
 # settled on.  Evidence is what the turn was made from, not what it was about,
-# so the keyword index keeps the whole of it (summaries and tags included, which
-# is what those columns are for) while the vector index keeps the turn's own
-# voice.
+# but it is still what a person *finds* it by when they remember a path, an
+# error string or a command: so the keyword index keeps the whole of it (tool
+# calls, results, summaries and tags included) while the vector index keeps the
+# turn's own voice.  The two legs are complements — exact things on one side,
+# what the turn was about on the other.
+
+
+#: The keyword text's own contract, separate from the tokenizer rules.
+#:
+#: `textindex.RULES_VERSION` says what a term is; it does not say which fields
+#: `searchable_text` composes into a row.  A row built from the old fields
+#: cannot be found by a term only the new ones hold, so the recorded
+#: `text_version` carries this constant too and a startup rebuilds the rows
+#: instead of leaving half the log unsearchable.  Bump it with any change to
+#: what `searchable_text` returns.
+#:
+#: `1` was the composition that recorded no such version (the two halves, the
+#: summary and the tags); `2` adds the tool calls and their results.
+SEARCH_TEXT_VERSION = "2"
 
 
 #: The vector text's own contract, separate from the keyword rules.
@@ -537,14 +553,51 @@ def _cut(text: str, chars: int) -> str:
 EMBED_TEXT_VERSION = "2"
 
 
+def _tool_text(messages: list[dict[str, Any]]) -> list[str]:
+    """What each tool call asked and what each result answered, in turn order.
+
+    **Whole, not a head.**  A path, a hash or an error string can sit anywhere in
+    an argument or a result, and this is the leg that is supposed to find it; a
+    cap picked here would be a term nobody can search for.  `message_text` reads
+    a result, so a non-text part is *named* there rather than dropped.
+    """
+    found: list[str] = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                function = function if isinstance(function, dict) else {}
+                line = (
+                    f"{function.get('name') or ''} {function.get('arguments') or ''}"
+                ).strip()
+                if line:
+                    found.append(line)
+        if message.get("role") == "tool":
+            answered = message_text(message.get("content"))
+            if answered:
+                found.append(answered)
+    return found
+
+
 def searchable_text(
     messages: list[dict[str, Any]], summary: str = "", tags: str = ""
 ) -> str:
     """The text a turn is *found* by — everything worth looking for it with.
 
-    Both halves of the exchange, plus the two retrieval hooks `turn_summarize`
-    writes: a term that survives only in a summary is the keyword leg's to
-    find, and that is the whole reason `summary` is in this string.
+    Both halves of the exchange, every tool call and every tool result, plus the
+    two retrieval hooks `turn_summarize` writes: a term that survives only in a
+    summary is the keyword leg's to find, and that is the whole reason `summary`
+    is in this string.
+
+    **The tools are here because this is the exact leg.**  A path, an error
+    string, a command, an identifier or a hash is named literally by the query
+    that wants it, and an embedding of a machine output is a poor handle on any
+    of them; the vector keeps the turn's own voice instead (`embed_text`).  The
+    arguments and results are whole rather than a head, which is why this string
+    can be several times the size of the vector's.
 
     Normalized here rather than at the index, because a query has to be
     normalized by the same rule (`slife2.libs.store.textindex`) and this is the one place
@@ -557,6 +610,7 @@ def searchable_text(
     parts = [
         user_message(messages),
         assistant_message(messages),
+        *_tool_text(messages),
         summary,
         tags,
     ]
@@ -599,8 +653,8 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     cost 2.7x the chunks and recovered one query.  The reason results were out
     before still holds — they were 56–99% of a turn's text — but with chunking it
     is a statement about *candidates*: evidence chunks crowd the `k` a turn-level
-    answer is chosen from.  A result is still in the turn, which is what
-    `turn_read` reads.
+    answer is chosen from.  A result is still in the turn, which is what the
+    keyword leg and `turn_read` read.
 
     Summaries and tags are out for a second reason: they are written *after* the
     turn, and a vector index that depended on them would have to be rebuilt
@@ -625,6 +679,18 @@ def _vector_identity(embedder: Embedder) -> str:
     every vector in the table and takes the same rebuild.
     """
     return f"{EMBED_TEXT_VERSION}|{vector_identity(embedder)}"
+
+
+def _search_text_version() -> str:
+    """The stamp the keyword index records: the fields and the tokenizer.
+
+    Both halves matter.  A row built from other fields cannot be found by a term
+    only the new ones hold, and a row tokenized by other rules cannot be queried
+    by this one (`slife2.libs.store.textindex` argues the second); one stamp answers
+    both, which is why it is composed here rather than written out at the two
+    call sites.
+    """
+    return f"{SEARCH_TEXT_VERSION}|{textindex.RULES_VERSION}"
 
 
 def _exclusion_clause(excluded: set[int]) -> tuple[list[str], list[int]]:
@@ -1259,21 +1325,21 @@ class TurnStore:
             )
 
     def _sync_text_index(self) -> None:
-        """Rebuild the keyword index when the rules that built it have changed.
+        """Rebuild the keyword index when the text or the rules built it changed.
 
         **One condition, because the other case cannot happen.**  A row can only
-        be missing from this index if the version stamp says the rules match —
-        and then it cannot be, since the rows are written in the same
-        transaction as the turns they index.  A database with no stamp at all is
-        simply the version-mismatch case, and is rebuilt whole; that is why
-        there is nothing here for "an older file", and why there is no migration
-        to write: a file this build cannot read is named by `index_status`, not
-        quietly upgraded.
+        be missing from this index if the version stamp says the text and the
+        rules match — and then it cannot be, since the rows are written in the
+        same transaction as the turns they index.  A database with no stamp at
+        all is simply the version-mismatch case, and is rebuilt whole; that is
+        why there is nothing here for "an older file", and why there is no
+        migration to write: a file this build cannot read is named by
+        `index_status`, not quietly upgraded.
         """
         with self._connect() as connection:
             if (
                 self.index_meta(connection).get("text_version", "")
-                == textindex.RULES_VERSION
+                == _search_text_version()
             ):
                 return
             connection.execute("DELETE FROM turn_fts")
@@ -1297,7 +1363,7 @@ class TurnStore:
                     for row in rows
                 ],
             )
-            self.set_index_meta(connection, text_version=textindex.RULES_VERSION)
+            self.set_index_meta(connection, text_version=_search_text_version())
 
     def _turns_without_vectors(self, limit: int = 0) -> list[tuple[int, str]]:
         """Every turn with a vector still owed, oldest first.

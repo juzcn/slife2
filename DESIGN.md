@@ -463,10 +463,14 @@ Two measurements decided the rules:
   raised MRR from 0.83 to 0.88, adding the reasoning raised it to 0.92 (hit@1
   0.77 to 0.90), and keeping the full arguments cost 2.7x the chunks to recover
   one query. The reasoning had been invisible to both legs — 83.6k characters
-  against a 73.9k semantic text.
-- A change to that composition is a vector identity change
-  (`EMBED_TEXT_VERSION`), so the index is rebuilt rather than mixing vectors
-  made from two different texts.
+  against a 73.9k semantic text. The evidence is not lost: the keyword index
+  keeps the tool calls and results whole, because a path, an error string or a
+  command is named literally by the query that wants it. The two legs are
+  complements — exact things on one side, what the turn was about on the other.
+- A change to a composition is an identity change: `EMBED_TEXT_VERSION` is
+  folded into the vector identity, and `SEARCH_TEXT_VERSION` into the keyword
+  stamp beside `RULES_VERSION`. Either way the index is rebuilt at startup
+  rather than mixing rows made from two different texts.
 - The token estimator uses `tiktoken`'s `o200k_base` when the vocabulary can be
   fetched, and a script-aware character measure when it cannot. The character
   measure was measured at about 25% high on English and 60% high on Chinese,
