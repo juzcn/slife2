@@ -103,7 +103,9 @@ INSTRUCTIONS = (
     "One conversation's memory, addressed by `(agent, subagent)`. Call "
     "`remember` after a turn: it is a record, not an interpretation, and it "
     "writes what it is given. `turn_list` browses, `turn_search` finds a turn by "
-    "what it was about, `turn_summarize` annotates one for the words leg, and "
+    "what it was about or by an exact string from its record (a path, a command, "
+    "an error, a tool name), `turn_summarize` annotates one for the words leg, "
+    "and "
     "`turn_read` returns one turn whole — all four are the model's, and none "
     "names an agent, because they answer about the conversation the call came "
     "from. `restore` and `rebuild` are the harness's: they decide which turns a "
@@ -486,16 +488,19 @@ def build_server(
         until: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search your own history by what a turn was about.
+        """Search your own history by what a turn was about, or by what it did.
 
-        Two legs decide the answer: the words a turn is found by, and what it
-        was about. A turn both legs find ranks first. Each hit is the one line
+        Two legs decide the answer: the words and exact strings a turn is found
+        by — what was asked and answered, and the tool calls and their results —
+        and what it was about. A path, a command, an error string or a tool name
+        from the record is therefore as searchable as the subject the turn
+        discussed. A turn both legs find ranks first. Each hit is the one line
         `turn_list` gives, plus `similarity` — the meaning score when the
         meaning leg measured the turn, `null` when only its words matched.
         Read one whole with `turn_read`.
 
         Args:
-            query: What the turn was about.
+            query: What the turn was about, or an exact string from its record.
             since: Lower bound on when the turn was written — an ISO date or
                 datetime, or one of: today, yesterday, tomorrow, now,
                 last|this week|month|quarter|year, or '<N> day(s)|week(s)|month(s)|year(s) ago'.
