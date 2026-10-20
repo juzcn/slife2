@@ -371,6 +371,13 @@ cli:
       version: 0.1.5
       description: Official browser-harness package
 
+  rg:
+    command: rg
+    description: ripgrep 14.1.0 — 快速递归文本搜索（gitignore 感知，带 PCRE2+JIT）。定字符串/行号首选，一次调用出结果，比"后台搜索会话+分页读"少绕两步。常用：rg -n "关键词" 路径 -g "*.py"（带行号并限定文件类型）；rg -l / rg -c 只列文件 / 计数；rg -uu 忽略 .gitignore 全扫（含 .venv、dist）；rg -U --pcre2 "多行模式" 跨行匹配；rg --json 供脚本消费；rg --stats 出统计；rg "FAILED|error" 某.log 定位失败行；rg -F 当纯字面量（搜 . 和 * 时用）。
+    install: choco install ripgrep（Windows）；已装在 C:\ProgramData\chocolatey\bin\rg.exe
+    source:
+      type: choco
+      version: 14.1.0
 skills:
   # Playbooks live in skills/<name>/SKILL.md. This section supplies the
   # environment each playbook declares. Scripts are not run; `skill_use`
