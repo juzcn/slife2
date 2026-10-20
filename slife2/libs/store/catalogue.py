@@ -1572,9 +1572,9 @@ class ToolStore:
         # It could not: the words are always *some* question's other leg — a
         # keywords-only call is routed into `sentences` above — so every keyword
         # id is already in `shortlist` by the time this line is reached.  The
-        # byte-identical line in `slife2.plugins.cabinet.store` is live, because
-        # that corpus does not do the routing; this copy was the one that
-        # outlived its reason.)
+        # byte-identical line in `slife2.plugins.cabinet.store` was live until
+        # that corpus adopted the same routing; this copy was the one that
+        # outlived its reason first.)
         # **The union is capped, and each question may bring `over` ids of its
         # own.**  Nothing a caller passes bounds this list: every sentence
         # contributes its meaning leg's ids plus the keyword leg's, so forty

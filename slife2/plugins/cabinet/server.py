@@ -1111,8 +1111,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """Search the cabinet — every note, day, file and report at once.
 
         The two legs add up rather than competing: give both for the strongest
-        answer, either alone for one leg, and neither to browse what is there,
-        newest first.
+        answer, a sentence alone for meaning, or words alone — the words are
+        also read by meaning as a sentence made of them. Give neither to browse
+        what is there, newest first.
 
         Args:
             keywords: Words that must appear. A path like `files/docs/spec.pdf`

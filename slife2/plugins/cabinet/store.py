@@ -1461,6 +1461,13 @@ class CabinetStore:
         kind and nothing else is asking for.  **Dumps are the one kind a browse
         and a search that named none do not reach** — see the module docstring.
 
+        **A keywords-only call routes the same words through both legs.**  The
+        joined words are its one sentence, because a word list is as good a
+        meaning question as the sentence it came from (`ToolStore.search`
+        measured it) and the keyword leg's AND is why a word form the text does
+        not carry finds nothing otherwise.  With a sentence present, the words
+        are that sentence's other leg.
+
         **One corpus, whatever `kind` says.**  A filter narrows what is *shown*
         and never what is ranked, because a rank only means something inside the
         corpus that produced it (DESIGN.md §5.3): one index per kind would be one corpus per
@@ -1507,6 +1514,14 @@ class CabinetStore:
                 ).fetchall()
             return {"results": [_found(dict(row)) for row in rows], "browsed": True}
 
+        # **The words are a sentence when they are all there is.**  The keyword
+        # leg asks for every word at once, so a word form the text does not
+        # carry finds nothing; the meaning leg reads the same joined words.
+        # `ToolStore.search` measured the difference (23/36 to 34-36) and this
+        # corpus was the one where the words never reached the second leg.
+        if keywords and not any(sentence.strip() for sentence in sentences):
+            sentences = [" ".join(str(word) for word in keywords)]
+
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits = (
             self._keyword_hits(expression, limit * 4, clauses, values)
@@ -1541,8 +1556,10 @@ class CabinetStore:
                     shortlist.append(rowid)
             for rowid, measured in hits:
                 meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-        if keyword_hits is not None and not shortlist:
-            shortlist = list(dict.fromkeys(keyword_hits))
+        # Every keyword id is in `shortlist` already: a keywords-only call was
+        # routed into `sentences` above, so the words are some question's other
+        # leg and the fusion put them there.  The fallback that stood here was
+        # the one-leg path this routing removes.
         shortlist = shortlist[:MAX_SQL_VARS]
         for rowid, value in self._meaning_of(
             [rowid for rowid in shortlist if rowid not in meaning], queries

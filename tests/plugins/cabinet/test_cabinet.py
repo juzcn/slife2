@@ -602,26 +602,52 @@ async def test_a_short_embedding_answer_is_refused_at_the_search_path() -> None:
 
 @pytest.mark.asyncio
 async def test_the_two_legs_answer_different_questions() -> None:
-    """Words are certain and a sentence is graded — and both are readable.
+    """Words are certain and a sentence is graded — and words are measured too.
 
     `tool_search`'s rule, restated for a cabinet: the words go to the leg that
-    asks for all of them, a sentence goes to the one that measures meaning, and
-    the page is ordered words-first so the column a reader sees is the column
-    that ordered it.
+    asks for all of them and, when no sentence is given, to the meaning leg as
+    a sentence made of them; a sentence goes to the meaning leg alone. The page
+    is ordered words-first, so the column a reader sees is the column that
+    ordered it.
     """
     async with Client(cabinet()) as client:
         await ask(client, "note_edit", subject="alpha", content=f"{WORD} in the body")
         await ask(client, "note_edit", subject="beta", content="nothing to match")
-        by_words = await payload(client, "cabinet_search", keywords=[WORD])
+        # One row, because the worded row is first and the routed meaning leg
+        # also returns the unrelated note behind it at similarity 0.
+        by_words = await payload(client, "cabinet_search", keywords=[WORD], limit=1)
         by_meaning = await payload(
             client, "cabinet_search", sentences=[f"{WORD} in the body"]
         )
 
     assert keys(by_words["results"]) == ["alpha"]
     assert by_words["results"][0]["matched_in"] == "line"
-    assert "similarity" not in by_words["results"][0], "no leg measured it by meaning"
+    assert by_words["results"][0]["similarity"] == 1.0, (
+        "the words are a sentence when they are all there is"
+    )
     best = by_meaning["results"][0]
     assert best["key"] == "alpha" and best["similarity"] == 1.0
+    assert "matched_in" not in best
+
+
+@pytest.mark.asyncio
+async def test_words_alone_reach_the_meaning_leg() -> None:
+    """**The words are a sentence when they are all there is.**
+
+    The keyword leg asks for every word at once, so a note holding only one of
+    two words is found by neither word *list*; the meaning leg reads the joined
+    words and finds it. `ToolStore.search` measured this routing at 23/36 to
+    34-36, and the cabinet was the corpus where the words never reached it.
+    """
+    async with Client(cabinet()) as client:
+        await ask(
+            client, "note_edit", subject="partial", content=f"a note about {WORD}"
+        )
+        answer = await payload(client, "cabinet_search", keywords=[WORD, OTHER])
+
+    assert keys(answer["results"]) == ["partial"]
+    assert answer["results"][0]["similarity"] is not None
+    assert "matched_in" not in answer["results"][0], "the keyword leg found nothing"
 
 
 @pytest.mark.asyncio
