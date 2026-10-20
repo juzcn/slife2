@@ -515,16 +515,26 @@ def _cut(text: str, chars: int) -> str:
 # --- what a turn is found by, and what it is about ----------------------------
 #
 # Two different strings, and the difference is deliberate.  A turn is *found* by
-# everything a person would look for it with, and it is *about* what was said —
+# everything a person would look for it with, and it is *about* what the turn
+# itself said — the person's question, the model's reasoning, and the answer it
+# settled on.  Evidence is what the turn was made from, not what it was about,
 # so the keyword index keeps the whole of it (summaries and tags included, which
-# is what those columns are for) while the vector index keeps only the
-# conversation, for the reason below.
+# is what those columns are for) while the vector index keeps the turn's own
+# voice.
 
 
-#: How much of a tool call's arguments a vector keeps.  The call is part of what
-#: a turn was about — "the one where it used the calculator" is a real question —
-#: but the arguments are incidental and can be enormous.
-TOOL_ARG_CHARS = 400
+#: The vector text's own contract, separate from the keyword rules.
+#:
+#: `textindex.RULES_VERSION` governs `normalize` and `terms`, the keyword
+#: grammar, and says nothing about which messages `embed_text` chooses.  A
+#: vector is a function of the text it was made from, so a change here has to
+#: invalidate every stored vector the way a changed model does;
+#: `_vector_identity` folds this constant in for exactly that reason.  Bump it
+#: with any change to what `embed_text` returns.
+#:
+#: `1` was the composition that recorded no such version (user, tool calls with
+#: their argument heads, answer); `2` is the turn's own voice.
+EMBED_TEXT_VERSION = "2"
 
 
 def searchable_text(
@@ -553,36 +563,44 @@ def searchable_text(
     return storable(textindex.normalize("\n".join(part for part in parts if part)))
 
 
-def _tool_call_text(messages: list[dict[str, Any]]) -> list[str]:
-    """What each tool call was, as `name` and the head of its arguments."""
+def _thinking_text(messages: list[dict[str, Any]]) -> list[str]:
+    """What the model reasoned, in the order it reasoned it.
+
+    **`thinking` is part of the message and not of its `content`.**  An assistant
+    message that calls a tool usually has no prose at all, so the reasoning is
+    the only place it says what it is doing; `message_text` deliberately does
+    not read the field (a listing is what was asked and answered), which is why
+    the vector builder reads it here.
+    """
     found: list[str] = []
     for message in messages:
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list):
+        if message.get("role") != "assistant":
             continue
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function")
-            function = function if isinstance(function, dict) else {}
-            name = str(function.get("name") or "")
-            arguments = str(function.get("arguments") or "")[:TOOL_ARG_CHARS]
-            line = f"{name} {arguments}".strip()
-            if line:
-                found.append(line)
+        reasoning = message.get("thinking")
+        if isinstance(reasoning, str) and reasoning.strip():
+            found.append(reasoning)
     return found
 
 
 def embed_text(messages: list[dict[str, Any]]) -> str:
     """The text a turn is *about*, which is not the text it is found by.
 
-    What was asked, what was answered, and which tools were called — **and not
-    what the tools answered**.  Measured on v1's live turn log, tool results were
-    56–99% of a turn's text, so an index built on them describes "an agent ran
-    tools" rather than what the turn was about: every turn lands in one narrow
-    cosine band and a similarity floor has nothing left to separate.  Nothing is
-    lost to search by leaving them out — a result is still in the turn, which is
-    what the keyword leg and `turn_read` read.
+    **The turn's own voice: what was asked, what the model reasoned, and what it
+    finally answered.**  The reasoning is included because it is the model's own
+    statement of what the turn is doing and it is stored with the message
+    (`slife2.libs.turn.messages`); measured on this repository's live log it was
+    83.6k characters against a 73.9k semantic text and visible to neither leg.
+    The answer is the turn's own synthesis, written with the whole turn in view.
+
+    **Tool results and tool-call arguments are out, and that is measured.**  With
+    30 discriminator-style subject queries over the same log, dropping the
+    per-call argument head raised MRR from 0.83 to 0.88, and adding the reasoning
+    raised it to 0.92 (hit@1 0.77 to 0.90); keeping the full arguments as well
+    cost 2.7x the chunks and recovered one query.  The reason results were out
+    before still holds — they were 56–99% of a turn's text — but with chunking it
+    is a statement about *candidates*: evidence chunks crowd the `k` a turn-level
+    answer is chosen from.  A result is still in the turn, which is what
+    `turn_read` reads.
 
     Summaries and tags are out for a second reason: they are written *after* the
     turn, and a vector index that depended on them would have to be rebuilt
@@ -593,10 +611,36 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     """
     parts = [
         user_message(messages),
-        *_tool_call_text(messages),
+        *_thinking_text(messages),
         assistant_message(messages),
     ]
     return storable("\n\n".join(part for part in parts if part))
+
+
+def _vector_identity(embedder: Embedder) -> str:
+    """The identity the turn vector index is built with.
+
+    The shared identity names the model, the endpoint and the width; this corpus
+    adds its text contract, because changing what `embed_text` returns changes
+    every vector in the table and takes the same rebuild.
+    """
+    return f"{EMBED_TEXT_VERSION}|{vector_identity(embedder)}"
+
+
+def _exclusion_clause(excluded: set[int]) -> tuple[list[str], list[int]]:
+    """A `NOT IN` clause for turns already in hand, or nothing when it will not bind.
+
+    A `NOT IN` cannot be split across statements the way an `IN` filter can, and
+    `MAX_SQL_VARS` is the house bound under SQLite's own.  A kept list larger
+    than one statement may bind is therefore left to the Python filters in
+    `_time_ranked` and `recall`, which hold the same set and remove it exactly;
+    the clause only keeps the candidate legs from spending their depth on turns
+    already in hand.  It is never what makes the answer correct.
+    """
+    if not excluded or len(excluded) > MAX_SQL_VARS:
+        return [], []
+    values = sorted(excluded)
+    return [f"t.rowid NOT IN ({_marks(values)})"], values
 
 
 class TurnStore:
@@ -1001,7 +1045,12 @@ class TurnStore:
         return allowed
 
     def _time_ranked(
-        self, since: str | None, until: str | None, limit: int, newest_first: bool
+        self,
+        since: str | None,
+        until: str | None,
+        limit: int,
+        newest_first: bool,
+        excluded: set[int] | frozenset[int] = frozenset(),
     ) -> list[tuple[int, float | None]]:
         """Turn ids in a window, from the end `anchor` named, with no similarity.
 
@@ -1009,17 +1058,30 @@ class TurnStore:
         "no number" is a different fact from "measured as zero" — which is what
         lets the caller exempt these from a similarity floor rather than drop
         them all (see `recall`).
+
+        **The scan is widened by the excluded ids, not the answer.**  A period
+        recall asks for the newest (or oldest) turns; a kept turn in that list
+        is one the caller already holds, so the window is read past it and the
+        filter below is the guarantee that `limit` *new* turns come back.  The
+        SQL clause is skipped when the kept list is too large to bind, and the
+        filter is exact either way.
         """
         clauses, params = time_window(since, until)
-        where = filter_clause(clauses)
+        exclude_clauses, exclude_params = _exclusion_clause(set(excluded))
+        where = filter_clause([*clauses, *exclude_clauses])
         order = "DESC" if newest_first else "ASC"
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT rowid AS turn_id FROM turn {where}"
-                f" ORDER BY rowid {order} LIMIT ?",
-                (*params, limit),
+                f"SELECT t.rowid AS turn_id FROM turn t {where}"
+                f" ORDER BY t.rowid {order} LIMIT ?",
+                (*params, *exclude_params, limit + len(excluded)),
             ).fetchall()
-        return [(int(row["turn_id"]), None) for row in rows]
+        found: list[tuple[int, float | None]] = [
+            (int(row["turn_id"]), None)
+            for row in rows
+            if int(row["turn_id"]) not in excluded
+        ]
+        return found[:limit]
 
     async def recall(
         self,
@@ -1030,6 +1092,7 @@ class TurnStore:
         until: str | None = None,
         anchor: str | None = None,
         limit: int = 20,
+        exclude: Sequence[int] = (),
     ) -> list[tuple[int, float | None]]:
         """Turns a rebuild may add, best first — the *ranking*, and no policy.
 
@@ -1058,17 +1121,33 @@ class TurnStore:
         signal than a cosine neighbourhood, and "no number" is not evidence
         against it.
 
+        **`exclude` is the caller's keep-list.**  A rebuild decides both halves
+        in one call — what stays in hand and what is missing — and a turn in
+        both is a turn the union collapses: recalling it spends a candidate
+        slot, a place in the `k` and a share of the token budget on something
+        already there.  The keyword leg and the time-ranked branch filter them
+        in SQL; the semantic leg cannot (a `vec0` KNN has no turn id to filter
+        on), so its answer is filtered after fusion — where the time window is
+        filtered too — and `over` is widened by the number excluded so the
+        places they took can be refilled.
+
         Raises:
             EmptyQuery: If the query holds no term.
             InvalidTimeBound: If a bound is in no grammar `slife2.helpers.timeutil`
                 speaks, for the reason `turns` gives.
         """
         limit = page_limit(limit)
+        excluded = set(normalise_ids(exclude))
         if not query.strip():
             if not since and not until and not anchor:
                 return []
             return await off_loop(
-                self._time_ranked, since, until, limit, anchor != "oldest"
+                self._time_ranked,
+                since,
+                until,
+                limit,
+                anchor != "oldest",
+                excluded,
             )
 
         if embedder is None:
@@ -1078,17 +1157,25 @@ class TurnStore:
             )
         expression = textindex.match_expression(query)
         clauses, params = time_window(since, until)
-        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
-        # The keyword leg is windowed in SQL (its `rank` orders every match, so
-        # limiting after the window is still the best inside it); the semantic
-        # leg is not, and the fusion is filtered below.
-        keyword = await off_loop(self._keyword_hits, expression, over, clauses, params)
+        exclude_clauses, exclude_params = _exclusion_clause(excluded)
+        over = min((limit + len(excluded)) * _OVERFETCH, MAX_SQL_VARS)
+        # The keyword leg is windowed and excluded in SQL (its `rank` orders
+        # every match, so limiting after the window is still the best inside
+        # it); the semantic leg is neither, and the fusion is filtered below.
+        keyword = await off_loop(
+            self._keyword_hits,
+            expression,
+            over,
+            [*clauses, *exclude_clauses],
+            [*params, *exclude_params],
+        )
         semantic = await self._semantic_hits(query, embedder, over)
         fused = [
             turn_id
             for turn_id, _ in fuse_ranked(
                 {"keyword": keyword, "semantic": list(semantic)}
             )
+            if turn_id not in excluded
         ][:MAX_SQL_VARS]
         allowed = await off_loop(self._ids_in_window, fused, clauses, params)
         return [
@@ -1168,7 +1255,7 @@ class TurnStore:
                 vec_table="turn_vec",
                 chunk_table="turn_chunk",
                 dimension=embedder.dimension,
-                identity=vector_identity(embedder),
+                identity=_vector_identity(embedder),
             )
 
     def _sync_text_index(self) -> None:
@@ -1294,7 +1381,7 @@ class TurnStore:
         pending = len(self._turns_without_vectors())
 
         problems: list[str] = []
-        if meta.get("vector_identity", "") != vector_identity(embedder):
+        if meta.get("vector_identity", "") != _vector_identity(embedder):
             problems.append(
                 "the vector index was built by a different model or a different "
                 "text contract than the configured one"
@@ -1384,7 +1471,7 @@ class TurnStore:
         expression: str,
         limit: int,
         clauses: list[str],
-        params: list[str],
+        params: Sequence[Any],
     ) -> list[int]:
         """Turn ids by `bm25`, best first.
 

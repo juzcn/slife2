@@ -805,7 +805,10 @@ def build_server(
         One model call decides: which of the turns in hand to keep, and what to
         recall from the turn log.  The two are joined by id and never reconciled,
         so an empty recall is harmless and only an explicit `"clear"` empties the
-        context (`slife2.libs.turn.context` is where that is argued).
+        context (`slife2.libs.turn.context` is where that is argued).  What was
+        kept is excluded from the recall: the decision's two halves are one
+        answer, and a turn in both would spend a recall place on something the
+        union would collapse anyway.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -966,6 +969,13 @@ def build_server(
         bound a kept context is measured against.**  Subtracting the *floor*
         instead would grant no headroom at all: the trim compacts down to the
         floor, so a live context sits at or above it for most of a session.
+
+        **What was kept is excluded from what is recalled.**  The two halves are
+        joined by id, so a turn in both is one turn; the recall would have spent
+        one of its `recall_limit` places, a distance in the semantic leg's `k`
+        and a share of the budget on a turn the caller already holds.  The
+        exclusion is handed to the store, which can look past those turns for
+        more rather than filtering a short answer here.
         """
         query = str(condition.get("query") or "")
         if query and not terms(query):
@@ -1017,6 +1027,12 @@ def build_server(
             until=until,
             anchor=anchor,
             limit=config.context.recall_limit,
+            # The keep-list is what is *in hand*, so it is also what a recall
+            # must not spend its places on: the union would collapse a turn in
+            # both, and the slot, the distance and the budget would be gone.
+            # The model's keep is the more accurate half of its decision, which
+            # is exactly why the recall is the half that looks elsewhere.
+            exclude=base,
         )
         gated = decisions.gate(ranked, config.context.min_similarity)
         order = [turn_id for turn_id, _ in gated][: config.context.recall_limit]

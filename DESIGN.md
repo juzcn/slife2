@@ -453,10 +453,20 @@ selects which of the agent's directories is read or written.
 
 Two measurements decided the rules:
 
-- Tool results were measured at 56–99% of a turn's text. Embedding them makes
-  every turn describe "an agent ran tools" instead of what it was about, which
-  is why the vector is built from what was asked, what was answered, and which
-  tools were called with what arguments — not what the tools answered.
+- What a turn is about is its own voice: the question, the model's reasoning,
+  and the answer it settled on. Tool results were measured at 56–99% of a
+  turn's text, so embedding them makes every turn describe "an agent ran
+  tools"; with chunking the cost is that evidence chunks crowd the `k` a
+  turn-level answer is chosen from. Tool-call arguments followed them, and this
+  time the reason was measured rather than assumed: on 41 turns and 30
+  discriminator-style subject queries, dropping the per-call argument head
+  raised MRR from 0.83 to 0.88, adding the reasoning raised it to 0.92 (hit@1
+  0.77 to 0.90), and keeping the full arguments cost 2.7x the chunks to recover
+  one query. The reasoning had been invisible to both legs — 83.6k characters
+  against a 73.9k semantic text.
+- A change to that composition is a vector identity change
+  (`EMBED_TEXT_VERSION`), so the index is rebuilt rather than mixing vectors
+  made from two different texts.
 - The token estimator uses `tiktoken`'s `o200k_base` when the vocabulary can be
   fetched, and a script-aware character measure when it cannot. The character
   measure was measured at about 25% high on English and 60% high on Chinese,

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -26,7 +27,7 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host.config import default_config
 from slife2.libs.host.paths import agent_dir
 from slife2.libs.plugin.audience import client_meta
-from slife2.libs.store.db import TurnStore
+from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
 from slife2.libs.turn.tokens import estimate_turn_tokens
@@ -821,6 +822,41 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
+    """Keep ∪ recall is joined by id, so a kept turn must not spend a recall place.
+
+    `recall_limit` is the place count, and the kept turn ranks first here: with
+    the exclusion the *next* turn comes back, which is the one the decision is
+    actually asking for.  Without it the recall answers with the turn already in
+    hand and the rebuild changes nothing.
+    """
+    config = default_config()
+    config = replace(config, context=replace(config.context, recall_limit=1))
+    reply = '{"context": [1], "recall": {"query": "工具"}}'
+
+    async with Client(
+        build_server(config, embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具 工具", "1"), ("工具 trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "工具 工具"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": [ids[0]],
+                "prompt": "那另一条呢？",
+            },
+        )
+
+    assert answer.data["turn_ids"] == ids
+    assert answer.data["recalled"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_context_list_that_cannot_be_written_fails_the_turn(
     monkeypatch,
 ) -> None:
@@ -1082,7 +1118,7 @@ async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
         recorded = connection.execute(
             "SELECT value FROM index_meta WHERE key = 'vector_identity'"
         ).fetchone()[0]
-    assert recorded.startswith("1|stub:two|"), recorded
+    assert recorded.startswith(f"{EMBED_TEXT_VERSION}|1|stub:two|"), recorded
 
 
 def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:

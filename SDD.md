@@ -945,6 +945,10 @@ Rules:
   Appendix C for every way the discriminator call can fail.
 - **A kept turn and a recalled turn are joined by id, in time order.**
   `normalise_ids` collapses duplicates to their first position.
+- **A recall is asked for what is missing.** The kept turns are excluded from
+  its candidates — in SQL for the keyword and time legs, after fusion for the
+  meaning leg — so a turn in both does not spend a recall place, a distance in
+  `k`, or a share of the budget on something already in hand.
 - **The live-context list's order is authoritative.** Reads replay it as written
   and never re-sort, because the list encodes what was kept, dropped, and
   recalled, and a selection is not always contiguous.
@@ -1466,9 +1470,12 @@ The width is measured, and the input limit is asked for:
 - an input limit cannot be measured without sending an oversized input, so a
   model whose endpoint reports no limit is refused rather than given a guess.
 
-Changing the embedding model invalidates the index identity. The vector index is
-rebuilt whole on the next start, because vectors from two models cannot be
-ranked against each other.
+Changing the embedding model — or the text a corpus builds its vectors from —
+invalidates the index identity. The vector index is rebuilt whole on the next
+start, because vectors from two models cannot be ranked against each other, and
+a vector is a function of the text it was made from. The turn store's text
+contract is `EMBED_TEXT_VERSION`, folded into the identity beside the model and
+width.
 
 ## 9. Inbound work
 

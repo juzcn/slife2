@@ -109,13 +109,15 @@ async def test_a_term_that_survives_only_in_a_summary_is_still_found(tmp_path) -
     assert store._keyword_hits(expression, 10, [], []) == [1]
 
 
-def test_a_tool_result_is_not_what_a_turn_is_about() -> None:
-    """The call is kept, the thing it answered is not.
+def test_a_tool_result_and_its_call_are_not_what_a_turn_is_about() -> None:
+    """The turn's own voice is what it is about; evidence is what it was made from.
 
-    Measured on v1's turn log, tool results were 56–99% of a turn's text, so a
-    vector built on them describes "an agent ran tools" and every turn lands in
-    one narrow band.  The call's own name and arguments stay, because "the turn
-    where it used the calculator" is a real question.
+    Tool results were already out — measured on v1's log at 56–99% of a turn's
+    text.  The call's argument head followed them after the chunked index made
+    the cost visible: on this repository's live log, with 30 discriminator-style
+    subject queries, dropping it raised MRR from 0.83 to 0.88, and keeping the
+    full arguments cost 2.7x the chunks to recover one query.  A result is still
+    in the turn, which is what `turn_read` reads.
     """
     messages = [
         {"role": "user", "content": "算一下"},
@@ -132,8 +134,36 @@ def test_a_tool_result_is_not_what_a_turn_is_about() -> None:
     text = embed_text(messages)
 
     assert "算一下" in text and "算好了" in text
-    assert "calc" in text and "99*8" in text
+    assert "calc" not in text and "99*8" not in text
     assert "xxxx" not in text
+
+
+def test_the_reasoning_is_part_of_what_a_turn_is_about() -> None:
+    """**The only prose a tool-calling assistant message usually has.**
+
+    `thinking` lives on the message and not in `content`, so `message_text`
+    never sees it; measured on the live log it was 83.6k characters against a
+    73.9k semantic text and reached neither leg.  Every assistant message's
+    reasoning is taken, not only the last: the one beside a tool call says what
+    the model is doing, and the one beside the answer says what it concluded.
+    """
+    messages = [
+        {"role": "user", "content": "看看磁盘"},
+        {
+            "role": "assistant",
+            "content": "",
+            "thinking": "我先查一下挂载点。",
+            "tool_calls": [{"id": "c1", "function": {"name": "df", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "…", "tool_call_id": "c1"},
+        {"role": "assistant", "content": "空间充足。", "thinking": "还剩 40%。"},
+    ]
+
+    text = embed_text(messages)
+
+    assert "看看磁盘" in text
+    assert "我先查一下挂载点。" in text and "还剩 40%。" in text
+    assert "空间充足。" in text
 
 
 def test_a_long_turn_becomes_several_chunks_overlapping_by_a_paragraph() -> None:
@@ -396,6 +426,44 @@ async def test_a_turn_with_several_chunks_is_a_hit_once(tmp_path) -> None:
     assert _ids(hits) == [1]
 
 
+@pytest.mark.asyncio
+async def test_a_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
+    """A keep-list and a recall are one decision; a turn in both is a place spent twice.
+
+    The keyword leg filters in SQL and the semantic leg's answer is filtered
+    after fusion — a `vec0` KNN has no turn id to filter on — so the excluded
+    turn is absent from both legs' contribution, and `limit` places go to turns
+    that are actually missing.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    await store.save_turn(
+        messages=[{"role": "user", "content": "工具 工具"}], embedder=embedder
+    )
+    await store.save_turn(
+        messages=[{"role": "user", "content": "工具 trump"}], embedder=embedder
+    )
+
+    ranked = await store.recall(query="工具", embedder=embedder, limit=1, exclude=[1])
+
+    assert [turn_id for turn_id, _ in ranked] == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_period_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
+    """The time-ranked branch has no similarity, so it filters the same way."""
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    for said in ("一", "二", "三"):
+        await store.save_turn(
+            messages=[{"role": "user", "content": said}], embedder=embedder
+        )
+
+    ranked = await store.recall(anchor="newest", limit=2, exclude=[2, 3])
+
+    assert [turn_id for turn_id, _ in ranked] == [1]
+
+
 # --- fusion, as a pure function -----------------------------------------------
 
 
@@ -488,6 +556,35 @@ async def test_changing_the_model_reindexes_every_turn(tmp_path) -> None:
     assert store._turns_without_vectors() == []
     status = store.index_status(second)
     assert status["ready"] and status["vectors"] == len(CORPUS)
+
+
+@pytest.mark.asyncio
+async def test_a_changed_vector_text_contract_rebuilds_the_index(
+    tmp_path, monkeypatch
+) -> None:
+    """**The text contract is part of the vector identity, and it has to be.**
+
+    `textindex.RULES_VERSION` governs the keyword grammar and says nothing about
+    which messages `embed_text` chooses; a vector is a function of its text, so
+    changing the composition without changing the identity would leave old and
+    new vectors ranked against each other.  The recorded identity carries
+    `EMBED_TEXT_VERSION`, and a difference takes the same rebuild a changed
+    model takes.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    await _corpus(store, embedder)
+    embedded = sum(len(call) for call in embedder.calls)
+
+    monkeypatch.setattr(db, "EMBED_TEXT_VERSION", "next")
+    status = store.index_status(embedder)
+    assert not status["ready"]
+    assert any("text contract" in problem for problem in status["problems"])
+
+    await store.sync_indexes(embedder)
+
+    assert sum(len(call) for call in embedder.calls) > embedded
+    assert store.index_status(embedder)["ready"]
 
 
 @pytest.mark.asyncio
