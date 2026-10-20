@@ -175,10 +175,11 @@ tool_load:
     - dump_read
     # Images.
     - attach_image
-    # Web search, by each server's `{server}__{tool}` name — the list is per
-    # tool, so the rest of each server stays on demand.
+    # Web search and fetch, by each server's `{server}__{tool}` name — the
+    # list is per tool, so the rest of each server stays on demand.
     - serper__google_search
     - deepseek-search__webSearch
+    - deepseek-search__webFetch
     - baidu-search__chatCompletions
     # Delegation and the subagent network.
     - subagent_set
