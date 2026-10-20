@@ -998,10 +998,12 @@ def build_server(
         in sentences, the input joins them: the model's sentence is a paraphrase
         of what the input points at, and the meaning leg reads the input as it
         stands.  That gives a sentence recall at least two questions, so the
-        paraphrase is never the only way the subject is found.  A keyword-only
-        recall keeps its query as the one meaning question — the phrase is the
-        deliberate one, and a second raw question there can only reorder it —
-        and a period recall is not narrowed by the input at all.
+        paraphrase is never the only way the subject is found — unless the
+        decision set `prompt_as_sentence` false, which is what it does when the
+        input names nothing ("hi", "continue", "what about the other one?").  A
+        keyword-only recall keeps its query as the one meaning question — the
+        phrase is the deliberate one, and a second raw question there can only
+        reorder it — and a period recall is not narrowed by the input at all.
         """
         query = str(condition.get("query") or "")
         raw_sentences = condition.get("sentences")
@@ -1040,15 +1042,18 @@ def build_server(
         # sentence is a paraphrase of what the input points at; the input is the
         # text it was paraphrasing, and the meaning leg reads it as it stands.
         # So a sentence recall asks the person's way as well — at least two
-        # questions — and the paraphrase is never the only way the subject is
-        # found.  A keyword-only recall keeps its query as the one meaning
-        # question (the phrase is the deliberate one, and a second raw question
-        # there can only reorder it), and a period recall is not narrowed by the
-        # input at all.
+        # questions — unless the decision said the input names nothing ("hi",
+        # "continue", "what about the other one?"): the model sees the input and
+        # the conversation, and that judgement is its to make.  A keyword-only
+        # recall keeps its query as the one meaning question (the phrase is the
+        # deliberate one, and a second raw question there can only reorder it),
+        # and a period recall is not narrowed by the input at all.
         asker = await embedding.get() if (query or sentences) else None
+        include_prompt = condition.get("prompt_as_sentence") is not False
         if (
             asker is not None
             and sentences
+            and include_prompt
             and prompt.strip()
             and prompt not in sentences
         ):

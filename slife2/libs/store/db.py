@@ -709,6 +709,36 @@ def _exclusion_clause(excluded: set[int]) -> tuple[list[str], list[int]]:
     return [f"t.rowid NOT IN ({_marks(values)})"], values
 
 
+def _fuse_questions(
+    keyword: Sequence[int], questions: Sequence[Sequence[int]]
+) -> list[int]:
+    """Fuse the words into each question, then keep each turn's best question.
+
+    **The keyword leg is evidence *about a question*.**  The catalogue already
+    fuses it that way; the turn recall used to fuse one keyword list against one
+    merged meaning list, which credited a turn by its best similarity across
+    questions rather than by how well it answers the question the words belong
+    to.  A turn is kept once, at the score of its best question, so another
+    question can only add a turn or raise one — the same rule the measured
+    similarity follows.
+
+    Ties fall to the newer turn, the order `fuse_ranked` uses.  The words are one
+    list and the same for every question; an empty keyword leg is a question
+    with one leg, not an error.
+    """
+    best: dict[int, float] = {}
+    for question in questions:
+        for turn_id, score in fuse_ranked(
+            {"keyword": list(keyword), "sentence": list(question)}
+        ):
+            if score > best.get(turn_id, 0.0):
+                best[turn_id] = score
+    return [
+        turn_id
+        for turn_id, _ in sorted(best.items(), key=lambda pair: (-pair[1], -pair[0]))
+    ]
+
+
 class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
@@ -1177,11 +1207,18 @@ class TurnStore:
 
         **`sentences` are the meaning questions; `query` is the words.**  Each
         sentence is embedded on its own and a turn keeps its best similarity
-        across them (`_semantic_hits`), so a second sentence can only add a turn
-        or raise one.  `query` is the keyword leg's AND — names, paths,
-        identifiers, an exact string — and it is also the meaning query when no
-        sentence is given; that is the fallback a caller uses when it cannot put
-        the subject into a sentence.  A recall may carry either, or both.
+        across them, so a second sentence can only add a turn or raise one.
+        `query` is the keyword leg's AND — names, paths, identifiers, an exact
+        string — and it is also the meaning query when no sentence is given;
+        that is the fallback a caller uses when it cannot put the subject into a
+        sentence.  A recall may carry either, or both.
+
+        **The words are fused into each question's list, and a turn keeps its
+        best question.**  A turn found by both legs *for the same sentence* is
+        evidence about that sentence; a turn several sentences found keeps the
+        best score rather than a sum, the same max the measured similarity
+        follows.  That is the catalogue's per-question fusion applied to a
+        ranking a budget can spend.
 
         **What is returned is ranked pairs, not a selection.**  The count, the
         similarity floor and the token budget are the *caller's* — they depend on
@@ -1258,17 +1295,23 @@ class TurnStore:
                     [*clauses, *exclude_clauses],
                     [*params, *exclude_params],
                 )
-        semantic = await self._semantic_hits(meaning or [words], embedder, over)
+        lists = await self._semantic_lists(meaning or [words], embedder, over)
+        nearest: dict[int, float] = {}
+        for found in lists:
+            for turn_id, similarity in found:
+                if similarity > nearest.get(turn_id, float("-inf")):
+                    nearest[turn_id] = similarity
         fused = [
             turn_id
-            for turn_id, _ in fuse_ranked(
-                {"keyword": keyword, "semantic": list(semantic)}
+            for turn_id in _fuse_questions(
+                keyword,
+                [[turn_id for turn_id, _ in found] for found in lists],
             )
             if turn_id not in excluded
         ][:MAX_SQL_VARS]
         allowed = await off_loop(self._ids_in_window, fused, clauses, params)
         return [
-            (turn_id, semantic.get(turn_id)) for turn_id in fused if turn_id in allowed
+            (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
         ][:limit]
 
     def count(self) -> int:
@@ -1578,25 +1621,61 @@ class TurnStore:
             ).fetchall()
         return [int(row["turn_id"]) for row in rows]
 
+    async def _semantic_lists(
+        self, queries: Sequence[str], embedder: Embedder, k: int
+    ) -> list[list[tuple[int, float]]]:
+        """One ranked list per question, out of **one** `embed`, nearest first.
+
+        **The questions are asked in a batch.**  A call per sentence is a round
+        trip per sentence, and the answer to one is not looked at while the next
+        is asked for; `checked_vectors` is the one count check every embedding
+        path shares.  A blank question is dropped before the call, so the
+        caller's list and the answer line up by position.
+
+        `k` counts **chunks**, not turns, which is why it is over-fetched: a
+        turn with four chunks can occupy four of the k places, and the answer
+        wants turns.  Deduplicated in `_nearest_turns` rather than in SQL
+        because a vec0 KNN refuses `GROUP BY`.  The window is *not* applied — a
+        KNN cannot be constrained by a column it does not have — so `recall`
+        filters the fused answer instead, and a window narrow enough to exclude
+        the k nearest chunks can return fewer turns than it asked for.
+
+        Each list is sorted by similarity, ties to the older turn, so the rank a
+        fusion reads is stable whatever order `vec0` returned equal distances
+        in.  The **raw** questions, not `textindex.normalize(...)`:
+        normalization is the keyword leg's rule and it inserts a space between
+        every pair of CJK characters, which is what makes them tokens there and
+        is nonsense as text handed to a model.  Measured: the normalized query
+        landed nearest the turns sharing *no* word with it.
+        """
+        asked = [query for query in queries if query.strip()]
+        if not asked:
+            return []
+        vectors = await checked_vectors(
+            embedder,
+            asked,
+            unit="questions",
+            so="this search cannot say what a turn was about",
+        )
+        lists: list[list[tuple[int, float]]] = []
+        for vector in vectors:
+            found = await off_loop(
+                self._nearest_turns, sqlite_vec.serialize_float32(vector), k
+            )
+            lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
+        return lists
+
     async def _semantic_hits(
         self, queries: Sequence[str], embedder: Embedder, k: int
     ) -> dict[int, float]:
         """Turn ids by vector distance across one or more questions, nearest first.
 
         **Several questions are several chances, and one must not cost another.**
-        Each sentence is embedded on its own — one `embed` call for the batch —
-        and each has its own KNN; a turn keeps its *best* similarity across
-        them.  A second sentence can therefore add a turn or raise a turn's
-        score, never lower one or remove it.  This is the rule the catalogue's
-        `sentences` already state, applied to turns.
-
-        `k` counts **chunks**, not turns, which is why it is over-fetched: a
-        turn with four chunks can occupy four of the k places, and the answer
-        wants turns.  Deduplicated here rather than in SQL because a vec0 KNN
-        refuses `GROUP BY`.  The window is *not* applied — a KNN cannot be
-        constrained by a column it does not have — so `search` filters the fused
-        answer instead, and a window narrow enough to exclude the k nearest
-        chunks can return fewer turns than it asked for.
+        Each sentence is embedded on its own — one `embed` call for the batch,
+        from `_semantic_lists` — and each has its own KNN; a turn keeps its
+        *best* similarity across them.  A second sentence can therefore add a
+        turn or raise a turn's score, never lower one or remove it.  This is the
+        rule the catalogue's `sentences` already state, applied to turns.
 
         **A mapping, in nearest-first order, and the value is a similarity.**
         The order is what `search` fuses; the value is what `recall` gates on —
@@ -1604,34 +1683,12 @@ class TurnStore:
         function of rank position and carries no magnitude to threshold
         (`recall`'s docstring is where that distinction is argued).
         """
-        # The **raw** questions, not `textindex.normalize(...)`.  Normalization
-        # is the keyword leg's rule and it inserts a space between every pair of
-        # CJK characters, which is what makes them tokens there — and is
-        # nonsense as text handed to a model, where it would ask for a vector of
-        # `工 具` rather than of `工具`.  Measured: the normalized query landed
-        # nearest the turns sharing *no* word with it.
-        asked = [query for query in queries if query.strip()]
-        if not asked:
-            return {}
-        vectors = await embedder.embed(asked)
-        if len(vectors) != len(asked):
-            # Refused rather than answered without the semantic half: there is
-            # no degraded mode here, and a search that quietly lost one of its
-            # two legs would answer a different question than the one asked.
-            raise RuntimeError(
-                f"the embedding model answered {len(vectors)} vectors for "
-                f"{len(asked)} question(s), so this search cannot say what a "
-                f"turn was about"
-            )
         nearest: dict[int, float] = {}
-        for vector in vectors:
-            found = await off_loop(
-                self._nearest_turns, sqlite_vec.serialize_float32(vector), k
-            )
+        for found in await self._semantic_lists(queries, embedder, k):
             for turn_id, similarity in found:
                 if similarity > nearest.get(turn_id, float("-inf")):
                     nearest[turn_id] = similarity
-        return dict(sorted(nearest.items(), key=lambda item: (-item[1], item[0])))
+        return dict(sorted(nearest.items(), key=lambda pair: (-pair[1], pair[0])))
 
     def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.

@@ -31,7 +31,10 @@ per idea — "the turn where we decided the dean of the management school". They
 are read by meaning, so they need not share words with the stored turn. Several
 sentences are several questions; another question is another chance to be found
 and cannot cost a turn an earlier one found. The person's input is read by
-meaning as well, so a sentence does not have to repeat it.
+meaning as well, so a sentence does not have to repeat it — unless you set
+"prompt_as_sentence": false, which you should when the input names nothing
+("hi", "continue", "what about the other one?") and only your sentence carries
+the subject.
 
 The "query" holds words that must all be present — names, paths, identifiers, a
 command, an error string. It is the fallback when you cannot put the subject
@@ -102,10 +105,11 @@ both ends of it.
     → {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
 10. Keep them and recall a question for a follow-up — its subject is in the
-conversation above, so carry it into the sentence.
+conversation above, so carry it into the sentence; the input itself names
+nothing, so it is not a question.
 
   input What about the other one?
-    → {"recall": {"sentences": ["the other school"]}}
+    → {"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}
 
 11. Keep none and recall a question — nothing in hand carries this input, and
 the subject is one the turn log may.

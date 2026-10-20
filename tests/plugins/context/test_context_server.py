@@ -903,6 +903,37 @@ async def test_a_sentence_recall_also_asks_with_the_persons_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None:
+    """The model sees the input and the conversation; a greeting names nothing.
+
+    `prompt_as_sentence: false` is the decision saying the sentence is the only
+    question — what makes "hi" or "continue" safe beside a subject the
+    conversation carries.
+    """
+    reply = (
+        '{"context": "clear", "recall": {"sentences": ["trump"],'
+        ' "prompt_as_sentence": false}}'
+    )
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM],
+                "turn_ids": [],
+                "prompt": "工具",
+            },
+        )
+
+    assert answer.data["turn_ids"] == [ids[1]]
+    assert answer.data["recalled"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() -> None:
     """The input is not added beside a keyword phrase.
 
@@ -1291,6 +1322,7 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
             recall={
                 "query": "the very first",
                 "sentences": None,
+                "prompt_as_sentence": None,
                 "since": None,
                 "until": None,
                 "anchor": None,
@@ -1323,6 +1355,7 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         recall={
             "query": None,
             "sentences": ["the dean", "the anniversary"],
+            "prompt_as_sentence": None,
             "since": None,
             "until": None,
             "anchor": None,
@@ -1336,6 +1369,41 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         '{"recall": {"sentences": [null]}}',
     ):
         assert parse(not_sentences) is None, not_sentences
+
+
+def test_a_recall_can_say_the_input_is_not_a_question() -> None:
+    """**The model sees the input and the conversation; this judgement is its.**
+
+    The input is read beside the sentences by default.  A greeting or a
+    follow-up names nothing, so the decision can say so — the flag alone is not
+    a question, and a value that is not a boolean is a reply this build does
+    not obey.
+    """
+    from slife2.libs.turn.context import Decision, parse
+
+    assert parse(
+        '{"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}'
+    ) == Decision(
+        recall={
+            "query": None,
+            "sentences": ["the other school"],
+            "prompt_as_sentence": False,
+            "since": None,
+            "until": None,
+            "anchor": None,
+        }
+    )
+    for flag_only in (
+        '{"recall": {"prompt_as_sentence": false}}',
+        '{"recall": {"prompt_as_sentence": true}}',
+    ):
+        decision = parse(flag_only)
+        assert decision is not None and decision.recall is None
+    for not_a_bool in (
+        '{"recall": {"prompt_as_sentence": "false"}}',
+        '{"recall": {"prompt_as_sentence": 0}}',
+    ):
+        assert parse(not_a_bool) is None, not_a_bool
 
 
 # --- the four ways a rebuild keeps the context, and what the log says ---------

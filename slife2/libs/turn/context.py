@@ -56,6 +56,10 @@ RECALL_REPLY: dict[str, Any] = {
             "What to recall, in your own words, one sentence per idea. Read by "
             "meaning. Omit when you have none."
         ),
+        "prompt_as_sentence": (
+            "Whether the person's input is read by meaning beside the sentences. "
+            "Default true; set false when the input names nothing."
+        ),
         "query": (
             "Words that must all be present — names, paths, exact strings. Also "
             "the meaning query when there is no sentence. Omit for no words."
@@ -74,7 +78,14 @@ RECALL_REPLY: dict[str, Any] = {
 ANCHORS = ("newest", "oldest")
 
 #: The fields of a recall condition, in the order they are read.
-RECALL_KEYS = ("query", "sentences", "since", "until", "anchor")
+RECALL_KEYS = (
+    "query",
+    "sentences",
+    "prompt_as_sentence",
+    "since",
+    "until",
+    "anchor",
+)
 
 #: What the reply says to keep *all* of the turns in hand, and *none* of them.
 #: Two spellings for keeping everything, because a model that says `"keep"` has
@@ -137,7 +148,7 @@ class Decision:
     """
 
     keep: list[int] | None = None
-    recall: dict[str, str | list[str] | None] | None = None
+    recall: dict[str, str | list[str] | bool | None] | None = None
 
     @property
     def asks_for_nothing(self) -> bool:
@@ -241,7 +252,7 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
     return REJECTED
 
 
-def _recall(raw: Any) -> dict[str, str | list[str] | None] | _Rejected | None:
+def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | None:
     """The `recall` field, as one condition.
 
     **One condition, never several.**  A period and a question are the two halves
@@ -250,7 +261,9 @@ def _recall(raw: Any) -> dict[str, str | list[str] | None] | _Rejected | None:
     `sentences` are read by meaning (each one a separate question, and one that
     cannot cost a turn an earlier one found), while `query` is the words that
     must all be present — names, paths, exact strings — and the meaning fallback
-    when there is no sentence.
+    when there is no sentence.  `prompt_as_sentence` says whether the person's
+    input is read beside those sentences; it defaults to true, and false is for
+    an input that names nothing — "hi", "continue", "what about the other one?".
 
     A key this build does not know is dropped rather than refused: the reply
     surface is written into the instruction, and a model that added a field of
@@ -274,8 +287,11 @@ def _recall(raw: Any) -> dict[str, str | list[str] | None] | _Rejected | None:
         ):
             return REJECTED
         sentences = [sentence for sentence in sentences if sentence.strip()]
+    prompt_as_sentence = raw.get("prompt_as_sentence")
+    if prompt_as_sentence is not None and not isinstance(prompt_as_sentence, bool):
+        return REJECTED
     for key in RECALL_KEYS:
-        if key == "sentences":
+        if key in ("sentences", "prompt_as_sentence"):
             continue
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
@@ -297,12 +313,18 @@ def _recall(raw: Any) -> dict[str, str | list[str] | None] | _Rejected | None:
             return REJECTED
     condition = {key: raw.get(key) for key in RECALL_KEYS}
     # The filtered list, not the raw one: a list of blank sentences is a field
-    # present and empty, and `any` below has to read it as nothing asked.
+    # present and empty, and the `asked` below has to read it as nothing asked.
     condition["sentences"] = sentences
+    condition["prompt_as_sentence"] = prompt_as_sentence
     # Nothing filled in is the same answer as no `recall` field at all, and it
     # has to be normalised here: a store asked for nothing at all cannot answer,
-    # and "asked and given nothing" must not become an error downstream.
-    return condition if any(condition.values()) else None
+    # and "asked and given nothing" must not become an error downstream.  The
+    # flag alone is not a question — it only says how one is asked — so it is
+    # not part of "asked".
+    asked = any(
+        value for key, value in condition.items() if key != "prompt_as_sentence"
+    )
+    return condition if asked else None
 
 
 def parse(text: str) -> Decision | None:

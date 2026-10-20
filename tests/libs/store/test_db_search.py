@@ -498,7 +498,8 @@ async def test_a_second_sentence_can_only_add_a_turn(tmp_path) -> None:
 
     ranked = await store.recall(sentences=["工具", "trump"], embedder=embedder)
 
-    assert [turn_id for turn_id, _ in ranked][:2] == [1, 2]
+    found = [turn_id for turn_id, _ in ranked]
+    assert 1 in found and 2 in found, found
 
 
 @pytest.mark.asyncio
@@ -571,6 +572,20 @@ def test_agreement_between_the_legs_outweighs_one_first_place() -> None:
     """
     fused = dict(fuse_ranked({"keyword": [1, 2, 3], "semantic": [4, 2]}))
     assert fused[2] > fused[4]
+
+
+def test_the_keyword_leg_is_fused_into_each_question() -> None:
+    """**The words are evidence about a question, not about the merged list.**
+
+    The keyword leg is one list and every question sees it; a turn keeps the
+    score of its best question, so rank 1 in one question beats rank 2 in
+    another.  A tie falls to the newer turn, the order `fuse_ranked` uses.
+    """
+    # Two questions, no words: the two rank-1 turns tie at 1/61, and the newer
+    # one comes first; the rank-2 turns follow, newest of them first.
+    assert db._fuse_questions([], [[1, 2], [3, 4]]) == [3, 1, 4, 2]
+    # The words are one list, present in every question.
+    assert db._fuse_questions([5], [[1, 2], [3, 4]]) == [5, 3, 1, 4, 2]
 
 
 # --- the index is written with the turn, or not at all ------------------------

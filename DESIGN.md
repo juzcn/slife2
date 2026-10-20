@@ -226,12 +226,19 @@ the catalogue (36/36 and the same MRR) — but it is no longer forced to read
 one, because the recall now has two spellings: `sentences` are read by meaning,
 `query` is the words the keyword leg ANDs and the meaning fallback when there
 is no sentence. Several sentences are several questions: each is embedded on
-its own, a turn keeps its best similarity across them, and a later sentence can
-only add a turn or raise one — never cost a turn an earlier sentence found.
-When the decision asks in sentences, the person's input is a second question:
+its own, the keyword leg is fused into each question's list, and a turn keeps
+its best question — a later sentence can only add a turn or raise one, never
+cost a turn an earlier sentence found. The old shape fused one keyword list
+against one merged meaning list, which credited a turn by its best similarity
+across questions rather than by how well it answered the question the words
+belonged to.
+When the decision asks in sentences, the person's input is a second question —
 the model's sentence is a paraphrase of what the input points at, and the
-meaning leg reads the input as it stands. A keyword-only recall keeps its query
-as the one meaning question, and a period recall is not narrowed by the input.
+meaning leg reads the input as it stands — unless the decision says the input
+names nothing (`prompt_as_sentence: false`, for "hi" or a follow-up), which is
+a judgement only the model that sees both can make. A keyword-only recall keeps
+its query as the one meaning question, and a period recall is not narrowed by
+the input.
 
 On the rebuilt log the 30-query set answered at hit@1 0.93, hit@10 0.97 and MRR
 0.94. Ten hand-written hard sentences were less decisive — phrase-only MRR
