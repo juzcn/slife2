@@ -186,7 +186,13 @@ WatchScreen {
 /* ── The status row ─────────────────────────────────────────────────────── */
 
 StatusBar {
-    height: 1;
+    /* One row when it fits, and as many as the words need when it does not:
+       `Static` wraps at the widget width, and the height follows the rendered
+       content.  Fixing this at `height: 1` clipped the last pieces of a narrow
+       terminal's bar — the key hints, as it happened — with nothing saying
+       they were there.  The transcript is `1fr` and gives up the rows. */
+    height: auto;
+    min-height: 1;
     padding: 0 1;
     background: $slife-panel;
     color: $slife-dim;

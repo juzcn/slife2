@@ -1870,6 +1870,28 @@ async def test_status_bar_shows_the_agent_the_model_and_the_context() -> None:
     assert "%" not in bar
 
 
+async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:
+    """**The bar is a row of facts, not a row of the screen.**
+
+    At 60 columns the agent, the model, the token count and the key hints do
+    not fit on one line.  `height: 1` clipped the tail — the hints, as it
+    happened — with nothing saying they were there.  The bar's height follows
+    the wrapped content now, and the transcript (`1fr`) gives up the rows.
+    """
+    app = make_app(answering("hello", tokens=25_000))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await submit(pilot, "hi")
+        await pilot.pause()
+        bar = app.query_one(StatusBar)
+        height, lines = bar.size.height, visible_lines(app)
+
+    # The size is read inside the session: closing it unmounts the widgets and
+    # their layout goes with them.
+    assert height > 1, "the facts did not fit on one row"
+    rendered = " ".join(lines[-height:])
+    assert "Ctrl+S" in rendered and "Ctrl+O" in rendered, rendered
+
+
 async def test_the_context_is_shown_as_a_percentage_of_the_window() -> None:
     """When the config says how big the model's window is, show how full it is."""
     client = FakeAgentClient(answering("hello", tokens=25_000))
