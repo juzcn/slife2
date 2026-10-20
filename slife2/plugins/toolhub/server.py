@@ -2063,9 +2063,11 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
 
     `matched` is which leg found it, and it is the half of the answer that is
     certain rather than graded: `words` is the caller's own words **in this
-    row's text**, and `body`/`parameters` is the same evidence one column over —
-    a playbook's whole text, or the parameters of a tool.  Naming which is what
-    makes the mark checkable instead of mysterious.
+    row's text**, `returns` is the same evidence in the tool's `Returns:`
+    prose, and `body`/`parameters` is the rest behind the line — a playbook's
+    whole text, or the parameters of a tool.  Naming which is what makes the
+    mark checkable instead of mysterious: a reader sent to the parameters for a
+    word that is in the answer's description looks in the wrong place.
 
     `status` is left as the catalogue's own word rather than filtered to unusable
     rows: `enabled` is an answer, and "its server is switched off" is exactly what
@@ -2080,6 +2082,8 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
     matched = row.get("matched_in")
     if matched == "line":
         found_by = "words"
+    elif matched == "returns":
+        found_by = "returns"
     elif matched == "rest":
         found_by = "body" if str(row.get("category")) == SKILL else "parameters"
     else:

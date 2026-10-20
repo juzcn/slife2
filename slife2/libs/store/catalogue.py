@@ -441,10 +441,12 @@ def _search_dict(
     `matched_in` is the other half and is not a score: the row's own text holds
     every word the caller gave, which is certain where a similarity is graded —
     and is the one piece of evidence a cutoff cannot express, since a row can be
-    named exactly whatever it scores (`pandoc`, at 0.514).  **`"line"` or
-    `"rest"` says whether those words are in the text the answer prints**, and
-    that is not a detail: a mark whose evidence is not on the page is a mark the
-    reader cannot check.
+    named exactly whatever it scores (`pandoc`, at 0.514).  **`"line"`,
+    `"returns"` or `"rest"` says where those words are**: the line the answer
+    prints, the tool's `Returns:` prose, or the rest of what it is indexed by
+    (its parameters, or a skill's whole playbook).  That is not a detail: a mark
+    whose evidence is not on the page is a mark the reader cannot check, and the
+    two hidden columns are different things to go and read.
     """
     found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
     schema = str(row["schema"] or "")
@@ -1609,17 +1611,23 @@ class ToolStore:
             self._rows_in_order, ordered, clauses, values, limit
         )
 
-        # **Where the words are, for the rows they matched** — `schema` is the one
-        # column of the five a row is indexed by that the line does not print, so
-        # a row can be marked `matched your words` with nothing on the line to
-        # check it against: a skill's whole playbook rides in that column, and
-        # `skill:browser-harness` matches `read`/`file` through the body while
-        # its description says nothing about either.  A mark whose evidence
-        # cannot be seen is a mark that cannot be checked, so the answer says
-        # which side it is on.
+        # **Where the words are, for the rows they matched** — `schema` and
+        # `returns` are the two columns of the six a row is indexed by that the
+        # line does not print, so a row can be marked `matched your words` with
+        # nothing on the line to check it against: a skill's whole playbook rides
+        # in `schema`, and a tool's `Returns:` prose is behind the line too.  A
+        # mark whose evidence cannot be seen is a mark that cannot be checked,
+        # so the answer says which side it is on — and which hidden column,
+        # because "the parameters" is the wrong place to look for a word that is
+        # in the answer's description.
         page = [int(row["rowid"]) for row in rows]
         inline = (
             await asyncio.to_thread(self._matched_in_line, expression, page)
+            if worded
+            else set()
+        )
+        by_returns = (
+            await asyncio.to_thread(self._matched_in_returns, expression, page)
             if worded
             else set()
         )
@@ -1633,6 +1641,8 @@ class ToolStore:
                         if int(row["rowid"]) not in worded
                         else "line"
                         if int(row["rowid"]) in inline
+                        else "returns"
+                        if int(row["rowid"]) in by_returns
                         else "rest"
                     ),
                 )
@@ -1644,18 +1654,20 @@ class ToolStore:
     def _matched_in_line(self, expression: str, rowids: Sequence[int]) -> set[int]:
         """Which of those rows hold the words in the columns the line prints.
 
-        **The line prints four of the five columns a row is indexed by** — name,
-        description, category and source_id — so `schema` alone is unshown, and
-        `{name description category source_id}` is the scope whose miss means
-        "the words are in the parameters".  It used to be `{name description}`,
-        and that was wrong about the renderer: a row whose words are in its
-        category or its source_id was reported `rest`, and the renderer turns
-        `rest` into `matched your words in its parameters` — a pointer at a
-        column the words are not in, which is the same uncheckable mark this
-        function exists to prevent, one step along.  `schema` is the one that
-        carries something substantial — a tool's parameters, or for a skill the
-        whole playbook (`tool_document` argues the column, and this is not the
-        place it is what it says).
+        **The line prints four of the six columns a row is indexed by** — name,
+        description, category and source_id — so `schema` and `returns` are
+        unshown, and `{name description category source_id}` is the scope whose
+        miss means "the words are behind the line".  `_matched_in_returns`
+        splits that miss into the two columns, because a reader sent to the
+        parameters for a word that is in the answer's description is looking in
+        the wrong place.  It used to be `{name description}`, and that was wrong
+        about the renderer: a row whose words are in its category or its
+        source_id was reported `rest`, and a reader told the evidence is behind
+        the line looks for it in the parameters — the same uncheckable mark this
+        function exists to prevent, one step along.  `schema` carries something
+        substantial — a tool's parameters, or for a skill the whole playbook
+        (`tool_document` argues the column, and this is not the place it is what
+        it says).
 
         The filter is a column-scoped `MATCH` rather than a token comparison in
         Python: what counts as a word here is `unicode61`'s answer, and a second
@@ -1674,6 +1686,31 @@ class ToolStore:
                         f"{{name description category source_id}} : ({expression})",
                         *rowids,
                     ),
+                )
+            }
+
+    def _matched_in_returns(self, expression: str, rowids: Sequence[int]) -> set[int]:
+        """Which of those rows hold the words in their `Returns:` prose.
+
+        **The other hidden column, and the one a word about an answer turns up
+        in.**  A row the line does not show and the schema does not hold is
+        reported `returns`, not `rest`: the two are different places to go and
+        read, and the model-facing label is the pointer.
+
+        A row that matches in both `schema` and `returns` is reported here — the
+        words are in the answer's description, so that is a true pointer, and a
+        single word cannot say both.  `rest` is left for the parameters, where
+        no `Returns:` text is involved.
+        """
+        if not rowids:
+            return set()
+        with self._connect() as connection:
+            return {
+                int(row["rowid"])
+                for row in connection.execute(
+                    "SELECT f.rowid AS rowid FROM tool_fts f"
+                    f" WHERE tool_fts MATCH ? AND f.rowid IN ({_marks(rowids)})",
+                    (f"{{returns}} : ({expression})", *rowids),
                 )
             }
 

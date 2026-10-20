@@ -1028,12 +1028,15 @@ def test_a_tool_is_found_by_a_word_only_its_returns_text_carries(tmp_path) -> No
         store,
         "cabinet",
         "plugin",
-        [tool("moon_phase", "Report something.", returns="`phase` — of the moon.")],
+        [tool("moon_phase", "Report something.", returns="`phase` — the silver orb.")],
     )
     merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
 
-    keyword = asyncio.run(store.search(keywords=["moon"], embedder=EMBEDDER))
+    keyword = asyncio.run(store.search(keywords=["silver"], embedder=EMBEDDER))
     assert keyword["results"][0]["name"] == "moon_phase"
+    assert keyword["results"][0]["matched_in"] == "returns", (
+        "the word is in the Returns prose, which no line prints"
+    )
 
 
 def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
@@ -1076,7 +1079,13 @@ def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> Non
 
 
 def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) -> None:
-    """`matched_in` is `line` or `rest`, and `rest` is the one that needed saying.
+    """`matched_in` names the column, and a hidden one is the case that needs it.
+
+    The values are `line`, `returns` and `rest`: the text the line prints, the
+    tool's `Returns:` prose, and everything else behind the line (a skill's
+    playbook, a tool's parameters).  `rest` is the one that used to swallow both
+    hidden columns, and a reader sent to the parameters for a word that is in
+    the answer's description looks in the wrong place.
 
     A row is indexed by six columns and a result line prints two of them, so a
     row can carry `matched your words` with nothing in the printed text to check

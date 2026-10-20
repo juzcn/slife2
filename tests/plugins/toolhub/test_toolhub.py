@@ -1351,6 +1351,26 @@ async def test_the_rows_the_words_matched_are_listed_first() -> None:
     assert rows[-1]["matched"] == "", "and the other matched nothing"
 
 
+@pytest.mark.asyncio
+async def test_a_match_in_a_tools_returns_text_says_returns_not_parameters() -> None:
+    """**The hidden column the words are in is named.**
+
+    `token_count` is in `turn_list`'s `Returns:` prose and in neither its
+    description nor its parameters; before `returns` was indexed this query
+    could not have matched the row at all, and once it was, the answer still
+    pointed at the parameters.  The label is the pointer a reader follows to
+    check the mark, so it has to name the column the words are in.
+    """
+    async with Client(hub_for()) as hub:
+        answer = await call(
+            hub, "tool_search", {"keywords": ["token_count"], "sentences": []}
+        )
+
+    rows = json.loads(answer["text"])["results"]
+    row = next(one for one in rows if one["name"] == "turn_list")
+    assert row["matched"] == "returns", row
+
+
 def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:
     """Three words, pinned where the floors are.
 
