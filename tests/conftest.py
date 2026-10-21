@@ -208,12 +208,12 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def clean_registered_secrets():
-    """**The redaction registry is per process, and the suite is one process.**
+    """**The masking registry is per process, and the suite is one process.**
 
-    A test that resolves a credential registers it for replacement; without this
-    the next test's log or tool output could be redacted by a value it never
-    saw.  The registry is emptied around every test, so each one starts from the
-    same state a fresh server process would.
+    A test that resolves a credential registers it for masking; without this the
+    next test's log or tool output could be masked by a value it never saw.  The
+    registry is emptied around every test, so each one starts from the same
+    state a fresh server process would.
     """
     secrets.reset()
     yield

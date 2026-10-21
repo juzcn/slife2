@@ -901,9 +901,10 @@ only confirmation mechanism, and it is model-driven.
 
 **Protection is scoped to credstore.** v1 tried to protect every secret, and
 the variety of shapes made the rules hard to maintain; v2 registers only what
-the credential store resolves, and replaces those values in tool results, tool
-descriptions, and logs. An environment value or a literal in the config is the
-operator's own. The manual recommends credstore for every secret.
+the credential store resolves, and shows those values in their masked form (the
+first four and last four characters) in tool results, tool descriptions, and
+logs. An environment value or a literal in the config is the operator's own.
+The manual recommends credstore for every secret.
 
 ### 8.5 Data and runtime layout
 

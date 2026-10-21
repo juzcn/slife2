@@ -1,9 +1,9 @@
-"""Resolved credentials are replaced, not printed.
+"""Resolved credentials are masked, not printed.
 
-The registry is process-local and deliberately small: its job is to make a
-credential **from credstore** unprintable in every surface that leaves the
-process.  A value from the environment or a literal in the config is the
-operator's own; protecting those is not this layer's job.
+The registry is process-local and deliberately small: its job is to mask a
+credential **from credstore** in every surface that leaves the process.  A
+value from the environment or a literal in the config is the operator's own;
+protecting those is not this layer's job.
 """
 
 from __future__ import annotations
@@ -24,27 +24,27 @@ def clean_registry():
     secrets.reset()
 
 
-def test_a_registered_value_is_replaced() -> None:
+def test_a_registered_value_is_masked() -> None:
     secrets.register(LONG)
-    assert secrets.redact(f"before {LONG} after") == "before [redacted] after"
+    assert secrets.masked(f"before {LONG} after") == "before sk-l…7890 after"
 
 
 def test_a_value_that_is_too_short_is_not_registered() -> None:
     secrets.register("abc")
-    assert secrets.redact("abc stays") == "abc stays"
+    assert secrets.masked("abc stays") == "abc stays"
 
 
 def test_the_longest_value_wins_when_one_contains_another() -> None:
     secrets.register("live-1234567890")
     secrets.register(LONG)
-    assert secrets.redact(LONG) == "[redacted]"
+    assert secrets.masked(LONG) == "sk-l…7890"
 
 
-def test_redaction_reaches_inside_mappings_and_lists() -> None:
+def test_masking_reaches_inside_mappings_and_lists() -> None:
     secrets.register(LONG)
-    assert secrets.redact_obj({"text": f"x {LONG}", "rows": [LONG], "count": 2}) == {
-        "text": "x [redacted]",
-        "rows": ["[redacted]"],
+    assert secrets.masked_obj({"text": f"x {LONG}", "rows": [LONG], "count": 2}) == {
+        "text": "x sk-l…7890",
+        "rows": ["sk-l…7890"],
         "count": 2,
     }
 
@@ -58,7 +58,7 @@ def test_resolving_a_credstore_reference_registers_it(
 
     monkeypatch.setattr(credstore, "resolve_uri", lambda _uri: LONG)
     assert resolve_secret("keyring:slife2/test") == LONG
-    assert secrets.redact(f"x {LONG}") == "x [redacted]"
+    assert secrets.masked(f"x {LONG}") == "x sk-l…7890"
 
 
 def test_an_environment_value_is_not_registered(
@@ -75,4 +75,4 @@ def test_an_environment_value_is_not_registered(
     assert resolve_secret("https://${SLIFE2_TEST_HOST}/v1") == (
         "https://example.test/v1"
     )
-    assert secrets.redact("https://example.test/v1") == "https://example.test/v1"
+    assert secrets.masked("https://example.test/v1") == "https://example.test/v1"

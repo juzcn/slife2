@@ -1448,7 +1448,7 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_resolved_credential_is_redacted_from_the_result() -> None:
+async def test_a_resolved_credential_is_masked_from_the_result() -> None:
     """A provider that echoes the key it was given is not put in front of the model.
 
     The result is the tool output and is what the turn stores; the progress
@@ -1473,7 +1473,7 @@ async def test_a_resolved_credential_is_redacted_from_the_result() -> None:
     finally:
         secrets.reset()
 
-    assert result.data["text"] == "the key is [redacted] done"
+    assert result.data["text"] == "the key is sk-l…3456 done"
 
 
 @pytest.mark.asyncio
