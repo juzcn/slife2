@@ -340,25 +340,11 @@ def session_path(agent: str) -> Path:
     return agent_dir(agent) / SESSION_NAME
 
 
-def load_session(agent: str) -> dict[str, Any]:
-    """A saved login, or `{}` — for a file that is missing or unreadable.
-
-    Unreadable reads as absent rather than raising: the file is a cache of a
-    login, the login can be had again by scanning, and a torn write must not be
-    able to stop the plugin from starting.  *Why* it could not be read is the
-    second value of :func:`_read_session`, which `ready` puts into
-    `restore_note`; this public half answers only the mapping.
-    """
-    saved, _ = _read_session(session_path(agent))
-    return saved
-
-
 def _read_session(path: Path) -> tuple[dict[str, Any], str]:
     """One login file as a mapping, and — when it could not be read — why.
 
-    The path-shaped half of :func:`load_session`, because the startup scan has
-    the path already and must read the name out of the file rather than the
-    directory it sits in.
+    The path-shaped half, because the startup scan has the path already and must
+    read the name out of the file rather than the directory it sits in.
 
     **A file that will not parse is named, not read as no file at all**
     (DESIGN.md §11.1).  The outcome stays a cache miss — a login can be had

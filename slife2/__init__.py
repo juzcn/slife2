@@ -15,6 +15,7 @@ name is passed through to the agent server for exactly that reason.
     slife2 [OPTIONS]          ensure the servers, then run the TUI
     slife2 status [OPTIONS]   what is running, and where
     slife2 down [OPTIONS]     stop the servers this config names
+    slife2 logs [SERVER]      read a server's log, or list the logs there are
 
 Starting in a data directory **makes that home** (`slife2._open_home`,
 `slife2._open_catalogue`): the directory is recorded, its `agents/` and `skills/`
@@ -24,8 +25,9 @@ rather than a directory with a config in it, and one nobody has sent a message i
 still has the tool set its `slife2.yaml` names.
 
 `--headless` runs that first one with **no terminal**: the same window, the same
-connections, the same servers, the same turns, and nothing drawn and nothing
-printed.  What it is for is a machine nobody is sitting in front of — the agent
+connections, the same servers, the same turns, and nothing drawn; the start-up
+report is still printed.  What it is for is a machine nobody is sitting in
+front of — the agent
 stays reachable, because its window holds the mesh open for as long as this
 process is up, so a peer can task it and be answered.  **Nothing else about the
 agent changes**: an unattended agent is the same agent, and the only thing that
@@ -58,8 +60,11 @@ from __future__ import annotations
 __version__ = "0.3.0"
 
 import argparse
+import json
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
@@ -83,7 +88,7 @@ from slife2.libs.host.paths import (
 
 #: The subcommands, and what happens when none is named.
 _RUN = "run"
-_COMMANDS = (_RUN, "status", "down")
+_COMMANDS = (_RUN, "status", "down", "logs")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -132,6 +137,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         choices=_COMMANDS,
         help="what to do (default: run the TUI)",
     )
+    parser.add_argument(
+        "server",
+        nargs="?",
+        default="",
+        metavar="SERVER",
+        help="which server's log to read (logs only; omit to list the logs)",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="print the version and exit",
+    )
     # Shared with the servers' own parsers: the flag means the same thing in
     # both, and `slife2.libs.host.paths` is where the directory it names is defined.
     add_data_dir_argument(parser)
@@ -165,6 +183,29 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print `status` as JSON (status only)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="stop the shared servers even when another client is using them (down only)",
+    )
+    parser.add_argument(
+        "--lines",
+        "-n",
+        type=int,
+        default=None,
+        metavar="N",
+        help="how many log lines to show; 0 shows the whole log (logs only; default: 50)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="show every configured server's log, with a header for each (logs only)",
+    )
+    parser.add_argument(
         "--keep-servers",
         action="store_true",
         help=(
@@ -177,10 +218,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help=(
             "run without a terminal: the same window, the same servers, the "
-            "same turns, nothing drawn and nothing printed"
+            "same turns, nothing drawn"
         ),
     )
     args = parser.parse_args(rest)
+    # **A flag that would otherwise do nothing is a usage error.**  `--json`
+    # on `run`, `--force` on `status` and a server name on `down` are not
+    # harmless extras: each reads as an instruction this command does not
+    # carry out.
+    if args.json and args.command != "status":
+        parser.error("--json only applies to `status`")
+    if args.force and args.command != "down":
+        parser.error("--force only applies to `down`")
+    if args.server and args.command != "logs":
+        parser.error("a server name only applies to `logs`")
+    if args.lines is not None and args.command != "logs":
+        parser.error("--lines only applies to `logs`")
+    if args.all and args.command != "logs":
+        parser.error("--all only applies to `logs`")
+    if args.all and args.server:
+        parser.error("--all and a server name cannot be combined")
+    if args.lines is not None and args.lines < 0:
+        parser.error("--lines must be 0 or more (0 shows the whole log)")
+    if args.lines is None:
+        args.lines = 50
     apply_data_dir(args)
     apply_a2a_broker(args)
     return args
@@ -490,10 +551,103 @@ def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     return f"{name}/{model.model}", model
 
 
-def _status(config: Config) -> int:
+def _broker_status(config: Config) -> dict[str, Any] | None:
+    """The A2A broker's row, or `None` when the config is not on the mesh.
+
+    The broker is the one daemon the launcher does not start, so `statuses`
+    cannot see it.  It is read the way `down` reads it: a record proves the
+    process is ours, and a port that answers proves there is a broker at all.
+    """
+    if not config.peer_agent.configured:
+        return None
+    from slife2.libs.host.runtime import (
+        log_path,
+        read_record,
+        same_process,
+        tcp_listening,
+    )
+    from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+
+    settings = config.peer_agent
+    url = log_url(settings)
+    listening = tcp_listening(settings.broker_host, settings.broker_port)
+    record = read_record(url)
+    if listening is None:
+        state, status, ok = "unknown", "unknown - the address did not resolve", False
+    elif listening:
+        state, ok = "running", True
+        if record is not None and same_process(record):
+            status = f"running (pid {record.pid}, since {record.started_at})"
+        else:
+            status = "running (not started by slife2)"
+    else:
+        state, status, ok = "not_running", "not running - nothing is listening", False
+    row: dict[str, Any] = {
+        "name": BROKER_NAME,
+        "url": url,
+        "state": state,
+        "status": status,
+        "ok": ok,
+        "log": str(log_path(url)),
+    }
+    if record is not None:
+        row["pid"] = record.pid
+        row["started_at"] = record.started_at
+    return row
+
+
+def _status_row(outcome: Any) -> dict[str, Any]:
+    """One server as the JSON answer describes it."""
+    from slife2.libs.host.runtime import log_path
+
+    record = outcome.record
+    row: dict[str, Any] = {
+        "name": outcome.spec.name,
+        "url": outcome.spec.url,
+        "state": outcome.status.name.lower(),
+        "status": outcome.status.value,
+        "ok": outcome.ok,
+        "detail": outcome.detail,
+        "log": str(log_path(outcome.spec.url)),
+    }
+    if record is not None:
+        row["pid"] = record.pid
+        row["started_at"] = record.started_at
+        row["version"] = record.version
+    return row
+
+
+def _status(config: Config, *, as_json: bool = False) -> int:
+    """Report what every configured server and the broker are doing.
+
+    The exit code is the answer a script needs: zero only when every row is
+    usable.  A human-readable status and a machine-readable one are one read of
+    the same outcomes.
+    """
     from slife2.libs.host.launcher import Status, statuses
 
-    for outcome in statuses(config):
+    outcomes = list(statuses(config))
+    broker = _broker_status(config)
+    failed = sum(1 for outcome in outcomes if not outcome.ok)
+    if broker is not None and not broker["ok"]:
+        failed += 1
+    total = len(outcomes) + (1 if broker is not None else 0)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "ok": failed == 0,
+                    "servers": [_status_row(outcome) for outcome in outcomes],
+                    "broker": broker,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0 if failed == 0 else 2
+
+    for outcome in outcomes:
         record = outcome.record
         suffix = str(outcome.status.value)
         if outcome.status in (Status.RUNNING, Status.UNMANAGED) and record:
@@ -503,13 +657,44 @@ def _status(config: Config) -> int:
         if outcome.detail:
             suffix += f" - {outcome.detail}"
         _report("", outcome.spec.name, outcome.spec.url, suffix)
+    if broker is not None:
+        _report("", broker["name"], broker["url"], broker["status"])
+    if failed:
+        print(
+            f"\nslife2: {failed} of {total} server(s) are not usable",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
-def _down(config: Config) -> int:
-    from slife2.libs.host.launcher import Status, stop
+def _down(config: Config, *, force: bool = False) -> int:
+    """Stop the servers this config names, and the broker.
 
-    outcomes = stop(config)
+    **A stop is not a broadcast.**  The servers are shared, so another live
+    client is another conversation with a turn in flight; `down` refuses while
+    one exists and asks for `--force`.  The last client out reaches here with
+    `others_running()` already empty, which is why the normal exit path needs no
+    flag.
+    """
+    from slife2.libs.host.launcher import Status, others_running, stop
+
+    others = others_running()
+    if others and not force:
+        print(
+            "slife2: other clients are using the shared servers; stop them only "
+            "with `slife2 down --force` (their turns would be interrupted):",
+            file=sys.stderr,
+        )
+        for record in others:
+            print(
+                f"  pid {record.pid}, agent {record.agent or '(unknown)'}",
+                file=sys.stderr,
+            )
+        return 2
+
+    outcomes = list(stop(config))
+    failed = False
     anything = False
     for outcome in outcomes:
         if outcome.status is Status.STOPPED:
@@ -524,6 +709,8 @@ def _down(config: Config) -> int:
                 outcome.spec.url,
                 outcome.detail or str(outcome.status.value),
             )
+        if outcome.status is Status.FAILED:
+            failed = True
     # **And the broker, which is the one daemon here the launcher does not
     # start.**  It has no module to launch and no MCP identity to check — the
     # a2a plugin brings one up when the mesh is wanted (`slife2.plugins.a2a.broker.ensure`)
@@ -534,15 +721,109 @@ def _down(config: Config) -> int:
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
     if config.peer_agent.configured:
-        from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+        from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
         from slife2.plugins.a2a.broker import stop as stop_broker
 
         said = stop_broker(config.peer_agent)
         if said:
             anything = True
             _report("", BROKER_NAME, log_url(config.peer_agent), said)
+            if stop_failed(said):
+                failed = True
     if not anything:
         print("nothing running")
+    return 2 if failed else 0
+
+
+def _log_targets(
+    config: Config,
+) -> list[tuple[str, str, Path, tuple[str, ...]]]:
+    """Every log a person might want, with the names that address it.
+
+    A server is addressed by the name `status` prints, by the MCP name it
+    advertises, and — for a model backend — by its bare protocol key.  The
+    broker is `a2a-broker` and `broker`.
+    """
+    from slife2.libs.host.launcher import specs
+    from slife2.libs.host.runtime import log_path
+
+    targets: list[tuple[str, str, Path, tuple[str, ...]]] = []
+    for spec in specs(config):
+        aliases = {spec.name, spec.expected_name}
+        if ":" in spec.name:
+            aliases.add(spec.name.split(":", 1)[1])
+        targets.append(
+            (spec.name, spec.url, log_path(spec.url), tuple(sorted(aliases)))
+        )
+    if config.peer_agent.configured:
+        from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+
+        url = log_url(config.peer_agent)
+        targets.append((BROKER_NAME, url, log_path(url), (BROKER_NAME, "broker")))
+    return targets
+
+
+def _log_target(
+    targets: list[tuple[str, str, Path, tuple[str, ...]]], name: str
+) -> tuple[str, str, Path, tuple[str, ...]] | None:
+    matches = [target for target in targets if name in target[3]]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _log_text(path: Path, lines: int) -> str:
+    """The end of a log; `lines == 0` is the whole file."""
+    rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if lines:
+        rows = rows[-lines:]
+    return "\n".join(rows)
+
+
+def _logs(config: Config, server: str, lines: int, every: bool) -> int:
+    """List the logs, one log, or all of them.
+
+    No `--follow`: the log a server is writing is the one a failing start names
+    in its error, and a terminal that owns the screen is not the place to watch
+    it.  Reading a bounded tail is the recurring need.
+    """
+    targets = _log_targets(config)
+    server = server.strip()
+
+    if not server and not every:
+        for name, _url, path, _aliases in targets:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            state = f"{size} bytes" if size else "no log yet"
+            print(f"  {name:<24} {path}  ({state})")
+        return 0
+
+    if every:
+        for name, _url, path, _aliases in targets:
+            print(f"== {name} <{path}> ==")
+            if not path.exists():
+                print("(no log yet)")
+                continue
+            text = _log_text(path, lines)
+            if text:
+                print(text)
+        return 0
+
+    target = _log_target(targets, server)
+    if target is None:
+        names = ", ".join(sorted({name for name, *_ in targets}))
+        print(
+            f"slife2: no server called {server!r}; configured logs: {names}",
+            file=sys.stderr,
+        )
+        return 2
+    name, _url, path, _aliases = target
+    if not path.exists():
+        print(f"slife2: {name} has no log at {path}", file=sys.stderr)
+        return 2
+    text = _log_text(path, lines)
+    if text:
+        print(text)
     return 0
 
 
@@ -582,9 +863,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "status":
-        return _status(config)
+        return _status(config, as_json=args.json)
     if args.command == "down":
-        return _down(config)
+        return _down(config, force=args.force)
+    if args.command == "logs":
+        return _logs(config, args.server, args.lines, args.all)
 
     # Imported here rather than at module scope so `slife2.libs.host.config` and the
     # servers stay importable without pulling in fastmcp or Textual.

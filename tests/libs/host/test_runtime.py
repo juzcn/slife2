@@ -346,7 +346,7 @@ def test_a_child_that_exited_unwaited_is_not_a_live_process() -> None:
     (which is `_wait_ready`'s lesson, and the reason it reaps by hand).
 
     The failure it produced is the end-to-end lane's teardown, and it was a
-    platform split: `launcher.stop` asked after seventeen daemons it had just
+    platform split: `launcher.stop` asked after eighteen daemons it had just
     killed, was told every one of them was still there, and reported `pid N did
     not exit` for each — on Linux and macOS, the two platforms that have
     zombies, while Windows, which does not, passed.

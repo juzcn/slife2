@@ -221,8 +221,8 @@ CHANNEL = REMOTE.channel
 #: DESIGN.md §2.4).  This one *is* what was said: it goes into the turn's row
 #: and comes back out of it verbatim, so v1's capitals told the model the
 #: opposite of the truth about it.  What is *not* renamed is anything that names
-#: the plugin — the `a2a` channel, its config key, `A2A_TYPES` — because those
-#: are this plugin's own name rather than a word in somebody's conversation.
+#: the plugin — the `a2a` channel and its config key — because those are this
+#: plugin's own name rather than a word in somebody's conversation.
 #:
 #: **`PeerAgent`, because `Agent` alone is the one word this marker must not
 #: say.**  Its `from` field is a peer and never the receiver, for the reason the
@@ -232,19 +232,6 @@ CHANNEL = REMOTE.channel
 #: settles it, and it is the word the window's bubble uses too
 #: (`slife2.tui.widgets.channel_prefix`).
 MARKER_PREFIX = REMOTE.marker
-
-#: The `type` values an inbound message can carry — the vocabulary the marker's
-#: `type` field is drawn from, and v1's list unchanged.  `task_request` (answer
-#: it), `task_response` (an auto-delivered result), `cancel_task` (the sender
-#: withdrew it), `message` (a conversation), `broadcast` (an event).
-A2A_TYPES = (
-    "task_request",
-    "task_response",
-    "cancel_task",
-    "message",
-    "broadcast",
-    "group_message",
-)
 
 #: How many inbound messages may be waiting for a hand-over.  v1's bound on its
 #: queues, and for v1's reason: a peer flooding a conversation must not grow this
@@ -302,72 +289,6 @@ def marker(
     if task_id is not None:
         payload["task_id"] = task_id
     return f"{net.marker}{json.dumps(payload, ensure_ascii=False)}] "
-
-
-def a2a_marker(text: str, net: Net) -> dict[str, Any] | None:
-    """The payload of an inbound A2A message's marker, or ``None``.
-
-    **One reader for the envelope, because two readers would be two spellings.**
-    :func:`a2a_message_type` asks this for the wire ``type``, and the ``task_id``
-    rides the same JSON object for any caller that needs to name the task a
-    message carries.  Both facts are read through this one parse; a second
-    reader beside it is how the two would drift.
-
-    ***net* is required, because the two meshes are independent and so are their
-    envelopes** (`[PeerAgent:`, and the local network's two, `[Agent:` and
-    `[Subagent:`).  A reader with a default would read one network's message
-    with the other's word, and the task it carries would not look like a marker
-    at all — the sender's task would stay pending while the reader called it a
-    message nobody owes an answer.  The network — and, on the local one, the
-    sender's kind (`sender_net`) — is the only thing that knows which word to
-    look for, so it is an argument rather than a default.
-
-    Returns ``None`` when *text* carries no marker, a marker that does not close,
-    or a payload that is not an object — the same three cases v1's type reader
-    tolerated, and the honest answer for each is "this text says nothing about
-    who sent it."
-    """
-    prefix = net.marker
-    if not text.startswith(prefix):
-        return None
-    end = text.find("]", len(prefix))
-    if end == -1:
-        return None
-    try:
-        payload = json.loads(text[len(prefix) : end])
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def a2a_message_type(text: str, net: Net) -> str | None:
-    """The wire ``type`` of an inbound A2A message, read from its marker.
-
-    The marker is the one envelope that classifies every inbound A2A message,
-    and it is what the receiver's stored turn carries — so a reader that wants
-    to know *what kind of thing* arrived has to ask the text, not a parallel
-    field threaded alongside it.  *net* is which network's envelope this is:
-    the two meshes are independent and spell their markers differently, so the
-    reader is told which one it is looking at rather than guessing.  Returns one
-    of :data:`A2A_TYPES`, or ``None`` when *text* carries no (or a malformed)
-    marker, or a type outside the set — the caller then falls back to a
-    type-less label.
-
-    **It is v1's reader and it has no caller in this build**, which is worth
-    saying rather than leaving to be discovered.  v1 read the type for the
-    window's turn-end line ("✓ A2A task_request from jill handled"), and this
-    window labels a turn from its *channel* instead — `channel_prefix` draws
-    `PeerAgent(jill)> ` and never looks at the words.  It stays because it is the
-    other half of :func:`marker`: the pair is what makes `A2A_TYPES` a
-    vocabulary rather than a list, and a reader added later that guessed at the
-    envelope instead of asking this would be the second spelling of a format
-    this module already owns.
-    """
-    payload = a2a_marker(text, net)
-    if payload is None:
-        return None
-    mtype = payload.get("type")
-    return mtype if mtype in A2A_TYPES else None
 
 
 def channel_for(net: Net, peer: str) -> str:

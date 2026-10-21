@@ -247,13 +247,16 @@ Commands:
   run       Ensure the servers are available, then run the TUI (default).
   status    Report what each server named by the configuration is doing.
   down      Stop the servers named by the configuration.
+  logs      Read a server's log, or list the logs that exist.
 ```
 
 `down` stops the shared servers and the broker; it does not close windows that
 are already open. A window left open reconnects on its next prompt once the
 servers are started again, and its conversation is restored from the turn log.
 Its agent name stays claimed until the window exits, so a new instance started
-with the same `--agent` name is refused until then.
+with the same `--agent` name is refused until then. `down` also refuses while
+another live client is using the servers; `--force` stops them anyway and
+interrupts that client's in-flight turns.
 
 Options:
 
@@ -265,8 +268,23 @@ Options:
 | `--url URL` | Connect the window to an agent server at `URL` instead of the configured one. |
 | `--a2a-broker HOST:PORT` | Use this broker for the peer-agent network for this run. It overrides `peer_agent.broker` only, never the subagent network's broker. It cannot enable a network that has no `peer_agent:` section, and it is refused when the A2A server is already running on another broker; stop the stack first. |
 | `--keep-servers` | Leave the shared servers running after this instance exits. |
-| `--headless` | Run the same window, servers, connections, and turns without a terminal: nothing is drawn and nothing is printed. The agent remains reachable on the peer network. Exit with Ctrl+C. |
+| `--headless` | Run the same window, servers, connections, and turns without a terminal: nothing is drawn, and the start-up report is the only output. The agent remains reachable on the peer network. Exit with Ctrl+C. |
 | `--lang {en,zh}` | Set the window's language. Without the flag, the language is detected from the operating system. |
+| `--json` | Print `status` as JSON. The object carries `ok`, `servers`, and `broker`; each server row has its log path. |
+| `--force` | Stop the shared servers even when another client is using them. `down` only. |
+| `--lines N`, `-n N` | How many log lines `logs` shows; `0` reads the whole log. Default: 50. |
+| `--all` | With `logs`, print every configured server's log under its own header. |
+| `--version` | Print the version and exit. |
+
+`slife2 logs` lists each configured server's log file and whether it exists.
+`slife2 logs agent` prints the end of one, and `slife2 logs --all` prints every
+one. The name is the one `status` prints (`agent`, `llm:openai-completions`,
+`a2a-broker`); the MCP name a server advertises also works.
+
+`status` and `down` exit 0 only when the stack is fully usable: `status`
+returns 2 if any configured server or the broker is not running, and `down`
+returns 2 if a server or the broker did not stop or the command was refused
+because another client is live. `run` returns 2 when a server cannot start.
 
 `--headless` does not create a different kind of agent. It runs the same window
 with no display, and the system prompt is told that nobody is watching so the
@@ -1228,7 +1246,7 @@ entry points in `.venv\Scripts\` on every run, and a running instance holds
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The end-to-end lane starts the real stack as processes: the launcher, seventeen
+The end-to-end lane starts the real stack as processes: the launcher, eighteen
 daemons, a configuration on disk, and a stub OpenAI-compatible provider. It
 exercises the launch order, cross-process turns, tool routing, progress
 notifications, large-output handling, and conversation restore.

@@ -232,11 +232,14 @@ slife2 [COMMAND] [OPTIONS]
   run       确保 server 可用，然后运行 TUI（默认）。
   status    报告配置所命名的每个 server 的状态。
   down      停掉配置所命名的 server。
+  logs      读取某个 server 的日志，或列出已有日志。
 ```
 
 `down` 只停共享 server 和 broker，不会关闭已经打开的窗口。遗留窗口在下一次输入
 时自动重连，并从 turns 日志恢复对话。它持有的 agent 名字要到窗口退出才释放，
-所以在它退出前，用同一个 `--agent` 名字启动新实例会被拒绝。
+所以在它退出前，用同一个 `--agent` 名字启动新实例会被拒绝。如果有其他活着的
+client 正在使用这些 server，`down` 会拒绝；`--force` 才会停掉它们，并打断那个
+client 正在进行的轮次。
 
 选项：
 
@@ -248,8 +251,22 @@ slife2 [COMMAND] [OPTIONS]
 | `--url URL` | 将窗口连接到 `URL` 上的 agent server，而不是配置中的地址。 |
 | `--a2a-broker HOST:PORT` | 本次运行让 peer agent 网络使用该 broker。它只覆盖 `peer_agent.broker`，从不覆盖 subagent 网络的 broker。它不能启用一个没有 `peer_agent:` 节的网络；如果 A2A server 已在另一个 broker 上运行，它会被拒绝，此时先停止整套服务。 |
 | `--keep-servers` | 本实例退出后保留共享 server。 |
-| `--headless` | 运行同一个窗口、同一批 server、连接和轮次，但不使用终端：不绘制、不打印。agent 仍然可以在 peer 网络上被访问。使用 Ctrl+C 退出。 |
+| `--headless` | 运行同一个窗口、同一批 server、连接和轮次，但不使用终端：不绘制，只有启动报告会打印。agent 仍然可以在 peer 网络上被访问。使用 Ctrl+C 退出。 |
 | `--lang {en,zh}` | 设置窗口语言。不指定时从操作系统检测。 |
+| `--json` | 以 JSON 打印 `status`。对象包含 `ok`、`servers` 和 `broker`；每个 server 行带有日志路径。 |
+| `--force` | 即使有其他 client 在使用共享 server 也停掉它们。仅用于 `down`。 |
+| `--lines N`、`-n N` | `logs` 显示多少行；`0` 表示整个日志。默认 50。 |
+| `--all` | 与 `logs` 连用，按各自的标题打印每个已配置 server 的日志。 |
+| `--version` | 打印版本并退出。 |
+
+`slife2 logs` 列出每个已配置 server 的日志文件以及它是否存在；`slife2 logs agent`
+打印其中一个的末尾，`slife2 logs --all` 打印全部。名字就是 `status` 打印的名字
+（`agent`、`llm:openai-completions`、`a2a-broker`），server 对外声明的 MCP 名字
+也可以。
+
+`status` 和 `down` 只有在整套服务完全可用时才返回 0：任一已配置 server 或 broker
+没有运行时 `status` 返回 2；server 或 broker 没有停掉、或因为其他 client 在使用而
+被拒绝时 `down` 返回 2。`run` 在 server 无法启动时返回 2。
 
 `--headless` 不是另一种 agent。它运行的是没有屏幕的同一个窗口；系统提示词会
 被告知没有人在看着，以便模型调整行为。
@@ -1095,7 +1112,7 @@ uv run pyright
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-端到端车道将真实整套服务作为进程启动：launcher、十七个守护进程、磁盘上的配置，
+端到端车道将真实整套服务作为进程启动：launcher、十八个守护进程、磁盘上的配置，
 以及一个桩 OpenAI 兼容 provider。它验证启动顺序、跨进程轮次、工具路由、进度
 通知、大输出处理和对话恢复。
 

@@ -20,7 +20,7 @@ CONVENTION (enforced by ``tests/test_no_magic_timeouts.py``):
 - consumers do **call-time lookups** — ``_T.timeouts.<role>.<key>`` — and NEVER
   import-capture values into module constants or def-time default args, so tests
   can monkeypatch ``slife2.helpers.timeouts.timeouts.<role>.<key>`` at runtime;
-- a value that has to stay a literal carries ``# noqa-timeout`` on the line, and
+- a value that has to stay a literal carries ``# timeouts:`` on the line, and
   the gate's docstring says which literals are exempt outright.
 
 **What is deliberately absent, and why.**

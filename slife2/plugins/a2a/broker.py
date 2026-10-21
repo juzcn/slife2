@@ -78,6 +78,10 @@ MOSQUITTO = "mosquitto"
 #: says this word to somebody deciding whether the machine is clean.
 BROKER_NAME = "a2a-broker"
 
+#: The words `stop` uses when the signal did not end the process.  Spelled once,
+#: because `slife2 down` reads the sentence to decide its exit code.
+_STOP_FAILED = "did not exit"
+
 #: The hosts `broker.host` may name and still be *this* machine at one address —
 #: the only ones a broker is started for.  **Deliberately without the wildcards**
 #: (`0.0.0.0`, `::`, ``""``): mosquitto takes `listener <port> <host>` verbatim,
@@ -390,9 +394,20 @@ def stop(
         # started by slife2; left alone", so the one process that most needs
         # signalling is the one nothing will signal.
         return (
-            f"pid {record.pid} did not exit; the record is kept, so `down` can "
+            f"pid {record.pid} {_STOP_FAILED}; the record is kept, so `down` can "
             f"find it again"
         )
     clear_record(url)
     logger.info("a2a_broker_stopped address=%s pid=%d", settings.address, record.pid)
     return f"stopped {MOSQUITTO} on {settings.address}"
+
+
+def stop_failed(said: str) -> bool:
+    """Whether `stop`'s sentence describes a stop that did not happen.
+
+    `stop` returns the sentence `slife2 down` prints; the one failure it can
+    report is the process that did not exit, and every other sentence is a
+    report about a daemon that is not ours or not there.  The reader lives
+    beside the writer, so the phrase is spelled once.
+    """
+    return _STOP_FAILED in said

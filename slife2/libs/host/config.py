@@ -1768,11 +1768,6 @@ class MediaProviderSettings:
         """The resolved key.  Touches credstore, so call it where it is needed."""
         return resolve_secret(self.api_key_ref)
 
-    def kinds(self) -> tuple[str, ...]:
-        """What this provider can be asked for, in `MEDIA_KINDS` order."""
-        found = {entry.kind for entry in self.models}
-        return tuple(kind for kind in MEDIA_KINDS if kind in found)
-
 
 @dataclass(frozen=True)
 class MediaSettings:

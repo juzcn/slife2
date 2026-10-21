@@ -449,7 +449,8 @@ def test_a_stale_default_falls_through_to_the_first_of_the_kind() -> None:
 
 
 def test_the_kinds_are_what_a_provider_declares() -> None:
-    assert settings().providers["test"].kinds() == ("image", "video", "tts", "asr")
+    kinds = dict.fromkeys(entry.kind for entry in settings().providers["test"].models)
+    assert tuple(kinds) == ("image", "video", "tts", "asr")
 
 
 def test_parameters_merge_with_the_call_winning() -> None:

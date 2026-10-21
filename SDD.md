@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | Software Design Description (SDD) |
-| **Version** | 0.2.0 |
+| **Version** | 0.3.0 |
 | **Date** | 2026-10-17 |
 | **Status** | Normative |
 | **Audience** | Developers, operators, and reviewers of slife2 |
@@ -48,7 +48,7 @@ disagree, this document is authoritative.
 
 ### 1.1 Purpose
 
-This document defines the software design of slife2 version 0.2.0. It is written
+This document defines the software design of slife2 version 0.3.0. It is written
 for a person who will change the code or operate the system. It states:
 
 - the system's architecture and process model;
@@ -545,7 +545,7 @@ releases if the holder dies.
 - A sanitized name becomes a filename. A name that reduces to nothing is
   refused; writing to a surprising path is worse than saying no.
 
-### 4.4 `status` and `down`
+### 4.4 `status`, `down`, and `logs`
 
 `slife2 status` reports, for each server named by the configuration, one of:
 
@@ -555,13 +555,27 @@ releases if the holder dies.
   server does not answer;
 - `not running`.
 
+It also reports the A2A broker when `peer_agent:` is configured: whether it is
+running, and whether the record proves slife2 started it. `status --json` gives
+the same rows as an object with `ok`, `servers`, and `broker`; each server row
+carries its log path.
+
+`status` exits 0 only when every server and the broker are usable, and 2
+otherwise.
+
 `slife2 down` stops the servers this configuration names and that this build can
 prove it owns. It also stops a local A2A broker if the peer network is configured
 and the broker was started by slife2. Stopping a plugin stops the child processes
 that plugin started.
 
-`status` does not report the broker; it reports MCP servers only. The broker is
-stopped by `down` and started by the A2A plugin on demand.
+`down` refuses while another live client is using the shared servers, and returns
+2; `--force` stops them anyway and interrupts that client's in-flight turns. It
+returns 2 when a server it owns did not stop.
+
+`slife2 logs` lists the configured logs with their paths and sizes; `logs NAME`
+prints the end of one log, and `logs --all` prints every log under a header. The
+name is the one `status` prints, the MCP name a server advertises, or the bare
+protocol key of a model backend. The broker is `a2a-broker` (or `broker`).
 
 ### 4.5 Subagents
 
@@ -1880,9 +1894,9 @@ An agent nobody holds is offline, and that is the one thing a terminal was
 required for.
 
 `--headless` runs the same `SlifeApp` with Textual's headless driver: the same
-connections, the same queue, the same turns, the same prompts, nothing drawn and
-nothing printed. No branch of the window is conditional on the flag; it is a
-mode, not a second kind of agent.
+connections, the same queue, the same turns, the same prompts, nothing drawn;
+the start-up report is still printed. No branch of the window is conditional on
+the flag; it is a mode, not a second kind of agent.
 
 The model is told that nobody is there. The flag is written into the agent-name
 claim, which the agent server already reads to render the system prompt, and the
@@ -2256,7 +2270,7 @@ lanes end up disagreeing about the shape of a double.
 | Fast | `uv run pytest` | Unit and integration tests, every module, across cores. Excludes `e2e`. No API key, no running server, no fixed port. |
 | Unit | `uv run pytest -m unit` | Fast, isolated unit tests. |
 | Integration | `uv run pytest -m integration` | Tests that bind a socket or spawn a process. Each binds an ephemeral port. |
-| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: seventeen daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
+| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: eighteen daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
 
 The fast lane drives servers over FastMCP's in-memory transport: real MCP
 messages and real progress notifications, with no port bound.
@@ -2415,7 +2429,7 @@ Each invariant is stated as an assertion. A change that violates one is a defect
 
 ## Appendix B. Plugin registry
 
-The following table is informative and reflects the registry at version 0.2.0.
+The following table is informative and reflects the registry at version 0.3.0.
 `PLUGINS` in `libs/host/config.py` is authoritative.
 
 | Key | MCP name | Module | Default port |

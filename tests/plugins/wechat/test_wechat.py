@@ -41,7 +41,6 @@ from slife2.plugins.wechat import server as wechat
 from slife2.plugins.wechat.server import (
     Wechat,
     build_server,
-    load_session,
     render_qr,
     save_session,
     session_path,
@@ -53,6 +52,16 @@ pytestmark = pytest.mark.unit
 #: tests belongs to a background loop, and this is what the loops are hurried
 #: with — through the module constant, which is where each loop reads it.
 QUICK = 0.01
+
+
+def load_session(agent: str) -> dict[str, Any]:
+    """The saved login, read the way the plugin reads it.
+
+    The plugin's reader is `_read_session`, which also returns why a file could
+    not be read; the tests want the mapping alone.
+    """
+    saved, _ = wechat._read_session(wechat.session_path(agent))
+    return saved
 
 
 class Bridge:

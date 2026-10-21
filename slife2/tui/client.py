@@ -55,33 +55,6 @@ def _unreadable(what: str, answer: Any) -> ConnectionError:
     return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
 
 
-def answer_of(result: Any) -> str:
-    """The words a tool answered with, however the transport carried them.
-
-    `model_switch` returns a plain string, which FastMCP wraps and hands back as
-    `data` — so that is the first shape read, and the content-block half is the
-    fallback for a server that answered the older way.
-
-    **A reply that is neither is refused, not answered as empty.**  Text read as
-    `""` is a turn with nothing in it, and a caller that treated that as an answer
-    would draw nothing where the server said something.  An unknown shape raises
-    naming what came back (DESIGN.md §11.1: a failure is not a verdict).
-    """
-    data = getattr(result, "data", None)
-    if isinstance(data, str):
-        return data
-    if isinstance(data, dict) and isinstance(data.get("text"), str):
-        return data["text"]
-    for block in getattr(result, "content", None) or ():
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            return text
-    raise _unreadable(
-        "answer with words",
-        data if data is not None else getattr(result, "content", None),
-    )
-
-
 @dataclass(frozen=True)
 class TurnReply:
     """What one submission was answered with, and by whose turn.

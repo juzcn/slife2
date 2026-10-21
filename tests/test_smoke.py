@@ -9,6 +9,7 @@ nothing has started yet and the fix is in the file being named.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -75,6 +76,239 @@ def test_help_exits_cleanly(capsys) -> None:
     # guesses at.
     assert "status" in out
     assert "down" in out
+    assert "logs" in out
+
+
+def test_version_prints_the_version(capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert "slife2 0.3.0" in capsys.readouterr().out
+
+
+def test_a_flag_for_another_command_is_a_usage_error() -> None:
+    """A flag that would do nothing is refused, not carried along."""
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_args(["status", "--force"])
+    assert exit_info.value.code == 2
+
+
+def test_status_exits_nonzero_when_a_server_is_not_usable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    first, second = launcher.specs(config)[:2]
+    monkeypatch.setattr(
+        launcher,
+        "statuses",
+        lambda _config: iter(
+            [
+                launcher.Outcome(first, launcher.Status.RUNNING),
+                launcher.Outcome(second, launcher.Status.FAILED),
+            ]
+        ),
+    )
+
+    assert slife2._status(config) == 2
+    assert "1 of 2 server(s) are not usable" in capsys.readouterr().err
+
+
+def test_status_json_names_each_server_and_its_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    monkeypatch.setattr(
+        launcher,
+        "statuses",
+        lambda _config: iter([launcher.Outcome(spec, launcher.Status.NOT_RUNNING)]),
+    )
+
+    assert slife2._status(config, as_json=True) == 2
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is False
+    assert answer["servers"][0]["name"] == spec.name
+    assert answer["servers"][0]["state"] == "not_running"
+    assert answer["servers"][0]["log"] == str(runtime.log_path(spec.url))
+    assert answer["broker"] is None
+
+
+def test_down_refuses_while_another_client_is_live(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    monkeypatch.setattr(
+        launcher,
+        "others_running",
+        lambda: [runtime.ClientRecord(pid=999, agent="jack")],
+    )
+    called: list[bool] = []
+    monkeypatch.setattr(
+        launcher, "stop", lambda _config: called.append(True) or iter(())
+    )
+
+    assert slife2._down(config) == 2
+    assert called == [], "the stop was never asked for"
+    err = capsys.readouterr().err
+    assert "jack" in err
+    assert "--force" in err
+
+
+def test_down_force_stops_while_another_client_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    monkeypatch.setattr(
+        launcher,
+        "others_running",
+        lambda: [runtime.ClientRecord(pid=999, agent="jack")],
+    )
+    monkeypatch.setattr(
+        launcher,
+        "stop",
+        lambda _config: iter([launcher.Outcome(spec, launcher.Status.STOPPED)]),
+    )
+
+    assert slife2._down(config, force=True) == 0
+
+
+def test_down_exits_nonzero_when_a_server_did_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    monkeypatch.setattr(launcher, "others_running", lambda: [])
+    monkeypatch.setattr(
+        launcher,
+        "stop",
+        lambda _config: iter(
+            [
+                launcher.Outcome(
+                    spec, launcher.Status.FAILED, detail="pid 1 did not exit"
+                )
+            ]
+        ),
+    )
+
+    assert slife2._down(config) == 2
+
+
+def test_logs_lists_the_configured_logs(capsys) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    assert slife2._logs(config, "", 50, False) == 0
+    out = capsys.readouterr().out
+    assert spec.name in out
+    assert str(path) in out
+    assert "bytes" in out
+
+
+def test_logs_prints_the_tail(capsys) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    path.write_text(
+        "\n".join(f"line {number}" for number in range(10)) + "\n",
+        encoding="utf-8",
+    )
+
+    assert slife2._logs(config, spec.name, 3, False) == 0
+    assert capsys.readouterr().out.rstrip().endswith("line 7\nline 8\nline 9")
+
+
+def test_logs_names_an_unknown_server(capsys) -> None:
+    config = default_config()
+    assert slife2._logs(config, "nowhere", 50, False) == 2
+    assert "no server called 'nowhere'" in capsys.readouterr().err
+
+
+def test_logs_all_prints_each_header(capsys) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    path.write_text("hello\n", encoding="utf-8")
+
+    assert slife2._logs(config, "", 1, True) == 0
+    out = capsys.readouterr().out
+    assert f"== {spec.name} <{path}> ==" in out
+    assert "hello" in out
+
+
+def test_logs_zero_lines_reads_the_whole_file(capsys) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    path.write_text("first\nmiddle\nlast\n", encoding="utf-8")
+
+    assert slife2._logs(config, spec.name, 0, False) == 0
+    assert capsys.readouterr().out.rstrip().endswith("first\nmiddle\nlast")
+
+
+def test_logs_says_when_a_server_has_no_log(capsys) -> None:
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+
+    assert slife2._logs(config, spec.name, 50, False) == 2
+    assert "has no log at" in capsys.readouterr().err
+
+
+def test_status_json_reports_the_broker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
+    monkeypatch.setattr(launcher, "statuses", lambda _config: iter(()))
+    monkeypatch.setattr(runtime, "tcp_listening", lambda _host, _port: True)
+    monkeypatch.setattr(runtime, "read_record", lambda _url: None)
+
+    assert slife2._status(config, as_json=True) == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["broker"]["name"] == "a2a-broker"
+    assert answer["broker"]["state"] == "running"
+    assert answer["broker"]["ok"] is True
+
+
+def test_status_exits_nonzero_when_the_broker_is_down(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
+    monkeypatch.setattr(launcher, "statuses", lambda _config: iter(()))
+    monkeypatch.setattr(runtime, "tcp_listening", lambda _host, _port: False)
+    monkeypatch.setattr(runtime, "read_record", lambda _url: None)
+
+    assert slife2._status(config) == 2
+    out = capsys.readouterr().out
+    assert "a2a-broker" in out
+    assert "not running" in out
 
 
 def test_the_tui_connects_to_the_agent_server() -> None:
@@ -247,6 +481,25 @@ def test_the_take_down_is_what_stops_the_broker(
     out = capsys.readouterr().out
     assert "a2a-broker" in out
     assert "stopped mosquitto" in out
+
+
+def test_a_broker_that_did_not_stop_is_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import slife2.plugins.a2a.broker as broker
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
+    monkeypatch.setattr(launcher, "others_running", lambda: [])
+    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(
+        broker,
+        "stop",
+        lambda _settings: "pid 1 did not exit; the record is kept",
+    )
+
+    assert slife2._down(config) == 2
 
 
 def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(

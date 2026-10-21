@@ -56,6 +56,7 @@ from slife2.libs.host.config import (
     SEND_MESSAGE,
     TASK_LIST,
     A2ASettings,
+    Net,
     default_config,
     net_settings,
 )
@@ -87,7 +88,6 @@ from slife2.plugins.a2a.mesh import (
     safe_name,
 )
 from slife2.plugins.a2a.server import (
-    A2A_TYPES,
     CHANNEL,
     FORGET,
     JOIN,
@@ -108,8 +108,6 @@ from slife2.plugins.a2a.server import (
     Session,
     _drain,
     _wire,
-    a2a_marker,
-    a2a_message_type,
     build_server,
     channel_for,
     marker,
@@ -129,6 +127,43 @@ def settings(**overrides: Any) -> A2ASettings:
     base: dict[str, Any] = {"configured": True}
     base.update(overrides)
     return A2ASettings(**base)
+
+
+#: The marker's `type` vocabulary.  It lived in the server beside a reader no
+#: shipped code called; the writer still writes these words, so the tests keep
+#: the list and the reader.
+A2A_TYPES = (
+    "task_request",
+    "task_response",
+    "cancel_task",
+    "message",
+    "broadcast",
+    "group_message",
+)
+
+
+def a2a_marker(text: str, net: Net) -> dict[str, Any] | None:
+    """The marker payload, as the envelope defines it."""
+    prefix = net.marker
+    if not text.startswith(prefix):
+        return None
+    end = text.find("]", len(prefix))
+    if end == -1:
+        return None
+    try:
+        payload = json.loads(text[len(prefix) : end])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def a2a_message_type(text: str, net: Net) -> str | None:
+    """The wire `type` of an inbound message, read from its marker."""
+    payload = a2a_marker(text, net)
+    if payload is None:
+        return None
+    mtype = payload.get("type")
+    return mtype if mtype in A2A_TYPES else None
 
 
 # ── the marker: one envelope, written and read ──────────────────────────────
@@ -164,47 +199,6 @@ def test_the_marker_carries_from_and_not_agent_name() -> None:
         marker(REMOTE, PEER, None, "message")
         == '[PeerAgent:{"from": "jill", "type": "message"}] '
     )
-
-
-def test_the_marker_reads_its_own_type_back() -> None:
-    """The writer and the reader are one pair, so the vocabulary stays one list."""
-    for kind in A2A_TYPES:
-        assert a2a_message_type(marker(REMOTE, PEER, TASK, kind), REMOTE) == kind
-
-
-def test_a_type_outside_the_vocabulary_reads_as_none() -> None:
-    """A peer may put anything in the payload; the set is what this build knows."""
-    assert (
-        a2a_message_type('[PeerAgent:{"from": "jill", "type": "invented"}] hi', REMOTE)
-        is None
-    )
-    assert a2a_message_type("no marker here", REMOTE) is None
-    assert a2a_message_type("[PeerAgent:{not json] hi", REMOTE) is None
-    assert a2a_message_type('[PeerAgent:["a", "list"]] hi', REMOTE) is None
-    # A bracket that never closes is a torn row: nothing is read out of it.
-    assert a2a_message_type('[PeerAgent:{"from": "jill"', REMOTE) is None
-
-
-def test_the_marker_reads_its_whole_payload_back() -> None:
-    """The task id rides the same envelope as the type.
-
-    A caller that needs to name the task a message carries reads it here, from
-    the same parse as the type — one reader for the payload, so the two
-    spellings of the envelope cannot drift.
-    """
-    text = marker(LOCAL, PEER, TASK, "task_request")
-    assert a2a_marker(text, LOCAL) == {
-        "from": PEER,
-        "type": "task_request",
-        "task_id": TASK,
-    }
-    # **The two meshes are independent, envelopes included.**  The local
-    # envelope read with the remote word is not a marker, and a reader that
-    # guessed its network would make the task look like a message nobody owes
-    # an answer.
-    assert a2a_marker(text, REMOTE) is None, "the remote reader read a local envelope"
-    assert a2a_marker("no marker here", LOCAL) is None
-    assert a2a_marker('[Subagent:["a", "list"]] hi', LOCAL) is None
 
 
 def test_the_channel_names_the_peer() -> None:
@@ -3488,19 +3482,14 @@ def test_group_vocabulary_is_the_networks_own() -> None:
         '[PeerAgentGroup:{"from": "jill", "group": "builders", '
         '"owner": "jill", "type": "group_message"}] '
     )
-    assert group_store.group_marker_payload(text, REMOTE) == {
-        "from": PEER,
-        "group": GROUP,
-        "owner": PEER,
-        "type": "group_message",
-    }
     assert (
         group_store.group_channel_for(REMOTE, GROUP, PEER)
         == "peer_agent_group:builders:jill"
     )
-    # A group name may contain a bracket; the reader must not stop at it.
+    # A group name may contain a bracket; `json.dumps` keeps it inside the
+    # payload rather than letting it end the marker.
     odd = group_store.group_marker(LOCAL, PEER, "a]b", PEER)
-    assert group_store.group_marker_payload(odd, LOCAL)["group"] == "a]b"
+    assert '"group": "a]b"' in odd
 
 
 def test_group_and_member_names_are_validated_for_their_uses() -> None:

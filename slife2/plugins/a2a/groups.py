@@ -188,22 +188,6 @@ def group_marker(net: Net, sender: str, group: str, owner: str) -> str:
     return f"{net.group_marker}{json.dumps(payload, ensure_ascii=False)}] "
 
 
-def group_marker_payload(text: str, net: Net) -> dict[str, Any] | None:
-    """The payload of a group marker, or ``None``.
-
-    ``raw_decode`` rather than a search for the first ``]``: a group name is
-    free text and may itself contain a bracket, which JSON escaping keeps
-    exact and a naive scan would truncate.
-    """
-    if not text.startswith(net.group_marker):
-        return None
-    try:
-        payload, _ = json.JSONDecoder().raw_decode(text, len(net.group_marker))
-    except (ValueError, TypeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def group_channel_for(net: Net, group: str, sender: str) -> str:
     """The channel a group turn arrived on: ``<group_channel>:<group>:<sender>``."""
     return f"{net.group_channel}:{group}:{sender}"
@@ -223,9 +207,6 @@ class Group:
     members: tuple[str, ...]
     gid: str
     updated: str = ""
-
-    def is_member(self, name: str) -> bool:
-        return name in self.members
 
 
 @dataclass(frozen=True)

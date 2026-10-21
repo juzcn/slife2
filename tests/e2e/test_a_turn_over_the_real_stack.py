@@ -16,7 +16,7 @@ is the one every child reads, that a turn crosses five process boundaries, that
 its answer comes back over the progress channel *and* as a result, and that the
 conversation it produced is still there for the next turn.
 
-**It is the slow lane.**  Seventeen daemons come up and go down, so it is marked
+**It is the slow lane.**  Eighteen daemons come up and go down, so it is marked
 `e2e` and kept out of the default run (`-m e2e` is how it is asked for); see
 README's Tests section.  Nothing here is timing-sensitive beyond the launcher's
 own readiness probe, which is what a real start waits on too.
@@ -453,7 +453,7 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
 
     Torn down in the reverse order it came up, and *stopped* rather than left to
     the last-client rule: these daemons belong to a data directory under
-    `tmp_path`, and a test that leaked them would leave seventeen processes
+    `tmp_path`, and a test that leaked them would leave eighteen processes
     holding ports for the rest of the session.
     """
     provider = StubProvider()
@@ -486,7 +486,7 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
         # `ensure_all`'s reason — "nothing here runs until the first `next`, so
         # a caller that drops the iterator has started nothing at all" — and
         # dropping it stops nothing at all either: this fixture leaked
-        # seventeen daemons on every run while both tests went on passing, and
+        # eighteen daemons on every run while both tests went on passing, and
         # the only trace was eighteen python processes per run holding ports
         # whose data directory pytest had already deleted.  The assertion is the
         # half that makes the next leak a failure instead of a mess.
