@@ -14,7 +14,10 @@ dependencies = [
     # progress stream on the server side, and `Client(FastMCP)` is the in-memory
     # transport every server test runs on.  Brings `mcp` transitively; nothing
     # here imports `mcp` directly, so it is not listed.
-    "fastmcp>=4.0.1",
+    # The floor is 4.1.1 because `slife2.clients.gateway.make_client` pins
+    # `Client(mode="legacy")`: that argument arrived with 4.1, and a 4.0.x
+    # client would reject it and fail every connect.
+    "fastmcp>=4.1.1",
     # The ASGI layer under it, imported *directly* by one plugin and nowhere
     # else: the file tunnel serves `GET /share/{token}` beside its MCP
     # endpoint, and a custom route is written as a Starlette handler

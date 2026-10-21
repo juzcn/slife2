@@ -157,7 +157,10 @@ class ToolListing:
 
 
 async def remote_catalogue(
-    client: Client, client_id: tuple[str, str] | None = None
+    client: Client,
+    client_id: tuple[str, str] | None = None,
+    *,
+    timeout: float | None = None,
 ) -> ToolListing:
     """What the hub offers, and how large the catalogue behind it is.
 
@@ -165,6 +168,11 @@ async def remote_catalogue(
     *here* rather than passed by the model — see `_proxy`.  Optional because a
     caller with no conversation behind it (a test, a one-off) is a caller that
     has nobody to be.
+
+    `timeout` is the asker's own patience, resolved at call time.  A turn takes
+    `work.hub`; the start-up build takes `work.catalogue`, which is longer
+    because it is the cold path — see that value's comment.  `None` means
+    `work.hub`, so every existing caller keeps the budget it had.
 
     Raises:
         ConnectionError: If the hub answers with something this build cannot
@@ -175,7 +183,11 @@ async def remote_catalogue(
             quietly lost its abilities.  `slife2 down` is the answer.
     """
     payload = tool_payload(
-        await client.call_tool(LIST_TOOLS, {}, timeout=_T.timeouts.work.hub)
+        await client.call_tool(
+            LIST_TOOLS,
+            {},
+            timeout=_T.timeouts.work.hub if timeout is None else timeout,
+        )
     )
     listed = payload.get("tools")
     # **The elements are checked and not only the list.**  A hub that answers

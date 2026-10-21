@@ -2043,7 +2043,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1.2.0" },
     { name = "credstore", specifier = ">=0.10.5" },
     { name = "croniter", specifier = ">=6.2.4" },
-    { name = "fastmcp", specifier = ">=4.0.1" },
+    { name = "fastmcp", specifier = ">=4.1.1" },
     { name = "griffelib", specifier = ">=2.0.0" },
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "jinja2", specifier = ">=3.1.0" },

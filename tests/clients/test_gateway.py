@@ -625,3 +625,23 @@ async def test_the_connect_budget_is_not_a_deadline_on_a_call(monkeypatch) -> No
         )
 
     assert "rendered" in gateway.flatten(result.content)
+
+
+def test_the_client_speaks_the_handshake_era() -> None:
+    """**The modern probe is a 60 s hang against an old server, not a fallback.**
+
+    FastMCP 4.1's `mode="auto"` sends `server/discover` first and falls back to
+    `initialize` only when the probe comes back as an MCP error.  A server built
+    on an older SDK drops the request silently — it logs a pydantic validation
+    warning and never answers — so the fallback cannot fire and the connect
+    expires at `connect_tools`, reported as `Failed to initialize server
+    session`.  That is what took every stdio `mcp:` entry down (2026-10-21)
+    while the two HTTP entries, which answer the probe with a 400, connected.
+
+    Asserted on the client's own mode rather than by connecting: a test server
+    here is a FastMCP 4.1 one and answers both eras, so it cannot reproduce the
+    old peer's silence.  What can be asserted is the decision this module makes
+    before any transport starts: this hop never probes.
+    """
+    client = gateway.make_client(server(), lambda _message: None)
+    assert client.mode == "legacy"

@@ -67,6 +67,17 @@ class Work:
     #: here bounds it (see the module docstring).  Must outlast the hub's own
     #: settle wait (`validate`).
     hub: float = 20.0
+    #: One *catalogue build* at start-up: the first ask that makes a home's
+    #: `agents/tools.db` (`slife2.libs.host.launcher.open_catalogue`).  **Longer
+    #: than `hub` because it is the cold path**: a hub that has just started
+    #: must reach every plugin, ask each family for its declaration, and embed
+    #: the rows that are new — on a machine that may still be starting nineteen
+    #: servers.  Measured on the slow machine (2026-10-21): 19 servers took
+    #: 170 s, and a 20 s ask expired while the hub was still declaring.  A
+    #: turn's ask stays `hub`; this budget is spent once, and a start-up that
+    #: gives up on it leaves the window with no catalogue at all.  `validate`
+    #: keeps it >= `hub`.
+    catalogue: float = 240.0
     #: One management call from the terminal to the agent server: `model_switch`,
     #: `reset`, `transcript`.  A question answered from memory or from the store.
     #: **Not the turn** — a turn's length is the answer's own business, and the
@@ -103,8 +114,14 @@ class Ready:
     #: started, so this bounds a port that listens and never answers.
     connect_ours: float = 10.0
     #: A `mcp:` entry connecting.  Somebody else's process, possibly an `npx`
-    #: fetching itself, so it gets far more patience than our own hops.
-    connect_tools: float = 60.0
+    #: fetching itself, so it gets far more patience than our own hops.  **180 s,
+    #: not 60**: on the slow machine (2026-10-21) a cold
+    #: `@aryanbv/pdf-toolkit-mcp` install took 138 s, and the old 60 s bound
+    #: killed it mid-install — leaving a half-written npx cache whose missing
+    #: files then failed every later start (`combined-stream/lib/…`,
+    #: `color-convert/route.js`).  A connect that is killed while somebody
+    #: else's package manager is writing is worse than one given time to finish.
+    connect_tools: float = 180.0
     #: How long a listing waits for connects it started, before answering with
     #: what is in hand.  "Not answering yet" and "absent" are the same answer.
     list_settle: float = 5.0
@@ -340,6 +357,13 @@ def validate(ts: Timeouts) -> list[str]:
         errs.append(
             "invariant: work.hub >= ready.list_settle (a listing's wait is "
             "inside the asker's patience)"
+        )
+    if ts.work.catalogue < ts.work.hub:
+        # The cold build is the same ask as a turn's, with the starting and
+        # embedding on top; a shorter budget would fail the start first.
+        errs.append(
+            "invariant: work.catalogue >= work.hub (a catalogue build is a "
+            "hub ask with the cold work in it)"
         )
     if ts.ready.tunnel_heal < ts.ready.tunnel_read_url:
         # A running child gets at least the patience a fresh start gets, or the

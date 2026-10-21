@@ -289,7 +289,12 @@ async def _open_catalogue_async(url: str) -> int:
     """
     client = await open_server(url, name=TOOLHUB_SERVER_NAME, fallback_tool=LIST_TOOLS)
     try:
-        return (await remote_catalogue(client)).total
+        # The cold budget: this is the ask that builds the file, so it waits for
+        # plugins that are still starting and for the rows to be embedded.  A
+        # turn's ask stays `work.hub` (`slife2.clients.toolclient`).
+        return (
+            await remote_catalogue(client, timeout=_T.timeouts.work.catalogue)
+        ).total
     finally:
         await close_server(client)
 

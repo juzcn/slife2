@@ -235,11 +235,31 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
     nothing, which is what `DESIGN.md` §9.2 says a foreground call gets).  The
     two awaits here that *no* caller bounds — a listing, and the hub's ask for a
     plugin's sources — carry their own, at the call site.
+
+    **`mode="legacy"` is the third thing this constructor decides**, and it was
+    found the hard way.  FastMCP 4.1's default is `"auto"`: the client probes
+    `server/discover` at the newest modern protocol version first, and falls
+    back to `initialize` only when the server answers the probe *as an MCP
+    error*.  A server built on an older SDK does neither — the Python one logs
+    a pydantic validation warning and drops the request — so the fallback never
+    fires and the client sits there until `init_timeout` expires, reported as
+    `RuntimeError: Client failed to connect: Failed to initialize server
+    session`.  Measured on the slow machine (2026-10-21): all eighteen stdio
+    `mcp:` entries failed at the 60 s connect budget this way, while the two
+    HTTP entries — whose servers answer the probe with a 400 — fell back and
+    worked; the same `fetch` entry connected in 22.2 s with `"legacy"` and
+    never with `"auto"`.  **A longer timeout does not help**: nothing in an
+    old server will ever answer that probe.  `initialize` is the one handshake
+    every MCP server implements, and our own FastMCP servers answer it too, so
+    this hop speaks the handshake era.  The hop that dials *our* servers
+    (`slife2.libs.plugin.protocol.Peer`) keeps the modern probe, where both
+    ends of the wire are ours.
     """
     return Client(
         transport,
         message_handler=handler,
         init_timeout=_T.timeouts.ready.connect_tools,
+        mode="legacy",
     )
 
 
