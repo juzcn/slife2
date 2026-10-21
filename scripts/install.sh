@@ -171,7 +171,11 @@ ensure_python() {
         PY313="$(brew --prefix python@3.13)/bin/python3.13"
         [ -x "$PY313" ] || die "python@3.13 is missing"
     else
-        stage "installing Python 3.13" uv python install 3.13 --upgrade --default \
+        # `--upgrade` is newer than uv 0.7; a uv that predates the flag
+        # rejects the whole command, and a stale uv installs 3.13 just fine,
+        # so retry without the patch bump instead of failing the run.
+        stage "installing Python 3.13" uv python install 3.13 --upgrade --default 2>/dev/null \
+            || stage "installing Python 3.13" uv python install 3.13 --default \
             || die "Python 3.13 could not be installed"
         refresh_path
     fi

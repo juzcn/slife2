@@ -215,8 +215,13 @@ function Ensure-Uv {
 
 function Ensure-Python {
     Say '  installing Python 3.13'
-    if (-not (Invoke-Quiet { & uv python install 3.13 --upgrade --default })) {
-        Die 'Python 3.13 could not be installed'
+    # **`--upgrade` is newer than uv 0.7.**  A uv that predates the flag
+    # rejects the whole command, and a stale uv installs 3.13 just fine, so
+    # retry without the patch bump instead of failing the run.
+    if (-not (Invoke-Quiet { & uv python install 3.13 --upgrade --default } -Silent)) {
+        if (-not (Invoke-Quiet { & uv python install 3.13 --default })) {
+            Die 'Python 3.13 could not be installed'
+        }
     }
     Update-ProcessPath
 }

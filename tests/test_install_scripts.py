@@ -506,6 +506,138 @@ def test_invoke_quiet_judges_a_native_command_by_its_exit_code(
     assert "RESULT=True" in result.stdout, result.stdout + result.stderr
 
 
+def _ensure_python_function(path: Path) -> str:
+    name = "Ensure-Python" if path.suffix == ".ps1" else "ensure_python"
+    pattern = (
+        rf"^function {re.escape(name)}.*?^\}}"
+        if path.suffix == ".ps1"
+        else rf"^{name}\(\) \{{.*?^\}}"
+    )
+    match = re.search(
+        pattern, path.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL
+    )
+    assert match, f"{name} is missing from {path.name}"
+    return match.group(0) + "\n"
+
+
+def test_the_shell_installer_falls_back_for_a_uv_without_upgrade(
+    tmp_path: Path,
+) -> None:
+    """**`uv python install --upgrade` is newer than uv 0.7.**  A uv that
+    predates the flag rejects the command outright, and `uv self update` is
+    allowed to fail quietly, so the installer must still put Python 3.13 in
+    place rather than dying on the patch bump.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(
+        stub_bin / "uv",
+        """\
+#!/bin/sh
+printf '%s\\n' "$*" >> "$UV_LOG"
+for arg in "$@"; do
+    [ "$arg" = "--upgrade" ] && exit 1
+done
+exit 0
+""",
+    )
+
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(_ensure_python_function(SHELL), encoding="utf-8")
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+PLATFORM=linux
+say() { :; }
+refresh_path() { :; }
+stage() { local message=$1; shift; "$@"; }
+die() { printf 'error: %s\\n' "$*" >&2; exit 2; }
+. "$FUNCTION_FILE"
+ensure_python
+""",
+        encoding="utf-8",
+    )
+    log = tmp_path / "uv.log"
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_bin}:{os.environ['PATH']}",
+            "FUNCTION_FILE": str(function_file),
+            "UV_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "python install 3.13 --upgrade --default",
+        "python install 3.13 --default",
+    ]
+
+
+def test_the_powershell_installer_falls_back_for_a_uv_without_upgrade(
+    tmp_path: Path,
+) -> None:
+    """The Windows half of the same fallback."""
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    (stub_bin / "uv.cmd").write_text(
+        "@echo off\r\n"
+        'echo %*>>"%UV_LOG%"\r\n'
+        'echo %* | findstr /c:"--upgrade" >nul && exit /b 1\r\n'
+        "exit /b 0\r\n",
+        encoding="utf-8",
+    )
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    quiet = re.search(r"^function Invoke-Quiet.*?^\}", text, re.MULTILINE | re.DOTALL)
+    assert quiet, "Invoke-Quiet is missing from install.ps1"
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        quiet.group(0) + "\n" + _ensure_python_function(POWERSHELL), encoding="utf-8"
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Say([string]$Message) { }\n"
+        "function Update-ProcessPath { }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        f". '{function_file}'\n"
+        f"$env:PATH = '{stub_bin};' + $env:PATH\n"
+        "Ensure-Python\n"
+        'Write-Output "RESULT=$?"\n',
+        encoding="utf-8",
+    )
+    log = tmp_path / "uv.log"
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "UV_LOG": str(log)},
+    )
+
+    assert "RESULT=True" in result.stdout, result.stdout + result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "python install 3.13 --upgrade --default",
+        "python install 3.13 --default",
+    ]
+
+
 def test_an_inline_installer_run_returns_to_the_caller(tmp_path: Path) -> None:
     """**`irm ... | iex` runs in the caller's shell.**
 
