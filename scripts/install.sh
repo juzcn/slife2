@@ -171,11 +171,11 @@ ensure_python() {
         PY313="$(brew --prefix python@3.13)/bin/python3.13"
         [ -x "$PY313" ] || die "python@3.13 is missing"
     else
-        # `--upgrade` is newer than uv 0.7; a uv that predates the flag
-        # rejects the whole command, and a stale uv installs 3.13 just fine,
-        # so retry without the patch bump instead of failing the run.
+        # `--upgrade` is newer than uv 0.7, and `--default` was behind
+        # `--preview` there.  An older uv still installs 3.13 with the preview
+        # flag, so retry rather than failing the run on a flag it does not know.
         stage "installing Python 3.13" uv python install 3.13 --upgrade --default 2>/dev/null \
-            || stage "installing Python 3.13" uv python install 3.13 --default \
+            || stage "installing Python 3.13" uv python install 3.13 --preview --default \
             || die "Python 3.13 could not be installed"
         refresh_path
     fi

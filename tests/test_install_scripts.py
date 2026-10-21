@@ -523,10 +523,11 @@ def _ensure_python_function(path: Path) -> str:
 def test_the_shell_installer_falls_back_for_a_uv_without_upgrade(
     tmp_path: Path,
 ) -> None:
-    """**`uv python install --upgrade` is newer than uv 0.7.**  A uv that
-    predates the flag rejects the command outright, and `uv self update` is
-    allowed to fail quietly, so the installer must still put Python 3.13 in
-    place rather than dying on the patch bump.
+    """**`--upgrade` is newer than uv 0.7, and `--default` was preview-only.**
+
+    A uv that predates either flag rejects the whole command, and `uv self
+    update` is allowed to fail quietly, so the installer must still put Python
+    3.13 in place rather than dying on a flag it does not know.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -540,9 +541,9 @@ def test_the_shell_installer_falls_back_for_a_uv_without_upgrade(
 #!/bin/sh
 printf '%s\\n' "$*" >> "$UV_LOG"
 for arg in "$@"; do
-    [ "$arg" = "--upgrade" ] && exit 1
+    [ "$arg" = "--preview" ] && exit 0
 done
-exit 0
+exit 1
 """,
     )
 
@@ -579,7 +580,7 @@ ensure_python
     assert result.returncode == 0, result.stdout + result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         "python install 3.13 --upgrade --default",
-        "python install 3.13 --default",
+        "python install 3.13 --preview --default",
     ]
 
 
@@ -598,8 +599,8 @@ def test_the_powershell_installer_falls_back_for_a_uv_without_upgrade(
     (stub_bin / "uv.cmd").write_text(
         "@echo off\r\n"
         'echo %*>>"%UV_LOG%"\r\n'
-        'echo %* | findstr /c:"--upgrade" >nul && exit /b 1\r\n'
-        "exit /b 0\r\n",
+        'echo %* | findstr /c:"--preview" >nul && exit /b 0\r\n'
+        "exit /b 1\r\n",
         encoding="utf-8",
     )
 
@@ -634,7 +635,7 @@ def test_the_powershell_installer_falls_back_for_a_uv_without_upgrade(
     assert "RESULT=True" in result.stdout, result.stdout + result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         "python install 3.13 --upgrade --default",
-        "python install 3.13 --default",
+        "python install 3.13 --preview --default",
     ]
 
 
