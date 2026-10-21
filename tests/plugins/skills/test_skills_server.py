@@ -120,16 +120,18 @@ async def test_skill_use_reads_the_document(isolated_runtime: Path) -> None:
 
     `skill_use` is one of the two tools whose answer is the thing itself: a
     playbook is a procedure to follow, so what the model reads is the document —
-    with the skills root in front of it — and not a page or a set of fields.
+    with the skill's own directory in front of it — and not a page or a set of
+    fields.
     """
-    skill(isolated_runtime, "one", body="Do it.")
+    folder = skill(isolated_runtime, "one", body="Do it.")
     async with Client(build_server(default_config())) as client:
         result = await client.call_tool(USE_TOOL, {"name": "one"})
 
     answer = result.data
     assert isinstance(answer, str)
     assert answer.rstrip().endswith("Do it.")
-    assert "Skills root:" in answer
+    assert "Skill directory:" in answer
+    assert str(folder.resolve()) in answer
 
 
 @pytest.mark.asyncio

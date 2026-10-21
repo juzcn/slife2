@@ -22,7 +22,7 @@ For detailed setup instructions, see:
 ## Usage
 
 ```bash
-python3 skills/baidu-search/scripts/search.py '<JSON>'
+python3 scripts/search.py '<JSON>'
 ```
 
 ## Request Parameters

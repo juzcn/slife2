@@ -239,19 +239,19 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         """Read a skill: a playbook to follow rather than a tool to call.
 
         Read the one for a job before starting it. The answer is the skill's
-        whole `SKILL.md`, preceded by the root its paths are relative to. It is
-        the document itself rather than JSON, and it is not shortened here: a
-        playbook cut at the result budget would stop in the middle of a step.
-        One too large for a conversation is the harness's oversized result,
-        whose selection is chosen from the document's own lines.
+        whole `SKILL.md`, preceded by the directory its paths are relative to.
+        It is the document itself rather than JSON, and it is not shortened
+        here: a playbook cut at the result budget would stop in the middle of a
+        step. One too large for a conversation is the harness's oversized
+        result, whose selection is chosen from the document's own lines.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
 
         Returns:
-            The skill's whole `SKILL.md` as text, preceded by the root the paths
-            in it are relative to and a note saying whether what it requires is
-            at hand.
+            The skill's whole `SKILL.md` as text, preceded by the directory the
+            paths in it are relative to and a note saying whether what it
+            requires is at hand.
         """
         # Found here to read the switch off it: a skill may be filed under either
         # its own name or its directory's, and only the folder knows which, so
@@ -465,8 +465,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             # was.  Saying both is what lets a caller retry the half that
             # failed without wondering about the half that worked.
             raise ToolError(
-                f"{name!r} is installed, but its `skills:` entry was not written: "
-                f"{exc}"
+                f"{name!r} is installed, but its `skills:` entry was not written: {exc}"
             ) from exc
         mirror = homes.current()
         if written:

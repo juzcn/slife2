@@ -196,10 +196,15 @@ def test_a_skill_is_found_by_its_header_name_or_its_directory(root: Path) -> Non
 
 def test_the_document_says_where_the_skill_lives(root: Path) -> None:
     """A body names its own files relatively, and a reader has no way to know
-    what they are relative to without this line."""
-    skill(root, "one", body="Run `scripts/go.py`.")
+    what they are relative to without this line.
+
+    **The line names the skill's own directory**, not the `skills/` root it sits
+    under: `scripts/go.py` is a file beside `SKILL.md`, so the root would send
+    the model one level too high.
+    """
+    folder = skill(root, "one", body="Run `scripts/go.py`.")
     text = document(find("one"))
-    assert text.startswith(f"> **Skills root:** `{root.resolve()}`")
+    assert text.startswith(f"> **Skill directory:** `{folder.resolve()}`")
     assert "Run `scripts/go.py`." in text
 
 

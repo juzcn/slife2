@@ -468,12 +468,17 @@ def _declared(needs: Requirements) -> str:
 
 
 def document(skill: Skill, note: str = "") -> str:
-    """A skill's `SKILL.md`, preceded by the root it lives under.
+    """A skill's `SKILL.md`, preceded by the directory it lives in.
 
     v1's shape, kept for v1's reason: a skill's body names its own files by
     relative path (`scripts/search.py`), and a model reading it has no way to
     know what those are relative *to*.  One line in front of the document turns
     a path it cannot use into one it can.
+
+    **The base is the skill's own directory, not the `skills/` root.**  A
+    playbook's files sit beside its `SKILL.md`, so `scripts/search.py` means
+    `<skill directory>/scripts/search.py`; printing the root instead sent the
+    model one level too high, to a path that does not exist.
 
     `note` rides in the same block rather than at the end, because a warning
     after a long playbook is a warning the reader has already stopped reading
@@ -485,10 +490,10 @@ def document(skill: Skill, note: str = "") -> str:
             whether it is answering a model or a person.
     """
     text = _read(skill.manifest)
-    root = skill.directory.parent.resolve()
+    directory = skill.directory.resolve()
     preamble = [
-        f"> **Skills root:** `{root}`",
-        "> Every path a skill names is relative to it.",
+        f"> **Skill directory:** `{directory}`",
+        "> Every path this playbook names is relative to it.",
     ]
     if note:
         preamble.append(f"> {note}")
