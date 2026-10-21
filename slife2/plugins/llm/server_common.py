@@ -38,6 +38,7 @@ from slife2.libs.host.config import (
     load_cached,
     unresolved_reference,
 )
+from slife2.libs.host.secrets import redact_obj
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.model.wire import encode_chunk
 from slife2.libs.plugin.protocol import house_server, serve_plugin
@@ -293,7 +294,9 @@ async def stream_chat_impl(
             f"{provider}: the provider's stream ended without a finish event, so "
             "the answer was cut short and is not returned as a whole one"
         )
-    return builder.build().to_wire()
+    # The result is the tool output; the progress stream is display only.  The
+    # result is redacted here and again by `RedactingMiddleware`.
+    return redact_obj(builder.build().to_wire())
 
 
 def read_int(source: Any, attribute: str) -> int:

@@ -95,6 +95,7 @@ from slife2.libs.host.runtime import (
     tcp_listening,
     write_record,
 )
+from slife2.libs.host.secrets import redact, redact_obj
 from slife2.libs.plugin.audience import (
     FOREIGN_HOME,
     foreign_home,
@@ -318,6 +319,72 @@ class DeclareReturns(Middleware):
         return tools
 
 
+class RedactingMiddleware(Middleware):
+    """Replace resolved credentials in everything a server hands out.
+
+    A tool's result, its description, and a refusal are the three surfaces a
+    model reads.  A credential this process resolved must not be in any of them,
+    so the rule is applied here — once, to every server `house_server` builds —
+    rather than left to each tool remembering.  The log formatter applies the
+    same replacement to every line.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        try:
+            result = await call_next(context)
+        except ToolError as exc:
+            raise ToolError(redact(str(exc))) from exc
+        except Exception as exc:  # noqa: BLE001 — the text is leaving the process
+            # FastMCP would fold this into a ToolError carrying the exception's
+            # own words; the traceback is logged here so it is not lost, and the
+            # answer the caller reads is the same failure with the key replaced.
+            logging.getLogger(__name__).error("tool call failed", exc_info=True)
+            raise ToolError(redact(f"{type(exc).__name__}: {exc}")) from exc
+        return _redact_result(result)
+
+    async def on_list_tools(self, context, call_next):
+        return [_redact_tool(tool) for tool in await call_next(context)]
+
+
+def _redact_result(result: Any) -> Any:
+    """A tool result with every string in it redacted."""
+    updates: dict[str, Any] = {}
+    content = getattr(result, "content", None)
+    if content is not None:
+        updates["content"] = [
+            block.model_copy(update={"text": redact(block.text)})
+            if isinstance(getattr(block, "text", None), str)
+            else block
+            for block in content
+        ]
+    structured = getattr(result, "structured_content", None)
+    if structured is not None:
+        updates["structured_content"] = redact_obj(structured)
+    meta = getattr(result, "meta", None)
+    if meta is not None:
+        updates["meta"] = redact_obj(meta)
+    return result.model_copy(update=updates) if updates else result
+
+
+def _redact_tool(tool: Any) -> Any:
+    """A tool definition with its human-readable fields redacted.
+
+    `name` is among them: a server that put a credential in a tool name would
+    otherwise hand the model the name.  A name that changes is a tool the model
+    cannot call, which is the safe half of that trade.
+    """
+    updates: dict[str, Any] = {}
+    for field in ("name", "title", "description"):
+        value = getattr(tool, field, None)
+        if isinstance(value, str):
+            updates[field] = redact(value)
+    for field in ("parameters", "output_schema", "tags", "meta", "task_config", "auth"):
+        value = getattr(tool, field, None)
+        if value is not None:
+            updates[field] = redact_obj(value)
+    return tool.model_copy(update=updates) if updates else tool
+
+
 def house_server(
     name: str,
     *,
@@ -361,6 +428,7 @@ def house_server(
     )
     mcp.add_middleware(ServeTheCallersHome())
     mcp.add_middleware(DeclareReturns())
+    mcp.add_middleware(RedactingMiddleware())
     return mcp
 
 
@@ -851,18 +919,42 @@ def serve(
             clear_record(url)
 
 
+class _RedactingFormatter(logging.Formatter):
+    """A formatter that replaces resolved credentials in the finished line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
+
+
 def configure_logging() -> None:
-    """Log to stderr, never stdout.
+    """Log to stderr, never stdout — and never with a resolved credential.
 
     stdout is not free here: on a stdio transport it *is* the protocol channel,
     and even over HTTP the house rule is that model output must never be
     printed to a console whose codepage may not be UTF-8 — a `UnicodeEncodeError`
     mid-turn is a worse failure than a log line nobody reads.
+
+    **The formatter is the redaction point.**  A log line is assembled from the
+    message, its arguments and a traceback, and any of the three can carry a
+    value a caller resolved; replacing in the finished string covers all three.
+    The noisy HTTP and provider loggers are pinned above DEBUG for the same
+    reason: their debug output can include request headers.
     """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        _RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    for noisy in (
+        "httpx",
+        "httpx2",
+        "httpcore",
+        "httpcore2",
+        "openai",
+        "anthropic",
+        "mcp",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def serve_plugin(

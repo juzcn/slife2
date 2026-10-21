@@ -1980,6 +1980,15 @@ A value may be:
 - `${VAR:-default}`, with a literal default;
 - `keyring:<service>/<key>`, resolved directly against the OS keyring.
 
+**Output protection covers credstore's values, and only those.** A credential
+resolved from credstore — a `keyring:` URI, or a `${VAR}` the store answers — is
+registered in the process that resolved it and replaced with `[redacted]` in
+tool results, tool descriptions, and log lines. An environment variable or a
+literal in the config is the operator's; the system does not try to recognise
+it. v1 attempted the wider rule, and the variety of secret shapes made it a
+maintenance burden; v2 scopes protection to the one store it owns. Operators
+are strongly advised to keep every secret in credstore.
+
 Resolution is lazy: a process nobody calls never touches the keyring. An
 unresolved reference is left verbatim, so the failure lands where the name can be
 stated.

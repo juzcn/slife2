@@ -899,6 +899,12 @@ only confirmation mechanism, and it is model-driven.
 
 **Rule:** SDD §11.2.
 
+**Protection is scoped to credstore.** v1 tried to protect every secret, and
+the variety of shapes made the rules hard to maintain; v2 registers only what
+the credential store resolves, and replaces those values in tool results, tool
+descriptions, and logs. An environment value or a literal in the config is the
+operator's own. The manual recommends credstore for every secret.
+
 ### 8.5 Data and runtime layout
 
 **Rule:** SDD §11.3–§11.6.

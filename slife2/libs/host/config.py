@@ -117,6 +117,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.host import secrets as _secret_registry
 from slife2.libs.host.paths import home
 
 #: The one place this module warns rather than refuses.  Everything else here
@@ -948,7 +949,9 @@ def resolve_secret(value: object) -> str:
     else:
         if is_keyring_uri(value):
             try:
-                return resolve_uri(value)
+                resolved = resolve_uri(value)
+                _secret_registry.register(resolved)
+                return resolved
             except KeyError as exc:
                 raise ConfigError(
                     f"{value}: this machine's credential store has no such "
@@ -959,8 +962,15 @@ def resolve_secret(value: object) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         var, default = match.group(1), match.group(2)
-        found = os.environ.get(var) or _credstore_lookup(var)
+        found = os.environ.get(var)
         if found:
+            return found
+        found = _credstore_lookup(var)
+        if found:
+            # The value came from credstore, so it is one of the secrets this
+            # process protects.  An environment value is not: the operator's
+            # shell is not the credential store.
+            _secret_registry.register(found)
             return found
         # Unresolvable and no default: leave the reference verbatim, so the
         # failure surfaces where the value is used with its own name intact.
@@ -3092,6 +3102,7 @@ def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
             f"media.providers.{name}: needs `models` — a provider with no model "
             f"is a key and an endpoint nobody can ask for anything"
         )
+    key = str(raw.get("api_key") or "")
     return MediaProviderSettings(
         name=name,
         api=api,
@@ -3100,7 +3111,7 @@ def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
             _media_model(entry, f"media.providers.{name}.models")
             for entry in models_raw
         ),
-        api_key_ref=str(raw.get("api_key") or ""),
+        api_key_ref=key,
     )
 
 
@@ -3254,11 +3265,12 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
             f"embeddings.providers.{name}: needs `model` — the id sent as "
             f"`model` on /embeddings"
         )
+    key = str(raw.get("api_key") or "")
     return EmbeddingProviderSettings(
         name=name,
         base_url=base_url,
         model=model,
-        api_key_ref=str(raw.get("api_key") or ""),
+        api_key_ref=key,
     )
 
 
@@ -3650,10 +3662,11 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
         # sentence existed twice and neither copy was in reach of this function.
         raise _needs_base_url(f"providers.{name}", also="and the conversation")
 
+    key = str(raw.get("api_key") or "")
     return ProviderSettings(
         api=api,
         base_url=base_url,
-        api_key_ref=str(raw.get("api_key") or ""),
+        api_key_ref=key,
         models=models,
     )
 

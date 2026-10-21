@@ -12,6 +12,7 @@ report anything).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from types import SimpleNamespace
@@ -124,6 +125,92 @@ async def test_house_server_keeps_error_details() -> None:
     with pytest.raises(Exception, match="model not found"):
         async with Client(mcp) as client:
             await client.call_tool("refuses", {})
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_secret_is_redacted_from_a_tool_result() -> None:
+    """A result is a surface the model reads; the key is not in it."""
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-123456")
+    try:
+        mcp: FastMCP = house_server("slife2-test")
+
+        @mcp.tool
+        async def echoes() -> str:
+            return "the key is sk-live-123456"
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("echoes", {})
+    finally:
+        secrets.reset()
+
+    assert "sk-live-123456" not in str(result)
+    assert "[redacted]" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_secret_is_redacted_from_a_tool_description() -> None:
+    """A description is prompt text too, not only a result."""
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-123456")
+    try:
+        mcp: FastMCP = house_server("slife2-test")
+
+        @mcp.tool
+        async def described() -> str:
+            """A tool that mentions sk-live-123456."""
+            return "ok"
+
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+    finally:
+        secrets.reset()
+
+    description = tools[0].description or ""
+    assert "sk-live-123456" not in description
+    assert "[redacted]" in description
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_secret_is_redacted_from_a_refusal() -> None:
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-123456")
+    try:
+        mcp: FastMCP = house_server("slife2-test")
+
+        @mcp.tool
+        async def refuses() -> str:
+            raise ToolError("bad key sk-live-123456")
+
+        with pytest.raises(ToolError) as raised:
+            async with Client(mcp) as client:
+                await client.call_tool("refuses", {})
+    finally:
+        secrets.reset()
+
+    assert "sk-live-123456" not in str(raised.value)
+    assert "[redacted]" in str(raised.value)
+
+
+def test_the_log_formatter_redacts_a_registered_secret() -> None:
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-123456")
+    try:
+        formatter = protocol_module._RedactingFormatter("%(message)s")
+        record = logging.LogRecord(
+            "t", logging.INFO, __file__, 1, "key sk-live-123456", None, None
+        )
+        assert formatter.format(record) == "key [redacted]"
+    finally:
+        secrets.reset()
 
 
 def test_house_server_carries_instructions_and_omits_empty_ones() -> None:

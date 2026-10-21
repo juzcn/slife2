@@ -1,6 +1,6 @@
 """Shared test setup.
 
-Three autouse fixtures, each guarding something every test would otherwise have
+Four autouse fixtures, each guarding something every test would otherwise have
 to remember, and the first is the difference between a test suite and a loaded
 gun: **every test runs against its own data directory.**
 
@@ -39,6 +39,7 @@ from typing import Any
 
 import pytest
 
+from slife2.libs.host import secrets
 from slife2.libs.turn import tokens
 
 #: Every module that dials one of *our* servers, and the names it does it
@@ -203,6 +204,20 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(config_module, "_wsl_mirrored", lambda: False)
     return tmp_path / "data"
+
+
+@pytest.fixture(autouse=True)
+def clean_registered_secrets():
+    """**The redaction registry is per process, and the suite is one process.**
+
+    A test that resolves a credential registers it for replacement; without this
+    the next test's log or tool output could be redacted by a value it never
+    saw.  The registry is emptied around every test, so each one starts from the
+    same state a fresh server process would.
+    """
+    secrets.reset()
+    yield
+    secrets.reset()
 
 
 @pytest.fixture(autouse=True)

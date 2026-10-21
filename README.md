@@ -489,6 +489,14 @@ A value may be:
 - a `keyring:<service>/<key>` reference, resolved directly against the OS
   keyring.
 
+**Only credstore-managed secrets are protected from output.** A credential
+slife2 resolves from credstore — a `keyring:` reference, or a `${VAR}` the
+credential store answers — is replaced with `[redacted]` in tool results, tool
+descriptions, and log lines. An environment variable or a literal value is the
+operator's own, and slife2 does not try to recognise it. Keep every secret in
+credstore: it is the one store whose values slife2 can keep out of the model's
+context and the logs.
+
 Resolution is lazy and lenient. An unresolved reference is left verbatim, so a
 missing key fails at the API call where the error message can name it rather
 than at startup.

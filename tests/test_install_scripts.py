@@ -584,6 +584,11 @@ def test_the_shell_installer_falls_back_for_a_uv_without_upgrade(
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        # WSL's alias translates Windows path operands into Linux paths, so the
+        # harness and its env files arrive without their separators.  The test
+        # needs a bash that can read Windows paths — Git Bash, as CI has.
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
 
     stub_bin = tmp_path / "stub-bin"
     stub_bin.mkdir()

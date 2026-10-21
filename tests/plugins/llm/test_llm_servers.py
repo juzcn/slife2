@@ -1448,6 +1448,35 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_resolved_credential_is_redacted_from_the_result() -> None:
+    """A provider that echoes the key it was given is not put in front of the model.
+
+    The result is the tool output and is what the turn stores; the progress
+    stream is display only and keeps its chunk boundaries.
+    """
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-123456")
+    try:
+        server = build_llm_server(
+            name="t",
+            streamer=scripted(
+                Chunk(text="the key is sk-live-"),
+                Chunk(text="123456 done"),
+                Finish("stop"),
+            ),
+        )
+        result, _chunks = await call_stream_chat(
+            server, messages=[{"role": "user", "content": "hi"}], tools=[], model="m"
+        )
+    finally:
+        secrets.reset()
+
+    assert result.data["text"] == "the key is [redacted] done"
+
+
+@pytest.mark.asyncio
 async def test_a_stream_that_ends_without_a_finish_is_not_a_whole_answer() -> None:
     """**The stream ending is not the provider saying it finished.**
 
