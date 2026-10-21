@@ -63,6 +63,19 @@ function Invoke-Quiet([scriptblock]$Body, [switch]$Silent) {
     }
 }
 
+function Get-UvTools {
+    # **`2>$null` alone does not silence native stderr.**  With the caller's
+    # `$ErrorActionPreference = 'Stop'`, Windows PowerShell 5.1 turns each
+    # redirected stderr line into an error record; `uv tool list` exits 0 but
+    # warns about a malformed tool, and that warning aborted the install
+    # before it started.  Continue turns the warning back into output that the
+    # redirection can drop.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { return @(& uv tool list 2>$null) }
+    finally { $ErrorActionPreference = $previous }
+}
+
 function Parse-Arguments {
     foreach ($arg in $args) {
         $lower = $arg.ToLowerInvariant()
@@ -253,7 +266,7 @@ function Download-Source {
 }
 
 function Install-SlifeTool {
-    $wasInstalled = [bool]((& uv tool list 2>$null) -match '^slife2\s')
+    $wasInstalled = [bool]((Get-UvTools) -match '^slife2\s')
     Say '  installing slife2'
     if (-not (Invoke-Quiet { & uv tool install --python 3.13 --force $script:SourceDir })) {
         Die 'slife2 could not be installed'
@@ -434,7 +447,7 @@ function Ensure-Mosquitto {
 
 function Ensure-UvTool([string]$Executable, [string]$Python) {
     if (Get-Command $Executable -ErrorAction SilentlyContinue) {
-        if ((& uv tool list 2>$null) -match "^$Executable\s") {
+        if ((Get-UvTools) -match "^$Executable\s") {
             Say "  upgrading $Executable"
             [void](Invoke-Quiet { & uv tool upgrade $Executable })
         }

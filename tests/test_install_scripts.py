@@ -506,6 +506,58 @@ def test_invoke_quiet_judges_a_native_command_by_its_exit_code(
     assert "RESULT=True" in result.stdout, result.stdout + result.stderr
 
 
+def test_uv_tool_list_tolerates_a_warning_on_stderr(tmp_path: Path) -> None:
+    """**A malformed tool is a warning, not a failed command.**
+
+    `uv tool list` exits 0 but writes the warning to stderr.  Under the
+    installer's `$ErrorActionPreference = 'Stop'`, Windows PowerShell 5.1
+    turns a redirected stderr line into an error record, and that warning
+    aborted the install before `uv tool install` ran.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    (stub_bin / "uv.cmd").write_text(
+        "@echo off\r\n"
+        "echo warning: Ignoring malformed tool `qd-evolve` 1>&2\r\n"
+        "echo slife2 v0.1.0\r\n"
+        "echo - slife2.exe\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
+    )
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    match = re.search(r"^function Get-UvTools.*?^\}", text, re.MULTILINE | re.DOTALL)
+    assert match, "Get-UvTools is missing from install.ps1"
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{function_file}'\n"
+        f"$env:PATH = '{stub_bin};' + $env:PATH\n"
+        "$tools = Get-UvTools\n"
+        'Write-Output ("TOOLS=" + ($tools -join "|"))\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TOOLS=slife2 v0.1.0|- slife2.exe" in result.stdout, (
+        result.stdout + result.stderr
+    )
+
+
 def _ensure_python_function(path: Path) -> str:
     name = "Ensure-Python" if path.suffix == ".ps1" else "ensure_python"
     pattern = (
