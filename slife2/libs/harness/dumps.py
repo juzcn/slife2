@@ -343,13 +343,17 @@ def instruction(
     tool: str,
     body: str,
     budget: int,
+    conversation: str,
     user_input: str,
 ) -> str:
     """The discriminator's instruction for one result, rendered from the template.
 
     The result is handed over **numbered**, which is the whole of how a reply can
     be an address rather than a copy, and its size is handed over as the measured
-    number rather than as a shape a model has to guess at.
+    number rather than as a shape a model has to guess at.  `conversation` is the
+    turns before this result, rendered as text: the template judges the result
+    under it, and the newest turn's tool calls cannot be sent as history because
+    their results do not exist yet.
     """
     lines = lines_of(body)
     return render(
@@ -358,6 +362,7 @@ def instruction(
         result=numbered(lines),
         result_tokens=estimate_text_tokens(body),
         budget=budget,
+        conversation=conversation or "(no earlier turns)",
         user_input=user_input,
         compact_reply=json.dumps(COMPACT_REPLY, indent=2, ensure_ascii=False),
     )

@@ -274,6 +274,7 @@ async def _asked(
         tool=call.name,
         body=text,
         budget=window,
+        conversation=_conversation(messages),
         user_input=_current_input(messages),
     )
     # No tools, and no observer: this is one question and one answer, and it runs
@@ -330,6 +331,58 @@ async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
     return flatten(answer.content)
 
 
+def _text_of(message: Message) -> str:
+    """The words in one message, whether it is plain or carries parts.
+
+    A user message with an attachment is a list of content parts (`Message`
+    documents the shape), and its text is a `{"type": "text"}` part.  Reading
+    only a `str` made the newest user message invisible to `_current_input`,
+    which then answered with the previous turn's words.
+    """
+    if isinstance(message.content, str):
+        return message.content
+    if isinstance(message.content, list):
+        return "\n".join(
+            part["text"]
+            for part in message.content
+            if isinstance(part, dict)
+            and isinstance(part.get("text"), str)
+            and part["text"]
+        )
+    return ""
+
+
+def _conversation(messages: Sequence[Message]) -> str:
+    """The conversation in hand, as the discriminator's template says it has.
+
+    **A transcript rather than the message list**, because the list cannot be
+    sent: compression runs before the result is appended, so its last message is
+    an assistant turn whose tool calls have no results yet — the one history
+    state every provider rejects.  Rendering the turns into the instruction gives
+    the model the condition without inventing tool results to satisfy a wire
+    format.
+    """
+    lines: list[str] = []
+    for message in messages:
+        text = _text_of(message)
+        if message.tool_calls:
+            called = ", ".join(
+                f"{call.name}({json.dumps(call.arguments, ensure_ascii=False)})"
+                for call in message.tool_calls
+            )
+            text = f"{text}\n[called {called}]".strip()
+        if not text.strip():
+            continue
+        label = {
+            "user": "User",
+            "assistant": "Assistant",
+            "tool": "Tool result",
+            "system": "System",
+        }.get(message.role, message.role.capitalize())
+        lines.append(f"{label}: {text}")
+    return "\n\n".join(lines)
+
+
 def _current_input(messages: Sequence[Message]) -> str:
     """The input this turn is answering: the newest user message, as words.
 
@@ -338,10 +391,14 @@ def _current_input(messages: Sequence[Message]) -> str:
     list *is* the current input, and a message that cut into the middle of the
     turn is the current input too, which is the honest answer to a question asked
     while the turn was running.
+
+    **The newest user message ends the search even when it has no `str` text.**
+    A message carrying an image is a list of parts; skipping it in favour of the
+    previous turn's plain message answered a question nobody asked in this turn.
     """
     for message in reversed(messages):
-        if message.role == "user" and isinstance(message.content, str):
-            return message.content
+        if message.role == "user":
+            return _text_of(message)
     return ""
 
 
@@ -1961,6 +2018,13 @@ def build_server(
         # scope, so it still completes.
         loop.record_pending = None
         if turn_id is None:
+            # **`None` is a fork's ordinary answer, not a refused write.**  A
+            # fork has no log, so `record` returns `None` by design; rolling the
+            # turn back deleted the very messages the cancellation repair kept,
+            # and the next message to the fork resumed without them.
+            if loop.fork:
+                loop.covered = len(loop.messages)
+                return
             roll_back(loop, pending.outcome)
             return
         address_turn(loop, pending.outcome, pending.item, turn_id)

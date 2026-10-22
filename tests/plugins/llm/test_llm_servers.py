@@ -166,7 +166,24 @@ def test_openai_a_gateway_streaming_the_deprecated_function_call_is_read() -> No
         accumulator.add(delta)
     accumulator.add(ToolCallDelta(index=0, arguments_delta=': "6*7"}'))
     (call,) = accumulator.complete()
-    assert (call.name, call.arguments, call.id) == ("calc", {"e": "6*7"}, "call_0")
+    assert (call.name, call.arguments) == ("calc", {"e": "6*7"})
+    assert call.id.startswith("call_0_")
+
+
+def test_a_synthetic_call_id_does_not_repeat_across_model_calls() -> None:
+    """A dump is keyed by the call id, and two id-less calls share the index.
+
+    The provider that omits ids is the one this fallback exists for; its next
+    response starts at index 0 again, so an id built from the index alone would
+    overwrite the previous dump and break the conversation's marker.
+    """
+
+    def one() -> str:
+        accumulator = ToolCallAccumulator()
+        accumulator.add(ToolCallDelta(index=0, name="calc", arguments_delta="{}"))
+        return accumulator.complete()[0].id
+
+    assert one() != one()
 
 
 def test_openai_a_chunk_carrying_both_spellings_is_one_call() -> None:
@@ -1355,7 +1372,7 @@ def test_accumulator_synthesises_an_id_when_the_provider_sent_none() -> None:
     accumulator = ToolCallAccumulator()
     accumulator.add(ToolCallDelta(index=0, name="calc", arguments_delta="{}"))
     (call,) = accumulator.complete()
-    assert call.id == "call_0"
+    assert call.id.startswith("call_0_")
 
 
 def test_accumulator_refuses_arguments_that_never_parsed() -> None:

@@ -30,9 +30,9 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
 from slife2.libs.model.base import Stream, StreamChatResult
-from slife2.libs.turn.messages import ToolCall
+from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.plugins.agent.server import build_server
+from slife2.plugins.agent.server import _asked, _current_input, build_server
 from slife2.plugins.context.server import build_server as build_context
 from slife2.plugins.toolhub.server import build_server as build_hub
 from tests.fakes import (
@@ -258,6 +258,60 @@ async def test_a_result_past_the_window_becomes_a_window_over_it(
     asked = backend.calls[1][0][-1].content
     assert " 100  line 100 of a tool output" in asked
     assert "look something up" in asked
+
+
+@pytest.mark.asyncio
+async def test_the_discriminator_is_shown_the_conversation_it_judges_under() -> None:
+    """The template's condition is the turns above the result, and they are sent.
+
+    The message list itself cannot be handed over: compression runs before the
+    result is appended, so its last message is an assistant turn whose tool call
+    has no result yet — a history state providers reject.  The conversation is
+    rendered into the instruction instead.
+    """
+    backend = FakeBackend(answered('{"lines": [[1, 1]]}'))
+    call = ToolCall(id="c1", name="grep", arguments={"pattern": "retry"})
+    messages = [
+        Message(role="user", content="the retry policy is in module x"),
+        Message(role="assistant", content="noted"),
+        Message(role="assistant", content=None, tool_calls=[call]),
+    ]
+
+    await _asked(backend, call, "line 1\nline 2", messages, window=WINDOW)
+
+    instruction = backend.calls[0][0][-1].content
+    assert "the retry policy is in module x" in instruction
+    assert "noted" in instruction
+    assert 'grep({"pattern": "retry"})' in instruction
+
+
+def test_the_current_input_is_the_newest_user_message_even_with_parts() -> None:
+    """A user message carrying an image is parts, not a string."""
+    messages = [
+        Message(role="user", content="the previous question"),
+        Message(
+            role="user",
+            content=[
+                {"type": "text", "text": "and this one"},
+                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+            ],
+        ),
+    ]
+
+    assert _current_input(messages) == "and this one"
+
+
+def test_an_image_only_message_does_not_fall_back_to_an_older_turn() -> None:
+    """The newest user message ends the search even when it has no words."""
+    messages = [
+        Message(role="user", content="the previous question"),
+        Message(
+            role="user",
+            content=[{"type": "image_url", "image_url": {"url": "https://x/y.png"}}],
+        ),
+    ]
+
+    assert _current_input(messages) == ""
 
 
 @pytest.mark.asyncio

@@ -246,13 +246,18 @@ def test_the_three_answers_that_are_not_a_window_read_differently() -> None:
 def test_the_instruction_hands_over_a_numbered_result_and_the_measured_size() -> None:
     """Numbered, because that is how the reply can be an address."""
     rendered = dumps.instruction(
-        tool="grep", body=body(12), budget=WINDOW, user_input="why?"
+        tool="grep",
+        body=body(12),
+        budget=WINDOW,
+        conversation="User: what about the other one?\n\nAssistant: looking",
+        user_input="why?",
     )
 
     assert "grep" in rendered
     assert " 1  line 1 of a tool output" in rendered
     assert "12  line 12 of a tool output" in rendered
     assert str(estimate_text_tokens(body(12))) in rendered
+    assert "what about the other one?" in rendered
     assert "why?" in rendered
     # The reply surface is rendered rather than described: a field's wording is
     # what a model copies.

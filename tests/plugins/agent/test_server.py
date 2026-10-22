@@ -3610,6 +3610,43 @@ async def test_a_fork_writes_nothing_down(context, hub) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_fork_turn_is_not_rolled_back_by_the_next_message(
+    context, hub
+) -> None:
+    """A fork's `record` answers `None` because it has no log, not because it failed.
+
+    The turn's messages are the only copy a fork has, so treating that `None` as
+    a refused write and rolling the tail back deleted the user's message and the
+    completed tool batch — the work the cancellation path keeps on purpose.
+    """
+    backend = FakeBackend(
+        text_turn("the maker's"),
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("continued"),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await set_subagent(server, "researcher", fork=True)
+    interrupted = asyncio.create_task(send(server, "two", subagent="researcher"))
+    await wait_for_streams(backend, 2)
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+
+    await send(server, "three", subagent="researcher")
+    assert "user:two" in prompts_seen(backend, 2), (
+        "the cancelled fork turn is still in its conversation"
+    )
+    assert "user:three" in prompts_seen(backend, 2)
+
+
+@pytest.mark.asyncio
 async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
     """The next start removes the record; a subagent with a store is kept.
 

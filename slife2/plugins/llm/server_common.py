@@ -26,6 +26,7 @@ import contextlib
 import importlib
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -140,16 +141,18 @@ class ToolCallAccumulator:
         calls = []
         for index in sorted(self._parts):
             part = self._parts[index]
+            # **The id must exist and must be unique beyond this call.**  It is
+            # what a tool result refers back to, and the cabinet keys a dump by
+            # it: a name like `call_0` repeats on the next id-less response and
+            # the next dump overwrites the previous one, while the earlier
+            # conversation still points at it.  The random suffix costs nothing
+            # and makes the key as durable as the row it names.
+            call_id = part.id or f"call_{index}_{uuid.uuid4().hex}"
             calls.append(
                 ToolCall(
-                    # The id must exist: the tool result message refers back to
-                    # it, and a provider that never sent one leaves nothing to
-                    # refer to.  A synthetic id keeps the pairing valid.
-                    id=part.id or f"call_{index}",
+                    id=call_id,
                     name=part.name,
-                    arguments=_parse_arguments(
-                        part.arguments, part.name or f"call_{index}"
-                    ),
+                    arguments=_parse_arguments(part.arguments, part.name or call_id),
                 )
             )
         return calls
