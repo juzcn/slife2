@@ -20,12 +20,21 @@ CORE = {
 
 def main() -> int:
     last = ""
-    for _ in range(180):
-        result = subprocess.run(
-            [SLIFE2, "status", "--json"],
-            capture_output=True,
-            text=True,
-        )
+    for _ in range(30):
+        try:
+            result = subprocess.run(
+                [SLIFE2, "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            # One hung probe must not hold the whole readiness check; the next
+            # status call can still see the other servers, and the caller's
+            # exec timeout is the real bound.
+            last = "status timed out"
+            time.sleep(2)
+            continue
         last = result.stdout
         try:
             data = json.loads(result.stdout) if result.stdout.strip() else {}
@@ -36,7 +45,7 @@ def main() -> int:
             return 0
 
         states = {
-            row.get("name"): row.get("state")
+            str(row.get("name")): row.get("state")
             for row in data.get("servers", [])
             if isinstance(row, dict)
         }
