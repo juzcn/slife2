@@ -130,6 +130,12 @@ def test_a_flag_for_another_command_is_a_usage_error() -> None:
     with pytest.raises(SystemExit) as exit_info:
         _parse_args(["status", "--force"])
     assert exit_info.value.code == 2
+    # `--model` stopped being resolved for the recovery commands when the
+    # resolution moved after their dispatch; ignoring it silently would let an
+    # operator read a successful `status` as "the model reference was accepted".
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_args(["status", "--model", "nosuch/model"])
+    assert exit_info.value.code == 2
 
 
 def test_status_exits_nonzero_when_a_server_is_not_usable(

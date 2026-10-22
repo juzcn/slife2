@@ -428,6 +428,25 @@ def test_the_correlation_cap_holds_a_route_for_every_ladder_rung() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_attempt_that_never_left_keeps_no_route() -> None:
+    """A refusal before the client is touched cannot ever be answered on.
+
+    The route is registered before the publish so a fast reply can find it;
+    the one failure known to have left nothing is the `not connected` refusal,
+    and its route must go with it.  Left behind, a ladder retrying every few
+    seconds during an outage would fill the capped table with dead routes and
+    evict the live ones other sends still depend on.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    send = _OutboundSend("task-the-link-was-down", PEER, "session", "{}")
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await mesh._publish_attempt(send, "corr-the-link-was-down")
+
+    assert "corr-the-link-was-down" not in mesh._corr_to_task
+
+
+@pytest.mark.asyncio
 async def test_the_artifact_and_routing_caches_are_capped_by_the_cache_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1270,6 +1289,71 @@ async def test_a_first_publish_that_fails_does_not_start_the_ladder(
 
 
 @pytest.mark.asyncio
+async def test_a_retry_cannot_overtake_the_first_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ladder exists early, but its first rung waits for the first publish.
+
+    The task is created before the first publish so `disconnect` can see the
+    send; without the gate, a first publish still awaiting PUBACK (aiomqtt's
+    publish has no deadline of its own) would be overtaken by a retry — work
+    left the process while the caller was about to be told it had not.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+    gate = asyncio.Event()
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+        if len(published) == 1:
+            await gate.wait()
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.001)
+    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+
+    sending = asyncio.create_task(mesh.send_message(PEER, "hi"))
+    await asyncio.sleep(0.05)
+    assert len(published) == 1, "a retry overtook the first publish"
+
+    gate.set()
+    assert await sending  # the first publish landed
+    await mesh.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_first_publish_keeps_the_route_for_a_late_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation is not "not sent": the publish may have reached the peer.
+
+    The caller was cancelled, so no verdict is recorded; the correlation is
+    kept so the peer's answer still routes, and the ladder — whose gate will
+    never be set — is cancelled rather than left waiting for ever.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    gate = asyncio.Event()
+
+    async def publish(*args, **kwargs) -> None:
+        await gate.wait()
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+
+    sending = asyncio.create_task(mesh.send_message(PEER, "hi"))
+    await asyncio.sleep(0.01)
+    sending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+    await asyncio.sleep(0)
+
+    ((task_id, send),) = list(mesh._sends.items())
+    assert get_store().get(task_id).status == "pending"
+    assert mesh._corr_to_task.get(task_id) == task_id
+    await until(lambda: not send.loops, "the ladder was left waiting")
+    await mesh.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_a_name_probe_that_failed_is_not_a_free_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1299,11 +1383,12 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
 async def test_the_name_probe_bounds_its_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The connect runs in an executor, outside the probe's own read window.
+    """The CONNACK wait runs outside the probe's own read window.
 
-    aiomqtt's default operation timeout is ten seconds and paho's socket
-    connect has its own; without passing a timeout the probe could outlast the
-    deadline the mesh states for connecting to a blackholed broker.
+    aiomqtt 2.5 has no default timeout (`Client(timeout=None)`), so a broker
+    that accepts TCP but never answers would hold the probe — and the session
+    lock around it — without a deadline.  The timeout passed to the client is
+    the mesh's own connect budget.
     """
     captured: dict[str, Any] = {}
 

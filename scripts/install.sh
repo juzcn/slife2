@@ -603,20 +603,26 @@ do_dry_run() {
 }
 
 remove_local() {  # tool package
+    # **Every removal's status counts.**  Under `set -u` alone a failing `rm`
+    # in the middle of a branch is invisible, and the function would answer
+    # with the last command's status — so a component that is still on disk
+    # would be dropped from the state file as if it had gone.
+    local rc=0
     case "$1" in
         node)
-            rm -rf "$HOME/.local/lib/nodejs"
-            rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx"
+            rm -rf "$HOME/.local/lib/nodejs" || rc=1
+            rm -f "$HOME/.local/bin/node" "$HOME/.local/bin/npm" "$HOME/.local/bin/npx" || rc=1
             ;;
         mosquitto)
-            rm -rf "$HOME/.local/usr"
+            rm -rf "$HOME/.local/usr" || rc=1
             rm -f "$HOME/.local/bin/mosquitto" "$HOME/.local/bin/mosquitto_pub" \
-                  "$HOME/.local/bin/mosquitto_sub" "$HOME/.local/bin/mosquitto_passwd"
+                  "$HOME/.local/bin/mosquitto_sub" "$HOME/.local/bin/mosquitto_passwd" || rc=1
             ;;
-        cloudflared) rm -f "$HOME/.local/bin/cloudflared" ;;
-        uv) rm -f "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx" "$HOME/.local/bin/uvw" ;;
-        *) rm -rf "$2" ;;
+        cloudflared) rm -f "$HOME/.local/bin/cloudflared" || rc=1 ;;
+        uv) rm -f "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx" "$HOME/.local/bin/uvw" || rc=1 ;;
+        *) rm -rf "$2" || rc=1 ;;
     esac
+    return "$rc"
 }
 
 do_uninstall() {
@@ -634,7 +640,7 @@ do_uninstall() {
         # then never drain, and the next run would fail on the same entry again.
         entry=0
         case "$manager" in
-            local) remove_local "$tool" "$package" ;;
+            local) remove_local "$tool" "$package" || entry=1 ;;
             brew) brew uninstall "$package" >/dev/null 2>&1 || entry=1 ;;
             uv-tool) uv tool uninstall "$package" >/dev/null 2>&1 || entry=1 ;;
             *) entry=1 ;;

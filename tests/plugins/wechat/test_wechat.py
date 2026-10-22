@@ -442,6 +442,45 @@ async def test_a_refreshed_qr_is_handed_out_by_the_status(
 
 
 @pytest.mark.asyncio
+async def test_a_new_login_takes_the_state_back_from_the_code_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replaced watch must not describe the login that replaced it.
+
+    It keeps polling through the new code's fetch; an expiry or error it wrote
+    there would otherwise outlive the login that set `waiting`, and a status
+    would report the replaced login's ending beside the new code.
+    """
+    made = rig(monkeypatch)
+    session = made.plugin.session("jack")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {
+            "qrcode": "QR-2",
+            "qrcode_img_content": "https://example.test/scan-2",
+        }
+
+    monkeypatch.setattr(session.client, "fetch_qrcode", fetch)
+    login = asyncio.create_task(made.plugin.login(session))
+    await entered.wait()
+    # What the replaced watch could have written while the fetch was in flight.
+    session.qr_state = "error"
+    session.qr_error = "the replaced code expired"
+    release.set()
+
+    answer = await login
+    assert answer["state"] == "waiting"
+    assert session.qr_state == "waiting", "the replaced watch's ending survived"
+    assert session.qr_error == ""
+    assert session.qr_url == "https://example.test/scan-2"
+    await made.close()
+
+
+@pytest.mark.asyncio
 async def test_a_login_that_exists_is_not_asked_to_scan_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

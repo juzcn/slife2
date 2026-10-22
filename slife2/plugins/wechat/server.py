@@ -1150,6 +1150,22 @@ class Wechat:
 
     # ── The QR login ─────────────────────────────────────────────────────
 
+    def _remember_code(self, session: Session, content: str) -> str:
+        """Draw *content* and keep it on the session, where a status can hand it out.
+
+        **The `ImportError` policy lives here, in one place** (DESIGN.md §11.1):
+        without the rendering library `qr` is empty and `qr_url` is the address
+        to send instead, so a reply never tells someone to scan a link.  Any
+        other failure propagates — the caller knows whether that is a failed
+        login (`login`) or a dead watch (`_qr_follow`).
+        """
+        try:
+            session.qr = render_qr(content)
+        except ImportError:
+            session.qr = ""
+        session.qr_url = content
+        return session.qr
+
     async def login(self, session: Session) -> dict[str, Any]:
         """Start a QR login, and answer the code to show and where it stands.
 
@@ -1179,6 +1195,12 @@ class Wechat:
 
         session.qr_state = "waiting"
         session.qr_error = ""
+        # **The previous login's code goes with the state.**  `_facts` hands
+        # `session.qr` to a caller whenever the state is waiting, and this
+        # fetch is an await: a status landing inside it would otherwise answer
+        # with a code the server has already invalidated.
+        session.qr = ""
+        session.qr_url = ""
         try:
             data = await client.fetch_qrcode(ilink.BASE_URL)
         except Exception as exc:  # noqa: BLE001 — a failure the model reads
@@ -1197,19 +1219,31 @@ class Wechat:
             )
         content = str(data.get("qrcode_img_content") or qrcode)
 
-        try:
-            rendered = render_qr(content)
-        except ImportError:
-            # **A URL is not a code, so the answer says which one it is**
-            # (DESIGN.md §11.1).  Without the rendering library there is nothing
-            # scannable to put in a reply, and handing `qr` the URL would be a
-            # false instruction — the person would be told to scan a link.  So
-            # `qr` is empty and the URL rides in `qr_url`, where the tool's own
-            # `Returns:` says it is what to send instead.
-            rendered = ""
-        session.qr = rendered
-        session.qr_url = content
+        # **The watch for the replaced code stops before the new one is drawn.**
+        # It was still polling through the fetch above, so it may have advanced
+        # `qr_state` (an expiry, an error) after this login set it to `waiting`;
+        # left running through the render it could do so again, and this login
+        # would answer with a code while the status still carried the replaced
+        # login's ending.  Cancelling it here and resetting the state makes this
+        # login the one the session describes.
         self._cancel(session.qr_task)
+        session.qr_task = None
+        session.qr_state = "waiting"
+        session.qr_error = ""
+        try:
+            rendered = self._remember_code(session, content)
+        except Exception as exc:  # noqa: BLE001 — a code that cannot be drawn is a failed login
+            # **A login is not left `waiting` on a code nobody can show.**  The
+            # watch is spawned below, so a failure here would leave the state
+            # saying a scan is pending with nothing polling — the state
+            # `wechat_check_status` reports for ever.  The fetch-failure rule,
+            # one step later: the login fails and says why.
+            session.qr_state = "error"
+            session.qr_error = f"The login code could not be drawn: {exc}"
+            raise ToolError(
+                f"the login QR could not be drawn ({exc}); "
+                f"call `wechat_login` again in a moment."
+            ) from exc
         session.qr_task = self._spawn(
             self._qr_watch(session, qrcode, ilink.BASE_URL, attempts=0)
         )
@@ -1263,6 +1297,12 @@ class Wechat:
                     session.qr_state = "expired"
                     session.qr_error = "The QR expired more than three times."
                     return
+                # **The expired code is cleared before its replacement is
+                # fetched.**  The state is still `waiting`, so a status landing
+                # inside the fetch would otherwise hand out a code the server
+                # has already invalidated.
+                session.qr = ""
+                session.qr_url = ""
                 refreshed = await session.client.fetch_qrcode(base_url)
                 fresh = str(refreshed.get("qrcode") or "")
                 if not fresh:
@@ -1272,12 +1312,7 @@ class Wechat:
                     )
                     return
                 content = str(refreshed.get("qrcode_img_content") or fresh)
-                try:
-                    session.qr = render_qr(content)
-                except ImportError:
-                    # The URL is still the code's address; `qr_url` carries it.
-                    session.qr = ""
-                session.qr_url = content
+                self._remember_code(session, content)
                 session.qr_state = "waiting"
                 session.qr_task = self._spawn(
                     self._qr_watch(session, fresh, base_url, attempts=attempts + 1)
@@ -1572,6 +1607,8 @@ class Wechat:
         # and told the model to wait for one that had already happened.
         session.qr_state = ""
         session.qr_error = ""
+        session.qr = ""
+        session.qr_url = ""
         # A fresh client rather than a cleared one, so nothing of the old
         # session survives in a field somebody forgot to reset — which is what
         # v1 did, and why.

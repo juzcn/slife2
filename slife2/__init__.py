@@ -228,6 +228,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # carry out.
     if args.json and args.command != "status":
         parser.error("--json only applies to `status`")
+    if args.model and args.command != _RUN:
+        parser.error("--model only applies to `run`")
     if args.force and args.command != "down":
         parser.error("--force only applies to `down`")
     if args.server and args.command != "logs":
@@ -846,20 +848,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = find_config_path()
         config: Config = load()
-    except ConfigError as exc:
-        # A config mistake is worth a one-line message rather than a traceback:
-        # nothing has started yet, and the fix is in the file being named.
-        print(f"slife2: {exc}")
-        return 2
 
-    if args.command == "status":
-        return _status(config, as_json=args.json)
-    if args.command == "down":
-        return _down(config, force=args.force)
-    if args.command == "logs":
-        return _logs(config, args.server, args.lines, args.all)
+        # **`status`, `down` and `logs` run before the model is resolved.**
+        # They are what an operator runs to recover from a stale `default:`;
+        # resolving it first made those commands exit 2 without running at all.
+        if args.command == "status":
+            return _status(config, as_json=args.json)
+        if args.command == "down":
+            return _down(config, force=args.force)
+        if args.command == "logs":
+            return _logs(config, args.server, args.lines, args.all)
 
-    try:
         # The provider itself is not needed here: the TUI talks to the *agent*
         # server, which is the one that knows which model server to use.  What
         # is needed is the reference — because `--model` may be a bare provider
@@ -868,12 +867,11 @@ def main(argv: list[str] | None = None) -> int:
         # from: its window, whether it reasons, whether it reads images.
         #
         # Resolved here rather than after the servers are up so that a `--model`
-        # naming something that does not exist is one line and no processes —
-        # **and after the commands above**, because `status`, `down` and `logs`
-        # are what an operator runs to recover from a stale `default:`; failing
-        # them on that reference left the recovery commands unusable.
+        # naming something that does not exist is one line and no processes.
         model_reference, model_settings = tui_model(config, args.model or "")
     except ConfigError as exc:
+        # A config mistake is worth a one-line message rather than a traceback:
+        # nothing has started yet, and the fix is in the file being named.
         print(f"slife2: {exc}")
         return 2
 

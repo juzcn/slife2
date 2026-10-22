@@ -185,7 +185,8 @@ powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https
 ```
 
 `uninstall` removes the components the installer added; components that were
-present before the installation stay in place.
+present before the installation stay in place. A component that could not be
+removed stays recorded, and a later `uninstall` retries it.
 
 ### Manual installation
 
@@ -264,7 +265,7 @@ Options:
 |---|---|
 | `--data-dir DIR` | Use `DIR` as the data directory. Overrides `SLIFE2_DATA_DIR`. |
 | `--agent NAME` | Run as `NAME`. Default: `slife2`. One live instance per name per machine. |
-| `--model PROVIDER/MODEL` | Start on this model. A bare provider selects its first model. Default: the configuration's `default`. |
+| `--model PROVIDER/MODEL` | Start on this model. A bare provider selects its first model. Default: the configuration's `default`. `run` only. |
 | `--url URL` | Connect the window to an agent server at `URL` instead of the configured one. |
 | `--a2a-broker HOST:PORT` | Use this broker for the peer-agent network for this run. It overrides `peer_agent.broker` only, never the subagent network's broker. It cannot enable a network that has no `peer_agent:` section, and it is refused when the A2A server is already running on another broker; stop the stack first. |
 | `--keep-servers` | Leave the shared servers running after this instance exits. |

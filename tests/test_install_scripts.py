@@ -116,6 +116,44 @@ def test_uninstall_keeps_a_failed_entry_and_drains_the_rest(tmp_path: Path) -> N
     assert state.read_text(encoding="utf-8").splitlines() == ["uv-tool\tslife2\tslife2"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the shell installer is POSIX-only")
+def test_uninstall_keeps_a_local_component_that_could_not_be_removed(
+    tmp_path: Path,
+) -> None:
+    """A `local` removal's failure counts, like a package manager's.
+
+    `remove_local` ran several `rm`s and answered with the last one's status,
+    so a failed removal in the middle was invisible: the entry drained from the
+    state file while the component was still there, and no later run could find
+    it again.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    state = tmp_path / "state.tsv"
+    state.write_text("local\tnode\tnode\n", encoding="utf-8")
+    home = tmp_path / "home"
+    # `rm -f` refuses a directory without `-r`, which is the failure the
+    # per-entry accumulator has to see.
+    (home / ".local" / "bin" / "node").mkdir(parents=True)
+
+    result = subprocess.run(
+        [bash, str(SHELL), "uninstall"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "SLIFE2_DATA_DIR": str(tmp_path / "data"),
+            "SLIFE2_INSTALL_STATE": str(state),
+        },
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert state.read_text(encoding="utf-8").splitlines() == ["local\tnode\tnode"]
+
+
 def test_no_elevation_or_system_package_manager() -> None:
     """The installers remain user-level: no root, no system package manager."""
     forbidden = (

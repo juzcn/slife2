@@ -124,11 +124,22 @@ _MAX_TRACKED_SENDS = 500  # delivery-tracking cap (mirrors the task store)
 #: Cap on correlation→task routing entries.  Every correlation a task was
 #: published under stays routed until its TERMINAL reply lands (the peer may
 #: answer on any of them — see ``_deliver``), then all of them are dropped
-#: together.  **Three per send, and the cap is sized for that**: the primary
-#: correlation plus one per ladder rung, so ``_MAX_TRACKED_SENDS`` unanswered
-#: sends can hold three times their number without evicting a route the peer
-#: may still answer on.  The cap is a safety valve, not a budget.
-_MAX_CORR_ENTRIES = 3 * _MAX_TRACKED_SENDS
+#: together.  **``_MAX_ATTEMPTS`` per send, and the cap is sized for that**:
+#: the first publish and each retry rung have their own correlation, so
+#: ``_MAX_TRACKED_SENDS`` unanswered sends fit without evicting a route the
+#: peer may still answer on.  The cap is a safety valve, not a budget.
+_MAX_CORR_ENTRIES = _MAX_ATTEMPTS * _MAX_TRACKED_SENDS
+
+
+class _NotConnected(RuntimeError):
+    """The outbound client is gone — the publish was refused before it left.
+
+    Distinct from every other way a publish can fail on purpose: this one is
+    raised before the client is touched, so a correlation registered for the
+    attempt can never be answered and is dropped with the attempt.  A paho
+    error after the client accepted the message is the other case and its
+    route is kept — the peer may still answer on it.
+    """
 
 
 def member_name(agent: str, subagent: str = "") -> str:
@@ -284,6 +295,7 @@ class _OutboundSend:
         "attempts",
         "unsent",
         "delivered",
+        "first_landed",
         "loops",
         "record",
         "sent_at",
@@ -309,6 +321,12 @@ class _OutboundSend:
         #: first publish that lands.
         self.unsent = 0
         self.delivered = False
+        #: Set by `send_message` once its first publish has returned; `_deliver`
+        #: waits on it before its first rung.  The ladder exists (and is in
+        #: ``loops``) while that publish is in flight so a teardown can see the
+        #: send, but it must not retry ahead of an attempt whose own fate the
+        #: caller has not been told yet.
+        self.first_landed = asyncio.Event()
         self.loops: set[asyncio.Task] = set()
         #: Whether this send created a task (TASK_REQUEST) or is a bare
         #: conversation (MESSAGE) — the reply is pushed as a completion or as a
@@ -536,6 +554,11 @@ CANCELLED = "cancelled"
 FAILED = "failed"
 UNREACHABLE = "unreachable"
 
+#: The three statuses a task row can end in.  One tuple rather than the same
+#: literal at every guard, so a check for "already ended" cannot drift from
+#: the vocabulary the store writes.
+_ENDED = (COMPLETED, FAILED, CANCELLED)
+
 
 def _reply_state(data: dict) -> str:
     """Store status implied by a terminal reply's raw wire state.
@@ -643,9 +666,10 @@ class A2AMesh:
         self._withdrawn: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
         # FIFO-capacity: evicts the oldest tracked send past _MAX_TRACKED_SENDS.
         self._sends: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
-        # correlation → task_id.  Capped at twice ``_sends`` because every
-        # correlation a task was published under stays routed until its TERMINAL
-        # reply lands (see ``_deliver``), so a task's retries each cost a route.
+        # correlation → task_id.  Capped at ``_MAX_ATTEMPTS`` routes per tracked
+        # send because every correlation a task was published under stays routed
+        # until its TERMINAL reply lands (see ``_deliver``), so the first
+        # publish and each retry each cost a route.
         # FIFOCache again: the bound used to be a hand-rolled ``pop`` in
         # ``_publish_attempt``, which is the same one line the class already is.
         self._corr_to_task: FIFOCache = FIFOCache(maxsize=_MAX_CORR_ENTRIES)
@@ -786,12 +810,13 @@ class A2AMesh:
                 f"-probe-{uuid.uuid4().hex[:8]}"
             ),
         )
-        # **The connect has its own bound.**  paho's blocking connect runs in
-        # an executor, and aiomqtt's own wait for CONNACK defaults to ten
-        # seconds; the `name_probe` window below starts only once the
-        # connection is up, so a blackholed broker left this call (and the
-        # session lock around it) waiting outside every deadline the mesh
-        # states.
+        # **The CONNACK wait has a bound of its own.**  paho's blocking connect
+        # runs in an executor and bounds its socket connect (five seconds in
+        # paho 2.1); aiomqtt's wait for CONNACK has no default timeout in 2.5
+        # (`Client(timeout=None)`), and the `name_probe` window below starts
+        # only once the connection is up.  Without passing one, a broker that
+        # accepts TCP but never answers would hold this call — and the session
+        # lock around it — without a deadline.
         kwargs["timeout"] = _T.timeouts.deliver.mqtt_connect
         try:
             async with aiomqtt.Client(**kwargs) as client:
@@ -1310,6 +1335,15 @@ class A2AMesh:
         # every retry correlation the peer may have answered on (the terminal
         # can ride any of them, see :meth:`_deliver`) — so the table cannot
         # accumulate stale routes across a session.
+        self._forget_send(task_id)
+
+    def _forget_send(self, task_id: str) -> None:
+        """Drop a send and every route published under it.
+
+        One ending, one cleanup: the terminal-reply path and the failed
+        first-publish path both have to leave nothing behind, and the retries
+        spread a task's routes over more than the primary correlation.
+        """
         self._sends.pop(task_id, None)
         for c in [c for c, tid in self._corr_to_task.items() if tid == task_id]:
             self._corr_to_task.pop(c, None)
@@ -1329,7 +1363,10 @@ class A2AMesh:
         without them."""
         client = self._outbound
         if client is None or not self._connected:
-            raise RuntimeError("A2A mesh is not connected.")
+            # `_NotConnected`, not a bare RuntimeError: the refusal happens
+            # before the client is touched, which is what lets a caller drop
+            # the correlation it registered for this attempt (`_publish_attempt`).
+            raise _NotConnected("A2A mesh is not connected.")
         await client.publish(topic, payload, qos=qos, properties=props)
 
     async def _publish_attempt(self, send: _OutboundSend, corr: str) -> None:
@@ -1343,13 +1380,21 @@ class A2AMesh:
             response_topic=self._topics.reply(self.agent_name, send.session),
             correlation_data=corr,
         )
-        await self._publish_props(
-            self._topics.request(send.agent),
-            send.payload,
-            props,
-        )
+        try:
+            await self._publish_props(
+                self._topics.request(send.agent),
+                send.payload,
+                props,
+            )
+        except _NotConnected:
+            # Nothing was handed to the client, so no peer can ever answer on
+            # this correlation.  Left in the table it would be a dead route
+            # that FIFO-evicts a live one — and a ladder retries every few
+            # seconds while the link is down, so the dead routes accumulate.
+            self._corr_to_task.pop(corr, None)
+            raise
 
-    async def _deliver(self, send: _OutboundSend) -> None:
+    async def _deliver(self, send: _OutboundSend, *, after_first: bool = False) -> None:
         """Requester retry profile for one outbound task.
 
         Re-publish the same payload (same Task.id + context_id) with a fresh
@@ -1393,9 +1438,21 @@ class A2AMesh:
         ``send.loops``).  A mesh that is only being rebuilt is not that: the
         teardown `connect` makes is a reviving one, and the ladder rides over it
         exactly as it rides over a rung whose publish did not leave.
+
+        **The ladder waits for the first publish.**  ``after_first`` is how
+        `send_message` starts it: its task is created before the send's own
+        publish so that a teardown can see the send (``send.loops``), but no
+        rung may overtake that attempt — aiomqtt's publish has no timeout of its
+        own, so the first publish can outlast the reply window, and a retry that
+        landed while it was still in flight would run work `send_message` was
+        about to report as never sent.  ``send.first_landed`` is set only when
+        that publish returns.  A direct caller has no first publish of its own
+        to wait for, which is the default.
         """
         try:
             try:
+                if after_first:
+                    await send.first_landed.wait()
                 await asyncio.sleep(_T.timeouts.deliver.reply_first)
             except asyncio.CancelledError:
                 raise
@@ -1510,22 +1567,43 @@ class A2AMesh:
             record=record,
         )
         self._sends[task_id] = send  # FIFOCache evicts the oldest past the cap
-        # First attempt — correlation == the public task_id.  **The ladder
-        # starts only once this one has left.**  Creating it first meant a
-        # failed first publish raised to the caller ("not sent") while the
-        # ladder went on to publish the same task seconds later; the peer ran
-        # work the model had been told was never sent, and a resend ran it
-        # twice.
+        # **The ladder exists, and is registered, before the first publish.**
+        # `disconnect` ends the sends it can see on a ladder (`send.loops`): a
+        # send created only after this await is invisible to a teardown that
+        # lands during it, so the conversation gets neither the peer's answer
+        # (the routes are cleared) nor the "the mesh went down while this was
+        # being sent" notice.  The ladder cannot publish ahead of this attempt:
+        # `_deliver` waits on `send.first_landed`, which is set only below.
+        #
+        # **A first publish that raises cancels it.**  Retrying behind a caller
+        # who was told "not sent" made the peer run work the model believed had
+        # never left, and a resend ran it twice.
+        #
+        # First attempt — correlation == the public task_id.
+        loop = asyncio.create_task(self._deliver(send, after_first=True))
+        send.loops.add(loop)
         try:
             await self._publish_attempt(send, task_id)
+        except asyncio.CancelledError:
+            # **The caller was cancelled, not told "not sent".**  The publish
+            # may have landed, so its route is kept: a late reply still records
+            # the true outcome.  Nothing will set `first_landed`, so the ladder
+            # is cancelled rather than left waiting; the row stays pending, as
+            # it does after an exhausted ladder.
+            loop.cancel()
+            raise
         except Exception:  # noqa: BLE001 - the cleanup is the point; the caller sees the cause
-            self._sends.pop(task_id, None)
-            self._corr_to_task.pop(task_id, None)
-            if record:
+            loop.cancel()
+            self._forget_send(task_id)
+            # The row is only ours to close while it is still open: a terminal
+            # reply that landed during the publish (the PUBACK can be lost
+            # after the peer answered) has already recorded the truth, and
+            # `record_error` would rewrite a `completed` ending.
+            current = get_store().get(task_id)
+            if record and current is not None and current.status == "pending":
                 get_store().record_error(task_id)
             raise
-        loop = asyncio.create_task(self._deliver(send))
-        send.loops.add(loop)
+        send.first_landed.set()
         return task_id
 
     async def cancel_task(self, agent: str, task_id: str) -> str:
@@ -1543,7 +1621,7 @@ class A2AMesh:
         record = get_store().get(task_id)
         if record is None:
             return "not_found"
-        if record.status in ("completed", "failed", "cancelled"):
+        if record.status in _ENDED:
             return record.status
         session = uuid.uuid4().hex[:12]
         props = make_properties(
@@ -1566,11 +1644,7 @@ class A2AMesh:
         # first, and the re-read below leaves that terminal status alone.
         await self._publish_props(self._topics.request(agent), payload, props)
         current = get_store().get(task_id)
-        if current is not None and current.status in (
-            "completed",
-            "failed",
-            "cancelled",
-        ):
+        if current is not None and current.status in _ENDED:
             return current.status
         get_store().record_cancel(task_id)
         return "cancelled"

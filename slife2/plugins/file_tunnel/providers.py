@@ -545,10 +545,14 @@ class _TunnelProviderBase:
         if self._public_url is not None:
             logger.warning("tunnel_already_running url=%s", self._public_url)
             return self._public_url
-        if self._closed:
-            return ""
 
         with self._start_lock:
+            # **`_closed` is read under the same lock `stop` sets it under.**
+            # Read before the lock, a `stop` landing in between was invisible:
+            # this attempt then bumped the generation past stop's bump, became
+            # the current owner, and published a tunnel after shutdown.
+            if self._closed:
+                return ""
             if self._starting:
                 elapsed = time.monotonic() - (self._starting_at or time.monotonic())
                 if elapsed < _T.timeouts.ready.tunnel_start:
@@ -829,14 +833,27 @@ class NgrokTunnel(_TunnelProviderBase):
         return self._run_attempts(_attempt)
 
     def _teardown(self) -> None:
-        if self._public_url is None or self._ngrok is None:
+        """Disconnect the listener this provider holds.
+
+        **Keyed on the listener, not the published URL.**  A start can be
+        cut off by `stop` before its URL is published (`_start_gen` refuses to
+        publish it); the base then calls this to release what the worker
+        established, and a URL-keyed guard would answer that call with
+        nothing while a live ngrok session stayed connected.
+        """
+        listener, self._listener = self._listener, None
+        if self._ngrok is None:
             return
+        url = self._public_url
         try:
-            self._ngrok.disconnect(self._public_url)
-            logger.info("tunnel_disconnected provider=ngrok url=%s", self._public_url)
+            if url is None and listener is not None:
+                url = str(listener.url()).rstrip("/")
+            if url is None:
+                return  # an inherited URL, with no transport of ours behind it
+            self._ngrok.disconnect(url)
+            logger.info("tunnel_disconnected provider=ngrok url=%s", url)
         except Exception as e:  # noqa: BLE001 — stop() must never raise
             logger.warning("tunnel_disconnect_error err=%s", e)
-        self._listener = None
 
     def is_alive(self) -> bool:
         if self._public_url is None:

@@ -1548,6 +1548,14 @@ silently; the bridge answers the first with `session timeout`. The plugin reads
 that answer as an offline state and reports the reason through
 `wechat_check_status`.
 
+While a login waits, the session holds the code itself: `wechat_check_status`
+hands out the drawn QR and what it encodes. A code that expires is replaced in
+the background and the replacement becomes the session's, so a status always
+names the current code (drawn, or its URL when the renderer is absent). A new
+login clears the code it replaces before fetching, and logout clears it with
+the state, so a status never hands out a code the server has already
+invalidated.
+
 The model-facing tools are:
 
 - `wechat_login`;
@@ -1602,10 +1610,13 @@ Rules specific to this system:
    cancel from a row that says a thing happened that never left. The task store
    refuses to let a later result or failure rewrite an ending the caller was
    already told about.
-6. **A send reported failed is not retried behind the caller.** The first
-   publish happens before the requester ladder starts. If it raises, the send is
-   closed failed and the caller sees the error; starting the ladder first let it
-   publish a task the model had been told was never sent.
+6. **A send reported failed is not retried behind the caller.** The ladder
+   task is registered before the first publish so a teardown can see the send,
+   but it waits for that publish to return. If the publish raises, the send is
+   closed with the caller's error and no retry is published; a terminal reply
+   that landed during the publish keeps the ending it already recorded. A
+   publish refused before the outbound client is touched drops the correlation
+   it registered, so an outage cannot fill the routing table with dead routes.
 7. **The broker is probed, owned, and stopped with the stack.** The plugin starts
    a broker when the configured one is local and absent, fails the start if it
    still will not serve, and `slife2 down` stops a broker this machine started.
@@ -2171,6 +2182,11 @@ its URL and answers HTTP 530, so reachability is checked separately and the tool
 refuses rather than handing out a dead link. A merely unreachable transport gets
 a heal window before being respawned, and an unanswerable liveness probe is not
 an outage.
+
+A stop that lands while a start is establishing the transport invalidates that
+attempt: the worker releases whatever it established — including an ngrok
+listener that has not published a URL yet — instead of publishing after `stop`
+returned.
 
 The tunnel publishes the MCP endpoint as well as `/share/{token}`. Any caller
 who knows the hostname can call `expose_local_image` and read any file the
