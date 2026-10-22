@@ -79,6 +79,43 @@ def test_powershell_syntax() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the shell installer is POSIX-only")
+def test_uninstall_keeps_a_failed_entry_and_drains_the_rest(tmp_path: Path) -> None:
+    """One failure must not write every later success back as still installed.
+
+    The accumulator was shared across the loop, so after `uv tool uninstall`
+    failed, the local node removal that followed succeeded but was re-appended
+    to the state file — and the file could never drain.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    state = tmp_path / "state.tsv"
+    state.write_text("uv-tool\tslife2\tslife2\nlocal\tnode\tnode\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "uv", "#!/bin/sh\nexit 1\n")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = subprocess.run(
+        [bash, str(SHELL), "uninstall"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "SLIFE2_DATA_DIR": str(tmp_path / "data"),
+            "SLIFE2_INSTALL_STATE": str(state),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        },
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert state.read_text(encoding="utf-8").splitlines() == ["uv-tool\tslife2\tslife2"]
+
+
 def test_no_elevation_or_system_package_manager() -> None:
     """The installers remain user-level: no root, no system package manager."""
     forbidden = (

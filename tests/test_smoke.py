@@ -86,6 +86,45 @@ def test_version_prints_the_version(capsys) -> None:
     assert "slife2 0.3.0" in capsys.readouterr().out
 
 
+#: A config the loader accepts whose `default:` names a provider that is not
+#: there — the state a provider rename leaves behind.
+STALE_DEFAULT = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    api_key: ${SMOKE_TEST_KEY:-none}
+    models:
+      - model: big
+        context_window: 100000
+        max_tokens: 4000
+default: nosuch/model
+"""
+
+
+@pytest.mark.parametrize("command", ["status", "down", "logs"])
+def test_a_recovery_command_does_not_resolve_the_default_model(
+    command: str,
+    isolated_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`status`, `down` and `logs` are what fixes a stale `default:`.
+
+    Resolving the reference before dispatch made the commands an operator needs
+    after a provider rename exit 2 without running at all.
+    """
+    from tests.fakes import config_file
+
+    config_file(isolated_runtime, STALE_DEFAULT)
+    ran: list[str] = []
+    monkeypatch.setattr(
+        slife2, f"_{command}", lambda *args, **kwargs: ran.append(command) or 0
+    )
+
+    assert main([command]) == 0
+    assert ran == [command]
+
+
 def test_a_flag_for_another_command_is_a_usage_error() -> None:
     """A flag that would do nothing is refused, not carried along."""
     with pytest.raises(SystemExit) as exit_info:

@@ -301,6 +301,12 @@ class Session:
         #: A QR login in progress, and v1's four words for where it is.
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
         self.qr_error: str = ""
+        #: The code in hand and what it encodes.  **The session's, not the
+        #: login call's**: a QR that expires is replaced in the background, and
+        #: a code returned only by `wechat_login` would be a code nobody could
+        #: scan while the status still said `waiting`.
+        self.qr: str = ""
+        self.qr_url: str = ""
         self.qr_task: asyncio.Task[None] | None = None
         #: The link state this session has already said, so a transition is
         #: announced once and a state that has not moved is announced not at
@@ -1191,10 +1197,6 @@ class Wechat:
             )
         content = str(data.get("qrcode_img_content") or qrcode)
 
-        self._cancel(session.qr_task)
-        session.qr_task = self._spawn(
-            self._qr_watch(session, qrcode, ilink.BASE_URL, attempts=0)
-        )
         try:
             rendered = render_qr(content)
         except ImportError:
@@ -1205,6 +1207,12 @@ class Wechat:
             # `qr` is empty and the URL rides in `qr_url`, where the tool's own
             # `Returns:` says it is what to send instead.
             rendered = ""
+        session.qr = rendered
+        session.qr_url = content
+        self._cancel(session.qr_task)
+        session.qr_task = self._spawn(
+            self._qr_watch(session, qrcode, ilink.BASE_URL, attempts=0)
+        )
         return {
             "state": "waiting",
             "qr": rendered,
@@ -1263,6 +1271,13 @@ class Wechat:
                         "The QR expired and a new one could not be fetched."
                     )
                     return
+                content = str(refreshed.get("qrcode_img_content") or fresh)
+                try:
+                    session.qr = render_qr(content)
+                except ImportError:
+                    # The URL is still the code's address; `qr_url` carries it.
+                    session.qr = ""
+                session.qr_url = content
                 session.qr_state = "waiting"
                 session.qr_task = self._spawn(
                     self._qr_watch(session, fresh, base_url, attempts=attempts + 1)
@@ -1460,6 +1475,11 @@ class Wechat:
             # The QR login, in the session's own words: waiting, scanned,
             # confirmed, expired or error, and `""` when no login is in progress.
             "qr_state": qr_state,
+            # **The code itself while it can still be scanned.**  A refreshed
+            # code is the session's now, so a status answer can hand it over
+            # instead of saying `waiting` about a code nobody holds.
+            "qr": session.qr if qr_state in ("waiting", "scanned") else "",
+            "qr_url": (session.qr_url if qr_state in ("waiting", "scanned") else ""),
             "error": error,
         }
 
@@ -1643,7 +1663,10 @@ def build_server(
             messages are being watched for, and `hours_left` of the login's day.
             `qr_state` is a login in progress: `waiting` for the code to be
             scanned, `scanned` for one to be confirmed on the phone, `confirmed`
-            or `expired` or `error`, and then call `wechat_login` again. `error`
+            or `expired` or `error`, and then call `wechat_login` again. `qr` is
+            that code drawn, and `qr_url` what it encodes — both empty unless a
+            login is waiting or scanned; a code refreshed after an expiry is
+            here rather than in the original login answer. `error`
             says what is wrong whenever anything is — empty means nothing is —
             and `peer_wechat_id` and `context_token` are who a reply goes to, and
             `heard_from` is whether they wrote to you — false means nobody has,

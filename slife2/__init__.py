@@ -846,16 +846,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = find_config_path()
         config: Config = load()
-        # The provider itself is not needed here: the TUI talks to the *agent*
-        # server, which is the one that knows which model server to use.  What
-        # is needed is the reference — because `--model` may be a bare provider
-        # name and the wire wants `provider/model` — and the model's own entry,
-        # which is where everything the status bar says about the model comes
-        # from: its window, whether it reasons, whether it reads images.
-        #
-        # Resolved here rather than after the servers are up so that a `--model`
-        # naming something that does not exist is one line and no processes.
-        model_reference, model_settings = tui_model(config, args.model or "")
     except ConfigError as exc:
         # A config mistake is worth a one-line message rather than a traceback:
         # nothing has started yet, and the fix is in the file being named.
@@ -868,6 +858,24 @@ def main(argv: list[str] | None = None) -> int:
         return _down(config, force=args.force)
     if args.command == "logs":
         return _logs(config, args.server, args.lines, args.all)
+
+    try:
+        # The provider itself is not needed here: the TUI talks to the *agent*
+        # server, which is the one that knows which model server to use.  What
+        # is needed is the reference — because `--model` may be a bare provider
+        # name and the wire wants `provider/model` — and the model's own entry,
+        # which is where everything the status bar says about the model comes
+        # from: its window, whether it reasons, whether it reads images.
+        #
+        # Resolved here rather than after the servers are up so that a `--model`
+        # naming something that does not exist is one line and no processes —
+        # **and after the commands above**, because `status`, `down` and `logs`
+        # are what an operator runs to recover from a stale `default:`; failing
+        # them on that reference left the recovery commands unusable.
+        model_reference, model_settings = tui_model(config, args.model or "")
+    except ConfigError as exc:
+        print(f"slife2: {exc}")
+        return 2
 
     # Imported here rather than at module scope so `slife2.libs.host.config` and the
     # servers stay importable without pulling in fastmcp or Textual.

@@ -1596,39 +1596,46 @@ Rules specific to this system:
    distinguishes completed, cancelled, and failed. The one outcome no reply can
    produce — the retry ladder running out — is `UNREACHABLE`, because it is the
    requester's failure and must not be rendered as a peer's answer.
-5. **A withdrawal outranks a late answer.** Cancelling records the cancellation,
-   and the task store refuses to let a later result or failure rewrite an ending
-   the caller was already told about.
-6. **The broker is probed, owned, and stopped with the stack.** The plugin starts
+5. **A withdrawal outranks a late answer.** Cancelling publishes the withdrawal
+   first and records it only after the publish lands; a failed publish leaves
+   the row pending so a retry can publish, rather than answering every later
+   cancel from a row that says a thing happened that never left. The task store
+   refuses to let a later result or failure rewrite an ending the caller was
+   already told about.
+6. **A send reported failed is not retried behind the caller.** The first
+   publish happens before the requester ladder starts. If it raises, the send is
+   closed failed and the caller sees the error; starting the ladder first let it
+   publish a task the model had been told was never sent.
+7. **The broker is probed, owned, and stopped with the stack.** The plugin starts
    a broker when the configured one is local and absent, fails the start if it
    still will not serve, and `slife2 down` stops a broker this machine started.
    A record of ownership, not a guess, makes stopping safe.
-7. **An inbound response-typed message is acknowledged and dropped.** A peer that
+8. **An inbound response-typed message is acknowledged and dropped.** A peer that
    streams its result reaches the response topic. A stray `task_response` on the
    request topic is not a new task.
-8. **A wildcard broker address is refused.** `0.0.0.0`, `::`, or empty is every
+9. **A wildcard broker address is refused.** `0.0.0.0`, `::`, or empty is every
    interface, not the machine's loopback broker; starting mosquitto there with
    anonymous access would publish every topic and accept tasks from anybody on
    the network.
-9. **`provider:` is a hard constraint.** Mosquitto is the only broker this build
+10. **`provider:` is a hard constraint.** Mosquitto is the only broker this build
    speaks; any other value is a configuration error, not a silently disabled
    feature.
-10. **A broadcast is not delivered to its sender.** The event subscription uses
+11. **A broadcast is not delivered to its sender.** The event subscription uses
     MQTT v5's No Local option, so the broker never forwards a member's own
     publication back to it. The sender named in the payload is the receiver's
     attribution; an event that names this member but was published by somebody
     else is refused rather than treated as its own.
-11. **A group is a named roster with an owner, kept per member.** The owner
+12. **A group is a named roster with an owner, kept per member.** The owner
     creates it and names the members; there is no invitation or acceptance.
     Every member persists its own YAML record under its own directory, and
     learns the roster from group traffic. Only the owner may replace the roster
     or disband the group; a member's way out is leaving.
-12. **Leaving is autonomous, including for the owner.** A member leaves itself,
+13. **Leaving is autonomous, including for the owner.** A member leaves itself,
     with no one's approval. An owner's departure transfers the group to the
     first remaining member in roster order, or disbands it when nobody remains.
     A fork is never a member: it is temporary, so a roster naming one would
     keep addressing a name nobody answers.
-13. **Group traffic is directed, fire-and-forget, and never returns to its
+14. **Group traffic is directed, fire-and-forget, and never returns to its
     sender.** One QoS 0 event per recipient on that recipient's own topic; the
     other members receive it and the sender does not. A member that is not
     listening misses it. Every event carries the roster and a generation id, so
@@ -1638,22 +1645,22 @@ Rules specific to this system:
     member that stays silent is not `pending` or `undelivered` — a group
     message is not a task, `sent` is only a publish count, and a task request
     is the only send with an expected answer.
-14. **Group messages have their own vocabulary.** The peer network uses the
+15. **Group messages have their own vocabulary.** The peer network uses the
     `PeerAgentGroup` channel and marker; the local network uses
     `SubagentGroup`, for the maker and its subagents alike. The marker carries
     `from` (the sender), the group and its owner. The roster is a separate read
     (`group_member_list`), so a large group is not repeated in every message; the wire
     payload carries it because membership has to converge from traffic. Control
     events use the wire only and never become a marker.
-15. **Mentions are text, not delivery.** `@name` and `@all` address members the
+16. **Mentions are text, not delivery.** `@name` and `@all` address members the
     way a chat group does. They are attention: every other member still
     receives the message.
-16. **Membership controls are silent.** A join, leave or disband changes the
+17. **Membership controls are silent.** A join, leave or disband changes the
     local record and nothing else; the conversation learns the current roster
     from the group member list tool, or from the next group message's wire
     event. Membership is not activity: a member that never answers is still a
     member.
-17. **A local send names a member; a remote send says it is unverified.** On
+18. **A local send names a member; a remote send says it is unverified.** On
     the subagent network membership is the directory set, so an unknown name
     cannot be delivered by any later mechanism — the send is refused before it
     is published rather than retried and reported against a name that never
@@ -2205,7 +2212,9 @@ A daemon's log is read as UTF-8, so a spawned Python child is given
 `PYTHONIOENCODING=utf-8`: without it the child writes the locale's codec and
 every non-ASCII line reaches `slife2 logs` as replacement characters.
 Every timestamp comes from one place: local time with an offset, seconds
-precision. One format is what keeps ordering and range bounds correct.
+precision. One format is what keeps ordering and range bounds correct; a range
+compares `julianday` values, because two offsets around a DST change do not sort
+as strings in the order their instants happened.
 
 ### 12.4 Timeouts
 
@@ -2345,7 +2354,9 @@ field arrives as a test that fails without the fix.
 
 3. **A scheduled run and the task that runs it.** A run is tied to its task by a
    name-derived id, which is not unique across two overlapping runs of one task.
-   *Resolution would require:* an id minted per run.
+   The poll and `schedule_run_now` now settle a finished run before starting
+   another, which closes the ordinary window; *an id minted per run* is still
+   the deeper fix.
 
 4. **Where a retry policy lives.** Two channels keep their own backoff and reset
    it on different events.

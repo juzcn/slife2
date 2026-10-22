@@ -88,6 +88,9 @@ class Bridge:
         }
         #: What `get_qrcode_status` says — `{}` is "still waiting".
         self.scan: dict[str, Any] = {}
+        #: One `expired` answer, then back to `scan` — so a test can drive a
+        #: refresh without also expiring the code that replaced it.
+        self.expire_once = False
         #: And that one endpoint failing, which is the poll a watch is made of.
         self.scan_fails = False
         #: Every path asked for, in order, so a test can count the polls.
@@ -125,6 +128,9 @@ class Bridge:
         if path == "ilink/bot/get_qrcode_status":
             if self.scan_fails:
                 raise ConnectionError("the bridge dropped the connection")
+            if self.expire_once:
+                self.expire_once = False
+                return {"status": "expired"}
             return self.scan
         if path == "ilink/bot/getupdates":
             if self.envelope:
@@ -399,6 +405,40 @@ async def test_a_watch_that_cannot_poll_ends_the_login_rather_than_waiting(
     assert after["qr_state"] == "error", "a dead watch is a state, not a wait"
     assert after["connected"] is False
     assert "could not be followed" in after["error"], "and the reason is in it"
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_qr_is_handed_out_by_the_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired code is replaced in the background, and the new one is reachable.
+
+    `_qr_follow` fetched a fresh code and watched it, but the code itself was
+    handed only to the watch: `wechat_check_status` kept saying `waiting` about
+    a code nobody could show, and the person's only code was the expired one.
+    """
+    bridge = Bridge()
+    made = rig(monkeypatch, bridge=bridge)
+    async with Client(
+        served(http=bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        first = await ask(client, "wechat_login")
+        bridge.qr = {
+            "qrcode": "QR-2",
+            "qrcode_img_content": "https://example.test/scan-2",
+        }
+        bridge.expire_once = True
+        after: dict[str, Any] = {}
+        for _ in range(400):
+            after = await ask(client, "wechat_check_status")
+            if after["qr_url"] == "https://example.test/scan-2":
+                break
+            await asyncio.sleep(0.005)
+
+    assert after["qr_state"] == "waiting"
+    assert after["qr_url"] == "https://example.test/scan-2"
+    assert after["qr"] and "█" in after["qr"], "the replacement is scannable"
+    assert after["qr"] != first["qr"], "and it is not the expired code"
 
 
 @pytest.mark.asyncio

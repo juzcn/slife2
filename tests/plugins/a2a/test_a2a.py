@@ -72,6 +72,8 @@ from slife2.plugins.a2a import server as a2a_server
 from slife2.plugins.a2a.inbound_store import InboundStore
 from slife2.plugins.a2a.mesh import (
     _MAX_ATTEMPTS,
+    _MAX_CORR_ENTRIES,
+    _MAX_TRACKED_SENDS,
     COMPLETED,
     FAILED,
     A2AMesh,
@@ -413,6 +415,16 @@ def test_a_fifo_cache_forgets_the_oldest_past_its_cap() -> None:
     cache["a"], cache["b"], cache["c"] = 1, 2, 3
     assert dict(cache) == {"b": 2, "c": 3}
     assert cache.get("a") is None
+
+
+def test_the_correlation_cap_holds_a_route_for_every_ladder_rung() -> None:
+    """One send publishes under the primary correlation and each retry's own.
+
+    Sizing the table at two routes per send evicted the oldest primary entries
+    before the peers could answer on them, and the result was dropped as an
+    unknown correlation while the send still looked open.
+    """
+    assert _MAX_CORR_ENTRIES >= _MAX_ATTEMPTS * _MAX_TRACKED_SENDS
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1240,36 @@ async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
 
 
 @pytest.mark.asyncio
+async def test_a_first_publish_that_fails_does_not_start_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send the caller was told failed must not be retried behind their back.
+
+    `send_message` created the ladder before awaiting the first publish, so a
+    dropped link raised "not connected" while the ladder published the same
+    task a moment later — the peer executed work the model had been told was
+    never sent.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+    failures = [RuntimeError("A2A mesh is not connected.")]
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+        if failures:
+            raise failures.pop()
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await mesh.send_message(PEER, "hi")
+
+    await asyncio.sleep(0.05)
+    assert len(published) == 1, "the failed send was retried in the background"
+
+
+@pytest.mark.asyncio
 async def test_a_name_probe_that_failed_is_not_a_free_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1251,6 +1293,37 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
 
     with pytest.raises(RuntimeError, match="name probe"):
         await mesh.connect()
+
+
+@pytest.mark.asyncio
+async def test_the_name_probe_bounds_its_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connect runs in an executor, outside the probe's own read window.
+
+    aiomqtt's default operation timeout is ten seconds and paho's socket
+    connect has its own; without passing a timeout the probe could outlast the
+    deadline the mesh states for connecting to a blackholed broker.
+    """
+    captured: dict[str, Any] = {}
+
+    class Capturing:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        async def __aenter__(self) -> None:
+            raise OSError("stop before connecting")
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    monkeypatch.setattr("slife2.plugins.a2a.mesh.aiomqtt.Client", Capturing)
+
+    with pytest.raises(RuntimeError, match="name probe"):
+        await mesh._probe_own_name()
+
+    assert captured["timeout"] == _T.timeouts.deliver.mqtt_connect
 
 
 @pytest.mark.asyncio
@@ -2474,6 +2547,37 @@ async def test_a_window_arriving_as_the_mesh_is_torn_down_gets_a_live_one(
         await leaving
         await arriving
         assert left == [AGENT, AGENT], "each departure takes its own mesh down"
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_that_could_not_be_published_is_not_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row is the caller's evidence, so it may only follow a real publish.
+
+    Writing `cancelled` first meant a dropped mesh raised to the caller while the
+    row said the task was withdrawn; every retry then took the early return and
+    never published at all.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+    failures = [RuntimeError("A2A mesh is not connected.")]
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+        if failures:
+            raise failures.pop()
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    get_store().record_send(TASK, PEER)
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await mesh.cancel_task(PEER, TASK)
+    assert get_store().get(TASK).status == "pending"
+
+    assert await mesh.cancel_task(PEER, TASK) == "cancelled"
+    assert get_store().get(TASK).status == "cancelled"
+    assert len(published) == 2, "the retry published the withdrawal"
 
 
 @pytest.mark.asyncio

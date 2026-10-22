@@ -124,10 +124,11 @@ _MAX_TRACKED_SENDS = 500  # delivery-tracking cap (mirrors the task store)
 #: Cap on correlation→task routing entries.  Every correlation a task was
 #: published under stays routed until its TERMINAL reply lands (the peer may
 #: answer on any of them — see ``_deliver``), then all of them are dropped
-#: together.  The cap is a safety valve for sends that never complete — a
-#: long session (or sends evicted from the capped ``_sends`` cache before
-#: their reply) would otherwise grow ``_corr_to_task`` without limit.
-_MAX_CORR_ENTRIES = 2 * _MAX_TRACKED_SENDS
+#: together.  **Three per send, and the cap is sized for that**: the primary
+#: correlation plus one per ladder rung, so ``_MAX_TRACKED_SENDS`` unanswered
+#: sends can hold three times their number without evicting a route the peer
+#: may still answer on.  The cap is a safety valve, not a budget.
+_MAX_CORR_ENTRIES = 3 * _MAX_TRACKED_SENDS
 
 
 def member_name(agent: str, subagent: str = "") -> str:
@@ -785,6 +786,13 @@ class A2AMesh:
                 f"-probe-{uuid.uuid4().hex[:8]}"
             ),
         )
+        # **The connect has its own bound.**  paho's blocking connect runs in
+        # an executor, and aiomqtt's own wait for CONNACK defaults to ten
+        # seconds; the `name_probe` window below starts only once the
+        # connection is up, so a blackholed broker left this call (and the
+        # session lock around it) waiting outside every deadline the mesh
+        # states.
+        kwargs["timeout"] = _T.timeouts.deliver.mqtt_connect
         try:
             async with aiomqtt.Client(**kwargs) as client:
                 await client.subscribe(
@@ -1502,10 +1510,22 @@ class A2AMesh:
             record=record,
         )
         self._sends[task_id] = send  # FIFOCache evicts the oldest past the cap
+        # First attempt — correlation == the public task_id.  **The ladder
+        # starts only once this one has left.**  Creating it first meant a
+        # failed first publish raised to the caller ("not sent") while the
+        # ladder went on to publish the same task seconds later; the peer ran
+        # work the model had been told was never sent, and a resend ran it
+        # twice.
+        try:
+            await self._publish_attempt(send, task_id)
+        except Exception:  # noqa: BLE001 - the cleanup is the point; the caller sees the cause
+            self._sends.pop(task_id, None)
+            self._corr_to_task.pop(task_id, None)
+            if record:
+                get_store().record_error(task_id)
+            raise
         loop = asyncio.create_task(self._deliver(send))
         send.loops.add(loop)
-        # First attempt — correlation == the public task_id.
-        await self._publish_attempt(send, task_id)
         return task_id
 
     async def cancel_task(self, agent: str, task_id: str) -> str:
@@ -1525,7 +1545,6 @@ class A2AMesh:
             return "not_found"
         if record.status in ("completed", "failed", "cancelled"):
             return record.status
-        get_store().record_cancel(task_id)
         session = uuid.uuid4().hex[:12]
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, session),
@@ -1539,7 +1558,21 @@ class A2AMesh:
                 "params": {"id": task_id},
             }
         )
+        # **The withdrawal is published before the row says it happened.**  A
+        # row written first turned a failed publish into a task that every
+        # later cancel answered "cancelled" without ever telling the peer; the
+        # caller was told work had been withdrawn that was still running.  A
+        # reply that lands during this await is recorded by `_handle_reply`
+        # first, and the re-read below leaves that terminal status alone.
         await self._publish_props(self._topics.request(agent), payload, props)
+        current = get_store().get(task_id)
+        if current is not None and current.status in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            return current.status
+        get_store().record_cancel(task_id)
         return "cancelled"
 
     async def broadcast(self, event: str) -> None:

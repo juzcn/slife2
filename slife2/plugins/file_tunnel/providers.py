@@ -367,6 +367,11 @@ class _TunnelProviderBase:
         self._starting: bool = False  # guard against concurrent starts
         self._starting_at: float | None = None  # monotonic time of the attempt
         self._start_gen: int = 0  # bumped per accepted start (stale ownership)
+        #: Set by `stop`.  A start runs on a worker thread, so cancelling the
+        #: task that awaited it does not cancel the thread: without this flag a
+        #: start that was in flight at shutdown could spawn its child, publish
+        #: its URL, and leave both behind after `stop()` had returned.
+        self._closed: bool = False
         self._start_lock = threading.Lock()  # serializes guard mutation only
         # Set once a start attempt has concluded unsuccessfully.  Cleared on a
         # successful start or an explicit stop — lets a reader report "tunnel
@@ -540,6 +545,8 @@ class _TunnelProviderBase:
         if self._public_url is not None:
             logger.warning("tunnel_already_running url=%s", self._public_url)
             return self._public_url
+        if self._closed:
+            return ""
 
         with self._start_lock:
             if self._starting:
@@ -578,6 +585,11 @@ class _TunnelProviderBase:
                         self.label,
                         url,
                     )
+                    if self._closed:
+                        # Shutdown took the tunnel while this thread was
+                        # establishing it.  `stop` saw no child to kill; this
+                        # is the moment there is one.
+                        self._teardown()
                     return self._public_url or ""
                 self._public_url = url
                 os.environ[_TUNNEL_URL_ENV] = url
@@ -606,6 +618,8 @@ class _TunnelProviderBase:
         """
         last_error: Exception | None = None
         for n in range(1, _MAX_RETRIES + 1):
+            if self._closed:
+                raise RuntimeError("the tunnel was stopped while it was starting")
             try:
                 return attempt()
             except Exception as e:  # noqa: BLE001 — retried, then re-raised
@@ -633,6 +647,15 @@ class _TunnelProviderBase:
 
     def stop(self) -> None:
         """Disconnect the tunnel.  Never raises."""
+        # **Invalidate a start in flight before tearing down.**  The start runs
+        # in a worker thread (`asyncio.to_thread`), so cancelling its task does
+        # not stop it; the generation bump makes the thread tear down whatever
+        # it established instead of publishing it after this returned.
+        with self._start_lock:
+            self._closed = True
+            self._start_gen += 1
+            self._starting = False
+            self._starting_at = None
         # A stopped tunnel is never "failed" — clear the flag even when there
         # is nothing to disconnect.
         self._failed = False

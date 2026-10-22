@@ -354,6 +354,51 @@ def test_stop_clears_the_url_and_the_failed_flag(monkeypatch) -> None:
     tunnel.stop()
 
 
+def test_a_stop_during_a_start_tears_the_late_tunnel_down() -> None:
+    """A start runs in a worker thread, so cancelling its task does not stop it.
+
+    The lifespan cancels the eager-start task and then calls `stop`, which used
+    to see no child because the worker had not spawned one yet.  The worker then
+    finished, published a URL and left the child running after shutdown.
+    """
+
+    class Slow(providers._TunnelProviderBase):
+        label = "slow"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.teardowns = 0
+
+        def _do_start(self, port: int) -> str:
+            self.entered.set()
+            self.release.wait(timeout=5)  # timeouts: the test's own rendezvous
+            return "https://slow.example"
+
+        def _teardown(self) -> None:
+            self.teardowns += 1
+
+        def is_alive(self) -> bool:
+            return False
+
+    tunnel = Slow()
+    started: list[str] = []
+    thread = threading.Thread(
+        target=lambda: started.append(tunnel.start(9090)), daemon=True
+    )
+    thread.start()
+    assert tunnel.entered.wait(5)  # timeouts: the test's own rendezvous
+
+    tunnel.stop()
+    tunnel.release.set()
+    thread.join(timeout=5)  # timeouts: the test's own rendezvous
+
+    assert started == [""], "a stopped start publishes nothing"
+    assert tunnel.public_url is None
+    assert tunnel.teardowns >= 2, "the late worker tore its own child down"
+
+
 def test_the_url_travels_through_the_environment(monkeypatch) -> None:
     """So that anything in this process — and anything it starts — can resolve
     the tunnel without holding the provider.

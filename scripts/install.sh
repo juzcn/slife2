@@ -629,13 +629,17 @@ do_uninstall() {
     grep '^#' "$STATE" > "$new_state" 2>/dev/null || true
     code=0
     while IFS=$(printf '\t') read -r manager package tool; do
+        # **Per entry.**  A failed component must not make every later, successful
+        # removal look failed and write it back to the state file: that file could
+        # then never drain, and the next run would fail on the same entry again.
+        entry=0
         case "$manager" in
             local) remove_local "$tool" "$package" ;;
-            brew) brew uninstall "$package" >/dev/null 2>&1 || code=1 ;;
-            uv-tool) uv tool uninstall "$package" >/dev/null 2>&1 || code=1 ;;
-            *) code=1 ;;
+            brew) brew uninstall "$package" >/dev/null 2>&1 || entry=1 ;;
+            uv-tool) uv tool uninstall "$package" >/dev/null 2>&1 || entry=1 ;;
+            *) entry=1 ;;
         esac
-        [ "$code" -eq 0 ] || printf '%s\t%s\t%s\n' "$manager" "$package" "$tool" >> "$new_state"
+        [ "$entry" -eq 0 ] || { code=1; printf '%s\t%s\t%s\n' "$manager" "$package" "$tool" >> "$new_state"; }
     done < <(grep -v -e '^#' -e '^$' "$STATE")
     mv "$new_state" "$STATE"
     if [ "$code" -eq 0 ]; then
