@@ -210,6 +210,44 @@ export DEEPSEEK_API_KEY=...
 `slife2.yaml` is optional: before the file exists, slife2 uses built-in defaults,
 including a single OpenAI-compatible provider.
 
+### Docker
+
+A container distribution is built from a checkout. It runs the project's own
+installer and uses the shipped `slife2.yaml` unchanged, including
+`desktop-commander` and the rest of the configured tools.
+
+```bash
+docker build -f docker/Dockerfile -t slife2:local .
+```
+
+The image runs as the non-root user `slife2`; its checkout and data directory
+are `/opt/slife2`, and its runtime directory is
+`/home/slife2/.slife2/runtime`. It is about 3 GB because it contains the
+programs the full configuration names.
+
+Run one prompt and exit:
+
+```bash
+docker run --rm -e DEEPSEEK_API_KEY=... \
+  -e SLIFE2_PROMPT='Use the shell tool to run pwd and report the output.' \
+  slife2:local
+```
+
+Or start the agent headless and keep it running:
+
+```bash
+docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
+```
+
+`DEEPSEEK_API_KEY` is what the default provider needs; the other `${VAR}`
+references in the configuration are resolved lazily, and a tool that needs a
+missing key fails at the call. Mount a different configuration over
+`/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
+`/home/slife2/.slife2` if conversations and logs should outlive the container.
+
+See [docker/README.md](docker/README.md) for the one-shot prompt, the
+environment variables, and the container-specific notes.
+
 ## Quick start
 
 After the one-click installer, the dependencies are already synced and

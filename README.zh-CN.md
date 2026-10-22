@@ -196,6 +196,40 @@ export DEEPSEEK_API_KEY=...
 `slife2.yaml` 是可选的：配置文件尚未创建时，slife2 使用内置默认值，其中包括
 一个 OpenAI 兼容 provider。
 
+### Docker
+
+从源码目录构建容器发行版。镜像里运行项目自己的安装器，并使用原样的
+`slife2.yaml`，包括 `desktop-commander` 和其余配置好的工具。
+
+```bash
+docker build -f docker/Dockerfile -t slife2:local .
+```
+
+镜像以非 root 用户 `slife2` 运行；源码目录和数据目录是 `/opt/slife2`，
+运行时目录是 `/home/slife2/.slife2/runtime`。镜像约 3 GB，因为包含完整配置
+点名的程序。
+
+运行一条提示并退出：
+
+```bash
+docker run --rm -e DEEPSEEK_API_KEY=... \
+  -e SLIFE2_PROMPT='使用 shell 工具运行 pwd 并报告输出。' \
+  slife2:local
+```
+
+或者以 headless 方式启动 agent 并保持运行：
+
+```bash
+docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
+```
+
+`DEEPSEEK_API_KEY` 是默认 provider 需要的 key；配置里其余 `${VAR}` 是惰性
+解析的，需要缺失 key 的工具会在调用时失败。要使用另一份配置，把它挂载到
+`/opt/slife2/slife2.yaml`；要让会话和日志在容器退出后保留，挂载
+`/opt/slife2/agents` 和 `/home/slife2/.slife2`。
+
+一次性提示、环境变量和容器相关说明见 [docker/README.md](docker/README.md)。
+
 ## 快速开始
 
 使用一键安装后，依赖已经同步，`credstore` 也已安装。设置 key 并启动窗口：

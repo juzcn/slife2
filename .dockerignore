@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+agents
+dist
+build
+wheels
+__pycache__
+*.py[oc]
+.pytest_cache
+.ruff_cache
+designer_notes.md
+tests
