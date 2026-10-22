@@ -72,7 +72,13 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.config import API_SERVER_NAMES, CONTEXT_SERVER_NAME, Config
+from slife2.libs.host.config import (
+    API_SERVER_NAMES,
+    CONTEXT_SERVER_NAME,
+    Config,
+    for_the_call,
+    load_cached,
+)
 from slife2.libs.host.paths import agents_dir, turn_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import (
@@ -192,6 +198,7 @@ async def _ask_model(
 def build_server(
     config: Config,
     *,
+    source: Callable[[], Config] | None = None,
     embedder: Embedder | None = None,
     ask: Discriminator | None = None,
 ) -> FastMCP:
@@ -210,6 +217,18 @@ def build_server(
     """
     embedding = EmbedderConnection(config, embedder=embedder)
     injected = ask
+
+    def current() -> Config:
+        """The config this call is served from, not the one this daemon started on.
+
+        This process is shared by every home on the machine, and the model a
+        `rebuild` names comes from the caller's conversation.  Resolving that
+        reference against the daemon's own `slife2.yaml` made every rebuild in a
+        second home fail as a `ConfigError` — swallowed as "keep the context",
+        so recall never ran there.  `for_the_call` is the rule the agent server
+        and the hub already use.
+        """
+        return for_the_call(source, config)
 
     #: Files whose indexes have been brought up to date, once per process.  A
     #: file created after the startup pass is not re-synced: its own save writes
@@ -730,7 +749,7 @@ def build_server(
         *asked for* is a failure, not a zero (DESIGN.md §11.1: a weaker path is
         not a substitute for a missing capability).
         """
-        return int(config.resolve(model)[2].context_window)
+        return int(current().resolve(model)[2].context_window)
 
     async def _discriminate(
         agent: str,
@@ -753,7 +772,7 @@ def build_server(
         try:
             text = await asyncio.wait_for(
                 ask_model(agent, subagent, model, messages, user_input),
-                timeout=config.context.timeout,
+                timeout=current().context.timeout,
             )
         except TimeoutError:
             logger.info("recall_discriminator_failed reason=timeout")
@@ -773,7 +792,7 @@ def build_server(
     opening = asyncio.Lock()
     ask_model: Discriminator = injected or (
         lambda agent, subagent, model, messages, prompt: _ask_model(
-            config, model_clients, opening, agent, subagent, model, messages, prompt
+            current(), model_clients, opening, agent, subagent, model, messages, prompt
         )
     )
 
@@ -1134,7 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
         note=lambda _config: f"turns in {agents_dir()}",
     )

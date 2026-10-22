@@ -426,6 +426,26 @@ async def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -
     assert [table(r) for r in records] == ["new", "middle", "old"] and total == 3
 
 
+@pytest.mark.asyncio
+async def test_a_window_compares_instants_not_offset_strings(tmp_path) -> None:
+    """The column holds local time with an offset, and offsets are not ordered.
+
+    `01:15+00:00` is an hour and a bit after `00:30+01:00`, but as text it sorts
+    first.  A window compared the strings, so the turn was silently outside a
+    window that contained its instant — the case that appears around a DST
+    change, and the one a UTC-only test lane never sees.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _turn(store, "before", "a", at="2026-10-25T00:15:00+00:00")
+    await _turn(store, "after", "b", at="2026-10-25T01:15:00+00:00")
+
+    records, total = store.turns(since="2026-10-25T01:30:00+01:00", limit=5)
+    assert [table(record) for record in records] == ["after"] and total == 1
+
+    records, total = store.turns(until="2026-10-25T01:30:00+01:00", limit=5)
+    assert [table(record) for record in records] == ["before"] and total == 1
+
+
 def table(record) -> str:
     return record.messages[0]["content"]
 

@@ -24,6 +24,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+import slife2.plugins.context.server as context_server
 from slife2.libs.host.config import default_config
 from slife2.libs.host.paths import agent_dir
 from slife2.libs.plugin.audience import client_meta
@@ -702,6 +703,36 @@ async def _rebuild(client: Client, reply: str, **overrides):
             **overrides,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_the_rebuild_uses_the_callers_homes_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared context daemon serves every home, and models are per home.
+
+    The discriminator's model reference comes from the caller's conversation,
+    but the daemon resolved it against the config it started with — a
+    `ConfigError` in a second home, swallowed as "keep the context", so recall
+    never ran there.
+    """
+    seen: list[Any] = []
+
+    async def capture(config, *args, **kwargs) -> str:
+        seen.append(config)
+        return "{}"
+
+    monkeypatch.setattr(context_server, "_ask_model", capture)
+    mine, callers = default_config(), default_config()
+    server = build_server(mine, embedder=EMBEDDER, source=lambda: callers)
+
+    async with Client(server) as client:
+        await _seed(client, "jack", ("one", "1"))
+        await _rebuild(client, "{}")
+
+    assert seen, "the rebuild asked the model"
+    assert seen[0] is callers, "and asked with the caller's config"
+    assert seen[0] is not mine
 
 
 @pytest.mark.asyncio

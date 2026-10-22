@@ -617,6 +617,14 @@ async def poll_once(
     not a sleep.
     """
     did: list[str] = []
+    # **Before the fires, not after them.**  A run whose task has finished but
+    # whose row is still `pending` is settled first; otherwise the next fire of
+    # the same task starts a new agent task under the same name, and
+    # `agent-task:<name>` — the id both runs then carry — names only the newer
+    # one.  The old run would be settled from the new task's ending, or stay
+    # pending for its lifetime.  Asking after a just-started task would only
+    # record `running`, so nothing is lost by asking before starting.
+    did.extend(await reconcile(config, tasks_client=tasks_client))
     for store in ledgers():
         # **One bad ledger is one ledger skipped, not a pass abandoned.**  A row
         # with a hand-edited, non-ISO anchor makes `due` raise out of `moment_of`;
@@ -673,10 +681,6 @@ async def poll_once(
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
             logger.exception("%s: this ledger was skipped for this pass", store.path)
             continue
-    # After the fires rather than before them, so that a run started by this pass
-    # is asked about on the next one: a task that has just been started is
-    # `running`, and asking immediately would only add a call per fire.
-    did.extend(await reconcile(config, tasks_client=tasks_client))
     return did
 
 
@@ -1016,6 +1020,12 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         task = task_of(agent, name.strip())
+        # **A finished run of this task is settled before another starts.**
+        # `agent_task_start` names a task after the schedule task, and that name
+        # is its id, so a still-`pending` predecessor would share the id with
+        # this run.  The poll does the same before its fires; this is the manual
+        # path, and it owes the same order.
+        await _reconcile_one(config, store, tasks_client=tasks_client)
         stamp = due_at.strip()
         if stamp:
             stamp = _key_of(store, task.name, stamp)

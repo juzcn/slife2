@@ -59,12 +59,14 @@ import math
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import sqlite_vec
 
 import slife2.helpers.timeouts as _T
+from slife2.helpers.clock import at
 from slife2.helpers.timeutil import normalize_bound
 from slife2.libs.store import textindex
 
@@ -369,6 +371,21 @@ def filter_clause(clauses: list[str]) -> str:
     return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
 
+def instant_bound(bound: str) -> str:
+    """A normalized bound as a moment, for a `julianday` comparison.
+
+    **A date-only bound is a local day, not UTC midnight.**  `normalize_bound`
+    leaves such a value as `YYYY-MM-DD` (and advances an `until` past its day),
+    because its other readers compare text prefixes.  Once the comparison is by
+    instant, the day has to be given the offset the column's timestamps carry,
+    or the first hours of the local day sort before it.
+    """
+    if len(bound) == 10 and "T" not in bound:
+        day = date.fromisoformat(bound)
+        return at(datetime(day.year, day.month, day.day))
+    return bound
+
+
 def time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
     """`(clauses, params)` for a `created_at` window.
 
@@ -387,11 +404,16 @@ def time_window(since: str | None, until: str | None) -> tuple[list[str], list[s
     clauses: list[str] = []
     params: list[str] = []
     if since:
-        clauses.append("created_at >= ?")
-        params.append(normalize_bound(since, role="since"))
+        # **By instant, not by string.**  `created_at` carries a local offset,
+        # and two rows written on either side of a DST change do not sort as
+        # strings in the order they happened: `01:15+00:00` is later than
+        # `01:30+01:00`, but it is smaller as text.  `julianday` reads the
+        # offset and compares the moments.
+        clauses.append("julianday(created_at) >= julianday(?)")
+        params.append(instant_bound(normalize_bound(since, role="since")))
     if until:
-        clauses.append("created_at <= ?")
-        params.append(normalize_bound(until, role="until"))
+        clauses.append("julianday(created_at) <= julianday(?)")
+        params.append(instant_bound(normalize_bound(until, role="until")))
     return clauses, params
 
 

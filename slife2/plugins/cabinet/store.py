@@ -106,11 +106,14 @@ rebuild rather than a migration.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
 import re
 import sqlite3
+import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -139,6 +142,7 @@ from slife2.libs.store.index import (
     filter_clause,
     fuse_ranked,
     index_meta,
+    instant_bound,
     meanings_by_cosine,
     page_limit,
     place_vectors,
@@ -451,6 +455,14 @@ def mirror_path(spec: Spec, key: str) -> str:
     return f"{spec.mirror}/{mirror_stem(key)}.md" if spec.mirror else ""
 
 
+#: One mirror is written at a time.  **Not for the temp name** — that is
+#: unique per write — but for the destination: on Windows two threads replacing
+#: onto one path at the same moment can make the second `os.replace` fail after
+#: its row has already committed, which reports a failed save for a document
+#: that was stored.  The writes are small, and the cabinet is one process.
+_MIRROR_LOCK = threading.Lock()
+
+
 def _write_mirror(root: Path, relative: str, text: str, *, append: bool) -> None:
     """Put the markdown at *relative*, creating the directory it needs.
 
@@ -462,12 +474,24 @@ def _write_mirror(root: Path, relative: str, text: str, *, append: bool) -> None
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     if append:
-        with path.open("a", encoding="utf-8") as handle:
+        with _MIRROR_LOCK, path.open("a", encoding="utf-8") as handle:
             handle.write(text)
         return
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # **A temp name per write, not per path.**  Two writes of one key overlap
+    # normally (the embedding before the transaction is awaited), and a shared
+    # `<name>.tmp` meant the second writer's `os.replace` could find the first
+    # had already moved it — raising after the row was committed, so a call
+    # failed that had stored its document.  The lock covers the destination
+    # for the same reason.
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with _MIRROR_LOCK:
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
 
 def resolve(root: Path, relative: str) -> Path:
@@ -1383,14 +1407,21 @@ class CabinetStore:
         where = filter_clause(["kind = ?", *clauses])
         limit = page_limit(limit, MAX_PAGE)
         with self._connect() as connection:
+            # **One read snapshot for the count and the page.**  They were two
+            # autocommit statements, so a write between them could put a row on
+            # the page that `total` did not count (or the reverse), and the
+            # page boundary a caller computes from the two then repeats or
+            # skips a row.
+            connection.execute("BEGIN")
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) AS n FROM cabinet_doc {where}", (kind, *values)
                 ).fetchone()["n"]
             )
+            order = spec.time if spec.day else f"julianday({spec.time})"
             rows = connection.execute(
                 f"SELECT * FROM cabinet_doc {where}"
-                f" ORDER BY {spec.time} DESC, id DESC LIMIT ? OFFSET ?",
+                f" ORDER BY {order} DESC, id DESC LIMIT ? OFFSET ?",
                 (kind, *values, limit, max(0, offset)),
             ).fetchall()
         return {
@@ -1426,15 +1457,23 @@ class CabinetStore:
         values: list[Any] = []
         if since:
             bound = normalize_bound(since, role="since")
-            clauses.append(f"{spec.time} >= ?")
-            values.append(bound[:10] if spec.day else bound)
+            if spec.day:
+                clauses.append(f"{spec.time} >= ?")
+                values.append(bound[:10])
+            else:
+                # By instant, not by offset string — see `time_window`.
+                clauses.append(f"julianday({spec.time}) >= julianday(?)")
+                values.append(instant_bound(bound))
         if until:
             bound = normalize_bound(until, role="until")
             if spec.day:
                 day = date.fromisoformat(bound[:10])
                 bound = (day + timedelta(days=1) if "T" in bound else day).isoformat()
-            clauses.append(f"{spec.time} {'<' if spec.day else '<='} ?")
-            values.append(bound)
+                clauses.append(f"{spec.time} < ?")
+                values.append(bound)
+            else:
+                clauses.append(f"julianday({spec.time}) <= julianday(?)")
+                values.append(instant_bound(bound))
         return clauses, values
 
     # ── Searching ───────────────────────────────────────────────────────
@@ -1509,7 +1548,7 @@ class CabinetStore:
             with self._connect() as connection:
                 rows = connection.execute(
                     f"SELECT d.* FROM cabinet_doc d {where}"
-                    f" ORDER BY d.updated_at DESC, d.id DESC LIMIT ?",
+                    f" ORDER BY julianday(d.updated_at) DESC, d.id DESC LIMIT ?",
                     (*values, limit),
                 ).fetchall()
             return {"results": [_found(dict(row)) for row in rows], "browsed": True}

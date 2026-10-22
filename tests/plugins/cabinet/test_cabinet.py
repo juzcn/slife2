@@ -21,6 +21,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
 from slife2.libs.plugin.audience import client_meta, for_the_model
-from slife2.libs.store.index import table_exists
+from slife2.libs.store.index import connect_to, table_exists
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
@@ -244,6 +245,135 @@ async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
     assert written.read_text(encoding="utf-8") == "# Python\n\nsecond\n"
     assert read["text"] == "second"
     assert "first" not in json.dumps(read), "the older body is gone"
+
+
+def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None:
+    """Two notes in one repeated DST hour do not sort as offset strings.
+
+    `2026-10-25T01:45:00+01:00` is 00:45Z and `2026-10-25T01:15:00+00:00` is
+    01:15Z: the second is newer, but `01:45` sorts after `01:15` as text.  The
+    same comparison decides whether a bound includes a row.
+    """
+    store = CabinetStore(tmp_path / "index.db")
+
+    def add(key: str, stamp: str) -> None:
+        with store._connect() as connection:
+            connection.execute(
+                "INSERT INTO cabinet_doc (kind, key, title, body, created_at,"
+                " updated_at) VALUES (?, ?, ?, '', ?, ?)",
+                (NOTE, key, key, stamp, stamp),
+            )
+
+    add("older", "2026-10-25T01:45:00+01:00")
+    add("newer", "2026-10-25T01:15:00+00:00")
+
+    listed = store.listing(NOTE)
+    assert [entry["key"] for entry in listed["entries"]] == ["newer", "older"]
+
+    # 02:00+01:00 is 01:00Z: after `older` (00:45Z), before `newer` (01:15Z).
+    windowed = store.listing(NOTE, since="2026-10-25T02:00:00+01:00")
+    assert [entry["key"] for entry in windowed["entries"]] == ["newer"]
+
+
+def test_a_listing_counts_and_pages_one_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write between the two statements used to split the page from `total`.
+
+    The count and the page were separate autocommit reads.  A row committed
+    between them appeared on the page but not in `total`, so a caller paging by
+    `offset + len(entries) < total` either repeated or skipped a row.
+    """
+    store = CabinetStore(tmp_path / "index.db")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO cabinet_doc (kind, key, title, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                NOTE,
+                "one",
+                "one",
+                "2026-10-25T01:00:00+00:00",
+                "2026-10-25T01:00:00+00:00",
+            ),
+        )
+    real_connect = store._connect
+
+    class Interleaving:
+        def __init__(self) -> None:
+            self.connection = real_connect()
+            self.injected = False
+
+        def execute(self, sql: str, params=()):
+            found = self.connection.execute(sql, params)
+            if sql.startswith("SELECT COUNT") and not self.injected:
+                self.injected = True
+                other = connect_to(store.path)
+                other.execute(
+                    "INSERT INTO cabinet_doc (kind, key, title, created_at,"
+                    " updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        NOTE,
+                        "two",
+                        "two",
+                        "2026-10-25T02:00:00+00:00",
+                        "2026-10-25T02:00:00+00:00",
+                    ),
+                )
+                other.commit()
+                other.close()
+            return found
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.connection.__exit__(*exc)
+
+    monkeypatch.setattr(store, "_connect", Interleaving)
+    listed = store.listing(NOTE)
+
+    assert listed["total"] == 1
+    assert [entry["key"] for entry in listed["entries"]] == ["one"]
+
+
+def test_two_mirror_writes_do_not_share_a_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Overlapping writes of one key once raced on `<name>.tmp`.
+
+    Both wrote the same temporary path and both moved it; the second `replace`
+    found nothing and raised *after* the row was committed, so a save that had
+    stored its note reported a failure.  The pause makes both writers reach the
+    move together, which is the window that used to fail.
+    """
+    real_replace = cabinet_store.os.replace
+
+    def replace(src: Path, dst: Path) -> None:
+        time.sleep(0.01)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cabinet_store.os, "replace", replace)
+    errors: list[BaseException] = []
+
+    def write(text: str) -> None:
+        try:
+            cabinet_store._write_mirror(tmp_path, "notes/x.md", text, append=False)
+        except BaseException as exc:  # noqa: BLE001 - the assertion is the failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(f"body {i}",)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)  # timeouts: the test's own rendezvous
+
+    assert not errors, errors
+    assert (tmp_path / "notes" / "x.md").read_text(encoding="utf-8") in (
+        "body 0",
+        "body 1",
+    )
 
 
 @pytest.mark.asyncio

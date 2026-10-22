@@ -360,6 +360,34 @@ async def test_removing_a_skill_takes_the_folder_and_its_entry(
 
 
 @pytest.mark.asyncio
+async def test_removing_by_the_header_name_removes_its_directory(
+    isolated_runtime: Path,
+) -> None:
+    """A skill answers to two names; removal must delete the folder, not the name.
+
+    `find` prefers the frontmatter `name:`, so a model calls `skill_remove` with
+    a name the directory does not have.  Passing that name to `remove` resolved
+    to no folder, after the config entry had already been deleted.
+    """
+    config_on_disk(
+        isolated_runtime,
+        CONFIG + "skills:\n  the-name:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
+    )
+    folder = isolated_runtime / "skills" / "the-folder"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(manifest("the-name"), encoding="utf-8")
+
+    async with Client(build_server(load())) as client:
+        answer = await ask(client, "skill_remove", name="the-name")
+
+    assert answer == {"name": "the-name", "removed": True}
+    assert not folder.exists()
+    assert "the-name" not in (isolated_runtime / "slife2.yaml").read_text(
+        encoding="utf-8"
+    ), "the entry went with the folder"
+
+
+@pytest.mark.asyncio
 async def test_installing_a_skill_writes_the_env_it_is_given(
     isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

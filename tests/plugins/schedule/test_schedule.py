@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -595,6 +596,37 @@ async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
     run = ledger().newest("daily")
     assert run is not None and run.status == MISSED
     assert "not running" in run.error
+
+
+async def test_the_poll_settles_finished_runs_before_it_fires_again(
+    window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two pending runs of one task would share `agent-task:<name>`.
+
+    The agent-task id is derived from the name, so a second start while the
+    first run's row is still `pending` aliases the two: `in_flight` returns
+    both, the newer task's ending is used for both, and the older run is never
+    settled from its own.  Reconciling before the fires closes the finished one
+    first.
+    """
+    async with Client(build(window)) as client:
+        await write(client, cron=EVERY_MINUTE)
+    order: list[str] = []
+
+    async def fake_reconcile(*args, **kwargs):
+        order.append("reconcile")
+        return []
+
+    async def fake_fire(*args, **kwargs):
+        order.append("fire")
+        return SimpleNamespace(status=PENDING)
+
+    monkeypatch.setattr(schedule_server, "reconcile", fake_reconcile)
+    monkeypatch.setattr(schedule_server, "fire", fake_fire)
+
+    await poll_once(default_config(), window_client=window.client, reference=later(90))
+
+    assert order == ["reconcile", "fire"]
 
 
 async def test_a_task_that_is_not_due_yet_does_nothing_twice(

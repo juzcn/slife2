@@ -506,7 +506,10 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             raise ToolError(str(exc)) from exc
         homes.current().forgotten(key)
         try:
-            removed = skills.remove(name.strip())
+            # **The directory, not the name the caller used.**  `find` prefers
+            # the frontmatter `name:`, which need not equal the folder's; the
+            # raw name then removed nothing and left the entry already deleted.
+            removed = skills.remove(skill.directory.name)
         except ValueError as exc:
             raise ToolError(f"{name!r} was not removed: {exc}") from exc
         if not removed:
