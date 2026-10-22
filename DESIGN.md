@@ -901,10 +901,14 @@ only confirmation mechanism, and it is model-driven.
 
 **Protection is scoped to credstore.** v1 tried to protect every secret, and
 the variety of shapes made the rules hard to maintain; v2 registers only what
-the credential store resolves, and shows those values in their masked form (the
-first four and last four characters) in tool results, tool descriptions, and
-logs. An environment value or a literal in the config is the operator's own.
-The manual recommends credstore for every secret.
+the credential store resolves, and masks those values in tool results, listing
+fields, refusals, and logs (uvicorn's included). The mask is the first four and
+last four characters when at least as many stay hidden, otherwise `***`; a
+value with a control character is masked whole. The masking middleware is added
+first because FastMCP's chain is built from `reversed(middleware)`, and
+`DeclareReturns` adds a listing field on the way out. An environment value or a
+literal in the config is the operator's own. The manual recommends credstore for
+every secret.
 
 ### 8.5 Data and runtime layout
 
@@ -932,7 +936,10 @@ must be accompanied by a stop.
 
 Encoding to UTF-8 with `errors="replace"` would turn an emoji into `??` and a
 lone surrogate into a question mark indistinguishable from a typed one. That is
-why the normalisation uses the UTF-16 codec.
+why the normalisation uses the UTF-16 codec. Daemon logs are opened as binary
+and read as UTF-8, so `runtime.spawn` gives a Python child
+`PYTHONIOENCODING=utf-8`; the locale's codec would otherwise make every
+non-ASCII log line mojibake.
 
 ## 9. Testing and timeouts
 

@@ -1473,7 +1473,7 @@ async def test_a_resolved_credential_is_masked_from_the_result() -> None:
     finally:
         secrets.reset()
 
-    assert result.data["text"] == "the key is sk-l…3456 done"
+    assert result.data["text"] == "the key is *** done"
 
 
 @pytest.mark.asyncio

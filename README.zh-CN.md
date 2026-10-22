@@ -446,10 +446,10 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 - `keyring:<service>/<key>` 引用，直接从操作系统 keyring 解析。
 
 **只有 credstore 管理的 secret 会被保护。** slife2 从 credstore 解析出的凭据——
-`keyring:` 引用，或由 credential store 回答的 `${VAR}`——会在工具结果、工具描述
-和日志行中以 masked 形式出现（前四位和后四位）。环境变量或字面值属于操作者自己，
-slife2 不会尝试识别它们。请用 credstore 管理所有 secret：它是 slife2 能保证不进入
-模型上下文和日志的唯一存储。
+`keyring:` 引用，或由 credential store 回答的 `${VAR}`——会在工具结果、工具列表
+和日志行中以 masked 形式出现（至少同样多的字符仍被隐藏时显示前四位和后四位，
+否则显示 `***`）。环境变量或字面值属于操作者自己，slife2 不会尝试识别它们。
+请用 credstore 管理所有 secret：只有它的值，slife2 能在任何可能泄露的位置将其遮蔽。
 
 解析是惰性且宽松的。无法解析的引用会原样保留，因此缺失的 key 会在 API 调用处
 失败，并能在错误信息中被点名，而不是在启动时失败。

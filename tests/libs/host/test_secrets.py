@@ -34,10 +34,54 @@ def test_a_value_that_is_too_short_is_not_registered() -> None:
     assert secrets.masked("abc stays") == "abc stays"
 
 
-def test_the_longest_value_wins_when_one_contains_another() -> None:
+def test_a_value_containing_another_masks_the_whole_region() -> None:
     secrets.register("live-1234567890")
     secrets.register(LONG)
     assert secrets.masked(LONG) == "sk-l…7890"
+
+
+def test_a_value_that_would_reveal_most_of_itself_is_masked_whole() -> None:
+    """Four characters at each end is only a mask when most of it is hidden."""
+    secrets.register("sk-live-12345")
+    assert secrets.masked("x sk-live-12345 y") == "x *** y"
+
+
+def test_sixteen_characters_is_the_shortest_prefix_and_suffix_mask() -> None:
+    """Eight shown, eight hidden.  One character shorter shows more than it hides."""
+    secrets.register("a" * 16)
+    secrets.register("b" * 15)
+    assert secrets.masked("a" * 16) == "aaaa…aaaa"
+    assert secrets.masked("b" * 15) == "***"
+
+
+def test_a_value_carrying_a_control_character_is_masked_whole() -> None:
+    """A copied newline or escape sequence would be more than cosmetic.
+
+    The visible ends are written to logs; a credential with a newline in it
+    would otherwise forge a second log line, and one with an ANSI escape would
+    rewrite the terminal.
+    """
+    secret = "sk-live-1234\n5678"
+    secrets.register(secret)
+    assert secrets.masked(f"x {secret} y") == "x *** y"
+
+
+def test_overlapping_values_leave_no_fragment() -> None:
+    """A regex resumes after its match, so the overlapping tail would survive.
+
+    Both values live in `abcdefghij`, offset by two.  Replacing either one first
+    removes the other's overlap but leaves its own tail in the clear; masking
+    the merged span is the only spelling that leaves neither fragment.
+    """
+    secrets.register("abcdefgh")
+    secrets.register("cdefghij")
+    assert secrets.masked("abcdefghij") == "***"
+
+
+def test_masking_reaches_inside_sets() -> None:
+    """A tool's `tags` is a set, and the listing names it as a masked field."""
+    secrets.register(LONG)
+    assert secrets.masked_obj({"tags": {f"x {LONG}"}}) == {"tags": {"x sk-l…7890"}}
 
 
 def test_masking_reaches_inside_mappings_and_lists() -> None:

@@ -492,10 +492,10 @@ A value may be:
 **Only credstore-managed secrets are protected from output.** A credential
 slife2 resolves from credstore — a `keyring:` reference, or a `${VAR}` the
 credential store answers — is shown in its masked form (the first four and last
-four characters) in tool results, tool descriptions, and log lines. An
-environment variable or a literal value is the operator's own, and slife2 does
-not try to recognise it. Keep every secret in credstore: it is the one store
-whose values slife2 can keep out of the model's context and the logs.
+four characters when at least as many stay hidden, otherwise `***`) in tool
+results, tool listings, and log lines. An environment variable or a literal
+value is the operator's own, and slife2 does not try to recognise it. Keep every secret in credstore: it is the one store
+whose values slife2 masks everywhere they would otherwise appear.
 
 Resolution is lazy and lenient. An unresolved reference is left verbatim, so a
 missing key fails at the API call where the error message can name it rather

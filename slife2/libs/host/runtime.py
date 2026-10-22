@@ -917,6 +917,14 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
             "stderr": subprocess.STDOUT,
             "close_fds": True,
             "cwd": str(runtime_dir()),
+            # **The log is read as UTF-8, so the child has to write UTF-8.**
+            # Otherwise Python picks the locale's encoding (cp936 on the
+            # machine this was found on, cp1252 elsewhere), and `tail_log`'s
+            # UTF-8 decode turns every non-ASCII line into replacement
+            # characters — a masked credential's ellipsis, and any message in
+            # the operator's own language, arrive unreadable.  Non-Python
+            # children ignore the variable.
+            "env": {**os.environ, "PYTHONIOENCODING": "utf-8"},
         }
         if sys.platform == "win32":
             base = subprocess.CREATE_NO_WINDOW

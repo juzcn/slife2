@@ -2347,10 +2347,15 @@ async def test_a_slow_connect_is_not_cancelled_by_the_waiting(
     come up yet.
     """
     monkeypatch.setattr(_T.timeouts.ready, "list_settle", 0.05)
+    gate = asyncio.Event()
 
     class Slow(FakeClient):
         async def __aenter__(self) -> FakeClient:
-            await asyncio.sleep(0.2)
+            # Held open by the test rather than by a sleep: the declaration
+            # this test reads is built by a plugin whose own start-up is a
+            # real connection, and under a loaded runner that can take longer
+            # than any sleep short enough to leave the entry "connecting".
+            await gate.wait()
             return self
 
     def make(transport: Any, handler: Any) -> Any:
@@ -2366,12 +2371,24 @@ async def test_a_slow_connect_is_not_cancelled_by_the_waiting(
         # The first ask is answered while the connect is still in flight, which
         # is the point: a declaration says "not up yet" rather than holding the
         # ask open, and the attempt keeps running in the background.
-        early = await hub.call_tool("servers", {})
-        assert "fake" in {one["name"] for one in early.data["servers"]}
+        #
+        # Wait for the declaration rather than for a fixed moment: it arrives
+        # from the plugin that holds the entry, and that plugin's own start is
+        # what the runner's load can stretch.
+        deadline = time.monotonic() + 10.0  # timeouts: a test's patience
+        while True:
+            early = await hub.call_tool("servers", {})
+            rows = {one["name"]: one for one in early.data["servers"]}
+            if "fake" in rows:
+                break
+            assert time.monotonic() < deadline, "fake was never declared"
+            await asyncio.sleep(0.01)
+        assert rows["fake"]["state"] == "connecting"
 
-        # The attempt was left alone, so it finishes on its own — and the next
-        # ask is the one that finds it.
-        await asyncio.sleep(0.3)
+        # The attempt was left alone, so releasing it finishes on its own — and
+        # the next ask is the one that finds it.
+        gate.set()
+        await wait_until_ready(hub, "fake")
         listed = await hub.call_tool("list_tools", {})
 
     assert "fake__echo" in names(listed.data)

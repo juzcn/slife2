@@ -1982,10 +1982,14 @@ A value may be:
 
 **Output protection covers credstore's values, and only those.** A credential
 resolved from credstore — a `keyring:` URI, or a `${VAR}` the store answers — is
-registered in the process that resolved it and shown in its masked form (the
-first four and last four characters) in tool results, tool descriptions, and
-log lines. An environment variable or a literal in the config is the operator's;
-the system does not try to recognise it. v1 attempted the wider rule, and the
+registered in the process that resolved it and masked in every surface that
+leaves that process: tool results, tool descriptions and other listing fields,
+refusals, and log lines, uvicorn's access log included. The mask shows the first
+four and last four characters when at least as many stay hidden, otherwise
+`***`; a value carrying a control character is masked whole, so the visible ends
+cannot forge a log line. An environment variable or a literal in the config is
+the operator's; the system does not try to recognise it. v1 attempted the wider
+rule, and the
 variety of secret shapes made it a maintenance burden; v2 scopes protection to
 the one store it owns. Operators are strongly advised to keep every secret in
 credstore.
@@ -2197,6 +2201,9 @@ SQLite refuses is normalised first:
 - a lone surrogate becomes U+FFFD.
 
 The UTF-16 codec is the one in the standard library that distinguishes the two.
+A daemon's log is read as UTF-8, so a spawned Python child is given
+`PYTHONIOENCODING=utf-8`: without it the child writes the locale's codec and
+every non-ASCII line reaches `slife2 logs` as replacement characters.
 Every timestamp comes from one place: local time with an offset, seconds
 precision. One format is what keeps ordering and range bounds correct.
 

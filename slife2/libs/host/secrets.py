@@ -7,9 +7,12 @@ site that forgets is silent.
 
 This module is the one place that remembers.  :func:`register` is called where a
 **credstore** value resolves; :func:`masked` is applied where text leaves a
-process: a tool result, a tool description, and the log formatter.  The mask is
-the conventional one — the first four and last four characters, or ``***`` when
-the value is short enough that four characters would be most of it.
+process: a tool result, a tool listing, and the log formatter.  The mask is
+the conventional one — the first four and last four characters — but only when
+at least as many characters stay hidden as are shown.  A value too short for
+that, or one carrying control characters, becomes ``***``: a mask that reveals
+most of the secret, or that copies a newline or an escape sequence into a log
+line, protects nothing and can forge output.
 
 **Only credstore values are registered.**  A ``keyring:`` URI, or a ``${VAR}``
 that the credential store answered, is in scope.  An environment variable or a
@@ -24,15 +27,20 @@ the floor is a guard against a sentinel like ``local``.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import Any
 
-#: The shortest value that is masked.  See the module docstring.
+#: The shortest value that is registered.  See the module docstring.
 MIN_LENGTH = 8
 
 #: What a value too short to show a prefix and suffix of becomes.
 SHORT = "***"
+
+#: Characters shown at each end of a masked value, and the minimum that must
+#: stay hidden.  A value shorter than ``2 * _SHOWN + _HIDDEN`` becomes
+#: :data:`SHORT` instead: four and four out of nine characters is not a mask.
+_SHOWN = 4
+_HIDDEN = 8
 
 #: Between the prefix and the suffix, the same glyph credstore's terminal mask
 #: uses.
@@ -53,30 +61,65 @@ def reset() -> None:
     _SECRETS.clear()
 
 
-def registered() -> tuple[str, ...]:
-    """The registered values, longest first, so one containing another wins."""
-    return tuple(sorted(_SECRETS, key=len, reverse=True))
-
-
 def mask(value: str) -> str:
     """The conventional masked form of one credential.
 
     The same shape as ``credstore``'s terminal mask: four characters at each
-    end, or nothing at all when the value is too short to hide anything.
+    end.  A value with fewer than :data:`_HIDDEN` characters left over becomes
+    :data:`SHORT` instead, and so does one carrying a control character — the
+    visible ends are copied into model output and log lines, where a newline or
+    an ANSI escape would be more than cosmetic.
     """
     if not value:
         return "(empty)"
-    if len(value) <= MIN_LENGTH:
+    if len(value) < 2 * _SHOWN + _HIDDEN or not value.isprintable():
         return SHORT
-    return f"{value[:4]}{_SEPARATOR}{value[-4:]}"
+    return f"{value[:_SHOWN]}{_SEPARATOR}{value[-_SHOWN:]}"
+
+
+def _spans(text: str) -> list[tuple[int, int]]:
+    """Every occurrence of every registered value, overlaps merged.
+
+    **One pass per value rather than one alternation**, because a regex matches
+    leftmost and then resumes after the match: two credentials that overlap in
+    the output leave the tail of the second one behind.  Merging the ranges
+    first means the whole covered region is replaced, and no fragment of any
+    registered value survives.
+    """
+    found: list[tuple[int, int]] = []
+    for secret in _SECRETS:
+        start = text.find(secret)
+        while start != -1:
+            found.append((start, start + len(secret)))
+            start = text.find(secret, start + 1)
+    if not found:
+        return []
+    found.sort()
+    merged = [found[0]]
+    for start, end in found[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def masked(text: str) -> str:
     """*text* with every registered credential in its masked form."""
     if not text or not _SECRETS:
         return text
-    pattern = "|".join(re.escape(secret) for secret in registered())
-    return re.sub(pattern, lambda found: mask(found.group(0)), text)
+    spans = _spans(text)
+    if not spans:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(text[cursor:start])
+        parts.append(mask(text[start:end]))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def masked_obj(value: Any) -> Any:
@@ -93,4 +136,7 @@ def masked_obj(value: Any) -> Any:
         return tuple(masked_obj(item) for item in value)
     if isinstance(value, list):
         return [masked_obj(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        # Tool tags are a set, and `_masked_tool` names them as a surface.
+        return type(value)(masked_obj(item) for item in value)
     return value

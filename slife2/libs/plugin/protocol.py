@@ -427,9 +427,16 @@ def house_server(
         lifespan=lifespan,
         mask_error_details=False,
     )
+    # **Order is the masking rule, because FastMCP wraps `reversed(middleware)`
+    # and the first added is therefore the outermost.**  `MaskingMiddleware`
+    # has to see the finished tool list, and `DeclareReturns` writes the raw
+    # `Returns:` docstring onto `_meta` on the way out — added after the masker,
+    # that text left the process unmasked.  `ServeTheCallersHome` stays outside
+    # the tool body in either position (it hooks `on_message`, the outer pass),
+    # so the masker can be first without changing which home a call sees.
+    mcp.add_middleware(MaskingMiddleware())
     mcp.add_middleware(ServeTheCallersHome())
     mcp.add_middleware(DeclareReturns())
-    mcp.add_middleware(MaskingMiddleware())
     return mcp
 
 
@@ -914,6 +921,15 @@ def serve(
             path=server.path,
             json_response=False,
             stateless_http=True,
+            # **Uvicorn's default logging config would put its loggers outside
+            # the mask.**  It gives `uvicorn` and `uvicorn.access` handlers of
+            # their own, with `propagate = False`, and the access handler writes
+            # to stdout — so a credential in a request line, and any ASGI
+            # traceback, would bypass `_MaskingFormatter` entirely.  With no
+            # config uvicorn adds no handlers and its records travel to the root
+            # handler `configure_logging` installed, where they are masked and
+            # written to stderr.
+            uvicorn_config={"log_config": None},
         )
     finally:
         if owner is None and read_record(url) == record:

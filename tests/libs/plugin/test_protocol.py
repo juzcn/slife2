@@ -147,7 +147,7 @@ async def test_a_resolved_secret_is_masked_from_a_tool_result() -> None:
         secrets.reset()
 
     assert "sk-live-123456" not in str(result)
-    assert "sk-l…3456" in str(result)
+    assert "***" in str(result)
 
 
 @pytest.mark.asyncio
@@ -172,7 +172,32 @@ async def test_a_resolved_secret_is_masked_from_a_tool_description() -> None:
 
     description = tools[0].description or ""
     assert "sk-live-123456" not in description
-    assert "sk-l…3456" in description
+    assert "***" in description
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_secret_is_masked_from_a_tools_tags() -> None:
+    """A tag is a listing field, and FastMCP models tags as a set."""
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-1234567890")
+    try:
+        mcp: FastMCP = house_server("slife2-test")
+
+        @mcp.tool(tags={"key sk-live-1234567890"})
+        async def tagged() -> str:
+            return "ok"
+
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+    finally:
+        secrets.reset()
+
+    # FastMCP carries tags in `_meta` over the protocol; the client's Tool has
+    # no `tags` field of its own.
+    assert "key sk-l…7890" in str(tools[0].meta)
+    assert "sk-live-1234567890" not in str(tools[0].meta)
 
 
 @pytest.mark.asyncio
@@ -195,7 +220,7 @@ async def test_a_resolved_secret_is_masked_from_a_refusal() -> None:
         secrets.reset()
 
     assert "sk-live-123456" not in str(raised.value)
-    assert "sk-l…3456" in str(raised.value)
+    assert "***" in str(raised.value)
 
 
 def test_the_log_formatter_masks_a_registered_secret() -> None:
@@ -208,7 +233,7 @@ def test_the_log_formatter_masks_a_registered_secret() -> None:
         record = logging.LogRecord(
             "t", logging.INFO, __file__, 1, "key sk-live-123456", None, None
         )
-        assert formatter.format(record) == "key sk-l…3456"
+        assert formatter.format(record) == "key ***"
     finally:
         secrets.reset()
 
@@ -260,6 +285,45 @@ async def test_a_tools_returns_section_travels_in_meta_not_the_description() -> 
     assert tool.meta[RETURNS] == (
         "`rows` — what was found.\n`total` — how many there are."
     )
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_secret_is_masked_from_the_returns_meta() -> None:
+    """**The middleware that adds `Returns:` runs inside the masking one.**
+
+    FastMCP wraps `reversed(middleware)`, so the *first* middleware added is
+    outermost on the way back.  `MaskingMiddleware` is added first for exactly
+    this reason: `DeclareReturns` writes the docstring's `Returns:` onto the
+    tool's `_meta` on the return path, and a mask applied closer to the tool
+    would have already finished by the time that key exists.
+    """
+    from slife2.libs.host import secrets
+
+    secrets.reset()
+    secrets.register("sk-live-1234567890")
+    try:
+        mcp = house_server("slife2-test")
+
+        @mcp.tool
+        def finds(x: int) -> dict[str, Any]:
+            """Find something.
+
+            Args:
+                x: How many.
+
+            Returns:
+                The key sk-live-1234567890, once.
+            """
+            return {"rows": [x], "total": 1}
+
+        async with Client(mcp) as client:
+            tool = next(one for one in await client.list_tools() if one.name == "finds")
+    finally:
+        secrets.reset()
+
+    assert RETURNS in (tool.meta or {}), "the return contract is still declared"
+    assert "sk-live-1234567890" not in str(tool.meta)
+    assert "sk-l…7890" in tool.meta[RETURNS]
 
 
 @pytest.mark.asyncio
@@ -604,6 +668,35 @@ def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
         serve_once()
 
     assert read_record(URL) == live, "the running server's record is not ours"
+
+
+def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
+    """Uvicorn's default logging config installs handlers of its own.
+
+    Those handlers write `uvicorn.access` to **stdout** and do not propagate, so
+    none of their lines pass through `configure_logging`'s formatter — a
+    credential in a request line or an ASGI traceback would be written in the
+    clear.  `log_config=None` leaves uvicorn's loggers on the root handler,
+    where the mask is applied; this pins that option so a later FastMCP or
+    transport change cannot quietly restore the default.
+    """
+
+    class CapturingMCP:
+        options: dict[str, Any] = {}
+
+        def run(self, **options: Any) -> None:
+            CapturingMCP.options = options
+            raise OSError("stop before binding")
+
+    with pytest.raises(OSError):
+        protocol_module.serve(
+            CapturingMCP(),
+            ServerSettings(port=24001),
+            SimpleNamespace(host=None, port=None),
+            name="slife2-agent",
+        )
+
+    assert CapturingMCP.options["uvicorn_config"] == {"log_config": None}
 
 
 def test_a_server_that_never_served_takes_its_own_record_back() -> None:

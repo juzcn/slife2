@@ -755,6 +755,22 @@ def test_a_spawned_server_gets_no_console_window(tmp_path) -> None:
     assert result.read_text().strip() == "0", "the daemon opened a console window"
 
 
+def test_a_spawned_servers_log_is_written_as_utf8() -> None:
+    """The log is read as UTF-8, so the child must not write the locale's codec.
+
+    On a cp936 machine a daemon's stderr was GBK, and `tail_log` decoded it as
+    UTF-8 with replacement: every non-ASCII line came back as mojibake — the
+    masked form's ellipsis included.  `PYTHONIOENCODING` is set on the child for
+    the same reason the log reader fixes its own encoding: the two ends have to
+    agree, and the reader's choice is the one every platform shares.
+    """
+    url = "http://127.0.0.1:24010/mcp"
+    proc = runtime.spawn([sys.executable, "-c", "print('中文…')"], url=url)
+    proc.wait(timeout=30)  # timeouts: the value this test is built around
+
+    assert "中文…" in runtime.tail_log(url)
+
+
 @pytest.mark.skipif(
     sys.platform != "win32", reason="breakaway is a Windows job-object flag"
 )
