@@ -733,9 +733,9 @@ async def test_a_tool_call_is_logged_when_it_succeeds(
         await send(server, "what is 6*7?")
 
     said = [record.getMessage() for record in caplog.records]
-    assert any(
-        message.startswith("tool_call name=skill_list ") for message in said
-    ), caplog.text
+    assert any(message.startswith("tool_call name=skill_list ") for message in said), (
+        caplog.text
+    )
 
 
 @pytest.mark.asyncio

@@ -189,8 +189,7 @@ class Link:
         """
         return Connection(
             settings,
-            transport=transport
-            or (lambda one: transport_for(one, cwd=directory)),
+            transport=transport or (lambda one: transport_for(one, cwd=directory)),
             client_factory=client_factory,
             on_listed=self._listed,
             on_failed=self._failed,

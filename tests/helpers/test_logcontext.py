@@ -27,7 +27,9 @@ def test_a_trace_names_the_conversation_and_resets() -> None:
         assert logcontext.current() == "jack"
         with logcontext.tracing("jack", "echo"):
             assert logcontext.current() == "jack/echo"
-        assert logcontext.current() == "jack", "the inner block is over, the outer is not"
+        assert logcontext.current() == "jack", (
+            "the inner block is over, the outer is not"
+        )
     assert logcontext.current() == ""
 
 

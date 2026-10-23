@@ -681,9 +681,7 @@ class Wechat:
             # `exc_info=error` and not just its repr: a poll loop that died of
             # a `ReadTimeout` said only `ReadTimeout('')` in the 2026-10 log,
             # which names the type and nothing about where it was raised.
-            logger.warning(
-                "wechat background task failed: %r", error, exc_info=error
-            )
+            logger.warning("wechat background task failed: %r", error, exc_info=error)
 
     # ── Restoring a login ────────────────────────────────────────────────
 
