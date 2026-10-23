@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -283,7 +284,8 @@ async def wait_for_handover(node: Window, count: int = 1) -> None:
     moment `retire` moved ahead of the hand-over, and it showed up as a test
     failing for a reason that had nothing to do with what it asserts.
     """
-    for _ in range(400):
+    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    while time.monotonic() < deadline:
         if len(node.handed) >= count:
             return
         await asyncio.sleep(0.01)
@@ -293,7 +295,8 @@ async def wait_for_handover(node: Window, count: int = 1) -> None:
 async def wait_for_log(caplog: pytest.LogCaptureFixture, needle: str) -> None:
     """Wait for a line the delivery writes about itself, which is how a test
     waits for a delivery that has *nothing* to show for itself."""
-    for _ in range(400):
+    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    while time.monotonic() < deadline:
         if needle in caplog.text:
             return
         await asyncio.sleep(0.01)
@@ -306,9 +309,15 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
     The poll is the test's, which is the one place polling is right: the model is
     told not to do it (that is what the tool's description is for), and a test
     has no other way to wait for a background loop.
+
+    **The bound is a wall clock, not a count of polls.**  A count makes the
+    budget depend on how fast each poll is answered, and a loaded CI runner
+    spent 400 of them before a turn of two one-second sleeps had finished.  A
+    deadline asks the question the test means: has the task stopped by now.
     """
+    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
     async with Client(built.mcp) as client:
-        for _ in range(400):
+        while time.monotonic() < deadline:
             answer = await ask(client, AGENT_TASK_STATUS, {"name": name})
             if answer["status"] != "running":
                 return answer

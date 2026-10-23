@@ -729,10 +729,17 @@ async def test_declarations_are_asked_together() -> None:
     starting the servers it holds answers late — and asking in sequence made the
     build pay their *sum*.  That sum was the failure in a cold container: enough
     slow plugins outlived the launcher's catalogue budget and no window opened.
-    So each plugin here waits for the other to be asked before it answers; a
-    sequential refresh never asks the second one and this test times out.
+    So each plugin here waits for the other to be asked before it answers.
+
+    **What is asserted is how many asks were in flight at once, not how long
+    the test took.**  Both asks are started by one `gather`, so a correct
+    refresh has both in flight within a moment of itself; a sequential one has
+    nothing beside the ask it is waiting on.  A wall clock cannot separate those
+    on a runner whose load stretches the hub's start-up around them — and that
+    start-up is what most of the elapsed time was.
     """
-    waiting = 0
+    in_flight = 0
+    peak = 0
     together = asyncio.Event()
 
     def barrier_declaring(source: str, row: str) -> FastMCP:
@@ -740,11 +747,18 @@ async def test_declarations_are_asked_together() -> None:
 
         @server.tool(name=LIST_SOURCES)
         async def list_sources() -> dict[str, Any]:
-            nonlocal waiting
-            waiting += 1
-            if waiting == 2:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            if in_flight >= 2:
                 together.set()
-            await asyncio.wait_for(together.wait(), 5.0)
+            try:
+                # The liveness bound, reached only by a refresh that asks in
+                # sequence: the correct one releases on the second ask's arrival.
+                patience = 5.0  # timeouts: a test's patience
+                await asyncio.wait_for(together.wait(), patience)
+            finally:
+                in_flight -= 1
             answer = one_source(name=source)
             answer["sources"][0]["rows"] = [
                 {"name": row, "description": "d", "status": "enabled"}
@@ -757,17 +771,18 @@ async def test_declarations_are_asked_together() -> None:
         "cli-server": lambda settings: barrier_declaring("cli:one", "cli:first"),
         "mcp-tools": lambda settings: barrier_declaring("mcp:two", "mcp:second"),
     }
-    started = time.monotonic()
     async with Client(hub_for(connected=connected)) as hub:
         first = await found(hub, "cli:first")
         second = await found(hub, "mcp:second")
-    elapsed = time.monotonic() - started
 
+    # Asked in sequence, neither ask ever has another beside it: the first waits
+    # out its own bound before the second is sent.
+    assert peak == 2, (
+        "the declarations were not asked together: "
+        f"at most {peak} plugin(s) were in flight at once"
+    )
     assert "cli:first" in first
     assert "mcp:second" in second
-    # The barrier releases as soon as both are asked; asked in sequence, the
-    # first one waits out its own timeout instead.
-    assert elapsed < 3.0, f"the declarations were not asked together ({elapsed:.1f}s)"
 
 
 @pytest.mark.asyncio
