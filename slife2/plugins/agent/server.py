@@ -1025,7 +1025,13 @@ def build_server(
                     config.server("context").url,
                     name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
-                    timeout=_T.timeouts.work.context,
+                    # **No request deadline on the connection**, for `hub()`'s
+                    # reason below.  This one client carries calls with
+                    # different budgets — a restore, a recall and a save that
+                    # embeds a whole turn — and `timeout=` here is a clock on
+                    # every one of them.  Each call states its own patience
+                    # where it is made.
+                    timeout=None,
                 )
             assert context_conn is not None  # open_server returns one or raises
             return context_conn
@@ -1462,6 +1468,11 @@ def build_server(
                     "created_at": created_at,
                     "completed_at": completed_at,
                 },
+                # The save's own budget, not the connection's: a long turn's
+                # embedding is work the turn already paid for, and cutting it
+                # at a restore's clock drops the answer after the model wrote
+                # it (`slife2.helpers.timeouts.Work.remember`).
+                timeout=_T.timeouts.work.remember,
             )
         )
         turn_id = payload.get("turn_id")
@@ -2046,6 +2057,7 @@ def build_server(
                     "subagent": loop.subagent,
                     "messages": [message.to_wire() for message in loop.messages],
                 },
+                timeout=_T.timeouts.work.context,
             )
         )
         _adopt(loop, payload, carried=0)
@@ -2190,6 +2202,7 @@ def build_server(
                     "model": loop.model,
                     "carried": carried,
                 },
+                timeout=_T.timeouts.work.context,
             )
         )
         _adopt(loop, payload, carried=carried)
@@ -2209,7 +2222,9 @@ def build_server(
         outcome the caller was trying to prevent.
         """
         await (await memory()).call_tool(
-            "forget", {"agent": agent, "subagent": subagent}
+            "forget",
+            {"agent": agent, "subagent": subagent},
+            timeout=_T.timeouts.work.context,
         )
 
     async def trim_tools(loop: Loop) -> None:
@@ -3842,6 +3857,7 @@ def build_server(
                         )
                     ],
                 },
+                timeout=_T.timeouts.work.context,
             )
         )
         turns = payload.get("turns")

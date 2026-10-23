@@ -101,7 +101,9 @@ class UnreadableStore:
     def __init__(self, **answers: dict[str, Any]) -> None:
         self.answers = answers
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], **_kwargs: Any
+    ) -> Any:
         return SimpleNamespace(data=self.answers[name])
 
 
