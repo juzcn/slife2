@@ -235,6 +235,14 @@ def build_server(
     #: the vector for the turn it is saving, and the only thing a sync would add
     #: is re-embedding turns that do not exist yet.
     synced: set[Path] = set()
+    #: One lock per file, because `synced` alone is a check-then-act.  Turns of
+    #: one conversations are serialized, but the *readers* are not: a window's
+    #: `transcript`/`watch` restores the same store while a turn's own restore
+    #: is starting, and both used to pass the check and rebuild the vector index
+    #: at once — one held SQLite's write lock, the other died on it with
+    #: `database is locked` after `storage.sqlite_busy`.  Keyed by file rather
+    #: than one global lock: two conversations never wait for each other.
+    syncing: dict[Path, asyncio.Lock] = {}
 
     async def indexed(store: TurnStore, model: Embedder) -> None:
         """Bring one file up to date with `model`, or say why it cannot be."""
@@ -251,8 +259,11 @@ def build_server(
     async def store_of(agent: str, subagent: str) -> TurnStore:
         """One conversation's store, with its indexes brought up to date."""
         store = await off_loop(store_for, agent, subagent)
-        if store.path not in synced:
-            await indexed(store, await embedding.get())
+        if store.path in synced:
+            return store
+        async with syncing.setdefault(store.path, asyncio.Lock()):
+            if store.path not in synced:
+                await indexed(store, await embedding.get())
         return store
 
     @asynccontextmanager

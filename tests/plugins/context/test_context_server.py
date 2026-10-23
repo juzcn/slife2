@@ -1557,3 +1557,46 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
         await _ask_model(
             config, clients, asyncio.Lock(), "jack", "", "", [], "and then?"
         )
+
+
+# --- the first sync of one file, which two readers can reach at once -----------
+
+
+@pytest.mark.asyncio
+async def test_two_first_asks_for_one_store_run_the_sync_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`synced` alone was a check-then-act: both asks rebuilt the vector index.
+
+    Turns of one conversation are serialized, but its *readers* are not — a
+    window's `transcript`/`watch` restores the same file while the turn's own
+    restore is starting.  The second rebuild then died on SQLite's write lock
+    with `database is locked`.  The lock is per file, so two agents never wait
+    for each other.
+    """
+    active = 0
+    most = 0
+    calls = 0
+    original = TurnStore.sync_indexes
+
+    async def counting(self: TurnStore, embedder: Any) -> None:
+        nonlocal active, most, calls
+        active += 1
+        most = max(most, active)
+        calls += 1
+        try:
+            await asyncio.sleep(0.2)
+            await original(self, embedder)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(TurnStore, "sync_indexes", counting)
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await asyncio.gather(
+            client.call_tool("restore", {"agent": "concurrent", "messages": []}),
+            client.call_tool("restore", {"agent": "concurrent", "messages": []}),
+        )
+
+    assert calls == 1, "the second ask re-ran the sync instead of waiting for it"
+    assert most == 1, "two syncs of one file overlapped"

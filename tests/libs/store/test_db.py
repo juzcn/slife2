@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 
 import pytest
 
@@ -27,7 +28,7 @@ from slife2.libs.store.db import (
     store_for,
     strip_images,
 )
-from slife2.libs.store.index import _rowid
+from slife2.libs.store.index import _rowid, connect_to
 from slife2.libs.turn import attachments
 from slife2.libs.turn.tokens import estimate_turn_tokens
 from tests.fakes import StubEmbedder
@@ -772,3 +773,40 @@ def test_a_store_closes_its_connection_when_the_call_ends(tmp_path, monkeypatch)
     TurnStore(tmp_path / "turns.db")
 
     assert closed == ["closed"], "the connection outlived the call"
+
+
+def test_two_first_connections_to_one_file_do_not_race_the_journal_mode(
+    tmp_path,
+) -> None:
+    """`journal_mode=WAL` was set on every connection, and that write raced.
+
+    A store's own first turn and its window's `transcript` read both open the
+    file at once; the connection that lost raised `database is locked` before
+    the busy timeout it was about to set was in force (the bench's own
+    traceback was this exact line).  WAL is a property of the file, so it is
+    read and switched once, under a per-file lock.
+    """
+    path = tmp_path / "turns.db"
+    barrier = threading.Barrier(8)
+    failures: list[BaseException] = []
+
+    def open_it() -> None:
+        try:
+            barrier.wait()
+            connection = connect_to(path)
+            connection.close()
+        except BaseException as exc:  # noqa: BLE001 - reported by the assertion
+            failures.append(exc)
+
+    threads = [threading.Thread(target=open_it) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not failures, failures
+    connection = connect_to(path)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        connection.close()
