@@ -2240,6 +2240,60 @@ async def test_a_plugin_that_is_not_answering_fails_the_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turns_list_waits_for_a_plugin_that_has_just_come_up() -> None:
+    """`wait=False` skips the declarations, not the connect attempts.
+
+    The refusal is read off `usable`, so a plugin whose connect attempt is
+    merely running must not be reported as one that has gone.  A fresh stack is
+    exactly that state: the launcher starts the hub before `agent-task` and
+    `schedule` — they reach the hub, so it cannot wait for them — and their
+    first asks fail while they start.  A turn's ask is the next one, and it is
+    the ask that finds them.
+
+    Here every ask made while the plugin is coming up refuses and the ones made
+    after it is up answer, so the failed verdict is stale by the time the list
+    is asked for.  An ask that does not wait for the attempt reads it and
+    refuses the turn; the background refresh then connects a moment later,
+    which is the trace a real stack left — the refusal and the listing that
+    would have answered it, 100 ms apart.
+    """
+    attempts = 0
+    answering = False
+
+    def comes_up_late(settings: ToolServerSettings) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if not answering:
+            raise FileNotFoundError("still starting")
+        server = FastMCP("plugin")
+
+        @server.tool(meta=FOR_THE_MODEL)
+        def answered() -> str:
+            """What the plugin offers once it is up."""
+            return ""
+
+        return server
+
+    async with Client(
+        hub_for(connected={"agent": comes_up_late}, autoload=("answered",))
+    ) as hub:
+        # Every start-up ask refused.  One yield lets the last of them — the
+        # one `refresh_declared` starts and nothing waits for — land before the
+        # plugin comes up, so the verdict on the record is the failure the
+        # turn's ask must not believe.
+        await asyncio.sleep(0)
+        answering = True
+        listed = await hub.call_tool("list_tools", {"wait": False})
+        reported = await hub.call_tool("servers", {})
+
+    assert "answered" in names(listed.data)
+    assert attempts >= 2, "the start-up asks failed; this ask is the retry"
+    row = next(one for one in reported.data["servers"] if one["name"] == "agent")
+    assert row["state"] == "ready"
+    assert row["tools"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_tool_from_a_server_that_never_started_is_unknown() -> None:
     """It was never advertised, so there is nothing to call — and the answer
     names what there is, which is what the model needs to try something else."""

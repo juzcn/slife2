@@ -3011,7 +3011,10 @@ def build_server(
                 the turn's ask wait for it is how a fresh catalogue becomes
                 `Request 'tools/call' timed out`.  A late source costs freshness
                 and not the turn: the refresh this answer starts runs on, and the
-                source is in the next list.
+                source is in the next list.  **The connections are waited for
+                either way**: the refusal below reads `usable`, and an attempt
+                still running — a plugin that has just come up — must not be
+                read as a plugin that is gone.
 
         Returns:
             `tools`: one entry per tool the model may call, with `name` as the
@@ -3042,9 +3045,21 @@ def build_server(
         # budget is `work.catalogue`; a turn's is `work.hub`, and the refresh's
         # plugin round trips can exceed the latter.  A turn starts the refresh
         # and answers from the catalogue it has.
+        #
+        # **The declarations are the part it does not wait for, and the links
+        # are not.**  The refusal below is an answer about `usable`, so an
+        # attempt that is merely running must not be read as a plugin that is
+        # gone — and a fresh stack is exactly that state: the launcher starts
+        # the hub before `agent-task` and `schedule` (they reach the hub, so it
+        # cannot wait for them), so their first asks fail while they start and
+        # the next ask is the one that finds them.  `settle` is bounded by
+        # `ready.list_settle` and fits a turn; the declarations refresh is what
+        # can outlast `work.hub`, and that is what the background task carries.
         if wait:
             await refresh()
         else:
+            begin_connecting()
+            await settle()
             refresh_soon()
 
         # **The catalogue's own failure comes first, and it is first because it
