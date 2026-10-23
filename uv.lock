@@ -2023,6 +2023,7 @@ dependencies = [
     { name = "starlette" },
     { name = "textual" },
     { name = "tiktoken" },
+    { name = "truststore" },
     { name = "tzdata" },
 ]
 
@@ -2056,6 +2057,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.7.0" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "tiktoken", specifier = ">=0.14.0" },
+    { name = "truststore", specifier = ">=0.10.5" },
     { name = "tzdata", specifier = ">=2026.5" },
 ]
 

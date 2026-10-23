@@ -66,6 +66,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import truststore
+
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     DEFAULT_AGENT,
@@ -85,6 +87,15 @@ from slife2.libs.host.paths import (
     register_home,
     skills_dir,
 )
+
+#: **The OS trust store, for every TLS client this package starts.**  The
+#: provider SDKs, the MCP client, media and the tunnels all verify against
+#: certifi by default, and certifi is a bundle that can lag — or be narrower
+#: than — the CA set the machine actually uses.  A task container's curl and apt
+#: trusted a provider's chain while the venv's certifi did not, which failed an
+#: embeddings call that was reachable.  Injected once here, so every process the
+#: package starts trusts what the machine trusts.
+truststore.inject_into_ssl()
 
 #: The subcommands, and what happens when none is named.
 _RUN = "run"

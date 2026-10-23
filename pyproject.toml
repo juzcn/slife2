@@ -47,6 +47,15 @@ dependencies = [
     # is where provider API keys live.  Published out of the slife repo, so this
     # is v1's credstore rather than a reimplementation.
     "credstore>=0.10.5",
+    # **The OS trust store, for every TLS client this package starts.**  The
+    # provider SDKs, the MCP client, media and the tunnels all verify against
+    # certifi by default, and certifi is a bundle that can lag — or be narrower
+    # than — the CA set the machine actually uses.  A task container's curl and
+    # apt trusted the provider's chain while the venv's certifi did not, which
+    # failed an embeddings call that was reachable.  `slife2/__init__.py`
+    # injects this at package import; declared here because the package imports
+    # it directly.
+    "truststore>=0.10.5",
     # Provider SDKs.  Imported *only* by the LLM server processes — one per wire
     # protocol, plus the embeddings server, so `openai` is imported by three of
     # them and `anthropic` by one: the TUI, the agent loop and every shared
