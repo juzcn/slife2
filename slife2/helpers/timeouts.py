@@ -76,8 +76,10 @@ class Work:
     #: 170 s, and a 20 s ask expired while the hub was still declaring.  A
     #: turn's ask stays `hub`; this budget is spent once, and a start-up that
     #: gives up on it leaves the window with no catalogue at all.  `validate`
-    #: keeps it >= `hub`.
-    catalogue: float = 240.0
+    #: keeps it >= `hub`.  **Raised from 240 s on 2026-10-23** for the same cold
+    #: start: with two task containers running, the plugins and the external
+    #: sources can take longer than four minutes to declare.
+    catalogue: float = 360.0
     #: One management call from the terminal to the agent server: `model_switch`,
     #: `reset`, `transcript`.  A question answered from memory or from the store.
     #: **Not the turn** — a turn's length is the answer's own business, and the
@@ -101,8 +103,11 @@ class Ready:
 
     #: How long a plugin may take to come up.  Generous: the launcher refuses to
     #: start at all if one will not, so a short bound here would be a system that
-    #: refuses to boot on a slow machine.
-    plugin_start: float = 90.0
+    #: refuses to boot on a slow machine.  **Raised from 90 s on 2026-10-23**: in
+    #: a fresh task container, `schedule` (the last server up, after the hub's
+    #: catalogue) took ~90 s with one other trial running and was killed at the
+    #: old bound; its port did answer, so this is a cold start, not a hang.
+    plugin_start: float = 300.0
     #: A TCP probe of an endpoint (is anything listening).
     probe: float = 2.0
     #: How long a second `slife2` waits on the claim file before deciding the

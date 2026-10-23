@@ -19,11 +19,10 @@ from slife2.plugins.tui.server import NOTE
 DEFAULT_TUI_URL = "http://127.0.0.1:24005/mcp"
 TURN_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_TURN_TIMEOUT", "3600"))
 #: How long the window may take to open.  `slife2 run` opens it only after
-#: every server is ensured and the catalogue is built, and the catalogue budget
-#: is `work.catalogue` (240 s) because the external `mcp:` sources connect on
-#: their own schedule; this gate has to outlast that, not a warm start's two
-#: minutes.
-READY_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_READY_TIMEOUT", "420"))
+#: every server is ensured and the catalogue is built; the launcher's own
+#: budgets are `ready.plugin_start` (300 s) and `work.catalogue` (360 s), and
+#: this gate has to outlast both rather than a warm start's two minutes.
+READY_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_READY_TIMEOUT", "900"))
 #: After the window is up, how long the external tool servers get to connect
 #: before the prompt goes in.  They start in the background and are listed as
 #: they answer, so the window's own readiness does not include them; a minute is
