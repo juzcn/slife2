@@ -60,8 +60,12 @@ class Work:
     #: and went quiet is (`slife2.clients.model`, v1's `work.stall`).
     stall: float = 120.0
     #: One call to the context plugin.  Long enough for `restore` (a whole
-    #: context replayed) and `rebuild` (a recall that may embed a query).
-    context: float = 120.0
+    #: context replayed) and `rebuild` (a recall that may embed a query), and
+    #: for `remember` to embed and write a long turn.  **Raised from 120 s on
+    #: 2026-10-23**: a `winning-avg-corewars` turn's save outlasted 120 s with one
+    #: window and no second client, and the whole turn was rolled back as
+    #: recorded-nowhere.
+    context: float = 300.0
     #: One *ask* of the toolhub by this process — the tool list, and the trim at
     #: a turn boundary.  **Not a tool call**: that is the loop's, and nothing
     #: here bounds it (see the module docstring).  Must outlast the hub's own
