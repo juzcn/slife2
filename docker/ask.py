@@ -30,6 +30,9 @@ async def main() -> int:
                 "watched": False,
                 "channel": "container",
             },
+            # The client timeout covers the connection; the call needs its own
+            # or a long first turn is cut at the transport's 25-minute default.
+            timeout=timeout,
         )
 
     data = result.data
