@@ -4351,7 +4351,7 @@ async def test_context_calls_state_their_own_budget(hub) -> None:
 
     await send(server, "hello", agent="jack")
 
-    assert store.timeouts["remember"] == [_T.timeouts.work.remember]
+    assert store.timeouts["remember"] == [None]
     for name in ("restore", "rebuild", "forget"):
         for timeout in store.timeouts.get(name, []):
             assert timeout == _T.timeouts.work.context

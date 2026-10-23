@@ -58,7 +58,6 @@ import array
 import math
 import re
 import sqlite3
-import threading
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import date, datetime
 from pathlib import Path
@@ -235,15 +234,6 @@ def connect_to(path: Path) -> sqlite3.Connection:
     `SQLITE_BUSY` — which matters more here than for the turns, because two of
     these files are written by different processes.
 
-    **The journal mode is the file's, and is set once.**  `PRAGMA
-    journal_mode=WAL` is a write on the database header; running it on every
-    connection made two first connections to a fresh store race, and the loser
-    raised `database is locked` *before* the busy timeout that was about to be
-    set was in force — which is how a turn's `restore` failed while a window's
-    `transcript` read was starting.  So the busy budget is set first, the mode
-    is read, and it is switched only when it differs; a per-file lock keeps two
-    in-process threads from both deciding to switch.
-
     The vector index arrives as a loadable extension, and an extension is loaded
     *into a connection* — so this, which opens one per call, loads it every
     time.  Measured at about half a microsecond, which is why it happens here
@@ -252,28 +242,12 @@ def connect_to(path: Path) -> sqlite3.Connection:
     """
     connection = sqlite3.connect(path, timeout=_T.timeouts.storage.sqlite_busy)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
     connection.execute(
         f"PRAGMA busy_timeout={int(_T.timeouts.storage.sqlite_busy * 1000)}"
     )
-    with _connect_lock(path):
-        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-        if str(mode).lower() != "wal":
-            connection.execute("PRAGMA journal_mode=WAL")
     _load_vector_index(connection)
     return connection
-
-
-#: One setup lock per database file.  `connect_to` is called from the event
-#: loop *and* from the threads `off_loop` hands the stores' blocking halves to,
-#: so the lock is a `threading` one rather than an asyncio one.  It is held only
-#: around the journal-mode read/switch, which is quick once the file is in WAL.
-_CONNECT_LOCKS: dict[Path, threading.Lock] = {}
-_CONNECT_LOCKS_GUARD = threading.Lock()
-
-
-def _connect_lock(path: Path) -> threading.Lock:
-    with _CONNECT_LOCKS_GUARD:
-        return _CONNECT_LOCKS.setdefault(path, threading.Lock())
 
 
 def begin_rebuild(connection: sqlite3.Connection) -> None:

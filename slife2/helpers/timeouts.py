@@ -62,13 +62,6 @@ class Work:
     #: One call to the context plugin.  Long enough for `restore` (a whole
     #: context replayed) and `rebuild` (a recall that may embed a query).
     context: float = 120.0
-    #: One post-turn save (`remember`).  **Longer than `context` on purpose,
-    #: and not a restore's budget borrowed**: the save chunks and embeds the
-    #: whole turn before it writes the row, so a long agentic turn is a save
-    #: doing its job.  The save is required — a turn that cannot be recorded
-    #: fails — which is exactly why this bound has to fit the work rather than
-    #: the connection it rides.  `validate` keeps it >= `context`.
-    remember: float = 600.0
     #: One *ask* of the toolhub by this process — the tool list, and the trim at
     #: a turn boundary.  **Not a tool call**: that is the loop's, and nothing
     #: here bounds it (see the module docstring).  Must outlast the hub's own
@@ -371,14 +364,6 @@ def validate(ts: Timeouts) -> list[str]:
         errs.append(
             "invariant: work.catalogue >= work.hub (a catalogue build is a "
             "hub ask with the cold work in it)"
-        )
-    if ts.work.remember < ts.work.context:
-        # A save embeds and writes a whole turn; a restore only reads one.  A
-        # save bounded below a restore is the save dying first, which is how a
-        # finished turn loses its answer.
-        errs.append(
-            "invariant: work.remember >= work.context (a save does the work a "
-            "restore reads back)"
         )
     if ts.ready.tunnel_heal < ts.ready.tunnel_read_url:
         # A running child gets at least the patience a fresh start gets, or the

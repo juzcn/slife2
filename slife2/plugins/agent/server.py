@@ -1468,11 +1468,12 @@ def build_server(
                     "created_at": created_at,
                     "completed_at": completed_at,
                 },
-                # The save's own budget, not the connection's: a long turn's
-                # embedding is work the turn already paid for, and cutting it
-                # at a restore's clock drops the answer after the model wrote
-                # it (`slife2.helpers.timeouts.Work.remember`).
-                timeout=_T.timeouts.work.remember,
+                # **No deadline, like the window's own `send_message`**: a save
+                # is the turn's last step, and the turn's length is the answer's
+                # own business.  The store's inner clocks (the embeddings call,
+                # SQLite's busy timeout) are the bounds an interested party
+                # stated; this call is not one of them.
+                timeout=None,
             )
         )
         turn_id = payload.get("turn_id")
