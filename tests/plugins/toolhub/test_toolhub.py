@@ -722,6 +722,55 @@ async def test_a_plugin_declares_the_sources_it_holds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_declarations_are_asked_together() -> None:
+    """Every plugin is asked at once; only the answers are merged in turn.
+
+    A round trip is what a build waits on — a plugin that is up but still
+    starting the servers it holds answers late — and asking in sequence made the
+    build pay their *sum*.  That sum was the failure in a cold container: enough
+    slow plugins outlived the launcher's catalogue budget and no window opened.
+    So each plugin here waits for the other to be asked before it answers; a
+    sequential refresh never asks the second one and this test times out.
+    """
+    waiting = 0
+    together = asyncio.Event()
+
+    def barrier_declaring(source: str, row: str) -> FastMCP:
+        server = FastMCP("declaring")
+
+        @server.tool(name=LIST_SOURCES)
+        async def list_sources() -> dict[str, Any]:
+            nonlocal waiting
+            waiting += 1
+            if waiting == 2:
+                together.set()
+            await asyncio.wait_for(together.wait(), 5.0)
+            answer = one_source(name=source)
+            answer["sources"][0]["rows"] = [
+                {"name": row, "description": "d", "status": "enabled"}
+            ]
+            return answer
+
+        return server
+
+    connected = {
+        "cli-server": lambda settings: barrier_declaring("cli:one", "cli:first"),
+        "mcp-tools": lambda settings: barrier_declaring("mcp:two", "mcp:second"),
+    }
+    started = time.monotonic()
+    async with Client(hub_for(connected=connected)) as hub:
+        first = await found(hub, "cli:first")
+        second = await found(hub, "mcp:second")
+    elapsed = time.monotonic() - started
+
+    assert "cli:first" in first
+    assert "mcp:second" in second
+    # The barrier releases as soon as both are asked; asked in sequence, the
+    # first one waits out its own timeout instead.
+    assert elapsed < 3.0, f"the declarations were not asked together ({elapsed:.1f}s)"
+
+
+@pytest.mark.asyncio
 async def test_a_declared_source_is_not_the_plugins_own_name() -> None:
     """A source's status is written across every row it owns, so a plugin that
     filed what it holds under its own name would have it marked broken whenever

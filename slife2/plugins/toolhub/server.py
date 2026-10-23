@@ -1385,16 +1385,36 @@ class Upstream:
             One `DeclaredSource` per source it holds, which is the hub's address
             book for calls it cannot make itself — and what `servers()` reports.
         """
-        if not self._connection.usable or not self._declares:
+        held = await self.fetch()
+        if held is None:
             return []
-        # **The one call in this process that no caller bounds.**  Every other
-        # `call` here runs inside a turn, where the loop holds the model's own
-        # `_timeout`; this one runs from `refresh_declared`, which `start()` and
-        # the first `list_tools` reach before any turn exists — and
-        # `gateway.make_client` deliberately sets no client-wide deadline, so
-        # without this a plugin that accepted the connection and then never
-        # answered would hold the hub's first listing open for good.  The bound is
-        # the connect budget, which is what this await has always effectively had.
+        return await self.record(held)
+
+    async def fetch(self) -> list[Any] | None:
+        """The round trip alone: what this plugin says it holds.
+
+        **Split from `record` so a refresh can ask every plugin at once and
+        merge one answer at a time.**  Each ask is a round trip and they run
+        together; each merge writes the catalogue and stays sequential, in
+        plugin order, because that order is what settles two plugins claiming
+        one source.  Asking in sequence was the whole cost of a build: with
+        enough plugins slow to answer, the sum outlived the launcher's
+        catalogue budget and took the stack down with it.
+
+        **The one call in this process that no caller bounds.**  Every other
+        `call` here runs inside a turn, where the loop holds the model's own
+        `_timeout`; this one runs from `refresh_declared`, which `start()` and
+        the first `list_tools` reach before any turn exists — and
+        `gateway.make_client` deliberately sets no client-wide deadline, so
+        without this a plugin that accepted the connection and then never
+        answered would hold the hub's first listing open for good.  The bound is
+        the connect budget, which is what this await has always effectively had.
+
+        Returns:
+            The raw `sources` list, or None when there is nothing to ask.
+        """
+        if not self._connection.usable or not self._declares:
+            return None
         try:
             async with asyncio.timeout(_T.timeouts.ready.connect_tools):
                 text, ok = await self.call(LIST_SOURCES, {})
@@ -1419,6 +1439,15 @@ class Upstream:
             raise ConnectionError(
                 f"{self.settings.name} answered without a list of sources"
             )
+        return held
+
+    async def record(self, held: list[Any]) -> list[DeclaredSource]:
+        """Merge one fetched answer and report what it leaves in the catalogue.
+
+        The writing half of `declare`, run one plugin's answer at a time:
+        `_record` merges into the catalogue, and a second merge of one source is
+        what the refresh lock and this order exist to keep apart.
+        """
         declared = [one for raw in held if (one := await self._record(raw)) is not None]
         # **A source it used to hold and does not any more.**  The entry was
         # taken out of the section, so nothing will declare it again and its rows
@@ -1435,8 +1464,8 @@ class Upstream:
         # set shared with the process would compute the difference across two
         # sections, and the row it deletes would be one of this home's.
         here = str(home_dir())
-        held = self._declared.get(here, set())
-        for source in sorted(held - {one.name for one in declared}):
+        last = self._declared.get(here, set())
+        for source in sorted(last - {one.name for one in declared}):
             gone = await self._catalogue.forget_source(source)
             logger.info(
                 "%s: %r is no longer in its section — %d tool(s) removed",
@@ -2725,12 +2754,29 @@ def build_server(
             known = {one.settings.name for one in upstreams} | {CONFIG_KEY}
             found: dict[str, DeclaredSource] = {}
             owners: dict[str, Upstream] = {}
-            for upstream in upstreams:
-                if not upstream.usable:
-                    continue
+            asked = [one for one in upstreams if one.usable]
+
+            async def fetched(
+                upstream: Upstream,
+            ) -> tuple[Upstream, list[Any] | None, ConnectionError | None]:
                 try:
-                    declared = await upstream.declare()
+                    return upstream, await upstream.fetch(), None
                 except ConnectionError as exc:
+                    return upstream, None, exc
+
+            # **Every ask at once, every merge in turn.**  A round trip is what
+            # a build waits for — a plugin that is up but still starting the
+            # servers it holds answers late — and an ask does not touch the
+            # catalogue, so asking them together costs the slowest one instead
+            # of their sum.  The sum was the failure: enough slow plugins
+            # outlived the launcher's catalogue budget and took the stack down
+            # with them.  The merges below do write rows and stay sequential in
+            # plugin order, which is what settles two plugins claiming one
+            # source and what the lock through this function exists to keep
+            # apart.
+            answers = await asyncio.gather(*(fetched(one) for one in asked))
+            for upstream, held, failure in answers:
+                if failure is not None:
                     # **A source that is slow to say what it holds is not a
                     # broken catalogue.**  The rule this file states for a
                     # plugin that is not up — it contributes nothing and is
@@ -2744,9 +2790,12 @@ def build_server(
                         "%s: declarations are not current (%s); keeping the "
                         "rows from the last refresh",
                         upstream.settings.name,
-                        exc,
+                        failure,
                     )
                     continue
+                if held is None:
+                    continue
+                declared = await upstream.record(held)
                 for one in declared:
                     if one.name in known:
                         logger.warning(
