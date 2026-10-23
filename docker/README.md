@@ -60,7 +60,7 @@ Useful environment variables:
 | `SLIFE2_PROMPT` | none | One-shot prompt. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
 | `SLIFE2_BENCH_TUI_URL` | `http://127.0.0.1:24005/mcp` | The TUI plugin's endpoint; the prompt is handed to the window there. |
-| `SLIFE2_BENCH_READY_TIMEOUT` | `180` | Seconds to wait for the window to open. |
+| `SLIFE2_BENCH_READY_TIMEOUT` | `420` | Seconds to wait for the window to open (the launcher's catalogue budget is 240 s, because the external `mcp:` sources connect on their own schedule). |
 | `SLIFE2_BENCH_TOOL_SETTLE` | `60` | Seconds after the window opens before the prompt goes in, so the background `mcp:`/REST tool servers can finish connecting. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
 
