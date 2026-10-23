@@ -461,11 +461,7 @@ def build_server(
                     config.server("context").url,
                     name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
-                    # **No request deadline on the connection**: the calls this
-                    # client carries state their own patience where they are
-                    # made, the same correction `slife2.plugins.agent.server`'s
-                    # `memory()` documents.
-                    timeout=None,
+                    timeout=_T.timeouts.work.context,
                 )
         return context_conn
 
@@ -566,7 +562,6 @@ def build_server(
                     "subagent": task.identity[1],
                     "messages": [message.to_wire() for message in head],
                 },
-                timeout=_T.timeouts.work.context,
             )
         )
         messages, turn_ids = adopt(payload)
@@ -622,7 +617,6 @@ def build_server(
                     "model": reference,
                     "carried": carried,
                 },
-                timeout=_T.timeouts.work.context,
             )
         )
         rebuilt, _ = adopt(payload)

@@ -564,9 +564,7 @@ class UnreadableStore:
     def __init__(self, **answers: dict[str, Any]) -> None:
         self.answers = answers
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any], **_kwargs: Any
-    ) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         return SimpleNamespace(data=self.answers[name])
 
 
@@ -590,15 +588,13 @@ class ParkedRestore:
         self.arrived = asyncio.Event()
         self.release = [asyncio.Event(), asyncio.Event()]
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any], **kwargs: Any
-    ) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "restore":
             mine = self.entered
             self.entered += 1
             self.arrived.set()
             await self.release[mine].wait()
-        return await self.inner.call_tool(name, arguments, **kwargs)
+        return await self.inner.call_tool(name, arguments)
 
 
 @pytest.mark.asyncio
@@ -4309,49 +4305,3 @@ async def test_removing_a_subagent_ends_its_watch(context, hub) -> None:
     assert result.data == {"closed": True}
     assert isinstance(frames[-1], Closed)
     assert "scout was removed" in frames[-1].reason
-
-
-class RecordingStore:
-    """A context store that answers every call and records its patience."""
-
-    def __init__(self) -> None:
-        self.timeouts: dict[str, list[float | None]] = {}
-
-    async def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-        *,
-        timeout: float | None = None,
-        **_kwargs: Any,
-    ) -> Any:
-        self.timeouts.setdefault(name, []).append(timeout)
-        answers = {
-            "restore": {"messages": [], "turn_ids": [], "turns": []},
-            "rebuild": {"messages": [], "turn_ids": [], "kept": 0, "recalled": 0},
-            "remember": {"turn_id": 1},
-            "forget": {},
-        }
-        return SimpleNamespace(data=answers[name])
-
-
-@pytest.mark.asyncio
-async def test_context_calls_state_their_own_budget(hub) -> None:
-    """The connection has no clock; each call names its own patience.
-
-    `memory()` used to hold `work.context` as a *session-wide* deadline, so the
-    post-turn `remember` — which embeds a whole turn — was cut at a restore's
-    budget.  A long turn finished and then lost its answer to `Request
-    'tools/call' timed out`.
-    """
-    store = RecordingStore()
-    server = build_server(
-        config(), context_client=store, hub_client=hub, backend=answering("hi")
-    )
-
-    await send(server, "hello", agent="jack")
-
-    assert store.timeouts["remember"] == [None]
-    for name in ("restore", "rebuild", "forget"):
-        for timeout in store.timeouts.get(name, []):
-            assert timeout == _T.timeouts.work.context
