@@ -15,6 +15,14 @@ from slife2.libs.store.db import message_text
 
 DEFAULT_TUI_URL = "http://127.0.0.1:24005/mcp"
 TURN_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_TURN_TIMEOUT", "3600"))
+#: How long the window may take to open.  `slife2 run` opens it only after
+#: every server is ensured and the catalogue is built, so a window that is not
+#: there yet is a stack still becoming ready — not a turn in progress.
+READY_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_READY_TIMEOUT", "180"))
+
+
+class NotReady(RuntimeError):
+    """No window opened within the readiness budget."""
 
 
 def database_of(agent: str) -> Path:
@@ -86,24 +94,28 @@ async def submit(url: str, agent: str, prompt: str) -> None:
     `send_message` client here — one agent has one window, and its turn store is
     a file rather than a shared service.
 
-    A refusal means no window is attached yet — the headless window attaches a
-    moment after its stack comes up — and it is the one answer that proves
-    nothing was written, so it is retried.  A call that did not come back is not
-    (`submit_to` says which is which).
+    A refusal means no window is attached yet — `slife2 run` opens the window
+    only after it has ensured every server and built the catalogue, so a
+    refusal is a stack still becoming ready.  It is the one answer that proves
+    nothing was written, so it is retried; a call that did not come back is not
+    (`submit_to` says which is which).  The retry *is* the readiness wait:
+    there is no second status probe here.
     """
-    deadline = asyncio.get_running_loop().time() + TURN_TIMEOUT
+    deadline = asyncio.get_running_loop().time() + READY_TIMEOUT
     while True:
         try:
             async with Client(url, timeout=30) as window:
                 handed = await submit_to(window, agent, prompt, "bench")
-        except Exception:  # noqa: BLE001 - the plugin attaches with the stack
+        except Exception:  # noqa: BLE001 - the plugin is part of the same start
             handed = False
         if handed is True:
             return
         if handed is None:
             raise RuntimeError("the hand-over to the agent's window did not come back")
         if asyncio.get_running_loop().time() >= deadline:
-            raise RuntimeError(f"no window is showing {agent!r}")
+            raise NotReady(
+                f"no window became available for {agent!r} within {READY_TIMEOUT:.0f}s"
+            )
         await asyncio.sleep(2)
 
 
@@ -133,8 +145,11 @@ async def main() -> int:
     url = os.environ.get("SLIFE2_BENCH_TUI_URL", DEFAULT_TUI_URL)
     path = database_of(agent)
     before = await asyncio.to_thread(last_turn, path)
-
-    await submit(url, agent, prompt)
+    try:
+        await submit(url, agent, prompt)
+    except NotReady as exc:
+        print(f"no window became available: {exc}", file=sys.stderr)
+        return 3
     turn_id, text = await wait_for_turn(path, before)
 
     print(text)

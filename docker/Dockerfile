@@ -55,7 +55,7 @@ RUN for i in 1 2 3; do \
     done; exit 1
 
 COPY --chown=slife2:slife2 docker/entrypoint.sh /usr/local/bin/slife2-entrypoint
-COPY --chown=slife2:slife2 docker/ask.py docker/wait_ready.py /opt/slife2-bench/
+COPY --chown=slife2:slife2 docker/ask.py /opt/slife2-bench/
 RUN chmod +x /usr/local/bin/slife2-entrypoint
 
 EXPOSE 24000

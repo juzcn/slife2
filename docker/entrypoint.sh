@@ -22,5 +22,4 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-/opt/slife2/.venv/bin/python /opt/slife2-bench/wait_ready.py
 /opt/slife2/.venv/bin/python /opt/slife2-bench/ask.py "${SLIFE2_PROMPT}"
