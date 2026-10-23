@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # The real slife2 distribution in a container. The build context is staged
 # from the slife2 checkout (build.py), and the project's own installer runs
@@ -45,14 +44,26 @@ COPY --chown=slife2:slife2 docker/sitecustomize.py /opt/slife2-bench/py/sitecust
 # point; a hand-built venv would be a different distribution.
 RUN bash scripts/install.sh
 
-# Warm the exact npx resolution path the shipped config names. Without this, a
-# fresh container's first start can lose the initial MCP handshake while npx
-# downloads the package, and the shell is absent for that run. The config is
-# unchanged; only the package cache is warmed.
-RUN for i in 1 2 3; do \
-        npx -y @wonderwhy-er/desktop-commander@latest < /dev/null && exit 0; \
-        sleep 2; \
-    done; exit 1
+# Install **every** external source's package, and the browsers.  The bench's
+# task containers unpack this image and its tool gate waits for each source to
+# report ready; a cold `npx`/`uvx` install is exactly what a 180 s connect
+# budget cannot cover, and a source that misses it fails the trial.  The list is
+# the config's, not this file's — see docker/prewarm.py — and a failure fails
+# the build rather than leaving an invisible hole.
+COPY --chown=slife2:slife2 docker/prewarm.py /opt/slife2-bench/prewarm.py
+RUN /opt/slife2/.venv/bin/python /opt/slife2-bench/prewarm.py
+
+# **Both browser sources drive the installed Google Chrome.**  @playwright/mcp
+# defaults to `channel: chrome` and chrome-devtools-mcp to `stable`; both look
+# for /opt/google/chrome/chrome, and a tool call against a bundled Chromium
+# fails with "Chromium distribution 'chrome' is not found".  The package
+# install needs root; its own npm cache and HOME keep the slife2 user's
+# `_npx` tree and `~/.cache` user-owned, which is what the tar ships.
+USER root
+RUN HOME=/root npm_config_cache=/tmp/root-npm \
+      npx -y playwright@latest install chrome \
+ && rm -rf /tmp/root-npm /root/.cache
+USER slife2
 
 COPY --chown=slife2:slife2 docker/entrypoint.sh /usr/local/bin/slife2-entrypoint
 COPY --chown=slife2:slife2 docker/ask.py /opt/slife2-bench/

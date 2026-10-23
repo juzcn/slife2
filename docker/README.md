@@ -86,10 +86,21 @@ the container.
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
-- Desktop Commander is pre-warmed at build time with the same `npx` line the
-  shipped config uses. Without that, a fresh container can lose the first MCP
-  handshake while npx downloads the package, and the shell is missing for that
-  run. Other `mcp:` servers may still cold-start on first use.
+- Every enabled `mcp:`/`rest-api:` source is **installed** at build time by
+  `docker/prewarm.py`, from the shipped config rather than a list in the file:
+  an `npx` source fills the same `_npx/<hash>` tree `npx -y <spec>` would use,
+  a `uvx` source builds the same environment `uvx <pkg>` reuses. The packages'
+  install scripts run with them, which is what pulls Chrome for Testing into
+  `~/.cache/puppeteer`. Nothing is started, so a server that ignores EOF cannot
+  hang the build, and a failed install fails the build.
+- Both browser sources drive the **installed Google Chrome**, not a bundled
+  Chromium: `@playwright/mcp` defaults to `channel: chrome` and
+  `chrome-devtools-mcp` to `stable`, and both look for
+  `/opt/google/chrome/chrome`. The image installs that package with
+  `playwright install chrome`. Chrome's own sandbox needs a PID namespace the
+  container runtime may refuse (`Failed to move to new namespace`); where it
+  does, a browser call needs `--no-sandbox`, which is a runtime decision, not an
+  image one. Starting the server and listing its tools do not need a browser.
 - Docker Desktop's kernel reports as WSL in `/proc/version`, so credstore would
   pick its WSL backend and look for `powershell.exe`. `sitecustomize.py` makes
   it treat the container as native Linux. Missing `${VAR}` references then stay
