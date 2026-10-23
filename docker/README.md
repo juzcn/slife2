@@ -52,6 +52,14 @@ only after every server is ensured and the catalogue is built. The answer is on
 stdout; the turn id is on stderr. The window is the only client of the
 conversation: the one-shot driver does not call `send_message` itself.
 
+**And the external sources are awaited before the prompt.** A user's home is
+warm — the `mcp:`/`rest-api:` servers were connected on the previous run — but a
+fresh container starts all of them from cold, and a prompt sent while they are
+still `connecting` runs its first turn against a partial tool set. So the
+driver asks the toolhub's `servers` until every enabled `mcp:`/`rest-api:` entry
+reports `ready`; a source that never gets there fails the run rather than
+sending the prompt anyway.
+
 Useful environment variables:
 
 | Variable | Default | Meaning |
@@ -60,8 +68,9 @@ Useful environment variables:
 | `SLIFE2_PROMPT` | none | One-shot prompt. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
 | `SLIFE2_BENCH_TUI_URL` | `http://127.0.0.1:24005/mcp` | The TUI plugin's endpoint; the prompt is handed to the window there. |
+| `SLIFE2_BENCH_TOOLHUB_URL` | `http://127.0.0.1:24020/mcp` | The toolhub's endpoint; the readiness gate asks `servers` there. |
 | `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
-| `SLIFE2_BENCH_TOOL_SETTLE` | `60` | Seconds after the window opens before the prompt goes in, so the background `mcp:`/REST tool servers can finish connecting. |
+| `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the

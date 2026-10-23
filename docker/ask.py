@@ -11,23 +11,27 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.harness.handover import submit_to
+from slife2.libs.host.config import load_cached
 from slife2.libs.host.paths import agent_dir
+from slife2.libs.plugin.protocol import tool_payload
 from slife2.libs.store.db import message_text
 from slife2.plugins.tui import server as control
 from slife2.plugins.tui.server import NOTE
 
 DEFAULT_TUI_URL = "http://127.0.0.1:24005/mcp"
+DEFAULT_TOOLHUB_URL = "http://127.0.0.1:24020/mcp"
 TURN_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_TURN_TIMEOUT", "3600"))
 #: How long the window may take to open.  `slife2 run` opens it only after
 #: every server is ensured and the catalogue is built; the launcher's own
 #: budgets are `ready.plugin_start` (300 s) and `work.catalogue` (360 s), and
 #: this gate has to outlast both rather than a warm start's two minutes.
 READY_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_READY_TIMEOUT", "900"))
-#: After the window is up, how long the external tool servers get to connect
-#: before the prompt goes in.  They start in the background and are listed as
-#: they answer, so the window's own readiness does not include them; a minute is
-#: the simple settle that covers the ones the tasks use.
-TOOL_SETTLE = float(os.environ.get("SLIFE2_BENCH_TOOL_SETTLE", "60"))
+#: How long the external `mcp:`/`rest-api:` sources may take to reach `ready`.
+#: Unlike a person's home — where the controllers stay warm and the sources are
+#: connected from the previous run — a task container starts every one of them
+#: from cold, so the bench blocks on their real states instead of guessing a
+#: settle.  See `wait_for_tools`.
+TOOL_READY_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_TOOL_READY_TIMEOUT", "900"))
 
 
 class NotReady(RuntimeError):
@@ -125,6 +129,63 @@ async def wait_for_window(url: str, agent: str) -> None:
         await asyncio.sleep(2)
 
 
+async def wait_for_tools(url: str, expected: dict[str, str], deadline: float) -> None:
+    """Block until every configured external source says `ready`.
+
+    **The set is read off the config, not off the answer.**  `servers` reports
+    the sources a plugin has *declared*; a plugin still installing them (a cold
+    container's `mcp-tools`, starting twenty `npx`/`uvx` servers) has not
+    declared at all, and its entries are absent — which "every row is ready"
+    would read as success.  So each enabled entry under `mcp:`/`rest-api:` is
+    awaited by name: absent is `missing`, and `connecting`/`failed`/`idle` are
+    all not `ready`.  `off` is not a wait — a switched-off entry is a decision.
+
+    The call itself refreshes the declarations (the hub's `servers` does), so a
+    poll is a fresh answer and a source that became ready between two polls is
+    seen.  A source that never becomes ready fails the trial at the deadline:
+    no prompt is sent against a tool set that is still changing.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            async with Client(url, timeout=TOOL_READY_TIMEOUT) as hub:
+                payload = tool_payload(
+                    await hub.call_tool("servers", {}, timeout=TOOL_READY_TIMEOUT)
+                )
+        except Exception as exc:  # noqa: BLE001 - the hub is part of the same start
+            payload = {}
+            print(f"the toolhub is not answering yet: {exc}", file=sys.stderr)
+        rows = {
+            str(row.get("name")): row
+            for row in payload.get("servers") or []
+            if isinstance(row, dict)
+        }
+        waiting = {
+            name: str((rows.get(name) or {}).get("state") or "missing")
+            for name in expected
+            if str((rows.get(name) or {}).get("state")) != "ready"
+        }
+        if not waiting:
+            return
+        if loop.time() >= deadline:
+            raise NotReady(
+                "external tool servers not ready: "
+                + ", ".join(
+                    f"{name}={state}" for name, state in sorted(waiting.items())
+                )
+            )
+        await asyncio.sleep(5)
+
+
+def external_sources() -> dict[str, str]:
+    """The enabled `mcp:` and `rest-api:` entries, by name, with their kind."""
+    config = load_cached()
+    entries = {**config.mcp, **config.rest_apis}
+    return {
+        name: settings.kind for name, settings in entries.items() if settings.enabled
+    }
+
+
 async def submit(url: str, agent: str, prompt: str) -> None:
     """Hand the prompt to the agent's window, which is what runs the turn.
 
@@ -183,16 +244,20 @@ async def main() -> int:
 
     agent = os.environ.get("SLIFE2_AGENT", "slife2")
     url = os.environ.get("SLIFE2_BENCH_TUI_URL", DEFAULT_TUI_URL)
+    hub_url = os.environ.get("SLIFE2_BENCH_TOOLHUB_URL", DEFAULT_TOOLHUB_URL)
     path = database_of(agent)
     before = await asyncio.to_thread(last_turn, path)
     try:
         await wait_for_window(url, agent)
+        # **The bench is not a warm home.**  A person's stack has the external
+        # sources connected from the previous run; a task container starts them
+        # all from cold.  Block on their real state so the first turn sees the
+        # tool set the config names, rather than racing the npx installs.
+        tools_deadline = asyncio.get_running_loop().time() + TOOL_READY_TIMEOUT
+        await wait_for_tools(hub_url, external_sources(), tools_deadline)
     except NotReady as exc:
-        print(f"no window became available: {exc}", file=sys.stderr)
+        print(f"the stack did not become ready: {exc}", file=sys.stderr)
         return 3
-    # The window is the stack's readiness; the external tool servers are not
-    # part of it and are still connecting.  Give them the minute.
-    await asyncio.sleep(TOOL_SETTLE)
     try:
         await submit(url, agent, prompt)
     except NotReady as exc:

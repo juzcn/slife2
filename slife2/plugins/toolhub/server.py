@@ -2689,6 +2689,15 @@ def build_server(
         declared last time is still in the catalogue, so a late one costs
         freshness and nothing else.
 
+        **And that rule is enforced, not assumed.**  `Upstream.declare` has a
+        bound of its own (`ready.connect_tools`) and raises when a plugin that is
+        up does not answer within it — a real state in a cold container, where
+        `mcp-tools` is still installing the external servers it holds.  The
+        raise is caught per upstream below: the source keeps its last rows, the
+        warning names it, and the refresh goes on.  Letting it escape was how a
+        slow external source failed the whole catalogue and, through
+        `_open_catalogue`, the launcher itself.
+
         **The two names that cannot be declared are checked here**, and only here
         can they be: a source may not take a name this process is already
         connected to, and two plugins may not claim one source between them —
@@ -2719,7 +2728,26 @@ def build_server(
             for upstream in upstreams:
                 if not upstream.usable:
                     continue
-                for one in await upstream.declare():
+                try:
+                    declared = await upstream.declare()
+                except ConnectionError as exc:
+                    # **A source that is slow to say what it holds is not a
+                    # broken catalogue.**  The rule this file states for a
+                    # plugin that is not up — it contributes nothing and is
+                    # asked again next time — is the same rule for one that is
+                    # up but still installing the external servers it holds:
+                    # its last rows stay in the catalogue, and this refresh
+                    # loses freshness rather than failing the stack.  The
+                    # required-plugin gate is what still fails a turn, and it
+                    # reads `usable`, not this answer.
+                    logger.warning(
+                        "%s: declarations are not current (%s); keeping the "
+                        "rows from the last refresh",
+                        upstream.settings.name,
+                        exc,
+                    )
+                    continue
+                for one in declared:
                     if one.name in known:
                         logger.warning(
                             "%s: %r is a name this hub is already connected under",
