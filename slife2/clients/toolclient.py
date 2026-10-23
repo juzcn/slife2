@@ -277,7 +277,7 @@ async def unload_tools(client: Client) -> dict[str, Any]:
             await client.call_tool(FUNC_TOOL_UNLOAD, {}, timeout=_T.timeouts.work.hub)
         )
     except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
-        logger.warning("the tool list was not trimmed: %s", exc)
+        logger.warning("the tool list was not trimmed: %s", exc, exc_info=exc)
         return empty
     # **`payload or empty` laundered the one case `trim_answer` exists for.**
     # A hub answering with a shape this build does not know (`tool_payload`'s

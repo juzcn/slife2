@@ -83,11 +83,13 @@ from typing import Any
 
 from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
+from fastmcp.client.transports import StdioTransport
 from mcp import MCPError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import SEPARATOR
 from slife2.libs.host.config import ToolServerSettings
+from slife2.libs.host.runtime import entry_log_path, truncate_if_huge
 from slife2.libs.plugin.audience import with_home
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,38 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
         if settings.env:
             entry["env"] = settings.resolved_env()
     return {"mcpServers": {settings.name: entry}}
+
+
+def transport_for(settings: ToolServerSettings, *, cwd: str) -> Any:
+    """One server's transport, with a stdio child's own words kept apart.
+
+    **The document cannot say where a child's stderr goes.**  `mcpServers` is the
+    ecosystem's shape and stays the shape for HTTP, but it has no `log_file`
+    (`StdioMCPServer` has no such field), so a stdio entry built through it hands
+    its stderr to this process's stderr — which, in a toolhub, is the file every
+    entry shares.  The 2026-10 corpus shows what that reads like: a node crash,
+    a DuckDuckGo deprecation notice and four servers' start-up chatter interleaved
+    in one file, none of it attributable.
+
+    `StdioTransport` takes the field directly.  Each entry gets its own log under
+    `runtime/logs/`, bounded by the same ceiling as a daemon's; that file is the
+    child's own last words, which is the one thing `str(exc)` cannot carry for a
+    process with no console (`Connection.fail` says the same).
+
+    HTTP keeps the document: its headers and URL are resolved here and it has no
+    child to attribute anything to.
+    """
+    if settings.url:
+        return mcp_config(settings, cwd=cwd)
+    log = entry_log_path(settings.name)
+    truncate_if_huge(log)
+    return StdioTransport(
+        command=settings.command,
+        args=list(settings.args),
+        env=settings.resolved_env(),
+        cwd=settings.cwd or cwd,
+        log_file=log,
+    )
 
 
 def make_client(transport: Any, handler: MessageHandler) -> Client:
@@ -568,10 +602,34 @@ class Connection:
         The error is kept rather than raised, because it is the answer to "what
         did it say the last time we asked" — and the caller is told, because
         what a failure *means* is not this module's to decide.
+
+        **The report belongs to the caller, and the duplicate is what this split
+        removes.**  A `Family` member and the hub's own sources both pass
+        `on_failed`, and both name the source, its target and what the failure
+        means; this line naming the same failure a millisecond earlier was the
+        second half of a pair every unreachable server cost — seventeen of them
+        in the 2026-10 corpus.  With a callback, the line here drops to DEBUG
+        and carries the traceback instead — the cause chain a one-line report
+        deliberately leaves out, available where somebody has asked for detail.
         """
         self._ready = False
         self._error = f"{type(exc).__name__}: {exc}".strip()
-        logger.warning("%s is not usable: %s", self.settings.name, self._error)
+        target = self.settings.url or self.settings.command
+        if self._on_failed is None:
+            logger.warning(
+                "%s (%s) is not usable: %s",
+                self.settings.name,
+                target,
+                self._error,
+            )
+        else:
+            logger.debug(
+                "%s (%s) is not usable: %s",
+                self.settings.name,
+                target,
+                self._error,
+                exc_info=exc,
+            )
         if self._on_failed is not None:
             self._on_failed(exc)
 
@@ -739,4 +797,5 @@ __all__ = [
     "mcp_config",
     "proxied_name",
     "sanitise",
+    "transport_for",
 ]

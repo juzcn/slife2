@@ -686,6 +686,59 @@ async def test_a_turn_returns_the_final_text(context, hub) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_leaves_one_line_saying_what_it_cost(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The operator's index into a session.**
+
+    Before this line the logs had no turn boundaries at all: a model call was
+    logged one process over, a stored turn one process over, and a tool only
+    when it failed.  One line per ending — success, failure or cancellation —
+    with the facts a reader needs to find the transcript row and the calls.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
+    )
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+        await send(server, "what is 6*7?")
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("turn_done ")
+    ]
+    assert len(lines) == 1, caplog.text
+    line = lines[0]
+    assert f"agent={DEFAULT_AGENT}" in line
+    assert "turn=" in line, "an id is written when the record landed"
+    assert "stop=stop" in line
+    assert "iterations=2" in line
+    assert "elapsed=" in line
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_is_logged_when_it_succeeds(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The successful call used to leave no trace at all.
+
+    The only tool lines in the 2026-10 corpus were warnings about failures, so
+    "what did this turn actually do" had no answer in any log.  The line names
+    the tool and its duration; the arguments stay out of it.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
+    )
+    with caplog.at_level("INFO", logger="slife2.libs.turn.loop"):
+        await send(server, "what is 6*7?")
+
+    said = [record.getMessage() for record in caplog.records]
+    assert any(
+        message.startswith("tool_call name=skill_list ") for message in said
+    ), caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_turn_reports_its_shape(context, hub) -> None:
     """What a caller needs to render and to bill — and no history.
 

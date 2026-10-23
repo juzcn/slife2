@@ -1064,6 +1064,13 @@ subagent:
 `SLIFE2_RUNTIME_DIR` 覆盖该位置。运行时目录是可重建的：删除它后，下次启动会
 重建所需内容。
 
+每个 server 默认以 INFO 级别写日志。启动时设置 `SLIFE2_LOG_LEVEL=DEBUG` 可以提高
+所有 server 的级别——每次调用的耗时、工具调用和连接细节都在这一级；无法识别的
+值会回退到 INFO，并写一行说明。日志超过上限时，下次启动会把它轮转为 `<log>.1`，
+而不是删除。外部 `mcp:` 条目的 stdio 子进程也会在 `logs/` 下写自己的文件
+（`mcp-<name>-<digest>.log`），因此某个 server 自己的启动输出和崩溃可以归属到它，
+而不会混进 toolhub 的日志。
+
 ### 多个数据目录
 
 一个数据目录可以包含多个 agent。它们共享该目录的 `slife2.yaml`、`skills/` 和

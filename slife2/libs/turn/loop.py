@@ -596,6 +596,7 @@ class AgentLoop:
             text, ok = await self._background(dispatch, bound, messages)
         else:
             text, ok = await self._foreground(dispatch, bound)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         await self._emit(
             observer,
             ToolCallFinished(
@@ -604,9 +605,26 @@ class AgentLoop:
                 ok=ok,
                 result_preview=preview(text),
                 result_chars=len(text),
-                elapsed_ms=int((time.monotonic() - started) * 1000),
+                elapsed_ms=elapsed_ms,
             ),
         )
+        # **The successful call used to leave no trace at all.**  The only tool
+        # lines in the 2026-10 corpus were warnings about calls that failed, so
+        # "what did this turn actually do for four minutes" had no answer in any
+        # log; a transcript showed the call but the record it lives in is the
+        # conversation's, not the operator's.  One line per *foreground* call:
+        # a background call has not run yet when its id is returned, and
+        # `slife2.libs.harness.async_tasks` logs its own schedule and finish.
+        # Arguments are deliberately absent — they can hold a path, a message or
+        # a credential, and the name and duration are what a trace needs.
+        if not meta.background:
+            logger.info(
+                "tool_call name=%s ok=%s elapsed_ms=%d result_chars=%d",
+                call.name,
+                ok,
+                elapsed_ms,
+                len(text),
+            )
         return text, ok
 
     async def _fit(self, call: ToolCall, text: str, messages: Sequence[Message]) -> str:

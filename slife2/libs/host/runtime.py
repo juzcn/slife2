@@ -97,6 +97,23 @@ def log_path(url: str) -> Path:
     return _sub("logs") / f"{endpoint_key(url)}.log"
 
 
+def entry_log_path(name: str) -> Path:
+    """The log one external stdio entry's child writes.
+
+    **A child's stderr is not the parent's log.**  Every `mcp:` entry the
+    mcp-tools plugin starts used to write into the plugin's own file, so four
+    servers' start-up chatter and one node crash arrived interleaved with the
+    plugin's lines and nothing said which process said what
+    (`slife2.clients.gateway.transport_for`).  One file per entry, named
+    readably and digested for the reason every key here is: a name reaches the
+    OS as a file name, and two entries may differ only in a character the
+    filesystem refuses.
+    """
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    stem = safe[:40].strip("_") or "entry"
+    return _sub("logs") / f"mcp-{stem}-{digest(name)[:8]}.log"
+
+
 def record_path(url: str) -> Path:
     return _sub("servers") / f"{endpoint_key(url)}.json"
 
@@ -908,7 +925,7 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
     against the `cwd` set here.
     """
     log = log_path(url)
-    _truncate_if_huge(log)
+    truncate_if_huge(log)
     sink = open(log, "ab", buffering=0)  # noqa: SIM115 - the child inherits it
     try:
         common: dict[str, object] = {
@@ -960,22 +977,28 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
         sink.close()
 
 
-def _truncate_if_huge(path: Path) -> None:
-    """Keep a daemon's log from growing without bound across restarts.
+def truncate_if_huge(path: Path) -> None:
+    """Keep a log from growing without bound across restarts — by keeping one.
 
-    **A truncation that did not happen is not one that did.**  The stat and the
-    unlink were both suppressed, so a log that could not be read or removed grew
-    past the ceiling with nothing said.  The unlink is still best-effort — a log
-    that is already gone is fine — but a failure is now logged naming the file,
-    because the ceiling this function exists to hold is otherwise quietly
-    exceeded (DESIGN.md §11.1).
+    **The previous file is renamed, not deleted.**  This used to unlink, and the
+    file it removed whole is exactly the one somebody opens after a crash: the
+    last run's words, gone at the next start.  `<name>.1` is overwritten on the
+    following rotation and otherwise left alone; `slife2 logs` reads the live
+    file, and the rotated one is beside it at the path the failure already names.
+
+    **A rotation that did not happen is not one that did.**  The stat and the
+    replace were both suppressed, so a log that could not be read or renamed grew
+    past the ceiling with nothing said.  A log that is already gone is fine — the
+    rename is best-effort — but a failure is logged naming the file, because the
+    ceiling this function exists to hold is otherwise quietly exceeded
+    (DESIGN.md §11.1).
     """
     try:
         if path.exists() and path.stat().st_size > _LOG_KEEP_BYTES:
-            path.unlink()
+            path.replace(path.with_name(path.name + ".1"))
     except OSError as exc:
         logger.warning(
-            "could not truncate %s (%s); it may grow past the log ceiling", path, exc
+            "could not rotate %s (%s); it may grow past the log ceiling", path, exc
         )
 
 

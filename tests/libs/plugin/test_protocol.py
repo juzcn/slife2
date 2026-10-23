@@ -292,10 +292,11 @@ async def test_a_resolved_secret_is_masked_from_the_returns_meta() -> None:
     """**The middleware that adds `Returns:` runs inside the masking one.**
 
     FastMCP wraps `reversed(middleware)`, so the *first* middleware added is
-    outermost on the way back.  `MaskingMiddleware` is added first for exactly
-    this reason: `DeclareReturns` writes the docstring's `Returns:` onto the
-    tool's `_meta` on the return path, and a mask applied closer to the tool
-    would have already finished by the time that key exists.
+    outermost on the way back.  `MaskingMiddleware` is added before
+    `DeclareReturns` for exactly this reason: `DeclareReturns` writes the
+    docstring's `Returns:` onto the tool's `_meta` on the return path, and a
+    mask applied closer to the tool would have already finished by the time that
+    key exists.  (`TraceMiddleware` is outside both, and masks nothing.)
     """
     from slife2.libs.host import secrets
 
@@ -697,6 +698,11 @@ def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
         )
 
     assert CapturingMCP.options["uvicorn_config"] == {"log_config": None}
+    # The banner is the other thing that must stay out of the log: it is noise
+    # at every start, and FastMCP's banner path also asks PyPI whether a newer
+    # version exists — an outbound request per server, in a stack that starts
+    # offline.
+    assert CapturingMCP.options["show_banner"] is False
 
 
 def test_a_server_that_never_served_takes_its_own_record_back() -> None:

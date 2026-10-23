@@ -522,10 +522,20 @@ class ToolRegistry:
         try:
             return as_tool_text(await tool.run(call.arguments)), True
         except ToolFailed as exc:
-            logger.warning("tool %s failed: %s", call.name, exc)
+            # **INFO, because this is the model's answer and not a fault.**  A
+            # refused tool — an unknown name, a missing file, a bad argument —
+            # is the model's ordinary feedback loop; the 2026-10 corpus had
+            # `no turn 999`, an unknown skill and an empty search at WARNING,
+            # where a reader looking for infrastructure faults then had to
+            # discount them by hand.  The failure still reaches the model as
+            # text, and this line is the trace of it.
+            logger.info("tool %s failed: %s", call.name, exc)
             return f"Error: {exc}", False
         except Exception as exc:  # noqa: BLE001 - a tool failure is a message, never an exception
             # Includes the exception type: "KeyError: 'e'" tells the model which
-            # argument it got wrong, where "tool failed" does not.
-            logger.warning("tool %s raised: %s", call.name, exc)
+            # argument it got wrong, where "tool failed" does not.  **This one
+            # keeps its traceback**: the model's text carries the exception's
+            # name, and the log is the only place the frame it came from is
+            # written down.
+            logger.warning("tool %s raised: %s", call.name, exc, exc_info=exc)
             return f"Error: {type(exc).__name__}: {exc}", False

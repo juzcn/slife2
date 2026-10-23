@@ -1274,7 +1274,7 @@ class Upstream:
             self.settings.transport,
         )
 
-    def _failed(self, _exc: Exception) -> None:
+    def _failed(self, exc: Exception) -> None:
         """This source is unusable, and the catalogue is told so.
 
         The verdict is recorded on the rows rather than only held here, which is
@@ -1283,10 +1283,23 @@ class Upstream:
         owns it is not answering — where before, a failed server's list was
         simply gone and nothing could say what it used to offer.
 
+        **This is the event's only WARNING**, now that `Connection.fail` defers
+        to its callback: the source name and its target are what a reader acts
+        on, and the cause chain stays one level down.  The verdict below is
+        bookkeeping on top of the report, not a substitute for it.
+
         Best-effort, and deliberately: a catalogue that cannot take the verdict
         is itself the failure, and the next `list_tools` says so in its own
         words.  A bookkeeping call must not replace the reason this one failed.
         """
+        target = self.settings.url or self.settings.command
+        logger.warning(
+            "%s (%s) is not usable: %s: %s",
+            self.settings.name,
+            target,
+            type(exc).__name__,
+            exc,
+        )
         try:
             verdict = asyncio.get_running_loop().create_task(
                 self._catalogue.source_state(self.settings.name, "error")
@@ -1299,7 +1312,7 @@ class Upstream:
         verdict.add_done_callback(self._verdict_written)
 
     def _verdict_written(self, verdict: asyncio.Task[None]) -> None:
-        """Retrieve a detached verdict, so a failure is logged and not a warning.
+        """Retrieve a detached verdict, so it is reported here rather than at GC.
 
         `create_task` is the only statement in the block above that cannot
         raise for a reason worth reporting, which is why the retrieval is here
@@ -1307,11 +1320,19 @@ class Upstream:
         *creation* and leave the coroutine's own failure to surface as "Task
         exception was never retrieved" — a message about nothing, naming no
         server, some minutes later.
+
+        **WARNING, not INFO.**  A verdict that was not written is a source whose
+        rows say the wrong thing about a connection the catalogue just watched
+        fail; the next reader of that state is a model deciding whether a tool is
+        usable.  The traceback names where the write broke.
         """
         self._verdicts.discard(verdict)
         if not verdict.cancelled() and (failure := verdict.exception()):
-            logger.info(
-                "the verdict on %s was not recorded: %s", self.settings.name, failure
+            logger.warning(
+                "the verdict on %s was not recorded: %s",
+                self.settings.name,
+                failure,
+                exc_info=failure,
             )
 
     def _offered(self, listed: list[Any]) -> list[UpstreamTool]:

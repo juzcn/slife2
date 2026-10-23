@@ -285,27 +285,47 @@ def test_a_log_that_cannot_be_read_is_named_not_empty() -> None:
     assert str(path) in text
 
 
-def test_a_log_that_cannot_be_truncated_is_reported(
+def test_a_log_that_cannot_be_rotated_is_reported(
     tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """**A truncation that did not happen is not one that did.**
+    """**A rotation that did not happen is not one that did.**
 
-    `_truncate_if_huge` suppressed the stat and the unlink, so a log that could
-    not be unlinked grew past the ceiling with nothing said.  The failure is now
+    `truncate_if_huge` suppressed the stat and the rename, so a log that could
+    not be renamed grew past the ceiling with nothing said.  The failure is now
     logged naming the file (`DESIGN.md` §11.1).
     """
     path = tmp_path / "daemon.log"
     path.write_text("x", encoding="utf-8")
 
-    def deny(self: Path, *, missing_ok: bool = False) -> None:
+    def deny(self: Path, target: Path) -> None:
         raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "unlink", deny)
+    monkeypatch.setattr(Path, "replace", deny)
     monkeypatch.setattr(runtime, "_LOG_KEEP_BYTES", 0)
     with caplog.at_level(logging.WARNING):
-        runtime._truncate_if_huge(path)
+        runtime.truncate_if_huge(path)
 
     assert str(path) in caplog.text
+
+
+def test_a_huge_log_is_kept_as_the_previous_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The file a crash wrote is renamed, not deleted.**
+
+    The whole reason the ceiling exists is the run that just ended; unlinking it
+    at the next start threw away the last words of the crash somebody is about
+    to investigate.  `<log>.1` is the one previous run, beside the live file.
+    """
+    path = tmp_path / "daemon.log"
+    path.write_text("the run before this one", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_LOG_KEEP_BYTES", 0)
+
+    runtime.truncate_if_huge(path)
+
+    assert not path.exists(), "the live log starts empty"
+    previous = path.with_name(path.name + ".1")
+    assert previous.read_text(encoding="utf-8") == "the run before this one"
 
 
 # --- pid liveness ------------------------------------------------------------

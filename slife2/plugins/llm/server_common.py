@@ -26,6 +26,7 @@ import contextlib
 import importlib
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -701,24 +702,53 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 the two are separate prompt lineages and a cache-hit ratio that
                 averaged them could not say which one was missing.
         """
-        result = await stream_chat_impl(streamer, provider, messages, tools, model, ctx)
+        who = f"{agent}/{subagent}" if subagent else agent or "(unstated)"
+        what = kind or "(unstated)"
+        began = time.monotonic()
+        try:
+            result = await stream_chat_impl(
+                streamer, provider, messages, tools, model, ctx
+            )
+        except Exception as exc:
+            # **A failed call used to leave only FastMCP's generic report.**  It
+            # names the tool (`stream_chat`) and carries a traceback, but not the
+            # provider, the model, or whose conversation paid for the failure —
+            # the 2026-10 `unsupported image` 400s were exactly this.  This line
+            # is the same failure with the identity on it.  **No `exc_info`
+            # here**: FastMCP prints the raw exception's traceback to stderr
+            # (which is this process's log file) as its own panel, and that
+            # traceback is what this line puts a name on.  A second copy of the
+            # same stack is the noise this line exists to remove.
+            logger.warning(
+                "stream_chat_failed %s/%s for %s kind=%s: %s: %s",
+                provider,
+                model,
+                who,
+                what,
+                type(exc).__name__,
+                exc,
+            )
+            raise
         # **One line per model call, with the cache breakdown on it.**  The
         # usage is the only place a provider's prefix cache shows itself — the
         # conversation pays for the miss either way — so the numbers a hit rate
         # is computed from are logged where they are final, next to the two
         # facts that make them comparable: whose call it was, and what kind.
+        # `elapsed` is the other half of a trace: usage says what was sent and
+        # returned, and only the clock says whether the wait was the provider's.
         usage = result.get("usage") or {}
         logger.info(
             "stream_chat %s/%s for %s kind=%s prompt=%d cache_read=%d "
-            "cache_creation=%d completion=%d",
+            "cache_creation=%d completion=%d elapsed=%.1fs",
             provider,
             model,
-            f"{agent}/{subagent}" if subagent else agent or "(unstated)",
-            kind or "(unstated)",
+            who,
+            what,
             int(usage.get("prompt_tokens") or 0),
             int(usage.get("cache_read") or 0),
             int(usage.get("cache_creation") or 0),
             int(usage.get("completion_tokens") or 0),
+            time.monotonic() - began,
         )
         return result
 

@@ -44,7 +44,12 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
-from slife2.clients.gateway import ClientFactory, Connection, mcp_config, proxied_name
+from slife2.clients.gateway import (
+    ClientFactory,
+    Connection,
+    proxied_name,
+    transport_for,
+)
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     Config,
@@ -184,7 +189,8 @@ class Link:
         """
         return Connection(
             settings,
-            transport=transport or (lambda one: mcp_config(one, cwd=directory)),
+            transport=transport
+            or (lambda one: transport_for(one, cwd=directory)),
             client_factory=client_factory,
             on_listed=self._listed,
             on_failed=self._failed,
@@ -223,7 +229,20 @@ class Link:
         # Nothing to write: a family holds no catalogue, and the hub learns this
         # from the next declaration.  It is logged because a server that will not
         # start is otherwise only visible as tools that are not there.
-        logger.warning("%s is not reachable: %s", self.settings.name, exc)
+        #
+        # **The target is on the line, and this is now the only WARNING for the
+        # event.**  `Connection.fail` used to log the same failure a millisecond
+        # earlier, which made one unreachable server cost two lines and neither
+        # say which command or URL had failed.  `settings.url or command` is what
+        # a reader goes to look at; the full cause chain stays at DEBUG in
+        # `Connection.fail`, where somebody who asked for detail gets it.
+        logger.warning(
+            "%s (%s) is not reachable: %s: %s",
+            self.settings.name,
+            self.settings.url or self.settings.command,
+            type(exc).__name__,
+            exc,
+        )
 
     def _row(self, tool: Any) -> dict[str, Any]:
         """One tool of this entry, as the catalogue's row for it.

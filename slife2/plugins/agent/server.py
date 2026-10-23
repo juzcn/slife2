@@ -646,11 +646,73 @@ class Outcome:
     model: str = ""
     started_at: str = ""
     completed_at: str = ""
+    #: The turn's own wall time, on the monotonic clock.  Kept on the outcome
+    #: rather than derived from `started_at`/`completed_at` because the two are
+    #: ISO strings written for the row, and a duration read back out of them
+    #: would be a second parsing of the store's format.  It is what the one
+    #: `turn_done` line reports, and it is filled in even when the turn was
+    #: cancelled — the clock ran whether or not the turn finished.
+    elapsed: float = 0.0
     #: The inbox entries this turn folded in, kept so a record that is refused
     #: can **un-answer** them (`unanswer_folded`): a caller whose message is
     #: rolled back with the turn must run its own turn, not be told an answer
     #: that is no longer in the conversation.
     folded: list[Pending] = field(default_factory=list)
+
+
+def log_turn(
+    loop: Loop,
+    outcome: Outcome,
+    turn_id: int | None,
+    failure: BaseException | None,
+) -> None:
+    """One line per turn: what it ran on, what it cost, and how it ended.
+
+    **The gap this closes is the whole reason a session could not be traced.**
+    Before it, the 2026-10 corpus had no turn lines at all: a model call was
+    logged one process over, a stored turn one process over, and a tool only
+    when it failed.  "Where did the five minutes go" had no starting point.
+
+    It is written on every ending, and the ending is in `stop=`: a model's own
+    reason, `cancelled` for a turn that was interrupted, or `failed` with the
+    exception's own words.  `turn=-` is a real value, not a missing one — the id
+    does not exist until the record lands, and a cancelled turn often never
+    reaches that point; the context plugin logs the id when the row does land,
+    and the conversation and times are what join the two.
+
+    **No prompt or answer text.**  The transcript is where words live; this line
+    is the operator's index into it, so it carries counts and times, never the
+    material — the same rule `slife2.helpers.logcontext` applies to the prefix.
+    """
+    if not outcome.started_at:
+        # A message folded into a running turn, or a turn that failed before it
+        # began (a restore, a rebuild): no turn here, and a line saying one ran
+        # would be the log's version of a false positive.
+        return
+    result = outcome.result
+    if result is not None:
+        ending = result.stop_reason or "stop"
+    elif isinstance(failure, asyncio.CancelledError):
+        ending = "cancelled"
+    else:
+        ending = "failed"
+    prompt_tokens = result.usage.prompt_tokens if result is not None else 0
+    completion_tokens = result.usage.completion_tokens if result is not None else 0
+    logger.info(
+        "turn_done agent=%s subagent=%s turn=%s model=%s stop=%s iterations=%d "
+        "prompt_tokens=%d completion_tokens=%d messages=%d elapsed=%.1fs%s",
+        loop.agent,
+        loop.subagent or "-",
+        turn_id if turn_id is not None else "-",
+        outcome.model or loop.model or "-",
+        ending,
+        result.iterations if result is not None else 0,
+        prompt_tokens,
+        completion_tokens,
+        len(outcome.messages),
+        outcome.elapsed,
+        f" error={type(failure).__name__}: {failure}" if failure is not None else "",
+    )
 
 
 @dataclass
@@ -1778,7 +1840,9 @@ def build_server(
         def done(finished: asyncio.Task[Any]) -> None:
             background.discard(finished)
             if not finished.cancelled() and (exc := finished.exception()):
-                logger.warning("recording a cancelled turn failed: %s", exc)
+                logger.warning(
+                    "recording a cancelled turn failed: %s", exc, exc_info=exc
+                )
 
         task.add_done_callback(done)
         return task
@@ -2014,6 +2078,7 @@ def build_server(
                 "the turn of %s was not recorded (%s); rolling it back",
                 describe((loop.agent, loop.subagent)),
                 exc,
+                exc_info=exc,
             )
             turn_id = None
         # **Cleared only after the await.**  A cancellation while waiting leaves
@@ -2262,6 +2327,7 @@ def build_server(
                 "%s: the tool list was not trimmed: %s",
                 describe((loop.agent, loop.subagent)),
                 exc,
+                exc_info=exc,
             )
             return
         if not unloaded:
@@ -2452,6 +2518,10 @@ def build_server(
                 receipt=waiting.receipt,
             )
 
+        # The monotonic clock is the duration's, and `started_at` the row's:
+        # both are needed, and neither can be derived from the other without
+        # reading the store's own timestamp format back (see `Outcome.elapsed`).
+        started_mono = time.monotonic()
         snapshot = len(loop.messages)
         outcome.started_at = now()
         # **The model is taken here, and that is a turn boundary.**  `loop_for`
@@ -2682,6 +2752,7 @@ def build_server(
                 # turn, which is exactly what the record needs.
                 outcome.messages = list(loop.messages[snapshot:])
                 outcome.completed_at = now()
+                outcome.elapsed = time.monotonic() - started_mono
 
     def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
         """What a turn that died at the provider leaves behind, and what it says.
@@ -3524,6 +3595,13 @@ def build_server(
         )
         loop.inbox.append(item)
         outcome = Outcome()
+        # **Both are read by the summary in `finally`, across a re-raise.**  The
+        # failure is captured rather than left to `sys.exc_info()` there, because
+        # a `finally` after an `except` that re-raises cannot be asked reliably
+        # what it is unwinding; the id is initialised here because a turn that
+        # never records (a fork, a refused write) has none to bind.
+        failure: BaseException | None = None
+        turn_id: int | None = None
         try:
             async with loop.lock:
                 # **The previous turn's record is taken up before this caller is
@@ -3635,6 +3713,7 @@ def build_server(
                     before = len(loop.messages)
                     await run_turn_into(loop, item, observer, outcome)
                 except BaseException as exc:
+                    failure = exc
                     # A turn that happened is recorded however it ended, and this
                     # is deliberately one clause rather than a handler per ending
                     # — see `remember_turn` for why the rule is written that way.
@@ -3696,6 +3775,7 @@ def build_server(
                                     "(%s); rolling it back",
                                     describe((loop.agent, loop.subagent)),
                                     refusal,
+                                    exc_info=refusal,
                                 )
                                 roll_back(loop, outcome)
                                 if taps.get(key) is tap:
@@ -3747,6 +3827,7 @@ def build_server(
                             "the turn of %s was not recorded (%s); rolling it back",
                             describe((loop.agent, loop.subagent)),
                             refusal,
+                            exc_info=refusal,
                         )
                         roll_back(loop, outcome)
                         if taps.get(key) is tap:
@@ -3802,6 +3883,11 @@ def build_server(
             loop.last_used = time.monotonic()
             with contextlib.suppress(ValueError):
                 loop.inbox.remove(item)
+            # **The one line a session is traced by**, on every ending.  It is
+            # here rather than at the success return because a failure and a
+            # cancellation are turns too — and the log is the only place they
+            # are otherwise given a start, a duration and a reason in one place.
+            log_turn(loop, outcome, turn_id, failure)
 
         # **One answer, built by `_reply`.**  No `if result` here: every path
         # that leaves a turn with no result has already left — `_injected_reply`

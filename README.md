@@ -1197,6 +1197,15 @@ The machine's shared-server bookkeeping is kept in `~/.slife2/runtime`:
 `SLIFE2_RUNTIME_DIR` overrides the location. The runtime directory is
 reconstructible: deleting it causes the next start to rebuild what it needs.
 
+Each server logs at INFO by default. `SLIFE2_LOG_LEVEL=DEBUG` raises the level
+for every server started with it; per-call durations, tool calls and connection
+detail live there, and a value that is not a level falls back to INFO with a
+line saying so. A log that outgrows its ceiling is rotated to `<log>.1` at the
+next start rather than deleted. An external `mcp:` entry's stdio child also
+writes its own file under `logs/` (`mcp-<name>-<digest>.log`), so a server's own
+start-up chatter and crashes are attributable instead of interleaved into the
+toolhub's log.
+
 ### Multiple data directories
 
 A data directory may hold several agents. They share its `slife2.yaml`, its

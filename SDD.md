@@ -4,7 +4,7 @@
 |---|---|
 | **Document** | Software Design Description (SDD) |
 | **Version** | 0.3.0 |
-| **Date** | 2026-10-17 |
+| **Date** | 2026-10-23 |
 | **Status** | Normative |
 | **Audience** | Developers, operators, and reviewers of slife2 |
 
@@ -249,7 +249,7 @@ those; the loop does not know where they come from.
 | **Recoverability** | Turns, the live-context list, the cabinet, and the schedule ledger are persisted. A restart restores the conversation. |
 | **Testability** | The loop is pure; servers run over in-memory transports in tests. |
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
-| **Observability** | Startup reports each server as it lands; `slife2 status` probes each server; logs are per daemon; usage is logged per model call. |
+| **Observability** | Startup reports each server as it lands, naming its pid, data directory and config; `slife2 status` probes each server; logs are per daemon and per external stdio entry; every turn, foreground tool call and model call leaves one line with its duration; every line written during a call names the conversation. |
 | **Portability** | Tested on Windows, macOS, and Linux; the runtime has no POSIX-only dependency beyond a documented fallback. |
 
 ## 3. Plugin contract
@@ -269,6 +269,11 @@ A plugin is an MCP server over Streamable HTTP. It MUST:
 
 The shared scaffold `libs/plugin/protocol.py` implements argument parsing, logging,
 configuration loading, address resolution, daemon records, and server startup.
+It also installs the middleware every server shares: `TraceMiddleware` names the
+conversation a call serves on every line it writes (§11.7), `MaskingMiddleware`
+masks credentials (§11.2), `ServeTheCallersHome` establishes the caller's home,
+and `DeclareReturns` writes a tool's `Returns:` contract onto its listing.
+`configure_logging` owns the handler, the level and the format.
 A plugin supplies three hooks:
 
 1. what to build;
@@ -576,6 +581,12 @@ returns 2 when a server it owns did not stop.
 prints the end of one log, and `logs --all` prints every log under a header. The
 name is the one `status` prints, the MCP name a server advertises, or the bare
 protocol key of a model backend. The broker is `a2a-broker` (or `broker`).
+
+Logs are plain text, appended across restarts, and rotated to `<log>.1` when they
+outgrow their ceiling at the next start. The level is INFO unless
+`SLIFE2_LOG_LEVEL` raises it. An external stdio entry's child writes its own log
+under the same directory (`mcp-<name>-<digest>.log`), so its output is
+attributable rather than interleaved into the plugin's (§11.7).
 
 ### 4.5 Subagents
 
@@ -1181,9 +1192,12 @@ that does not declare `image` is not offered image attachment.
 - `discriminator` for the recall decision, which is the one call that reaches the
   model server outside the loop's backend.
 
-One line is logged per call with the breakdown. A cache hit rate distinguishes a
-rebuild from an append; an average across the two lineages could not say which
-one missed.
+One line is logged per call with the breakdown and the call's `elapsed`. A cache
+hit rate distinguishes a rebuild from an append; an average across the two
+lineages could not say which one missed. A call that raises logs
+`stream_chat_failed` with the provider, model, conversation and kind before the
+error propagates, so the failure is attributable even though FastMCP prints its
+own traceback.
 
 ## 7. Tool system
 
@@ -2056,7 +2070,8 @@ It contains:
 ```text
 <runtime>/
   servers/      a record per running server: pid, url, config
-  logs/         what each server printed
+  logs/         what each server printed, one file per server and per
+                external stdio entry (plus a rotated <log>.1)
   locks/        per-endpoint start locks
   agents/       agent-name claims
   clients/      which clients use the shared servers, and their home
@@ -2127,7 +2142,50 @@ A daemon writes a log under the runtime directory and records that it is running
 
 A failed start reports the end of the log, because a real error message is worth
 more than a status code. The startup report goes to stdout; a plugin's own output
-goes to its log.
+goes to its log. The server's own first line names its address, pid, data
+directory and config, and a line at shutdown closes the run — logs are appended
+across restarts, so those two lines are what tell one instance from the next.
+
+**Logs are for tracing, so every line is placed.** The format is
+`time level logger: [agent/subagent] message`. The conversation is established
+by `TraceMiddleware` (`libs/plugin/protocol.py`) from the `agent`/`subagent`
+arguments of a tool call, carried in a `contextvar`, and put on every record by
+`TraceFilter` (`helpers/logcontext.py`). A line outside a call has no prefix.
+`asyncio` copies the context into every task, so a background call keeps the
+conversation that scheduled it. The prefix is a description, not an id: it never
+names a home, and the turn id appears on the turn line once the record has
+landed. It names the conversation the call is *about*; for the a2a send tools
+that is the recipient, not the caller.
+
+One line is written per turn on every ending — success, failure or cancellation:
+
+```text
+turn_done agent=… subagent=… turn=… model=… stop=… iterations=… \
+prompt_tokens=… completion_tokens=… messages=… elapsed=…
+```
+
+One line is written per **foreground** tool call:
+`tool_call name=… ok=… elapsed_ms=… result_chars=…`. Arguments and result text
+are not logged; the transcript is where words live. A background call is logged
+by `libs/harness/async_tasks.py` when it is scheduled and when it finishes. The
+model call line is §6.5's.
+
+The root level is INFO. `SLIFE2_LOG_LEVEL`, read per process by
+`configure_logging`, raises it; a value that is not a level falls back to INFO
+and logs a warning saying so. HTTP libraries, provider SDKs, FastMCP and
+`uvicorn.access` are pinned to WARNING: their debug output can carry credentials,
+and an access line is one line per MCP request. `uvicorn.error` stays at INFO for
+the run boundaries. The FastMCP banner is disabled — it repeats at every start,
+and its version check makes an outbound request.
+
+A log is written as UTF-8 (§12.3) and masked at the formatter (§11.2). At startup
+a log larger than its ceiling is renamed to `<log>.1`; the previous run is kept,
+not deleted. `slife2 logs` reads the live file.
+
+An external stdio entry's child writes its own log under `logs/`
+(`mcp-<name>-<digest>.log`) through `StdioTransport(log_file=…)`. A crash or a
+server's start-up chatter is attributable to its entry rather than interleaved
+into the plugin's file.
 
 ### 11.8 Configuration edits
 
@@ -2390,6 +2448,12 @@ field arrives as a test that fails without the fix.
    should be ranked against a person's notes is not settled.
    *Resolution would require:* a stated rule, not a query filter.
 
+7. **Correlation across processes.** A log line carries `agent/subagent`, and a
+   turn line carries the turn id, but the id is not sent on the model or context
+   hops. Joining those lines to one turn is by conversation and time.
+   *Resolution would require:* the turn id in every hop's `_meta`, which the
+   model and context tool arguments do not carry today.
+
 ### 14.2 Deferred capabilities
 
 The following are not implemented in this version:
@@ -2552,6 +2616,8 @@ A registered fallback states:
 | A lone surrogate reaches tool text | Escape it | Nothing the model needs | Text that is not a surrogate | Nothing; the request survives |
 | The post-turn trim cannot reach the hub | Skip the trim | The trim for that turn; the set stays over budget | The next turn, which fails loudly on a dead hub | A warning; an error for a task |
 | A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
+| A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
+| `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
 | The trim tool is missing or unreadable | Answer empty, log the reason | The trim and the names the model would have seen | A trim the hub answers | A warning in the server log |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | Nothing; a teardown must not replace the caller's work |
 | The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |

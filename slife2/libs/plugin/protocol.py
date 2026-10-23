@@ -82,10 +82,16 @@ from mcp import types as mt
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
+import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2 import __version__
 from slife2.libs.host.config import Config, ServerSettings, find_config_path, load
-from slife2.libs.host.paths import add_data_dir_argument, apply_data_dir, in_home
+from slife2.libs.host.paths import (
+    add_data_dir_argument,
+    apply_data_dir,
+    data_dir,
+    in_home,
+)
 from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
@@ -319,6 +325,41 @@ class DeclareReturns(Middleware):
         return tools
 
 
+class TraceMiddleware(Middleware):
+    """Name the conversation a tool call names, for every line it writes.
+
+    **The arguments are the one place a call says which conversation it is
+    about.**  Every tool that has one takes `agent`, and most take `subagent`; a
+    call that names neither (`now`, a catalogue read) is about the machine and
+    keeps whatever trace its caller set (`slife2.helpers.logcontext.tracing`).
+    The a2a send tools are the one place `agent` is the *recipient* rather than
+    the caller: their lines are about the message to that agent, which is the
+    question a reader of those lines is asking.
+
+    Registered outermost in `house_server`, so the conversation is in hand
+    before the masking middleware rebuilds the tool list and before the handler
+    writes any line — and so any failure the middleware itself reports on the
+    way out still names whose call broke.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        # **`context.message` is the params object, not the request wrapper** —
+        # FastMCP hands middleware the `CallToolRequestParams` for a tool call,
+        # so the name and the arguments are fields on it and `.params` is
+        # `None`.  The fallback to `message` reads both spellings, because a
+        # FastMCP release that hands the wrapper over should not turn every
+        # conversation back into `""` silently.
+        message = getattr(context, "message", None)
+        params = getattr(message, "params", None) or message
+        arguments = getattr(params, "arguments", None)
+        agent = subagent = ""
+        if isinstance(arguments, dict):
+            agent = str(arguments.get("agent") or "")
+            subagent = str(arguments.get("subagent") or "")
+        with logcontext.tracing(agent, subagent):
+            return await call_next(context)
+
+
 class MaskingMiddleware(Middleware):
     """Show resolved credentials in their masked form wherever a server hands
     them out.
@@ -339,7 +380,16 @@ class MaskingMiddleware(Middleware):
             # FastMCP would fold this into a ToolError carrying the exception's
             # own words; the traceback is logged here so it is not lost, and the
             # answer the caller reads is the same failure with the key masked.
-            logging.getLogger(__name__).error("tool call failed", exc_info=True)
+            # **The name is the line's other half**: the trace prefix says whose
+            # conversation, and this says which tool in it — a traceback without
+            # either is an error report nobody can place.
+            message = getattr(context, "message", None)
+            params = getattr(message, "params", None) or message
+            logging.getLogger(__name__).error(
+                "tool call failed name=%s",
+                getattr(params, "name", "") or "(unknown)",
+                exc_info=True,
+            )
             raise ToolError(masked(f"{type(exc).__name__}: {exc}")) from exc
         return _masked_result(result)
 
@@ -428,12 +478,16 @@ def house_server(
         mask_error_details=False,
     )
     # **Order is the masking rule, because FastMCP wraps `reversed(middleware)`
-    # and the first added is therefore the outermost.**  `MaskingMiddleware`
-    # has to see the finished tool list, and `DeclareReturns` writes the raw
-    # `Returns:` docstring onto `_meta` on the way out — added after the masker,
-    # that text left the process unmasked.  `ServeTheCallersHome` stays outside
-    # the tool body in either position (it hooks `on_message`, the outer pass),
-    # so the masker can be first without changing which home a call sees.
+    # and the first added is therefore the outermost.**  `TraceMiddleware` is
+    # first because every line written below it — including the failure the
+    # masker logs — should name the conversation.  `MaskingMiddleware` has to
+    # see the finished tool list, and `DeclareReturns` writes the raw `Returns:`
+    # docstring onto `_meta` on the way out — added after the masker, that text
+    # left the process unmasked.  `ServeTheCallersHome` stays outside the tool
+    # body in either position (it hooks `on_message`, the outer pass), so the
+    # trace and the masker can precede it without changing which home a call
+    # sees.
+    mcp.add_middleware(TraceMiddleware())
     mcp.add_middleware(MaskingMiddleware())
     mcp.add_middleware(ServeTheCallersHome())
     mcp.add_middleware(DeclareReturns())
@@ -919,6 +973,13 @@ def serve(
             host=args.host or server.host,
             port=args.port or server.port,
             path=server.path,
+            # **No banner, for two reasons.**  It is ~20 lines of ASCII art at
+            # every server start, in a file whose first useful line is ours; and
+            # `log_server_banner` calls `check_for_newer_version`, so every start
+            # of every one of the nineteen servers made an outbound request to
+            # PyPI — a network dependency in a stack that otherwise starts
+            # offline.  The server's name and address are on our own line above.
+            show_banner=False,
             json_response=False,
             stateless_http=True,
             # **Uvicorn's default logging config would put its loggers outside
@@ -943,6 +1004,28 @@ class _MaskingFormatter(logging.Formatter):
         return masked(super().format(record))
 
 
+def _log_level() -> tuple[int, str]:
+    """The root level, and the name asked for when it was not one.
+
+    **The level is an operator's, not a build's.**  Every debugging line in this
+    project is written at DEBUG and none of them could be reached: the level was
+    a constant, so seeing one meant editing the code and restarting the stack.
+    `SLIFE2_LOG_LEVEL` is the lever — read per process, so one noisy server can
+    be raised without turning DEBUG on for all nineteen.
+
+    An unreadable value is not a reason to refuse to start: the server logs at
+    INFO and says the value was not a level (the second half of the pair, so the
+    fallback is not itself silent).
+    """
+    asked = os.environ.get("SLIFE2_LOG_LEVEL", "").strip()
+    if not asked:
+        return logging.INFO, ""
+    level = logging.getLevelName(asked.upper())
+    if isinstance(level, int):
+        return level, ""
+    return logging.INFO, asked
+
+
 def configure_logging() -> None:
     """Log to stderr, never stdout — and never with a credential in the clear.
 
@@ -956,12 +1039,31 @@ def configure_logging() -> None:
     value a caller resolved; masking in the finished string covers all three.
     The noisy HTTP and provider loggers are pinned above DEBUG for the same
     reason: their debug output can include request headers.
+
+    **The trace is the formatter's other field.**  `logcontext.TraceFilter` puts
+    the call's conversation on every record (see that module), and the format
+    prints it only when there is one, so a start-up line and a `mcp:` server's
+    own output keep the shape they always had.  The filter is on the *handler*,
+    not the root logger: a record that reached a different handler (a library's
+    own, during a test) is not ours to prefix.
+
+    **Uvicorn's access log is pinned down too.**  `serve` passes
+    `log_config=None` so those records reach this formatter and are masked — but
+    they are one line per MCP request, and the corpus that prompted this file's
+    work was a fifth request chatter with no tool name on it.  A request line is
+    a DEBUG fact; `uvicorn.error` stays at INFO because "Started server
+    process"/"Application startup complete" are the run boundaries a reader
+    uses.
     """
+    level, bad = _log_level()
     handler = logging.StreamHandler()
     handler.setFormatter(
-        _MaskingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        _MaskingFormatter(
+            "%(asctime)s %(levelname)s %(name)s:%(slife_trace)s %(message)s"
+        )
     )
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    handler.addFilter(logcontext.TraceFilter())
+    logging.basicConfig(level=level, handlers=[handler], force=True)
     for noisy in (
         "httpx",
         "httpx2",
@@ -970,8 +1072,14 @@ def configure_logging() -> None:
         "openai",
         "anthropic",
         "mcp",
+        "fastmcp",
+        "uvicorn.access",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    if bad:
+        logging.getLogger(__name__).warning(
+            "SLIFE2_LOG_LEVEL=%r is not a level this knows; logging at INFO", bad
+        )
 
 
 def serve_plugin(
@@ -1030,13 +1138,21 @@ def serve_plugin(
         print(f"{server_name}: {missing}", file=sys.stderr)
         return 2
 
+    # **A start-up line has to say which run it is.**  Logs are appended across
+    # restarts, and a person reading one has no other way to tell one instance
+    # from the next — or one data directory from another when two stacks share
+    # a machine.  The pid and the config are the two facts the `servers/`
+    # record already keeps, put where the reader already is.
     logger.info(
-        "serving %s on http://%s:%d%s%s",
+        "serving %s on http://%s:%d%s%s (pid %d, data-dir %s%s)",
         server_name,
         args.host or address.host,
         args.port or address.port,
         address.path,
         f" ({note(config)})" if note is not None else "",
+        os.getpid(),
+        data_dir(),
+        f", config {config_path}" if config_path else "",
     )
     serve(
         build(config),
@@ -1045,4 +1161,8 @@ def serve_plugin(
         name=server_name,
         config_path=config_path,
     )
+    # The other half of the start line: without it a log that simply stops and
+    # one that was stopped look the same, and the next start's line is the only
+    # thing that would have told them apart.
+    logger.info("%s: stopped", server_name)
     return 0

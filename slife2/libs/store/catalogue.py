@@ -678,7 +678,15 @@ class ToolStore:
         await asyncio.to_thread(self.ensure_index, embedder)
         vectors = await embed_rows(plan["documents"], embedder, noun="tool")
         applied = await asyncio.to_thread(self._apply, plan, vectors)
-        logger.info(
+        # **A merge that changed nothing is a DEBUG fact.**  This line was INFO
+        # unconditionally, and on a repeated start-up it is one row per source
+        # saying "0 added, 0 changed, 0 deleted, N unchanged" — 4,330 of the
+        # 4,536 catalogue lines in the 2026-10 corpus, and every one of them a
+        # line a reader scrolls past to find the handful that did move.  The
+        # counts stay on the INFO line when any of the three actually happened.
+        changed = plan["inserts"] or plan["updates"] or plan["purged"]
+        logger.log(
+            logging.INFO if changed else logging.DEBUG,
             "%s: %d tool(s) — %d added, %d changed, %d deleted, %d unchanged",
             source,
             len(plan["incoming"]),
