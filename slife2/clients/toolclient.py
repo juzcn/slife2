@@ -161,6 +161,7 @@ async def remote_catalogue(
     client_id: tuple[str, str] | None = None,
     *,
     timeout: float | None = None,
+    wait: bool = True,
 ) -> ToolListing:
     """What the hub offers, and how large the catalogue behind it is.
 
@@ -174,6 +175,12 @@ async def remote_catalogue(
     because it is the cold path — see that value's comment.  `None` means
     `work.hub`, so every existing caller keeps the budget it had.
 
+    `wait` is passed to the hub and decides whether *this* ask waits for the
+    sources' declarations.  The start-up build does; a turn's list does not — it
+    reads the catalogue the last ask built and lets the refresh run on, because a
+    declarations refresh can outlast `work.hub` when external sources are
+    connecting, and a late source costs freshness rather than the turn.
+
     Raises:
         ConnectionError: If the hub answers with something this build cannot
             read.  Deliberately loud, and deliberately not an empty list: the
@@ -185,7 +192,7 @@ async def remote_catalogue(
     payload = tool_payload(
         await client.call_tool(
             LIST_TOOLS,
-            {},
+            {"wait": wait},
             timeout=_T.timeouts.work.hub if timeout is None else timeout,
         )
     )
@@ -233,7 +240,7 @@ async def remote_tools(
     reader: the total is read and dropped here, and `remote_catalogue` is where
     both halves are checked.
     """
-    return (await remote_catalogue(client, client_id)).tools
+    return (await remote_catalogue(client, client_id, wait=False)).tools
 
 
 async def unload_tools(client: Client) -> dict[str, Any]:

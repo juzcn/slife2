@@ -1327,11 +1327,14 @@ def build_server(
         than in an argument — see `slife2.clients.toolclient`.
 
         The answer carries the catalogue's size as well as the list, because the
-        same ask is the only one that refreshes the declarations and therefore
-        the only moment the two numbers are both current.  See `registry`, which
-        is where the size is reported to a display.
+        start-up ask is the one that refreshes the declarations and therefore the
+        only moment the two numbers are both current.  A turn's ask reads what
+        that build produced and starts a background refresh; it must not wait for
+        one, because a declarations refresh can outlast `work.hub` while external
+        sources are connecting.  See `registry`, which is where the size is
+        reported to a display.
         """
-        return await remote_catalogue(await hub(), client_id)
+        return await remote_catalogue(await hub(), client_id, wait=False)
 
     async def registry(
         client_id: ClientId, observer: TurnObserver | None = None

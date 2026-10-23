@@ -2829,6 +2829,23 @@ def build_server(
         await settle()
         await refresh_declared()
 
+    #: The refresh a non-waiting ask started, while it is still running.  One at
+    #: a time: a second ask joins it rather than starting another merge.
+    refreshing: asyncio.Task[None] | None = None
+
+    async def _refresh_in_background() -> None:
+        try:
+            await refresh()
+        except Exception:  # noqa: BLE001 - the next ask is the retry
+            logger.exception("the tool catalogue refresh failed")
+
+    def refresh_soon() -> None:
+        """Start one refresh and return; the ask does not wait for it."""
+        nonlocal refreshing
+        if refreshing is not None and not refreshing.done():
+            return
+        refreshing = asyncio.get_running_loop().create_task(_refresh_in_background())
+
     async def start() -> None:
         """What the hub does before it serves anything.
 
@@ -2882,7 +2899,7 @@ def build_server(
     )
 
     @mcp.tool
-    async def list_tools() -> dict[str, Any]:
+    async def list_tools(wait: bool = True) -> dict[str, Any]:
         """Every tool the agent may offer the model **now**, with its schema.
 
         **The loaded set, not the whole catalogue.**  A tool the model has not
@@ -2909,6 +2926,16 @@ def build_server(
                 else's process, and its tools are in the catalogue with `error`
                 on them.  See DESIGN.md §5.1 and §4.1.
 
+        Args:
+            wait: Whether this answer waits for the sources' declarations.
+                **The start-up build does; a turn's list does not.**  The
+                declarations refresh talks to every plugin and can outlast a
+                turn's `work.hub` when external sources are connecting — making
+                the turn's ask wait for it is how a fresh catalogue becomes
+                `Request 'tools/call' timed out`.  A late source costs freshness
+                and not the turn: the refresh this answer starts runs on, and the
+                source is in the next list.
+
         Returns:
             `tools`: one entry per tool the model may call, with `name` as the
             model will call it, the `server` it came from, the upstream's own
@@ -2918,9 +2945,10 @@ def build_server(
             so skills and CLI entries are in it, and so are the rows of a source
             that is down or switched off.  The list above is the model's *loaded*
             set; this is the size of the catalogue it was chosen from, and it is
-            carried here because the ask that reads the list is the ask that has
-            already refreshed the declarations (`refresh`), so a display can
-            show a current number without a second question of its own.
+            carried here because the start-up ask that reads the list is the ask
+            that has already refreshed the declarations (`refresh`), so a
+            display can show a current number without a second question of its
+            own.
         """
         # Ask for connects that are not running, then give the ones that are a
         # moment: a tool server that is still starting is left out of this
@@ -2932,7 +2960,15 @@ def build_server(
         # now comes from what a plugin last said rather than from a connection
         # this process holds.  Without this, a source that had just gone down
         # would keep its tools in the model's list for one more call.
-        await refresh()
+        #
+        # **But only the ask that can afford it waits.**  The start-up build's
+        # budget is `work.catalogue`; a turn's is `work.hub`, and the refresh's
+        # plugin round trips can exceed the latter.  A turn starts the refresh
+        # and answers from the catalogue it has.
+        if wait:
+            await refresh()
+        else:
+            refresh_soon()
 
         # **The catalogue's own failure comes first, and it is first because it
         # is what made a plugin look broken.**  A listing the catalogue could not

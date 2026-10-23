@@ -98,7 +98,7 @@ async def test_a_listed_tool_becomes_a_tool_the_loop_can_run() -> None:
     assert [tool.spec.name for tool in tools] == ["fake__echo"]
     assert tools[0].spec.description == "[fake] Echo it back."
     assert "text" in tools[0].spec.parameters["properties"]
-    assert hub.calls == [(LIST_TOOLS, {})]
+    assert hub.calls == [(LIST_TOOLS, {"wait": False})]
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_the_catalogue_s_size_is_read_beside_the_list() -> None:
 
     assert [tool.spec.name for tool in listed.tools] == ["fake__echo"]
     assert listed.total == 1
-    assert hub.calls == [(LIST_TOOLS, {})]
+    assert hub.calls == [(LIST_TOOLS, {"wait": True})]
 
 
 @pytest.mark.asyncio
@@ -342,7 +342,7 @@ async def test_a_hub_that_is_the_wrong_build_says_so() -> None:
     hub = FastMCP("not the hub")
 
     @hub.tool
-    def list_tools() -> str:
+    def list_tools(wait: bool = True) -> str:
         """Answers, but not with what the agent expects."""
         return "hello"
 

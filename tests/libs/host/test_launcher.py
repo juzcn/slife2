@@ -610,7 +610,7 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
     seen: dict[str, Any] = {}
 
     @hub.tool
-    async def list_tools(ctx: Context) -> dict[str, Any]:
+    async def list_tools(ctx: Context, wait: bool = True) -> dict[str, Any]:
         seen["meta"] = dict(request_meta(ctx) or {})
         return {
             "tools": [
