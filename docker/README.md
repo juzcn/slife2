@@ -43,9 +43,12 @@ docker run --rm -e DEEPSEEK_API_KEY=... \
   slife2:local
 ```
 
-The one-shot mode starts the whole stack, waits for the core servers, sends
-the prompt through the agent server's `send_message`, prints the answer, and
-stops the stack. The answer is on stdout; the usage line is on stderr.
+The one-shot mode starts the whole stack, waits for the core servers, hands
+the prompt to the headless window through `slife2-tui`'s `submit` (the same
+road a WeChat message or an agent task takes), prints the answer from the turn
+the window recorded, and stops the stack. The answer is on stdout; the turn id
+is on stderr. The window is the only client of the conversation: the one-shot
+driver does not call `send_message` itself.
 
 Useful environment variables:
 
@@ -54,8 +57,8 @@ Useful environment variables:
 | `DEEPSEEK_API_KEY` | none | The shipped config's provider key; required for a turn. |
 | `SLIFE2_PROMPT` | none | One-shot prompt. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
-| `SLIFE2_BENCH_AGENT_URL` | `http://127.0.0.1:24000/mcp` | The agent server's MCP endpoint. |
-| `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds for one turn. |
+| `SLIFE2_BENCH_TUI_URL` | `http://127.0.0.1:24005/mcp` | The TUI plugin's endpoint; the prompt is handed to the window there. |
+| `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the
 data directory) is `/opt/slife2`; the runtime directory is
