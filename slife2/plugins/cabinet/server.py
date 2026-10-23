@@ -456,7 +456,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, NOTE, subject, f"there is no note about {subject!r}."
         )
-        return _document(NOTE, row)
+        return _document(row)
 
     @mcp.tool(name="note_list", meta=FOR_THE_MODEL)
     async def note_list(
@@ -537,7 +537,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, DIARY, date, f"there is no diary entry for {date}."
         )
-        return _document(DIARY, row)
+        return _document(row)
 
     @mcp.tool(name="diary_list", meta=FOR_THE_MODEL)
     async def diary_list(
@@ -709,7 +709,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 f"{path} is not text ({row['mime'] or 'unknown type'}, {size} "
                 f"bytes) — its bytes are at {target}."
             )
-        read = _document(FILE, row, text=text)
+        read = _document(row, text=text)
         if encoding:
             read["encoding"] = encoding
         return read
@@ -803,7 +803,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
         )
-        return _document(REPORT, row)
+        return _document(row)
 
     @mcp.tool(name="report_list", meta=FOR_THE_MODEL)
     async def report_list(
@@ -1429,9 +1429,7 @@ def _render_window(
     return window
 
 
-def _document(
-    kind: str, row: dict[str, Any], *, text: str | None = None
-) -> dict[str, Any]:
+def _document(row: dict[str, Any], *, text: str | None = None) -> dict[str, Any]:
     """One document as the payload a model reads: its own fields, and its text.
 
     `text` is the caller's where the document's text is not the row's — a saved

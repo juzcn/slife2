@@ -438,7 +438,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
             if waiter.done() and not waiter.cancelled():
                 waiter.exception()
 
-    @mcp.tool
+    @mcp.tool(name=ATTACH)
     async def attach(agent: str, ctx: Context) -> None:
         """Attach this window to *agent*'s session, and be handed messages on it.
 
@@ -464,7 +464,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         finally:
             windows.detach(agent, session)
 
-    @mcp.tool
+    @mcp.tool(name=SUBMIT)
     async def submit(agent: str, text: str, channel: str) -> None:
         """Hand an agent's window a message to treat as something the person typed.
 
@@ -495,7 +495,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         """
         await _hand_over(agent, text, channel, TURN)
 
-    @mcp.tool
+    @mcp.tool(name=NOTE)
     async def note(agent: str, text: str) -> None:
         """Hand an agent's window a line to draw — no turn, no model, no record.
 

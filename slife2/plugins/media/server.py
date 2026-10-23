@@ -331,7 +331,7 @@ def build_server(
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
     async def transcribe_audio(
-        ctx: Context, path: str, model: str = "", offset: int = 0, limit: int = 0
+        path: str, model: str = "", offset: int = 0, limit: int = 0
     ) -> dict[str, Any]:
         """Write down what an audio file says, and answer the text.
 

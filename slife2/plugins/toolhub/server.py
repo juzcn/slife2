@@ -1247,7 +1247,7 @@ class Upstream:
             await self._catalogue.remember(
                 self.settings.name,
                 self.settings.kind,
-                [_row_of(self.settings.name, tool) for tool in offered],
+                [_row_of(tool) for tool in offered],
             )
         except Exception as exc:  # noqa: BLE001 - split by _refused, below
             await self._connection.disconnect()
@@ -2317,7 +2317,7 @@ def _advertise(settings: ToolServerSettings, tool: Any) -> UpstreamTool:
     )
 
 
-def _row_of(server: str, tool: UpstreamTool) -> dict[str, Any]:
+def _row_of(tool: UpstreamTool) -> dict[str, Any]:
     """One advertised tool, as the catalogue stores it.
 
     The description is stored **raw** and the `[server]` prefix is put on at
@@ -2943,7 +2943,7 @@ def build_server(
         (`refresh_declared`).
         """
         await catalogue.remember(
-            CONFIG_KEY, PLUGIN, [_row_of(CONFIG_KEY, one.tool) for one in local]
+            CONFIG_KEY, PLUGIN, [_row_of(one.tool) for one in local]
         )
         await refresh()
 
