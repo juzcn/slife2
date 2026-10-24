@@ -7,13 +7,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.harness.handover import submit_to
 from slife2.libs.host.config import load_cached
 from slife2.libs.host.paths import agent_dir
-from slife2.libs.plugin.protocol import tool_payload
+from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.store.db import message_text
 from slife2.plugins.tui import server as control
 from slife2.plugins.tui.server import NOTE
@@ -107,19 +106,27 @@ async def wait_for_window(url: str, agent: str) -> None:
     """
     deadline = asyncio.get_running_loop().time() + READY_TIMEOUT
     while True:
+        window = None
         try:
-            async with Client(url, timeout=30) as window:
-                await window.call_tool(
-                    NOTE,
-                    {"agent": agent, "text": "bench: waiting for the tool set"},
-                    timeout=10,
-                )
+            # **The caller's home has to travel with the call.**  A shared stack
+            # serves many homes; a plain MCP client says nothing, and the server
+            # would answer for its own home.  `open_server` is slife2's client —
+            # it puts this process's `SLIFE2_DATA_DIR` on every call.
+            window = await open_server(url, fallback_tool=NOTE, timeout=30)
+            await window.call_tool(
+                NOTE,
+                {"agent": agent, "text": "bench: waiting for the tool set"},
+                timeout=10,
+            )
             return
         except ToolError as exc:
             if not control.refused(exc):
                 raise
         except Exception:  # noqa: BLE001 - the plugin is part of the same start
             pass
+        finally:
+            if window is not None:
+                await close_server(window)
         if asyncio.get_running_loop().time() >= deadline:
             raise NotReady(
                 f"no window became available for {agent!r} within {READY_TIMEOUT:.0f}s"
@@ -145,14 +152,22 @@ async def wait_for_tools(url: str, expected: dict[str, str], deadline: float) ->
     """
     loop = asyncio.get_running_loop()
     while True:
+        hub = None
         try:
-            async with Client(url, timeout=TOOL_READY_TIMEOUT) as hub:
-                payload = tool_payload(
-                    await hub.call_tool("servers", {}, timeout=TOOL_READY_TIMEOUT)
-                )
+            # The toolhub answers for the caller's home, so the client must say
+            # which one — see `wait_for_window`.
+            hub = await open_server(
+                url, fallback_tool="servers", timeout=TOOL_READY_TIMEOUT
+            )
+            payload = tool_payload(
+                await hub.call_tool("servers", {}, timeout=TOOL_READY_TIMEOUT)
+            )
         except Exception as exc:  # noqa: BLE001 - the hub is part of the same start
             payload = {}
             print(f"the toolhub is not answering yet: {exc}", file=sys.stderr)
+        finally:
+            if hub is not None:
+                await close_server(hub)
         rows = {
             str(row.get("name")): row
             for row in payload.get("servers") or []
@@ -220,11 +235,15 @@ async def submit(url: str, agent: str, prompt: str) -> None:
     """
     deadline = asyncio.get_running_loop().time() + READY_TIMEOUT
     while True:
+        window = None
         try:
-            async with Client(url, timeout=30) as window:
-                handed = await submit_to(window, agent, prompt, "bench")
+            window = await open_server(url, fallback_tool="submit", timeout=30)
+            handed = await submit_to(window, agent, prompt, "bench")
         except Exception:  # noqa: BLE001 - the plugin is part of the same start
             handed = False
+        finally:
+            if window is not None:
+                await close_server(window)
         if handed is True:
             return
         if handed is None:
