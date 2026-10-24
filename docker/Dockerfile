@@ -32,7 +32,15 @@ RUN chown -R slife2:slife2 /opt/slife2
 USER slife2
 ENV HOME=/home/slife2 \
     PATH=/home/slife2/.local/bin:/opt/slife2/.venv/bin:/usr/local/bin:/usr/bin:/bin \
-    SLIFE2_RUNTIME_DIR=/home/slife2/.slife2/runtime
+    SLIFE2_RUNTIME_DIR=/home/slife2/.slife2/runtime \
+    PYTHONPATH=/opt/slife2-bench/py
+
+# **The installer needs the shim too.**  Docker Desktop's kernel looks like
+# WSL to credstore, and the installer reads the configuration (which resolves
+# `${VAR}`) before the venv exists — so the venv copy below cannot protect it.
+# The old `PYTHONPATH` placement is kept for the build; the venv copy is what a
+# task container's filesystem inherits, because a snapshot carries no `ENV`.
+COPY --chown=slife2:slife2 docker/sitecustomize.py /opt/slife2-bench/py/sitecustomize.py
 
 # The project's installer: Python 3.13, the venv, the external programs the
 # shipped configuration names, and the credential hints. Running it is the
