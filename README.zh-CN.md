@@ -228,6 +228,7 @@ docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
 `/opt/slife2/slife2.yaml`；要让会话和日志在容器退出后保留，挂载
 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。
 
+密钥进入镜像只有两种方式：环境变量，或挂载 credstore 的加密 seed。
 **宿主机的 keyring 不会随镜像进入容器，但它的加密 seed 可以。** `${VAR}`
 先查操作系统 keyring，keyring 不应答时再查 credstore 的加密备份
 （`~/.credstore/credentials.crypt`，或 `CREDSTORE_FILE`）——容器正是这种情况，
@@ -246,7 +247,9 @@ docker run --rm -it \
 保持锁定，`${DEEPSEEK_API_KEY}` 仍是字面量；这时请像上面的命令一样用环境变量
 传入单个 key（也可以使用 `--env-file` 或 Docker secret）。
 `credstore set-password` 会新建 seed，或修改已有 seed——修改会先要求旧密码——
-所以主密码未知的 seed 打不开，只能替换。
+所以主密码未知的 seed 打不开，只能替换。也可以在镜像内的 volume 里创建并填充
+seed：具体命令和随后启动 stack 所需的 volume 挂载见
+[docker/README.md](docker/README.md)。
 
 一次性提示、环境变量和容器相关说明见 [docker/README.md](docker/README.md)。
 

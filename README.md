@@ -245,8 +245,9 @@ missing key fails at the call. Mount a different configuration over
 `/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
 `/home/slife2/.slife2` if conversations and logs should outlive the container.
 
-**The host's keyring does not follow the image, but its encrypted seed can.**
-`${VAR}` resolves through the OS keyring and then through credstore's encrypted
+Keys reach the image in one of two ways: environment variables, or a mounted
+credstore seed. **The host's keyring does not follow the image; its encrypted
+seed can.** `${VAR}` resolves through the OS keyring and then through credstore's encrypted
 backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) when the keyring
 does not answer — which is the container's case, because Docker blocks
 `keyctl`. The backup is encrypted, so the container also needs its master
@@ -265,7 +266,10 @@ Without it the backup stays locked and `${DEEPSEEK_API_KEY}` remains literal;
 pass individual keys in the environment instead (as above, or through
 `--env-file` or a Docker secret). `credstore set-password` creates a new seed,
 or changes an existing one — changing it asks for the old password first — so a
-seed whose password is unknown cannot be opened, only replaced.
+seed whose password is unknown cannot be opened, only replaced. A seed can also
+be created and filled **inside the image**, in a volume: see
+[docker/README.md](docker/README.md) for the two commands and the volume mount
+the stack then uses.
 
 See [docker/README.md](docker/README.md) for the one-shot prompt, the
 environment variables, and the container-specific notes.

@@ -60,6 +60,41 @@ driver asks the toolhub's `servers` until every enabled `mcp:`/`rest-api:` entry
 reports `ready`; a source that never gets there fails the run rather than
 sending the prompt anyway.
 
+## Credentials
+
+The image has no OS keyring, so a key reaches it in **one of two ways**:
+
+1. **Environment** — `-e KEY=...`, `--env-file`, or a Docker secret. Direct, and
+   the right choice for one or two keys.
+2. **credstore's encrypted seed** — mount `credentials.crypt` read-only, point
+   `CREDSTORE_FILE` at the mount, and give its master password in
+   `CREDSTORE_MASTER_PASSWORD`. One password resolves every `${VAR}` the
+   configuration names, which is what makes the full tool set practical.
+
+There is no third path: the lookup reads an OS keyring first, and a container
+does not have one. A key that neither path provides stays literal and fails
+where it is used, which is the stack's documented lenient behavior.
+
+A seed can also be **created inside the image**, in a volume that survives the
+container:
+
+```bash
+docker volume create slife2-cred
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  --entrypoint bash slife2:local
+# in that shell:
+credstore set-password            # choose the master password
+credstore set DEEPSEEK_API_KEY    # repeat for each key you use
+```
+
+Then start the stack with the same volume and the password it was created with;
+`CREDSTORE_FILE` defaults to `~/.credstore/credentials.crypt` on that volume:
+
+```bash
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  -e CREDSTORE_MASTER_PASSWORD=... slife2:local
+```
+
 Useful environment variables:
 
 | Variable | Default | Meaning |
