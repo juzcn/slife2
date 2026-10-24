@@ -250,8 +250,11 @@ the OS keyring, and `~/.credstore/credentials.crypt` is only that keyring's
 encrypted *backup* — restored by `credstore reset`, which needs the master
 password and a working keyring. A Linux container's keyring is usually
 unavailable under Docker's seccomp policy and would start empty anyway, so
-mounting the seed does not make `${DEEPSEEK_API_KEY}` resolve. Pass the key in
-the environment (as above, or through `--env-file` or a Docker secret).
+mounting the seed does not make `${DEEPSEEK_API_KEY}` resolve. `credstore set`
+inside the container is not a substitute either: with no system keyring it writes
+only the encrypted backup (after `credstore set-password`), and the `${VAR}`
+lookup reads the keyring, never the backup. Pass the key in the environment (as
+above, or through `--env-file` or a Docker secret).
 
 See [docker/README.md](docker/README.md) for the one-shot prompt, the
 environment variables, and the container-specific notes.

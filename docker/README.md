@@ -89,8 +89,11 @@ the container.
   `CREDSTORE_FILE`) is that keyring's encrypted *backup*, restored by
   `credstore reset` with the master password. A Linux container's keyring is
   usually unavailable under Docker's seccomp policy and starts empty even where
-  it works, so mounting the seed does not fill `${DEEPSEEK_API_KEY}` — pass the
-  key through `-e`, `--env-file`, or a Docker secret.
+  it works, so mounting the seed does not fill `${DEEPSEEK_API_KEY}`. `credstore
+  set` in the container is not a substitute for the same reason: without a
+  keyring it writes only the backup (after `set-password`), and the `${VAR}`
+  lookup reads the keyring. Pass the key through `-e`, `--env-file`, or a Docker
+  secret.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by
