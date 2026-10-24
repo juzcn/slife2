@@ -500,6 +500,31 @@ async def test_shift_enter_inserts_a_newline() -> None:
         assert "\n" in app.query_one(HistoryInput).text
 
 
+async def test_the_prompt_starts_at_one_row_and_grows_with_the_draft() -> None:
+    """One row is what an empty prompt costs, and the draft makes it taller.
+
+    The box is empty most of the time and the transcript is what the screen is
+    for, so the floor is a single row.  `height: auto` is what keeps a pasted
+    paragraph readable in place: the box grows line by line, and by the rows a
+    long line wraps onto, rather than becoming a one-row window onto the draft.
+    """
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        prompt = app.query_one(HistoryInput)
+        assert prompt.size.height == 1, "an empty prompt is one row"
+
+        prompt.text = "one\ntwo\nthree"
+        await pilot.pause()
+        assert prompt.size.height == 3, "three lines of draft take three rows"
+
+        # One long line wraps, and the wrapped rows grow the box the same way a
+        # newline does.
+        prompt.text = "x" * 500
+        await pilot.pause()
+        assert prompt.size.height > 1
+
+
 async def test_empty_input_is_not_submitted() -> None:
     app = make_app(answering("ok"))
     async with app.run_test(size=SIZE) as pilot:

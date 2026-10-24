@@ -160,12 +160,13 @@ WatchScreen {
 
 /* ── The prompt ─────────────────────────────────────────────────────────── */
 
-/* Three rows to start, twelve at most, growing upward with the draft.  The
-   rule above it is the only line on the screen, and it fades out on focus so
-   that typing has nothing competing with it. */
+/* One draft row to start, twelve at most, growing upward as the draft does.
+   `min-height` counts the whole box, the top rule included, so a one-row prompt
+   is 2 — not 1.  The rule is the only line on the screen, and it fades out on
+   focus so that typing has nothing competing with it. */
 #user-input {
     height: auto;
-    min-height: 3;
+    min-height: 2;
     max-height: 12;
     padding: 0 1;
     background: $slife-bg;

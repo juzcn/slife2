@@ -1262,7 +1262,9 @@ class HistoryInput(TextArea):
 
     `TextArea` rather than `Input` because a pasted stack trace or a paragraph
     is a normal thing to send, and `Input` silently truncates at the first
-    newline.  It grows from three rows to twelve as the draft does.
+    newline.  It grows from one row to twelve as the draft does, wrapped lines
+    included, so a long prompt reads in place rather than through a one-row
+    window.
     """
 
     #: How many previous prompts Up/Down can reach.
@@ -1273,10 +1275,10 @@ class HistoryInput(TextArea):
         Binding("up", "history_previous", "Previous prompt", show=False),
         Binding("down", "history_next", "Next prompt", show=False),
         # TextArea claims PageUp/PageDown to page through its *own* text, and
-        # for a chat prompt that is the wrong target: the draft is three rows
-        # while the transcript above is what the reader is paging.  The binding
-        # is what takes the key back — a binding here beats the one inherited
-        # from TextArea — and the action forwards it to the transcript.
+        # for a chat prompt that is the wrong target: the draft is a few rows
+        # at most while the transcript above is what the reader is paging.
+        # The binding is what takes the key back — a binding here beats the one
+        # inherited from TextArea — and the action forwards it to the transcript.
         Binding("pageup", "transcript_page_up", show=False),
         Binding("pagedown", "transcript_page_down", show=False),
     ]
