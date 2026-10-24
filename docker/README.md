@@ -60,41 +60,6 @@ driver asks the toolhub's `servers` until every enabled `mcp:`/`rest-api:` entry
 reports `ready`; a source that never gets there fails the run rather than
 sending the prompt anyway.
 
-## Credentials
-
-The image has no OS keyring, so a key reaches it in **one of two ways**:
-
-1. **Environment** — `-e KEY=...`, `--env-file`, or a Docker secret. Direct, and
-   the right choice for one or two keys.
-2. **credstore's encrypted seed** — mount `credentials.crypt` read-only, point
-   `CREDSTORE_FILE` at the mount, and give its master password in
-   `CREDSTORE_MASTER_PASSWORD`. One password resolves every `${VAR}` the
-   configuration names, which is what makes the full tool set practical.
-
-There is no third path: the lookup reads an OS keyring first, and a container
-does not have one. A key that neither path provides stays literal and fails
-where it is used, which is the stack's documented lenient behavior.
-
-A seed can also be **created inside the image**, in a volume that survives the
-container:
-
-```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# in that shell:
-credstore set-password            # choose the master password
-credstore set DEEPSEEK_API_KEY    # repeat for each key you use
-```
-
-Then start the stack with the same volume and the password it was created with;
-`CREDSTORE_FILE` defaults to `~/.credstore/credentials.crypt` on that volume:
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  -e CREDSTORE_MASTER_PASSWORD=... slife2:local
-```
-
 Useful environment variables:
 
 | Variable | Default | Meaning |
@@ -107,8 +72,6 @@ Useful environment variables:
 | `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
 | `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
-| `CREDSTORE_FILE` | `~/.credstore/credentials.crypt` | Where the container looks for credstore's encrypted seed. |
-| `CREDSTORE_MASTER_PASSWORD` | none | The seed's master password; used only when the container's keyring answers nothing (which is the normal Docker case). |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the
 data directory) is `/opt/slife2`; the runtime directory is
@@ -121,15 +84,14 @@ the container.
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
   lazily: the stack starts, and a tool that needs a key fails at the call. Only
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
-- **The host's keyring does not come with the image; its encrypted seed can.**
-  `${VAR}` is resolved through the OS keyring and, when that answers nothing,
-  through credstore's encrypted backup (`~/.credstore/credentials.crypt`, or
-  `CREDSTORE_FILE`). Docker blocks `keyctl`, so the container is exactly the
-  keyring-less host that fallback exists for; it needs the backup's master
-  password in `CREDSTORE_MASTER_PASSWORD`. Mount the seed read-only and point
-  `CREDSTORE_FILE` at the mounted path (see the variable table). Without the
-  password the seed stays locked, and the key has to arrive through `-e`,
-  `--env-file`, or a Docker secret.
+- **Keys reach the image in one of three ways** — the same three a host install
+  accepts: through a host's `credstore` (the launcher reads the store and passes
+  the values as environment variables; the bench's host adapter does this for
+  every `${VAR}` the configuration names), as bare environment variables (`-e`,
+  `--env-file`, or a Docker secret), or as plaintext in a mounted `slife2.yaml`.
+  The build runs `scripts/install.sh`, so credstore is installed and its
+  `credstore set` hints are in the build log. The container has no keyring, so
+  `credstore` run inside it is not a store the runtime reads.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by

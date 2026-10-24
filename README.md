@@ -245,31 +245,20 @@ missing key fails at the call. Mount a different configuration over
 `/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
 `/home/slife2/.slife2` if conversations and logs should outlive the container.
 
-Keys reach the image in one of two ways: environment variables, or a mounted
-credstore seed. **The host's keyring does not follow the image; its encrypted
-seed can.** `${VAR}` resolves through the OS keyring and then through credstore's encrypted
-backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) when the keyring
-does not answer — which is the container's case, because Docker blocks
-`keyctl`. The backup is encrypted, so the container also needs its master
-password in `CREDSTORE_MASTER_PASSWORD`. Mount the seed read-only:
+Keys reach the image in one of three ways, the same three a host install
+accepts:
 
-```bash
-docker run --rm -it \
-  -v "$HOME/.credstore/credentials.crypt:/tmp/credentials.crypt:ro" \
-  -e CREDSTORE_FILE=/tmp/credentials.crypt \
-  -e CREDSTORE_MASTER_PASSWORD=... \
-  slife2:local
-```
+1. **credstore**, managed on the host. The container has no keyring, so the
+   store is read by whatever starts it — the bench's host adapter reads every
+   `${VAR}` the configuration names and passes the values as environment
+   variables.
+2. **Bare environment variables** — `-e`, `--env-file`, or a Docker secret.
+3. **Plaintext in the configuration** — mount a `slife2.yaml` whose keys are
+   literals instead of `${VAR}` references.
 
-Like any other secret, the master password is masked in slife2's output.
-Without it the backup stays locked and `${DEEPSEEK_API_KEY}` remains literal;
-pass individual keys in the environment instead (as above, or through
-`--env-file` or a Docker secret). `credstore set-password` creates a new seed,
-or changes an existing one — changing it asks for the old password first — so a
-seed whose password is unknown cannot be opened, only replaced. A seed can also
-be created and filled **inside the image**, in a volume: see
-[docker/README.md](docker/README.md) for the two commands and the volume mount
-the stack then uses.
+The image's build runs the same `scripts/install.sh` as a host install, so it
+installs credstore and prints the `credstore set` hints for the credentials the
+shipped configuration names.
 
 See [docker/README.md](docker/README.md) for the one-shot prompt, the
 environment variables, and the container-specific notes.

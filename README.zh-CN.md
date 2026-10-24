@@ -228,28 +228,17 @@ docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
 `/opt/slife2/slife2.yaml`；要让会话和日志在容器退出后保留，挂载
 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。
 
-密钥进入镜像只有两种方式：环境变量，或挂载 credstore 的加密 seed。
-**宿主机的 keyring 不会随镜像进入容器，但它的加密 seed 可以。** `${VAR}`
-先查操作系统 keyring，keyring 不应答时再查 credstore 的加密备份
-（`~/.credstore/credentials.crypt`，或 `CREDSTORE_FILE`）——容器正是这种情况，
-因为 Docker 屏蔽了 `keyctl`。备份是加密的，所以还要通过
-`CREDSTORE_MASTER_PASSWORD` 提供主密码。以只读方式挂载 seed：
+密钥进入镜像只有三种方式，和宿主机安装接受的三种相同：
 
-```bash
-docker run --rm -it \
-  -v "$HOME/.credstore/credentials.crypt:/tmp/credentials.crypt:ro" \
-  -e CREDSTORE_FILE=/tmp/credentials.crypt \
-  -e CREDSTORE_MASTER_PASSWORD=... \
-  slife2:local
-```
+1. **宿主机上的 `credstore`。** 容器没有 keyring，所以由启动容器的程序读取
+   宿主机的存储（bench 的 host adapter 会扫描配置里每个 `${VAR}` 并注入），
+   值以环境变量进入容器。
+2. **裸环境变量** —— `-e`、`--env-file` 或 Docker secret。
+3. **配置文件明文** —— 挂载一份把 key 写成字面量（而不是 `${VAR}`）的
+   `slife2.yaml`。
 
-和其他 secret 一样，主密码在 slife2 的输出中也会被遮蔽。没有主密码时备份
-保持锁定，`${DEEPSEEK_API_KEY}` 仍是字面量；这时请像上面的命令一样用环境变量
-传入单个 key（也可以使用 `--env-file` 或 Docker secret）。
-`credstore set-password` 会新建 seed，或修改已有 seed——修改会先要求旧密码——
-所以主密码未知的 seed 打不开，只能替换。也可以在镜像内的 volume 里创建并填充
-seed：具体命令和随后启动 stack 所需的 volume 挂载见
-[docker/README.md](docker/README.md)。
+镜像构建运行的是和宿主机安装相同的 `scripts/install.sh`，所以会安装 credstore，
+并在构建日志里打印随附配置所引用凭据的 `credstore set` 提示。
 
 一次性提示、环境变量和容器相关说明见 [docker/README.md](docker/README.md)。
 
