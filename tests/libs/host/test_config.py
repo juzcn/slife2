@@ -796,6 +796,138 @@ def test_no_keyring_at_all_still_degrades_to_the_reference(
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
 
+def a_seed(path: Path, password: str, entries: dict[str, str]) -> None:
+    """A real encrypted credstore backup at *path*, unlocked by *password*.
+
+    `keyrings.cryptfile` is what credstore writes the seed with; building one
+    here rather than faking the reader keeps the test about the KDF and the
+    public `check_backend()` path, not about a stand-in agreeing with itself.
+    """
+    from keyrings.cryptfile.cryptfile import CryptFileKeyring
+
+    keyring = CryptFileKeyring()
+    keyring.file_path = str(path)
+    keyring.keyring_key = password
+    for key, value in entries.items():
+        keyring.set_password("credstore", key, value)
+
+
+def test_a_mounted_seed_resolves_when_the_keyring_is_silent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The container's half of the chain.**
+
+    Docker blocks `keyctl`, so credstore reports no keyring and
+    `get_credential` answers None for every key; the encrypted backup is a file
+    and survives the isolation when it is mounted.  `CREDSTORE_MASTER_PASSWORD`
+    is the non-interactive form of the prompt `credstore get -p` writes, and a
+    value read through it is registered for masking like any other credential.
+    """
+    import credstore
+
+    import slife2.libs.host.config as config_module
+    from slife2.libs.host import secrets
+
+    path = tmp_path / "credentials.crypt"
+    password = "correct horse battery"
+    a_seed(path, password, {"SLIFE2_TEST_KEY": "seed-secret"})
+    monkeypatch.setenv("CREDSTORE_FILE", str(path))
+    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
+    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
+    monkeypatch.setattr(config_module, "_cryptfile_state", {})
+    monkeypatch.setattr(config_module, "_cryptfile_values", {})
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+
+    assert resolve_secret("${SLIFE2_TEST_KEY}") == "seed-secret"
+    assert secrets.masked("it is seed-secret") != "it is seed-secret"
+    # The master password unlocks every value, so it is masked like one.
+    assert (
+        secrets.masked(f"the password is {password}") != f"the password is {password}"
+    )
+
+
+def test_a_seed_whose_password_is_absent_stays_unread(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No password is no fallback: the chain still degrades to the reference.
+
+    The backup is Argon2/AES-encrypted; guessing a password would turn a
+    missing secret into a wrong one, and a daemon has no terminal to ask on.
+    """
+    import credstore
+
+    import slife2.libs.host.config as config_module
+
+    path = tmp_path / "credentials.crypt"
+    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
+    monkeypatch.setenv("CREDSTORE_FILE", str(path))
+    monkeypatch.delenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, raising=False)
+    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
+    monkeypatch.setattr(config_module, "_cryptfile_state", {})
+    monkeypatch.setattr(config_module, "_cryptfile_values", {})
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+
+    assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
+
+
+def test_a_master_password_that_does_not_unlock_the_seed_is_a_config_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A seed that is there and refuses is not a seed that is absent.
+
+    `read_cryptfile_entry` raises `ValueError` for a wrong password (the MAC
+    check).  Letting that out of `resolve_secret` would name neither the file
+    nor the variable; the config error names both, which is the one place where
+    naming them is the whole of the fix.
+    """
+    import credstore
+
+    import slife2.libs.host.config as config_module
+
+    path = tmp_path / "credentials.crypt"
+    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
+    monkeypatch.setenv("CREDSTORE_FILE", str(path))
+    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, "wrong password")
+    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
+    monkeypatch.setattr(config_module, "_cryptfile_state", {})
+    monkeypatch.setattr(config_module, "_cryptfile_values", {})
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+
+    with pytest.raises(ConfigError) as raised:
+        resolve_secret("${SLIFE2_TEST_KEY}")
+    assert config_module.CREDSTORE_PASSWORD_ENV_VAR in str(raised.value)
+    assert str(path) in str(raised.value)
+
+
+def test_a_keyring_uri_falls_back_to_the_same_seed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `keyring:` URI is the same credential under its `service/key` spelling.
+
+    A container has no keyring, so `resolve_uri` raises `KeyError`; the seed's
+    entry is what the person stored with `credstore set slife/deepseek`, and
+    the fallback reads it by exactly that name.
+    """
+    import credstore
+
+    import slife2.libs.host.config as config_module
+
+    path = tmp_path / "credentials.crypt"
+    password = "correct horse battery"
+    a_seed(path, password, {"slife/deepseek": "seed-secret"})
+    monkeypatch.setenv("CREDSTORE_FILE", str(path))
+    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
+    monkeypatch.setattr(config_module, "_cryptfile_state", {})
+    monkeypatch.setattr(config_module, "_cryptfile_values", {})
+
+    def missing(value: str) -> str:
+        raise KeyError("Credential 'slife/deepseek' not found in keyring")
+
+    monkeypatch.setattr(credstore, "resolve_uri", missing)
+
+    assert resolve_secret("keyring:slife/deepseek") == "seed-secret"
+
+
 def test_a_keyring_uri_that_failed_is_not_left_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -225,43 +225,46 @@ are `/opt/slife2`, and its runtime directory is
 `/home/slife2/.slife2/runtime`. It is about 3 GB because it contains the
 programs the full configuration names.
 
-Run one prompt and exit:
+The image has no OS keyring, so it keeps its keys in credstore's encrypted file
+inside a volume. Create it once and store every key the configuration names —
+one `credstore set` per key:
 
 ```bash
-docker run --rm -e DEEPSEEK_API_KEY=... \
-  -e SLIFE2_PROMPT='Use the shell tool to run pwd and report the output.' \
-  slife2:local
+docker volume create slife2-cred
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  --entrypoint bash slife2:local
+# in that shell:
+credstore set-password            # choose the master password
+credstore set DEEPSEEK_API_KEY    # then every line the build log listed
 ```
 
-Or start the agent headless and keep it running:
+The image's build runs the same `scripts/install.sh` as a host install, so its
+log lists every `credstore set <KEY>` line the shipped configuration needs —
+run those in the shell above. Run one prompt and exit; the image asks for the
+master password you set above, and every `${VAR}` in the configuration resolves
+from the file:
 
 ```bash
-docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  slife2:local 'Use the shell tool to run pwd and report the output.'
 ```
 
-`DEEPSEEK_API_KEY` is what the default provider needs; the other `${VAR}`
-references in the configuration are resolved lazily, and a tool that needs a
-missing key fails at the call. Mount a different configuration over
-`/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
-`/home/slife2/.slife2` if conversations and logs should outlive the container.
+Or start the agent headless and keep it running (it prompts the same way):
 
-Keys reach the image in one of three ways, the same three a host install
-accepts:
+```bash
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+```
 
-1. **credstore**, managed on the host. The container has no keyring, so the
-   store is read by whatever starts it — the bench's host adapter reads every
-   `${VAR}` the configuration names and passes the values as environment
-   variables.
-2. **Bare environment variables** — `-e`, `--env-file`, or a Docker secret.
-3. **Plaintext in the configuration** — mount a `slife2.yaml` whose keys are
-   literals instead of `${VAR}` references.
+Keys are configured in the container's credstore, not on the command line. The
+default provider needs `DEEPSEEK_API_KEY`; the rest of the configuration's
+`${VAR}` references need their own keys for the full tool set, which is why the
+credstore file is the path. A mounted `slife2.yaml` whose values are literals
+(mounted over `/opt/slife2/slife2.yaml`) is the other supported source. Mount
+`/opt/slife2/agents` and `/home/slife2/.slife2` if conversations and logs should
+outlive the container.
 
-The image's build runs the same `scripts/install.sh` as a host install, so it
-installs credstore and prints the `credstore set` hints for the credentials the
-shipped configuration names.
-
-See [docker/README.md](docker/README.md) for the one-shot prompt, the
-environment variables, and the container-specific notes.
+See [docker/README.md](docker/README.md) for the credential setup, the one-shot
+prompt, and the container-specific notes.
 
 ## Quick start
 

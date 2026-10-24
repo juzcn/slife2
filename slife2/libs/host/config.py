@@ -85,14 +85,24 @@ the hard way, and the fields carry the same meaning here.
 
 Secrets
 -------
-1. ``keyring:<service>/<key>``  -> credstore
-2. ``${VAR}``                   -> os.environ -> credstore
-3. ``${VAR:-default}``          -> os.environ -> credstore -> literal default
+1. ``keyring:<service>/<key>``  -> credstore keyring, then its encrypted backup
+2. ``${VAR}``                   -> os.environ -> credstore keyring -> its
+                                   encrypted backup
+3. ``${VAR:-default}``          -> the same chain, then the literal default
 4. anything else                -> as-is
 
-Resolution never raises.  A missing secret degrades to its literal form
-(``"${DEEPSEEK_API_KEY}"``), which fails loudly at the API call where it is a
-readable error, rather than at startup where it is not.  It is also *lazy*: the
+The encrypted backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) is
+read when the keyring does not answer **and** `CREDSTORE_MASTER_PASSWORD` holds
+the master password the CLI would prompt for.  That is what lets a container,
+whose kernel keyring is blocked, resolve from the cred file `credstore` created
+inside it; without the password the backup stays locked and the chain steps
+past it.
+
+A missing secret degrades to its literal form (``"${DEEPSEEK_API_KEY}"``),
+which fails loudly at the API call where it is a readable error, rather than at
+startup where it is not.  A store that is *there* and refuses — a locked
+keyring, a seed the master password does not unlock — raises where the secret
+is resolved instead.  Resolution is also *lazy*: the
 provider keeps the raw reference and only touches credstore when `api_key` is
 read, so the TUI process never opens the OS keyring.  A tool server's `env:`
 and `headers:` and a tunnel provider's options are lazy the same way — a
@@ -887,11 +897,106 @@ def net_settings(config: Config, net: Net) -> A2ASettings:
 A2A_BROKER_ENV_VAR = "SLIFE2_A2A_BROKER"
 
 
+#: The master password that unlocks credstore's encrypted backup.  The CLI asks
+#: for it (`credstore get KEY -p`); a daemon has no terminal to ask on, so a
+#: container gets it through the environment instead.
+CREDSTORE_PASSWORD_ENV_VAR = "CREDSTORE_MASTER_PASSWORD"
+
+#: What `check_backend()` said about the seed, by `CREDSTORE_FILE` spelling.
+#: Resolved once per process per path because `check_backend()` re-probes the
+#: platform keyring every time, and a container has no keyring to find — the
+#: probe's warnings would otherwise land on every `${VAR}` the config resolves.
+_cryptfile_state: dict[str, tuple[bool, str]] = {}
+
+#: Values already read from the seed, by `(CREDSTORE_FILE, key)`.  Unlocking is
+#: Argon2 at 64 MB and 15 passes, so a config with a dozen `${VAR}` references
+#: would pay that a dozen times; a credential does not change under a running
+#: stack.  A key the seed does not hold is cached as None for the same reason.
+_cryptfile_values: dict[tuple[str, str], str | None] = {}
+
+
+def _cryptfile_ready() -> tuple[bool, str]:
+    """Whether the encrypted backup is there, and where — asked once.
+
+    The key is `CREDSTORE_FILE`'s value, so a test (or a caller) that points the
+    store at another file gets that file's answer rather than the first one's.
+    """
+    from credstore import check_backend
+
+    key = os.environ.get("CREDSTORE_FILE", "")
+    state = _cryptfile_state.get(key)
+    if state is None:
+        info = check_backend()
+        state = (
+            bool(info.get("cryptfile_ready")),
+            str(info.get("cryptfile_path") or ""),
+        )
+        _cryptfile_state[key] = state
+    return state
+
+
+def _cryptfile_lookup(key: str) -> str | None:
+    """Read one credential from credstore's encrypted backup, when unlocked.
+
+    **The half that survives a container.**  credstore's public
+    `get_credential` reads the OS keyring only (`credstore` says so: the Python
+    API "returns None in cryptfile-only mode — it never prompts for the master
+    password").  Its encrypted backup is a file, and a file crosses into a
+    container where a kernel keyring does not: Docker blocks `keyctl`, so the
+    Linux backend reports `available: False` and every lookup answers None.
+    Without this fallback a cred file created inside the container is readable
+    by the CLI and by nobody slife2 runs.
+
+    **The password comes from `CREDSTORE_MASTER_PASSWORD`.**  The backup is
+    Argon2/AES-encrypted; no password is no fallback, because guessing one would
+    turn a missing secret into a wrong one.  A password that is present but does
+    not decrypt the file raises, like a keyring that refused: it is an answer
+    about the store, not an absence (DESIGN.md §11.1).
+
+    **The file's location is credstore's.**  `check_backend()` owns
+    `CREDSTORE_FILE` and the `~/.credstore/credentials.crypt` default, and
+    `read_cryptfile_entry` is the same reader `credstore get -p` uses.  The
+    module is private because the public API deliberately excludes the
+    password-prompting path; duplicating the KDF here would be a second way to
+    read one file.
+    """
+    password = os.environ.get(CREDSTORE_PASSWORD_ENV_VAR)
+    if not password:
+        return None
+    try:
+        from credstore._backend import read_cryptfile_entry
+    except ImportError:
+        return None
+    # The password itself is a credential: keep it out of every surface that
+    # masks resolved values.
+    _secret_registry.register(password)
+    seed = os.environ.get("CREDSTORE_FILE", "")
+    cached = (seed, key)
+    if cached in _cryptfile_values:
+        return _cryptfile_values[cached]
+    ready, path = _cryptfile_ready()
+    if not ready:
+        return None
+    try:
+        value = read_cryptfile_entry(key, password, "credstore")
+    except ValueError as exc:
+        raise ConfigError(
+            f"{CREDSTORE_PASSWORD_ENV_VAR} does not unlock "
+            f"{path or 'the credential backup'}: {exc}"
+        ) from exc
+    _cryptfile_values[cached] = value
+    return value
+
+
 def _credstore_lookup(key: str) -> str | None:
-    """Look up an environment-variable name in the OS keyring.
+    """Look up an environment-variable name in credstore.
 
     The env var name *is* the credential-store key, so ``DEEPSEEK_API_KEY``
     resolves whether it was exported or stored with ``credstore set``.
+
+    **The keyring first, then the encrypted backup.**  A keyring answers on a
+    desktop and a mounted `credentials.crypt` answers in a container; asking
+    the backup too on the desktop is how a key the keyring lost is still found.
 
     **No backend at all degrades to "not found"; a backend that failed does
     not.**  credstore itself answers None when this host has no keyring — a CI
@@ -906,7 +1011,10 @@ def _credstore_lookup(key: str) -> str | None:
         from credstore import get_credential
     except ImportError:
         return None  # credstore is not installed: there is no backend to consult
-    return get_credential(key)
+    found = get_credential(key)
+    if found is not None:
+        return found
+    return _cryptfile_lookup(key)
 
 
 def resolve_secret(value: object) -> str:
@@ -936,6 +1044,11 @@ def resolve_secret(value: object) -> str:
     naming it is the whole of the fix.  The store that is *there* and refused
     keeps raising rather than degrading, which is the registered behaviour and
     the reason this catches the one exception type rather than all of them.
+
+    **Before that refusal, the encrypted backup is asked.**  A container's
+    keyring has no answer for any key; the cred file `credstore` created in it,
+    with `CREDSTORE_MASTER_PASSWORD`, does (`_cryptfile_lookup`), and a
+    `keyring:` URI is the same credential under its `service/key` spelling.
     """
     if not isinstance(value, str):
         return str(value)
@@ -953,6 +1066,14 @@ def resolve_secret(value: object) -> str:
                 _secret_registry.register(resolved)
                 return resolved
             except KeyError as exc:
+                # **The backup is the second half of the same store.**  A
+                # container's keyring answers nothing, so a `keyring:` URI there
+                # has only the seed to read — the same key the CLI would find
+                # under `credstore get -p`.
+                recovered = _cryptfile_lookup(value.removeprefix("keyring:"))
+                if recovered is not None:
+                    _secret_registry.register(recovered)
+                    return recovered
                 raise ConfigError(
                     f"{value}: this machine's credential store has no such "
                     f"credential — store it with "

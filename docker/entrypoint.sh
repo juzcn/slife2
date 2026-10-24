@@ -9,7 +9,32 @@ mkdir -p "${SLIFE2_RUNTIME_DIR}"
 AGENT="${SLIFE2_AGENT:-slife2}"
 SLIFE2=/opt/slife2/.venv/bin/slife2
 
-if [[ -z "${SLIFE2_PROMPT:-}" ]]; then
+# **One prompt for the whole stack.**  The image has no OS keyring, so the keys
+# live in credstore's encrypted file in the container.  Unlock it once here,
+# before any child starts, and every server inherits the password; a launcher
+# with no terminal (the bench) sets CREDSTORE_MASTER_PASSWORD itself instead.
+if [[ -z "${CREDSTORE_MASTER_PASSWORD:-}" && -t 0 ]]; then
+    credential_file="${CREDSTORE_FILE:-${HOME}/.credstore/credentials.crypt}"
+    if [[ -f "${credential_file}" ]]; then
+        read -r -s -p "credstore master password: " CREDSTORE_MASTER_PASSWORD
+        echo
+        export CREDSTORE_MASTER_PASSWORD
+        if [[ -z "${CREDSTORE_MASTER_PASSWORD}" ]]; then
+            echo "no password given; the keys in ${credential_file} stay locked" >&2
+        fi
+    fi
+fi
+
+# **The one-shot prompt is an argument, not an environment variable.**  A
+# credential or a key must not be spelled `-e KEY=...` on the command line, and
+# the prompt is the one thing a one-shot run has to say.  `SLIFE2_PROMPT` stays
+# for a launcher that cannot pass an argument (Compose, a wrapper).
+PROMPT="${SLIFE2_PROMPT:-}"
+if [[ -z "${PROMPT}" && $# -gt 0 ]]; then
+    PROMPT="$*"
+fi
+
+if [[ -z "${PROMPT}" ]]; then
     exec "${SLIFE2}" run --headless --agent "${AGENT}"
 fi
 
@@ -22,4 +47,4 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-/opt/slife2/.venv/bin/python /opt/slife2-bench/ask.py "${SLIFE2_PROMPT}"
+/opt/slife2/.venv/bin/python /opt/slife2-bench/ask.py "${PROMPT}"

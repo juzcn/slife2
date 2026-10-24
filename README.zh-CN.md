@@ -209,38 +209,41 @@ docker build -f docker/Dockerfile -t slife2:local .
 运行时目录是 `/home/slife2/.slife2/runtime`。镜像约 3 GB，因为包含完整配置
 点名的程序。
 
-运行一条提示并退出：
+镜像没有 OS keyring，所以密钥保存在 volume 里 credstore 自己的加密文件中。
+先创建一次，把配置点名的 key 都存进去——每个 key 一条 `credstore set`：
 
 ```bash
-docker run --rm -e DEEPSEEK_API_KEY=... \
-  -e SLIFE2_PROMPT='使用 shell 工具运行 pwd 并报告输出。' \
-  slife2:local
+docker volume create slife2-cred
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  --entrypoint bash slife2:local
+# 在容器里：
+credstore set-password            # 设置主密码
+credstore set DEEPSEEK_API_KEY    # 然后按构建日志里列出的每一条
 ```
 
-或者以 headless 方式启动 agent 并保持运行：
+镜像构建运行的是和宿主机安装相同的 `scripts/install.sh`，所以构建日志里会列出
+随附配置需要的每一条 `credstore set <KEY>`——在上面的 shell 里照着执行。
+运行一条提示并退出；镜像会询问刚才设置的主密码，配置里所有 `${VAR}` 都从
+这个文件解析：
 
 ```bash
-docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  slife2:local '使用 shell 工具运行 pwd 并报告输出。'
 ```
 
-`DEEPSEEK_API_KEY` 是默认 provider 需要的 key；配置里其余 `${VAR}` 是惰性
-解析的，需要缺失 key 的工具会在调用时失败。要使用另一份配置，把它挂载到
-`/opt/slife2/slife2.yaml`；要让会话和日志在容器退出后保留，挂载
-`/opt/slife2/agents` 和 `/home/slife2/.slife2`。
+或者以 headless 方式启动 agent 并保持运行（同样会询问主密码）：
 
-密钥进入镜像只有三种方式，和宿主机安装接受的三种相同：
+```bash
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+```
 
-1. **宿主机上的 `credstore`。** 容器没有 keyring，所以由启动容器的程序读取
-   宿主机的存储（bench 的 host adapter 会扫描配置里每个 `${VAR}` 并注入），
-   值以环境变量进入容器。
-2. **裸环境变量** —— `-e`、`--env-file` 或 Docker secret。
-3. **配置文件明文** —— 挂载一份把 key 写成字面量（而不是 `${VAR}`）的
-   `slife2.yaml`。
+密钥配置在容器的 credstore 里，不在命令行上。默认 provider 需要
+`DEEPSEEK_API_KEY`；配置里其余 `${VAR}` 也需要各自的 key 才能跑全功能，所以
+用 credstore 文件。另一种支持的来源是挂载一份把值写成字面量的
+`slife2.yaml`（覆盖 `/opt/slife2/slife2.yaml`）。要让会话和日志在容器退出后
+保留，挂载 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。
 
-镜像构建运行的是和宿主机安装相同的 `scripts/install.sh`，所以会安装 credstore，
-并在构建日志里打印随附配置所引用凭据的 `credstore set` 提示。
-
-一次性提示、环境变量和容器相关说明见 [docker/README.md](docker/README.md)。
+凭据配置、一次性提示和容器相关说明见 [docker/README.md](docker/README.md)。
 
 ## 快速开始
 

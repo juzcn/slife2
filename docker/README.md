@@ -29,18 +29,19 @@ installer's programs, not a minimal agent.
 
 ## Run
 
-Start the real agent headless (the same window, without a display):
+Set up the credstore volume once (see Credentials), then start the real agent
+headless (the same window, without a display); the entrypoint asks for the
+master password:
 
 ```bash
-docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
 ```
 
-Run one prompt and exit:
+Run one prompt and exit (it asks for the same password):
 
 ```bash
-docker run --rm -e DEEPSEEK_API_KEY=... \
-  -e SLIFE2_PROMPT='Use the shell tool to run `pwd; echo CONTAINER-OK` and report the output.' \
-  slife2:local
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  slife2:local 'Use the shell tool to run `pwd; echo CONTAINER-OK` and report the output.'
 ```
 
 The one-shot mode starts the whole stack, hands the prompt to the headless
@@ -60,18 +61,46 @@ driver asks the toolhub's `servers` until every enabled `mcp:`/`rest-api:` entry
 reports `ready`; a source that never gets there fails the run rather than
 sending the prompt anyway.
 
+## Credentials
+
+The container has no keyring, but it can create and read credstore's own
+encrypted cred file. A volume keeps it across starts, and one master password
+then resolves every `${VAR}` in the configuration:
+
+```bash
+docker volume create slife2-cred
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+  --entrypoint bash slife2:local
+# in that shell:
+credstore set-password            # choose the master password
+credstore set DEEPSEEK_API_KEY    # then every line the build log listed
+```
+
+The build runs `scripts/install.sh`, whose log lists every
+`credstore set <KEY>` line the shipped configuration names; run those in the
+shell above. Start the stack with the same volume; the entrypoint asks for the
+master password you chose:
+
+```bash
+docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+```
+
+A mounted `slife2.yaml` whose values are literals is the other supported
+source. A launcher with no terminal sets `CREDSTORE_MASTER_PASSWORD` itself
+instead of being prompted.
+
 Useful environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | none | The shipped config's provider key; required for a turn. |
-| `SLIFE2_PROMPT` | none | One-shot prompt. Omit to keep the stack running. |
+| `SLIFE2_PROMPT` | none | One-shot prompt for a launcher that cannot pass it as the command argument. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
 | `SLIFE2_BENCH_TUI_URL` | the config's `servers.tui.url` | The TUI plugin's endpoint; the prompt is handed to the window there. |
 | `SLIFE2_BENCH_TOOLHUB_URL` | the config's `servers.toolhub.url` | The toolhub's endpoint; the readiness gate asks `servers` there. |
 | `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
 | `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
+| `CREDSTORE_MASTER_PASSWORD` | none | For a launcher with no terminal: the master password for the cred file in the volume. The interactive entrypoint asks for it instead. |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the
 data directory) is `/opt/slife2`; the runtime directory is
@@ -84,14 +113,10 @@ the container.
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
   lazily: the stack starts, and a tool that needs a key fails at the call. Only
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
-- **Keys reach the image in one of three ways** — the same three a host install
-  accepts: through a host's `credstore` (the launcher reads the store and passes
-  the values as environment variables; the bench's host adapter does this for
-  every `${VAR}` the configuration names), as bare environment variables (`-e`,
-  `--env-file`, or a Docker secret), or as plaintext in a mounted `slife2.yaml`.
-  The build runs `scripts/install.sh`, so credstore is installed and its
-  `credstore set` hints are in the build log. The container has no keyring, so
-  `credstore` run inside it is not a store the runtime reads.
+- **Keys are configured in the container's credstore** (see Credentials above);
+  a mounted `slife2.yaml` whose values are literals is the other supported
+  source. The build runs `scripts/install.sh`, so credstore is installed and
+  its `credstore set` hints are in the build log.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by
