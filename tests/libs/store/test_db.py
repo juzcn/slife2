@@ -64,7 +64,7 @@ def test_a_fork_has_no_turn_database_of_its_own(
     assert database_path("jack", "researcher") == agent_dir("jack") / "turns.db"
 
 
-def test_the_table_is_v1s_schema(tmp_path) -> None:
+def test_the_table_is_the_agreed_schema(tmp_path) -> None:
     """The columns are the contract — including the ones nothing writes yet.
 
     Adding a table later is what `CREATE TABLE IF NOT EXISTS` is for; adding a
@@ -74,9 +74,9 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
     and `tags` existed empty before the feature that fills them, and `usage`
     joins them for the same reason: the shape is decided here, once.
 
-    One divergence from v1: there is no `user_message`.  v1 keeps the user's
-    half beside the assistant's; here the turn is one list and the user's
-    message is its first element, so a column for it would be a second copy.
+    There is no `user_message` column.  The user's half does not sit beside the
+    assistant's; the turn is one list and the user's message is its first
+    element, so a column for it would be a second copy.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     with sqlite3.connect(store.path) as connection:
@@ -543,11 +543,10 @@ async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
 async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
     """What was asked and what was answered, which no column holds.
 
-    v1 keeps the user's message in a column and lists rows straight out of SQL.
-    Here the turn is one list of messages, so the browse has to read both ends
-    of it out — and the answer is the *last* assistant message with prose in it,
-    not the last assistant message, which on a turn that called a tool is a
-    message with no text at all.
+    The turn is one list of messages, so the browse has to read both ends of it
+    out — and the answer is the *last* assistant message with prose in it, not
+    the last assistant message, which on a turn that called a tool is a message
+    with no text at all.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     await store.save_turn(

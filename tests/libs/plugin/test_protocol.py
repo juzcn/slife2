@@ -447,7 +447,7 @@ async def test_a_port_that_could_not_be_probed_is_not_reported_as_closed(
     The gate read `tcp_listening`'s `False` as "nothing is listening", but a
     name that would not resolve produced `None`, so the message stated as fact
     what the check had not found.  The third answer is named instead
-    (`DESIGN.md` §11.1).
+    (`SDD Appendix C).
     """
     monkeypatch.setattr(protocol_module, "tcp_listening", lambda *a, **k: None)
     with pytest.raises(ConnectionError, match="cannot tell whether"):

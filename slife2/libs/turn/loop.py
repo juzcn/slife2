@@ -7,8 +7,8 @@ repeat until it stops asking for tools.
 The loop is a pure function over a message list.  It does not own the
 conversation, does not know what MCP is, does not know which provider answered,
 and does not know whether anyone is watching — the observer is optional and its
-failures cannot end a turn.  Each of those was a thing v1's loop did, and each
-one made it harder to test than it needed to be.
+failures cannot end a turn.  Each of those is deliberately out of the loop,
+which is what keeps it testable.
 """
 
 from __future__ import annotations
@@ -47,10 +47,10 @@ from slife2.libs.turn.tools import (
 
 logger = logging.getLogger(__name__)
 
-#: What the model reads when its own request to be checked was refused.  v1's
-#: sentence, and it starts with `Error` because that is what makes the call read
-#: as a failure in the transcript rather than as a result that happens to be
-#: discouraging (`slife2.libs.turn.tools` states the same rule for a tool's own failures).
+#: What the model reads when its own request to be checked was refused.  It
+#: starts with `Error` because that is what makes the call read as a failure in
+#: the transcript rather than as a result that happens to be discouraging
+#: (`slife2.libs.turn.tools` states the same rule for a tool's own failures).
 DENIED = "Error: Tool execution was denied by user."
 
 #: What the model reads when it asks for a background call in a loop that has
@@ -72,10 +72,9 @@ def timed_out(name: str, bound: float) -> str:
     only when the model asked for one, and the same bound firing has to read the
     same way whichever path the call took — the sentence names the tool and the
     bound, and both are what the model acts on (retry with a longer one, or
-    without one at all).  v1's sentence, verbatim, and the second copy this
-    replaces is exactly how the background path came to say nothing: its timeout
-    was a bare `TimeoutError`, and `slife2.libs.harness.async_tasks._runner` renders
-    whatever escapes a task as `Error: {type}: {exc}`, so the hand-back read
+    without one at all).  A bare `TimeoutError` in the background path would say
+    nothing: `slife2.libs.harness.async_tasks._runner` renders whatever escapes a
+    task as `Error: {type}: {exc}`, so the hand-back would read
     `Error: TimeoutError: ` with neither fact in it.
     """
     return f"Error: Tool '{name}' timed out ({bound}s)."
@@ -90,8 +89,8 @@ def harness_call(name: str) -> ToolCall:
     boundary; two id formats would be two conventions for one thing, and two
     `time_ns`-suffixed ids built in two places are two chances to collide.
 
-    The `_harness_` prefix with the tool's own mark stripped is v1's, and it is
-    what makes the pair recognisable as the machinery's rather than the model's —
+    The `_harness_` prefix with the tool's own mark stripped is what makes the
+    pair recognisable as the machinery's rather than the model's —
     `slife2/tui/restore.py` reads it, and so does anyone reading a transcript.
 
     **And the shape is a wire constraint rather than only a label.**  A pair is
@@ -218,9 +217,8 @@ class AgentLoop:
         #: docstring's third promise), so it cannot answer "is there an operator"
         #: itself — it asks the thing that does, and a caller that has nobody to
         #: ask passes None.  None means the model's `_approve` is granted rather
-        #: than refused, which is v1's rule for the same situation and the safe
-        #: direction: refusing would turn "nobody is here to say yes" into a tool
-        #: the model can never use.
+        #: than refused, which is the safe direction: refusing would turn "nobody
+        #: is here to say yes" into a tool the model can never use.
         self._approve = approve
         #: Where a background call's result goes when it is ready, or None for a
         #: loop nobody's conversation is behind.  **It is handed in for the same
@@ -295,7 +293,7 @@ class AgentLoop:
         message would be a second place that knows it.
 
         **The auto-invoke.**  `auto` is asked at the top of every iteration for
-        an `AutoCall` — the name of a tool the *harness* wants called, v1's
+        an `AutoCall` — the name of a tool the *harness* wants called, the
         cut-in — and the call is then made the way the model's own calls are
         made: through `self._tools`, the registry whose `specs` went out with the
         last request.  So the name
@@ -311,7 +309,7 @@ class AgentLoop:
         sequence for every provider.  A bare user message in the middle of one is
         a 400 from several of them.
 
-        `auto` returns an `AutoCall` or `None`, which is v1's split: the
+        `auto` returns an `AutoCall` or `None`, and the split is deliberate: the
         caller decides *whether* something arrived — cheaply, without a call —
         and this decides nothing about tools at all.  The registry is what knows
         a name.  The call's channel is written onto the pair as display
@@ -372,11 +370,10 @@ class AgentLoop:
             # no pair at all, and whatever the call consumed is still in hand to
             # be run as its own turn.
             #
-            # v1 writes its pair the other way round, because its tools can
-            # raise and a failure had to be *recorded* as the result of the call
-            # it was written for.  Here the registry returns a failure as text
-            # (`ToolRegistry.execute` never raises), so there is no such case:
-            # everything that can come back is an answer.
+            # The registry returns a failure as text (`ToolRegistry.execute`
+            # never raises), so there is no case where a failure has to be
+            # *recorded* with the call it was written for: everything that can
+            # come back is an answer.
             if auto is not None and (wanted := auto()) is not None:
                 call = harness_call(wanted.name)
                 text, _ok = await self._tools.execute(call)
@@ -547,8 +544,9 @@ class AgentLoop:
 
         `iteration` is the loop's own counter, and it is here for the same
         reason: the event that opens the call carries it so the panel can say
-        which iteration of the turn this is (v1's `(3/30)`), and this is the
-        only place that knows both the call and the iteration it was made in.
+        which iteration of the turn this is (shown as `(3/30)` in the panel),
+        and this is the only place that knows both the call and the iteration it
+        was made in.
 
         `messages` travels no further than a background call needs it, and it
         is passed rather than read off an attribute because the loop does not
@@ -558,9 +556,9 @@ class AgentLoop:
         has to be reachable — see `_background`.
 
         * **Nothing is announced before the gate answers.**  A call the operator
-          refused never happened as far as the transcript is concerned: v1's
-          rule, and the reason is the display — a panel that appeared and then
-          said "denied" would have told a reader the tool ran.
+          refused never happened as far as the transcript is concerned, and the
+          reason is the display — a panel that appeared and then said "denied"
+          would have told a reader the tool ran.
         * **The clock starts after the announcement**, so a call's duration is
           the call and not the time somebody spent deciding.
         * **The call is announced with the arguments the model wrote**, including
@@ -708,9 +706,8 @@ class AgentLoop:
         the foreground's anyway would undo the thing that was asked for.  A tool
         with its own `timeout` argument has already been handed the number; a
         tool without one is wrapped when the model named a number and runs bare
-        when nobody did — v1's mapping exactly, and the same mapping the
-        foreground path uses, which is why this method takes `bound` rather than
-        deciding anything.
+        when nobody did — the same mapping the foreground path uses, which is
+        why this method takes `bound` rather than deciding anything.
 
         **The window reaches this road too.**  A background call's result arrives
         as a *message* — a turn of its own, several turns later — which is the
@@ -749,7 +746,7 @@ class AgentLoop:
             deliver=self._deliver,
             fit=fit,
         )
-        # v1's sentence, under the marker the registry wrote
+        # The sentence goes under the marker the registry wrote
         # (`slife2.libs.harness.async_tasks.started`): the sentence is what the model acts on,
         # and the marker is what a screen and a reader of the transcript pair
         # this call's two halves by.
@@ -781,7 +778,7 @@ class AgentLoop:
         """One call's answer, as its text *and* whether it worked.
 
         **The pair travels now, and the old argument for dropping it is the one
-        DESIGN.md §11.1 forbids.**  `_ok` used to be thrown away on the grounds
+        SDD Appendix C forbids.**  `_ok` used to be thrown away on the grounds
         that it was not lost — a failure is text by the time it reaches here
         (`ToolRegistry.execute` renders one) so the `Error` the string starts
         with was said to *be* the fact, and `slife2.libs.harness.async_tasks` read the prefix.

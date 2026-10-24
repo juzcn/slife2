@@ -24,17 +24,15 @@ CONVENTION (enforced by ``tests/test_no_magic_timeouts.py``):
   the gate's docstring says which literals are exempt outright.
 
 **What is deliberately absent, and why.**
-There is **no tool-call budget here**.  v1 had one (``work.tool_budget``, 120 s)
-and applied it to every tool that did not declare its own bound; v2 does not, on
-the argument that a single number applied to every tool is a number wrong for
-most of them — a search and a twenty-minute render are both tools.  The bound a
-call has is the one an interested party stated: the model's ``_timeout``, or the
-tool's own declared parameter, and otherwise none (``slife2.libs.turn.loop``).
+There is **no tool-call budget here**, on the argument that a single number
+applied to every tool is a number wrong for most of them — a search and a
+twenty-minute render are both tools.  The bound a call has is the one an
+interested party stated: the model's ``_timeout``, or the tool's own declared
+parameter, and otherwise none (``slife2.libs.turn.loop``).
 
-**Every value here is v1's unless its comment says otherwise** — the port kept
-the numbers and moved them, which is why the roles are v1's too.  ``timeouts.py``
-intentionally imports nothing from ``slife2.*`` (``config.py`` imports us; a
-cycle would break both).  stdlib only.
+**Every value here is a tuned default, and its comment says what it is for.**
+``timeouts.py`` intentionally imports nothing from ``slife2.*``
+(``config.py`` imports us; a cycle would break both).  stdlib only.
 """
 
 from __future__ import annotations
@@ -57,7 +55,7 @@ class Work:
     #: Inactivity watchdog on a streamed model answer: seconds of silence before
     #: the call is declared stalled.  **Not a total** — reset by every chunk, so
     #: a slow-but-live generation is never cut and a provider that answered 200
-    #: and went quiet is (`slife2.clients.model`, v1's `work.stall`).
+    #: and went quiet is (`slife2.clients.model`).
     stall: float = 120.0
     #: One call to the context plugin.  Long enough for `restore` (a whole
     #: context replayed) and `rebuild` (a recall that may embed a query), and
@@ -208,7 +206,7 @@ class Storage:
 @dataclass
 class Stream:
     """Retries, which are counts and not durations — here for the same reason
-    v1 kept them here: one file answers "what is this number", whatever it is."""
+    as the durations: one file answers "what is this number", whatever it is."""
 
     #: The embeddings server's.  Zero: an embedding that failed is a caller's
     #: problem to retry, not the server's to repeat.

@@ -253,9 +253,8 @@ def test_rows_and_vectors_are_written_together(tmp_path) -> None:
 
     # A row that declares nothing still has a vector: what a tool is *about* is
     # its name and description, and "open a page and take a screenshot" is a
-    # description rather than an argument list.  v1 asked whether the *schema*
-    # was worth embedding, because in v1 that column held the whole tool
-    # definition; here it holds only the parameters, and a tool with none is
+    # description rather than an argument list.  The *schema* column holds only
+    # the parameters, never the whole tool definition, and a tool with none is
     # exactly the kind a model looks for by what it does.
     merge(
         store,
@@ -476,7 +475,7 @@ def test_a_store_told_nothing_forgets_nothing_even_when_asked(tmp_path) -> None:
     collapsed by `self.known or frozenset()`, so a caller that constructed a
     store without the argument and then called `reset` deleted the catalogue —
     the destructive case `ToolStore.__init__` declines to run, reached through
-    the method it declines to run it with (DESIGN.md §11.1).
+    the method it declines to run it with (SDD Appendix C).
     """
     path = tmp_path / "tools.db"
     told = ToolStore(path, threshold=100, known={"arxiv"})
@@ -588,15 +587,15 @@ def test_a_harness_tool_is_injected_only_by_name(tmp_path) -> None:
 
     The catalogue holds its row either way — it is a tool like everything else,
     with a state and a source — so the *gate* is what decides, and the
-    convention is a name rather than a column for v1's reason: what makes a tool
-    the harness's is who calls it, and that belongs on the thing itself.
+    convention is a name rather than a column: what makes a tool the harness's
+    is who calls it, and that belongs on the thing itself.
 
     **The exceptions are the harness pairs, and they are by name and not by
     shape.**  Each is recorded in the conversation as a tool pair — the trim, and
     the message a running turn is handed — so the model reads both names in its
     own history; a tool the model can read there but not call would be
-    inconsistent with itself, and v1's rule is that the name has to be declared
-    for the backends to take the pair at all.  Any other underscore name stays
+    inconsistent with itself, and the name has to be declared for the backends
+    to take the pair at all.  Any other underscore name stays
     out — which is what the second half of this asserts, and it is the half that
     keeps the convention from eroding into "names the hub happens to like".
     """
@@ -659,7 +658,7 @@ def test_a_document_row_carries_its_own_verdict(tmp_path) -> None:
     config switched off, since a merge only runs for a source that answered.
     For these two there is no link to answer, so the mirror is the authority:
     a `cli:` entry with `enabled: false` is `disabled`, and a `SKILL.md` that
-    cannot be read is `error` (v1's `status_verdict`, in this build's words).
+    cannot be read is `error`.
 
     **And a re-merge must not undo it** — the mirror runs again before every
     search, so "re-enable what the config switched off" would flip this row

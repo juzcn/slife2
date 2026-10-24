@@ -5,8 +5,9 @@ faith.  That a Chinese word is found at all — FTS5's tokenizer sees a run of
 them as one token, so this only works because `slife2.libs.store.textindex` separated the
 characters, and the test that says so is the one that fails if anybody removes
 that step.  That the save is atomic, because a save that raised and stored a row
-anyway is the failure v1 shipped.  And that the event loop keeps running while a
-turn is embedded, because `async` alone does not make that true.
+anyway is the failure this design exists to prevent.  And that the event loop
+keeps running while a turn is embedded, because `async` alone does not make that
+true.
 """
 
 from __future__ import annotations
@@ -112,8 +113,8 @@ async def test_a_term_that_survives_only_in_a_summary_is_still_found(tmp_path) -
 def test_a_tool_result_and_its_call_are_not_what_a_turn_is_about() -> None:
     """The turn's own voice is what it is about; evidence is what it was made from.
 
-    Tool results were already out — measured on v1's log at 56–99% of a turn's
-    text.  The call's argument head followed them after the chunked index made
+    Tool results are already out — they are 56–99% of a turn's text.  The
+    call's argument head followed them after the chunked index made
     the cost visible: on this repository's live log, with 30 discriminator-style
     subject queries, dropping it raised MRR from 0.83 to 0.88, and keeping the
     full arguments cost 2.7x the chunks to recover one query.  A result is still
@@ -610,8 +611,8 @@ async def test_saving_a_turn_writes_the_turn_both_indexes(tmp_path) -> None:
 async def test_a_save_that_cannot_embed_stores_nothing(tmp_path) -> None:
     """The property that makes a failed save worth trusting.
 
-    v1's complaint about embedding on the save path was a raise that had in fact
-    stored the row, leaving nobody able to say whether it had.  Atomic means the
+    The hazard of embedding on the save path is a raise that had in fact stored
+    the row, leaving nobody able to say whether it had.  Atomic means the
     question does not arise: if it raised, there is nothing.
     """
     path = tmp_path / "jack.turn.db"

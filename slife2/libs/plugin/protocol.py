@@ -6,7 +6,7 @@ transport: a plugin answers the same JSON-RPC as any MCP server does, and the
 `arxiv` entry under `mcp:` speaks the same wire.  Two things separate the
 words.  A *plugin* is started by slife2 and shared by every instance, which is
 what makes it required — the hub refuses to list anything when one is missing
-(DESIGN.md §4.1) — while an entry under `mcp:` is somebody else's process that
+(SDD §7.1) — while an entry under `mcp:` is somebody else's process that
 may be slow, paid or down.  And a plugin honours the contract below, which is
 the part that is ours: what follows is not the protocol, it is what this project
 puts on top of it.
@@ -52,7 +52,7 @@ an explicit argument rather than by the connection — with one deliberate
 difference: the id is a **name the caller already has**, not an opaque handle
 the server minted.  An opaque handle has to be stored, and a stored handle is
 one more thing that can be lost, expired, or wrong after a restart.  See
-DESIGN.md §1.5 for the argument and for what this costs.
+SDD §3.2 for the argument and for what this costs.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def agent_or_blank(ctx: Any) -> str:
 
     **The second of the two idioms, and each has one caller.**  Every
     model-facing tool *raises* now — a refusal is a `ToolError`, so that the
-    call's status and its text agree (`DESIGN.md` §4.5) — which is what
+    call's status and its text agree (`SDD` §7.6) — which is what
     `agent_reader` builds and what the mesh, the task server, the clock and the
     cabinet use.  This is the other shape: a plugin that asks the question in a
     *class* whose tool bodies decide what to do with the blank, which is the
@@ -578,13 +578,12 @@ class _Ours(ClientTransport):
         # as FastMCP's transport does it.
         #
         # **Read and write are None, and that is the whole of this hop's own
-        # opinion.**  v1's registry spelled it `read: None # DELEGATED — owned by
-        # the loop's tool budget`, and the reason survives the port: a bound here
-        # applies to *every* message that crosses this socket, so a number meant
-        # for one layer becomes the deadline for whatever the far end is doing —
-        # and a tool that takes twenty minutes (a render) is a tool doing its job,
-        # not a link to give up on.  A request that stated a deadline keeps it
-        # (`read_timeout_seconds`); one that did not has none.
+        # opinion.**  A bound here applies to *every* message that crosses this
+        # socket, so a number meant for one layer becomes the deadline for
+        # whatever the far end is doing — and a tool that takes twenty minutes
+        # (a render) is a tool doing its job, not a link to give up on.  A
+        # request that stated a deadline keeps it (`read_timeout_seconds`); one
+        # that did not has none.
         #
         # Connect is not a duration anybody waits *through*: it is the bound that
         # keeps a port that hangs instead of refusing from holding a turn open.
@@ -680,7 +679,7 @@ async def open_server(
             # The probe could not be made — the name did not resolve, so it never
             # asked the question.  "nothing is listening" here would state as
             # fact what the check did not find, so the failure is named as
-            # itself (DESIGN.md §11.1).
+            # itself (SDD Appendix C).
             raise ConnectionError(
                 f"{url}: cannot tell whether anything is listening on "
                 f"{parts.hostname}:{parts.port} — the address did not resolve"
@@ -797,9 +796,9 @@ def unreadable(peer: str, what: str, payload: Any) -> ConnectionError:
     **The last clause is the point of the sentence.**  A payload of the wrong
     shape is the only evidence there is that the far end is a *different build*
     — a daemon left over from a previous one, which `slife2 down` is the answer
-    to (DESIGN.md §8.7) — so the payload is quoted rather than summarised, and the
+    to (SDD §12.5) — so the payload is quoted rather than summarised, and the
     remedy is named.  Reading it as "no answer" instead is the confident negative
-    DESIGN.md §11.1 forbids: a conversation rebuilt from an unreadable answer is
+    SDD Appendix C forbids: a conversation rebuilt from an unreadable answer is
     a conversation quietly missing what the answer held.
     """
     return ConnectionError(

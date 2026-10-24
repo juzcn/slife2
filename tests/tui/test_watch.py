@@ -156,7 +156,7 @@ async def test_a_stream_that_does_not_open_with_history_is_said_so() -> None:
 
     Drawn as though the live half were the whole conversation, a stream that
     lost its history would read as an agent that had never spoken before — a
-    failure presented as a fact (`DESIGN.md` §11.1).
+    failure presented as a fact (`SDD Appendix C).
     """
     watch = FakeWatchClient((TextDelta("orphan"),))
     app: App[None] = App()

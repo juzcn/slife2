@@ -74,8 +74,8 @@ class FakeAdapter:
 
     The tool half is about *addressing* — which provider, model, parameters and
     folder a call reaches — and a fake that records exactly that is what makes
-    those assertions readable.  v1's tests do the same with a `MagicMock`; a
-    class with four methods says what the contract is.
+    those assertions readable.  A class with four methods says what the
+    contract is, in a way a `MagicMock` cannot.
     """
 
     def __init__(self, *, answer: str = "/tmp/out") -> None:
@@ -149,7 +149,7 @@ async def refused(client: Client, tool: str, **arguments: Any) -> str:
 
 @pytest.mark.asyncio
 async def test_the_four_tools_are_the_models() -> None:
-    """Four capabilities, all marked, and named as v1 named them."""
+    """Four capabilities, all marked, and named for the act they perform."""
     async with Client(server_for()) as client:
         listed = {tool.name: tool for tool in await client.list_tools()}
 
@@ -321,8 +321,8 @@ async def test_a_capability_the_adapter_lacks_names_the_adapter() -> None:
 
 @pytest.mark.asyncio
 async def test_a_provider_failure_is_a_failure_not_a_transcript_entry() -> None:
-    """v1 answered `"Error: …"` as text; here it is a `ToolError`, because a
-    refusal the transcript reads as a success is what that convention costs."""
+    """A failure is a `ToolError`, not an `"Error: …"` string, because a refusal
+    the transcript reads as a success is what that convention costs."""
     failing = Failing(MediaAdapterError("the media API answered 401: nope", 401))
     async with Client(server_for(failing)) as client:
         # Not through `ask`: that reads the failure as text, deliberately, and
@@ -348,7 +348,7 @@ async def test_an_unknown_api_is_a_sentence_not_a_raw_error() -> None:
     """**A config with `api: typo` loads cleanly** — the loader only requires the
     key to be there — and then fails at the first call, where `create_adapter`
     raises.  Resolving the adapter *outside* `_run` let that failure escape as a
-    raw exception instead of the sentence DESIGN.md §8.2 promises, so the
+    raw exception instead of the sentence SDD §12.2 promises, so the
     resolution is inside the guard and this checks the sentence is what arrives.
     """
     section = {
@@ -380,9 +380,9 @@ def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
 
 
 def test_a_provider_entry_has_to_say_what_it_speaks_and_where() -> None:
-    """Refused at load, which is the opposite of v1 and right for where this
-    parsing happens: v1 read the section at call time and had to skip a bad
-    entry, where here the loader is the judge."""
+    """Refused at load, which is right for where this parsing happens: the
+    loader is the judge, rather than a call-time reader that has to skip a bad
+    entry."""
     with pytest.raises(ConfigError, match="needs `api`"):
         _media(
             {"providers": {"p": {"base_url": "https://x", "models": []}}},
@@ -687,7 +687,7 @@ async def test_a_payload_that_is_not_base64_is_a_failure_not_a_traceback(
     and `slife2.plugins.media.server._run` converts only `NotImplementedError`,
     `MediaAdapterError` and `FileNotFoundError`.  So a vendor answering with a
     truncated `b64_json` (or an `audio.data` that is an object) reached the model
-    as a raw traceback instead of the sentence DESIGN.md §8.2 promises —
+    as a raw traceback instead of the sentence SDD §12.2 promises —
     exactly the class of answer `_json_object` exists to eliminate one line up.
     """
     images = OpenAICompatAdapter(settings().providers["test"])

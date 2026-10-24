@@ -27,7 +27,7 @@ reclaims memory; nothing a caller can observe depends on it.
 **The key travels with the call.**  Everything this server asks of a peer is
 asked on behalf of the same `(agent, subagent)` — the write to the db and the
 model call both carry it — so a hop is never anonymous.  What the model servers do
-*not* do with it is keep the conversation: see DESIGN.md §2.2 for why the history
+*not* do with it is keep the conversation: see SDD §5.5 for why the history
 has to live here, on the side of the hop that does not speak a wire protocol.
 
 **The tools come from the toolhub**, and are asked for again before every model
@@ -35,7 +35,7 @@ call — the list goes out with each request, so it is read with each request.
 That is why this server holds no tool registry of its own and why `loop.py`
 still knows nothing about MCP: it is handed a coroutine, and where the registry
 came from is nobody else's business.  Our own plugins included: one owner for
-the model's whole tool list is worth one hop.  See DESIGN.md §4.1.
+the model's whole tool list is worth one hop.  See SDD §7.1.
 
 Two consequences of owning the history are paid for here rather than avoided,
 because they are the price of the state:
@@ -46,8 +46,8 @@ because they are the price of the state:
 * **Cut-in**, which is what waiting *for* means.  A message that arrives while a
   turn runs is handed to that turn at its next iteration boundary — as a call to
   `_check_new_input` and a result carrying the message's own words — so the model
-  addresses it inside the turn it arrived in rather than one turn later.  v1's
-  mode, always on, and the one place this server writes a message into a
+  addresses it inside the turn it arrived in rather than one turn later.  It is
+  always on, and it is the one place this server writes a message into a
   conversation that its own caller did not send.
 * **Interruption keeps the work.**  A turn an interruption cuts short leaves a
   well-formed exchange: the loop completes the tool batch it was in —
@@ -68,7 +68,7 @@ because they are the price of the state:
   Such a row is note-only by design; the cabinet save is for turns that ran.
 
 What statelessness bought and is now given up deliberately: a conversation store
-that can grow without bound.  See DESIGN.md §10 — trimming is the next thing, not
+that can grow without bound.  See SDD §14.2 — trimming is the next thing, not
 a thing this cut pretends to have solved.
 """
 
@@ -402,8 +402,8 @@ def _current_input(messages: Sequence[Message]) -> str:
     return ""
 
 
-#: The harness tool a message that arrived mid-turn is delivered under — v1's
-#: *cut-in*, and the name is v1's for the same reason its pair shape is.
+#: The harness tool a message that arrived mid-turn is delivered under — the
+#: *cut-in*, named for the pair it forms with the message it delivers.
 #:
 #: **It is a tool because a pair has to name one.**  The Responses and Messages
 #: backends reject a tool call in history whose name is not in the request's
@@ -420,20 +420,19 @@ def _current_input(messages: Sequence[Message]) -> str:
 #: rebuilds a transcript reads it too.
 
 #: The tool an image comes in by.  **The model calls it**, which is the whole
-#: mechanism: somebody writes a path in a sentence and the model attaches it.  v1
-#: also let its harness call this for `@path` markers in the text, and that half
-#: is not ported — it saves one model call and costs a second entry point into
-#: one behaviour, a marker syntax every user has to be taught, and an argument
-#: only the harness ever omits.  What is kept is the half that carries the
-#: feature.
+#: mechanism: somebody writes a path in a sentence and the model attaches it.
+#: A harness-side entry for `@path` markers in the text is deliberately absent —
+#: it saves one model call and costs a second entry point into one behaviour, a
+#: marker syntax every user has to be taught, and an argument only the harness
+#: ever omits.  What is kept is the half that carries the feature.
 #:
 #: **An ordinary tool, not a harness tool.**  Nothing this process's machinery
 #: writes refers to it by name — no pair, no prompt — so it is offered to the
 #: model the way any plugin's tool is, and whether it is in the list from the
 #: first turn is the budget's business (`tool_load:`), not this file's.
 #:
-#: It injects content parts into the **user message** — where v1's tool put them
-#: too, and the only place a wire here can carry an image: a tool result is text
+#: It injects content parts into the **user message**, which is the only place
+#: a wire here can carry an image: a tool result is text
 #: on every backend this system speaks.  Those parts are live-session state and
 #: nothing more; what is stored is the text plus a note naming every file
 #: (`slife2.libs.turn.attachments.image_note`), which is also what the repair below leaves
@@ -527,14 +526,13 @@ class Pending:
     channel: str
     #: Whether this caller can be asked a question mid-turn and will answer it.
     #:
-    #: **It is the caller's to say, and nobody else can.**  v1 answered the same
-    #: question with "is a handler installed", which worked because one process
-    #: was one host — here every turn arrives at the same server, and whether
-    #: anybody is watching is a fact about *this* call rather than about the
-    #: process: the TUI is watched, a WeChat message is not, and the two can
-    #: address one conversation an hour apart.  False is the safe default for
-    #: the same reason it is v1's rule: a caller that cannot answer must never
-    #: be asked, or the model's request for a check becomes a turn that hangs.
+    #: **It is the caller's to say, and nobody else can.**  "Is a handler
+    #: installed" would answer a different question: every turn arrives at the
+    #: same shared server, and whether anybody is watching is a fact about
+    #: *this* call rather than about the process — the TUI is watched, a WeChat
+    #: message is not, and the two can address one conversation an hour apart.
+    #: False is the safe default: a caller that cannot answer must never be
+    #: asked, or the model's request for a check becomes a turn that hangs.
     watched: bool = False
     #: Set by the turn that folded this message into itself, and **only when that
     #: turn produced a result**.  `None` is therefore the honest "nothing folded
@@ -816,10 +814,9 @@ class Loop:
     #: turn and the messages become addressable.  **A write that is refused is a
     #: hard failure**: the turn's messages are rolled back to this prefix, so a
     #: silent unaddressable run cannot be left behind.  A fork has no id at all
-    #: and never rebuilds, so its carried run is never read.  v1 re-derived the
-    #: same run by grouping messages into turns; a count is enough here only
-    #: because of that rule, and it is what lets a rebuild replace the turns
-    #: without destroying a message that has no turn to be replaced by.
+    #: and never rebuilds, so its carried run is never read.  A count is enough
+    #: here only because of that rule, and it is what lets a rebuild replace the
+    #: turns without destroying a message that has no turn to be replaced by.
     covered: int = 0
     #: The write of a turn whose caller could not wait for it, kept until the
     #: turn that follows can take up the id it answered with — see
@@ -1308,7 +1305,7 @@ def build_server(
     def compress_for(backend: LLMBackend, client_id: ClientId) -> Compress:
         """How one conversation's tool results are fitted into it.
 
-        **The second discriminator, and the shape of the first** (DESIGN.md §5.4):
+        **The second discriminator, and the shape of the first** (SDD §5.2.4):
         one model call, given the result, the conversation in hand and the
         current input, answering with **line numbers rather than text** — so the
         harness cuts the original, and what enters the conversation is the tool's
@@ -1397,9 +1394,9 @@ def build_server(
         or grew a tool, is in the next *call*'s list, and nothing here had to
         notice that it happened.
 
-        v1 needed a `tools/list_changed` subscription, a shared catalog and a
-        reconcile pass to arrive at the same place.  Here the answer can be at
-        most one call old, and nothing has to be kept in step to make that true.
+        The answer can be at most one call old, and nothing has to be kept in
+        step to make that true: no `tools/list_changed` subscription, no shared
+        catalog and no reconcile pass.
 
         It is also asked once when the loop is built, before the user's message
         is appended: a hub that is not there is a system that has come apart, and
@@ -1432,7 +1429,7 @@ def build_server(
         hub, which knows nothing about whose call it was.  They are therefore
         outside the catalogue: the budget cannot unload them and `tool_search`
         cannot find them, which is what a tool the mechanism itself needs
-        deserves (v1's system tools sat in every registry the same way).
+        deserves (the system tools sit in every registry the same way).
 
         **`observer` is where the catalogue's size goes**, and it is optional
         because this is also called to build a loop before a turn exists
@@ -2021,7 +2018,7 @@ def build_server(
         the loop's `turn_ids` and the store's disagreed from that point on and
         the next write persisted the wrong list.  A missing or null `turn_ids`
         is the same damage as a non-list `messages` and is refused the same way
-        (DESIGN.md §11.1: a value that cannot be read is not a value that is
+        (SDD Appendix C: a value that cannot be read is not a value that is
         absent).
         """
         messages = payload.get("messages")
@@ -2272,7 +2269,7 @@ def build_server(
         **An answer that carried no counts is refused**, like a shape `_adopt`
         cannot read: a reply that replaced the context list but omitted `kept`
         and `recalled` used to draw `[kept 0, recalled 0]`, a note reporting a
-        decision nobody made (DESIGN.md §11.1: a failure is not a verdict).
+        decision nobody made (SDD Appendix C: a failure is not a verdict).
         """
         carried = max(len(loop.messages) - loop.covered, 0)
         payload = tool_payload(
@@ -2326,12 +2323,11 @@ def build_server(
         **What went is written into the conversation.**  The trim is recorded as
         a tool pair — `_func_tool_unload` called with no names — so the model
         reads that its list shrank and which tools left, instead of reaching for
-        a tool it still believes it has.  That is v1's *harness tool-pair*
-        (DESIGN.md §4.3 there), and it is why the tool is in the model's list at
-        all: v1's rule is that such a pair has to name a **declared** tool,
+        a tool it still believes it has.  The pair names a **declared** tool,
         because the Responses and Messages backends reject a tool call in
-        history that is not in the request's tool list.  A pair invented in the
-        history layer would be exactly that.
+        history that is not in the request's tool list; that is why the tool is
+        in the model's list at all.  A pair invented in the history layer would
+        be exactly that.
 
         Nothing is written when nothing moved: no tools unloaded, no pair.  An
         empty pair every turn would be a record of something that did not
@@ -2448,7 +2444,7 @@ def build_server(
         therefore how a keep-list is expressible: the ids a model writes back
         are the ids it read.  `messages_from_turns` puts one on every turn a
         *rebuild* builds, which covers everything that came out of the store —
-        and this is the other half, and v1's: the turn that has just run is in
+        and this is the other half: the turn that has just run is in
         memory and in no rebuilt list yet, so without this the newest turns are
         the only ones the model cannot name, and a keep-list silently drops
         exactly those.
@@ -2511,7 +2507,7 @@ def build_server(
         """
 
         def auto_invoke() -> AutoCall | None:
-            """The tool to call at this iteration boundary, or `None` — v1's cut-in.
+            """The tool to call at this iteration boundary, or `None` — the cut-in.
 
             **Cheap, and it decides only *whether*.**  The name it returns is
             handed to the loop, which makes the call through the same registry
@@ -2637,8 +2633,8 @@ def build_server(
 
             **A result nobody comes back for is a result lost**, which is the one
             thing backgrounding must not do: the call was made for this
-            conversation, and v1's only road back was the model remembering to
-            poll.  So it is handed to the window like every other piece of work
+            conversation, and a model remembering to poll is not a road back.
+            So it is handed to the window like every other piece of work
             this system does in the background (`slife2.libs.harness.handover`).
 
             **A failure here is `False`, and `False` is not "lost"**: the call
@@ -2685,7 +2681,7 @@ def build_server(
             (loop.agent, loop.subagent),
             # Only a caller that said it can be asked is asked (see
             # `Pending.watched`).  With None the loop grants the request and the
-            # call runs, which is v1's rule for a turn with nobody behind it.
+            # call runs, which is the rule for a turn with nobody behind it.
             ask if item.watched else None,
             deliver,
             # Every turn's results are fitted, not only the ones a window has
@@ -2729,7 +2725,7 @@ def build_server(
             # commit below, and `send_message`'s handler would then find an empty
             # `outcome.messages`, record nothing and re-raise — a completed turn
             # with no row, which is the "conversation the database has never
-            # heard of" DESIGN.md §2.5's rule exists to prevent.  So the commit is put in a
+            # heard of" SDD §5.6's rule exists to prevent.  So the commit is put in a
             # `finally` of its own: it holds no `await`, so it completes even as a
             # cancellation unwinds past it (the property
             # `slife2.plugins.agent_task.server`'s cancelled path names), and the turn is
@@ -2739,8 +2735,8 @@ def build_server(
             # save a call: that `finally` is running *during* a cancellation,
             # where the next await is cancelled at its first checkpoint — so a
             # pair could be started and never finished, which is the one history
-            # state that is a 400 from every provider.  v1's `_auto_invoke`
-            # refuses to start for the same reason.  The turn is over; the budget
+            # state that is a 400 from every provider.  `auto_invoke` refuses to
+            # start for the same reason.  The turn is over; the budget
             # can wait a turn.
             try:
                 if not cancelled:
@@ -2951,10 +2947,10 @@ def build_server(
             )
 
         if not loop.accepts_images:
-            # v1 refused to encode rather than letting a provider drop them, and
-            # this is the better half of its version: the refusal is the tool
-            # result the model reads, so it can tell the person — where v1 had
-            # the harness write an assistant message on the model's behalf.
+            # Encoding is refused rather than letting a provider drop the
+            # images: the refusal is the tool result the model reads, so it can
+            # tell the person — rather than the harness writing an assistant
+            # message on the model's behalf.
             raise ToolError(
                 f"{loop.model} cannot read images, so nothing was attached — "
                 f"move to a model whose config lists `image` under `input`."
@@ -3062,7 +3058,7 @@ def build_server(
         return {"answered": True, "text": ""}
 
     # ── The model config tools ───────────────────────────────────────────
-    # v1's `model_*` set, on the process that *resolves* the model rather than
+    # The `model_*` set, on the process that *resolves* the model rather than
     # in a family plugin of its own: `default:` and `providers:` are what this
     # server turns a conversation's model into, so the edit and the read that
     # honours it are in one process — "哪个 plugin 用，哪个 plugin 管".  The hub
@@ -3478,10 +3474,10 @@ def build_server(
         # conversation starts on — so switching away from a model that has
         # stopped answering, which is the whole reason to do this, would leave
         # the window being answered (or not) by the model it was trying to
-        # leave.  v1's `switch_model` reloaded the loop for exactly that reason,
-        # and it is done here rather than by the caller because this process is
-        # the one holding the loops: the edit and the read that honours it are
-        # one process, which is the argument that puts these four tools on the
+        # leave.  The loop is reloaded for exactly that reason, and it is done
+        # here rather than by the caller because this process is the one
+        # holding the loops: the edit and the read that honours it are one
+        # process, which is the argument that puts these four tools on the
         # agent server at all.
         #
         # From the next turn, never mid-turn.  `loop_for` resolves the backend
@@ -3998,7 +3994,7 @@ def build_server(
         **A `turns` this build cannot read is refused, not drawn as none.**  A
         context plugin answering with a shape this build does not know — the
         same damage `_adopt` refuses — used to become `[]`, so a screen showed
-        an empty conversation and said nothing (DESIGN.md §11.1: a failure is
+        an empty conversation and said nothing (SDD Appendix C: a failure is
         not a verdict).
 
         Args:

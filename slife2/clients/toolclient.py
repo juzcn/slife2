@@ -80,7 +80,7 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 #: not single: FastMCP's own multi-server client prefixes with one underscore,
 #: and one underscore is a character an upstream tool name can contain —
 #: `read_file` would then be a name nobody could split back apart.  Two of them,
-#: and the convention is v1's, which used it for the same reason.
+#: for that same reason.
 SEPARATOR = "__"
 
 
@@ -185,7 +185,7 @@ async def remote_catalogue(
         ConnectionError: If the hub answers with something this build cannot
             read.  Deliberately loud, and deliberately not an empty list: the
             likely cause is a hub daemon left over from a previous build
-            (DESIGN.md §8.7), and the alternative — silently handing the model a
+            (SDD §12.5), and the alternative — silently handing the model a
             short tool list — turns a version mismatch into a model that has
             quietly lost its abilities.  `slife2 down` is the answer.
     """
@@ -210,7 +210,7 @@ async def remote_catalogue(
     # and a silent hole for the field that is an identity: a hub from another
     # build answering `{"tools": [{}]}` would hand the model a nameless tool it
     # could never call.  The element that broke the shape is the evidence, so
-    # the element is what is quoted (DESIGN.md §11.1).
+    # the element is what is quoted (SDD Appendix C).
     for raw in listed:
         if not isinstance(raw, dict) or not str(raw.get("name") or ""):
             raise unreadable("the toolhub", "return a tool list", raw)
@@ -301,7 +301,7 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
     `found.get("text") or ""` does the same one key over, writing an empty
     sentence where the hub's own belongs.  Both halves are one answer and are
     read as strictly as `remote_tools` reads a listing: only a *readable* empty
-    answer is a verdict, and a missing key is damage (DESIGN.md §11.1 — a
+    answer is a verdict, and a missing key is damage (SDD Appendix C — a
     failure is not a verdict).  Reading both before either half is used also
     means a refused answer can never leave the half-written pair every provider
     rejects.

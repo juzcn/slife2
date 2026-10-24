@@ -1,30 +1,27 @@
 """How a media provider is spoken to: one contract, and the adapters that keep it.
 
-v1's shape, and it is the shape the problem has: **one endpoint family per
-adapter**, and a provider entry names which one it speaks (`api:`).  What a tool
-asks for is a *capability* — draw this, render this, say this, transcribe this —
-and what an adapter does is translate that into one vendor's HTTP.  So a second
-vendor is a class and a registry entry, and nothing above this module learns its
-name.
+The shape follows the problem: **one endpoint family per adapter**, and a
+provider entry names which one it speaks (`api:`).  What a tool asks for is a
+*capability* — draw this, render this, say this, transcribe this — and what an
+adapter does is translate that into one vendor's HTTP.  So a second vendor is a
+class and a registry entry, and nothing above this module learns its name.
 
 **No SDK, and no new dependency.**  Both adapters speak plain HTTP over
-`httpx2`, which this project already depends on — v1's do the same, and it is
-why the port needed no change to `pyproject.toml`: a media endpoint is three or
-four JSON calls, a poll, and a download, and an SDK would be a dependency that
-exists to spell them differently.
+`httpx2`, which this project already depends on — and it is why no change to
+`pyproject.toml` was needed: a media endpoint is three or four JSON calls, a
+poll, and a download, and an SDK would be a dependency that exists to spell
+them differently.
 
-**Artifacts land in the agent's own directory**, and that is where this port
-deliberately differs from v1.  v1 wrote them to the process's working directory;
-here a daemon's working directory is `<data>/runtime/`, which this project
-documents as *reconstructible — delete it and the next start rebuilds whatever
-it needs*, so a generated image left there would be the one file guaranteed to
-be lost.  What it is instead is the agent's own (`agents/<agent>/media/`):
-generated work belongs to whoever asked for it.  The bytes are still work products rather than cabinet documents (v1's
-distinction, kept): nothing is registered anywhere, and the answer is a path a
-person can open.
+**Artifacts land in the agent's own directory**, deliberately: a daemon's
+working directory is `<data>/runtime/`, which this project documents as
+*reconstructible — delete it and the next start rebuilds whatever it needs*, so
+a generated image left there would be the one file guaranteed to be lost.  What
+it is instead is the agent's own (`agents/<agent>/media/`): generated work
+belongs to whoever asked for it.  The bytes are still work products rather than
+cabinet documents, and that distinction is kept: nothing is registered
+anywhere, and the answer is a path a person can open.
 
-**A failure is raised, not returned as text.**  v1 answered `"Error: …"`, which
-was its convention for a tool failure; here the convention is `ToolError`
+**A failure is raised, not returned as text.**  The convention is `ToolError`
 (`slife2.plugins.skills.server` states it: a refusal returned as text reaches the
 transcript as a *success*).  So the adapter raises and the plugin decides.
 """
@@ -48,10 +45,9 @@ from slife2.libs.host.paths import work_dir
 logger = logging.getLogger(__name__)
 
 # ── Cadence and bounds ──────────────────────────────────────────────────────
-# v1 kept these in a global timeouts registry (`slife.timeouts`) that every
-# plugin read.  There is no such registry here — a number is a constant beside
-# the call it paces — and the values are v1's, measured against the same
-# providers: a render is slow, a connect is not, and an artifact is megabytes.
+# There is no global timeouts registry here — a number is a constant beside the
+# call it paces — and the values were measured against the providers: a render
+# is slow, a connect is not, and an artifact is megabytes.
 
 #: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
@@ -88,8 +84,8 @@ def stamp(moment: datetime | None = None) -> str:
     `slife2.helpers.clock` writes this project's house format — `2026-10-11T14:20:00+08:00`
     — and a colon is not a character a Windows filename may hold, so this is the
     same instant in a shape a filesystem takes.  Seconds and six random hex
-    digits are what make a collision impossible in practice; v1's naming, with
-    its stamp respelled.
+    digits are what make a collision impossible in practice; the stamp is the
+    house format respelled.
     """
     return f"{moment or datetime.now():%Y%m%d-%H%M%S}"
 
@@ -137,7 +133,7 @@ def _json_object(response: Any, what: str) -> dict[str, Any]:
     does not convert: a body that is not JSON (`ValueError`), a body that is JSON
     but not an object (`AttributeError` on `.get`), and a key that is missing or
     the wrong shape (`IndexError`, `TypeError`).  `_run` turns only
-    `MediaAdapterError` into the sentence DESIGN.md §8.2 promises, so
+    `MediaAdapterError` into the sentence SDD §12.2 promises, so
     anything else reached the model as a raw traceback instead — and the fix
     belongs here, once, because both adapters have the same body to read and two
     copies of this is how they come to differ.
@@ -162,8 +158,9 @@ def _json_object(response: Any, what: str) -> dict[str, Any]:
 class _HttpClientMixin:
     """A lazy, lock-protected `httpx2` client, one per adapter.
 
-    Both adapters carried verbatim copies of this in v1 — the same double-checked
-    lock, the same headers — so it is one class here and the adapters inherit it.
+    Both adapters would otherwise carry verbatim copies of this — the same
+    double-checked lock, the same headers — so it is one class here and the
+    adapters inherit it.
     **The ``__init__`` came with the client**, because both adapters had written
     it out identically: the settings, the client, the saver, in that order.  A
     docstring that used to say "call :meth:`_init_http_client` from ``__init__``"
@@ -305,7 +302,7 @@ class ArtifactSaver:
     **A work product, not a cabinet document.**  Nothing here registers the file
     with the cabinet or with any sharing plugin; the answer is a path, and
     putting the file somewhere durable is a separate call by whoever wants it
-    (v1's distinction, kept).
+    (a deliberate distinction).
 
     `kind` names the artifact in the log line and in an error message; it does
     not become a subdirectory, so a directory of generated things reads as the
@@ -696,8 +693,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             )
             return str(path)
         # The other shape the same endpoint answers with: the bytes inline,
-        # base64'd.  Saving them as `.wav` is v1's choice and the vendor's
-        # default format.
+        # base64'd.  Saving them as `.wav` matches the vendor's default format.
         if encoded := audio.get("data"):
             path = await self._saver.save_bytes(
                 _decoded(encoded, "audio.data"), "audio", "wav", outputs_dir
@@ -855,6 +851,6 @@ def merge_params(
 
     The call wins, and an absent value leaves the configured one alone — which
     is what makes `media:` a place to say "this model always renders 720P"
-    without a tool growing a field per provider.  v1's rule.
+    without a tool growing a field per provider.
     """
     return {**(configured or {}), **(given or {})}

@@ -79,9 +79,9 @@ def test_a_manifest_names_the_skill(root: Path) -> None:
 def test_a_quoted_description_arrives_without_its_quotes(root: Path) -> None:
     """The reason the header is parsed as YAML rather than as `key: value`.
 
-    A description with a colon in it has to be quoted, and v1's line-by-line
-    reader handed the model the quotes as part of the description.  Every real
-    skill has one — the quotes are what the format demands, not a typo.
+    A description with a colon in it has to be quoted, and a line-by-line
+    reader would hand the model the quotes as part of the description.  Every
+    real skill has one — the quotes are what the format demands, not a typo.
     """
     skill(root, "one", header='name: one\ndescription: "Always use this: it matters."')
     assert scan()[0].description == "Always use this: it matters."

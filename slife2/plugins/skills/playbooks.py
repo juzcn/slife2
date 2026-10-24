@@ -3,8 +3,8 @@
 A skill is **not a tool**.  It is a document, and the difference is the whole
 design: a tool is called with arguments the model invents, while a skill is
 *read* and then followed — a procedure, the conventions around it, and the
-command lines it expects.  v1 put it best by keeping the two families apart, and
-what slife2 keeps from that is the shape of the folder:
+command lines it expects.  The two families are kept apart, and the shape of the
+folder follows from that:
 
     <data>/skills/
       browser-harness/
@@ -51,7 +51,7 @@ credstore — which is what makes a key that lives in the OS keyring reach a
 script whose process was started days later by a daemon that never saw it.  This
 module only reads the *declaration* and reports it; the resolution is
 `slife2.libs.host.config`'s, and injecting what it resolved is the business of whatever
-runs a skill's scripts (`DESIGN.md` §10 — nothing does yet).
+runs a skill's scripts (`SDD` §14.2 — nothing does yet).
 
 Why this is a module rather than part of the server
 ---------------------------------------------------
@@ -82,16 +82,16 @@ from slife2.libs.host.paths import skills_dir
 
 logger = logging.getLogger(__name__)
 
-#: The file that makes a directory a skill.  Upper case, and v1's name: it is
-#: what every skill in the wild already calls this file.
+#: The file that makes a directory a skill.  Upper case, a name every skill
+#: in the wild already uses for this file.
 MANIFEST = "SKILL.md"
 
 #: The frontmatter's delimiter, and the fence a skill's own header sits between.
 _FENCE = "---"
 
-#: What the model calls to read one.  Named `skill_use` because v1's name is the
-#: one that already appears in prompts and habits; a port that renamed it would
-#: be a port somebody has to relearn for nothing.
+#: What the model calls to read one.  Named `skill_use` because that name
+#: already appears in prompts and habits; renaming it would be a change
+#: somebody has to relearn for nothing.
 #:
 #: The name lives here and the *tool* is served by `slife2.plugins.skills.server`, which
 #: takes its own name from this constant — and `slife2.plugins.toolhub.server` spells it too,
@@ -197,9 +197,9 @@ def split_frontmatter(content: str) -> tuple[str, str]:
     The header is returned as *text* rather than as a mapping, because "this
     file has no frontmatter" and "this file has frontmatter that does not
     parse" are two different facts and only the caller can decide what to do
-    with the second.  An unterminated fence counts as no frontmatter at all —
-    v1's rule, and the safe half: whatever follows an unclosed `---` is body,
-    and a body is never wrong to show.
+    with the second.  An unterminated fence counts as no frontmatter at all, the
+    safe half: whatever follows an unclosed `---` is body, and a body is never
+    wrong to show.
     """
     lines = content.split("\n")
     if not lines or lines[0].strip() != _FENCE:
@@ -213,11 +213,11 @@ def split_frontmatter(content: str) -> tuple[str, str]:
 def frontmatter(content: str) -> dict[str, Any]:
     """A `SKILL.md`'s header, as a mapping.  Never raises.
 
-    **Parsed as YAML, not as `key: value` lines.**  v1 read it line by line,
-    which was enough right up until a description contained a colon and had to
-    be quoted — and then the quotes arrived in the model's context as part of
-    the description.  ruamel is already here for `slife2.yaml`, so the correct
-    reading costs nothing to adopt.
+    **Parsed as YAML, not as `key: value` lines.**  Reading it line by line is
+    enough right up until a description contains a colon and has to be quoted —
+    and then the quotes arrive in the model's context as part of the
+    description.  ruamel is already here for `slife2.yaml`, so the correct
+    reading costs nothing.
 
     **A header that does not parse degrades to no header, and that is a
     decision registered in SDD Appendix C — not an accident.**  What it does:
@@ -470,10 +470,10 @@ def _declared(needs: Requirements) -> str:
 def document(skill: Skill, note: str = "") -> str:
     """A skill's `SKILL.md`, preceded by the directory it lives in.
 
-    v1's shape, kept for v1's reason: a skill's body names its own files by
-    relative path (`scripts/search.py`), and a model reading it has no way to
-    know what those are relative *to*.  One line in front of the document turns
-    a path it cannot use into one it can.
+    The shape has a reason: a skill's body names its own files by relative path
+    (`scripts/search.py`), and a model reading it has no way to know what those
+    are relative *to*.  One line in front of the document turns a path it cannot
+    use into one it can.
 
     **The base is the skill's own directory, not the `skills/` root.**  A
     playbook's files sit beside its `SKILL.md`, so `scripts/search.py` means

@@ -49,8 +49,8 @@ def _unreadable(what: str, answer: Any) -> ConnectionError:
     obvious empty that reads as a legitimate one: an answer with no words, a
     conversation that never ran, a switch that worked.  So each quotes the
     payload rather than summarising it, because a shape this build cannot read is
-    the only evidence there is that the far end is a different build (DESIGN.md
-    DESIGN.md §11.1: a value that cannot be read is not a value that is absent).
+    the only evidence there is that the far end is a different build (SDD
+    SDD Appendix C: a value that cannot be read is not a value that is absent).
     """
     return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
 
@@ -120,7 +120,7 @@ class AgentClient(Protocol):
         Each entry has `name`, `model` (empty for the maker's own), `role` and
         `fork`.  A list this build cannot read raises rather than answering
         empty: an agent with no subagents is a real, empty list, and the two
-        must not look alike (DESIGN.md §11.1).
+        must not look alike (SDD Appendix C).
         """
         ...
 
@@ -137,7 +137,7 @@ class AgentClient(Protocol):
         (`slife2.plugins.agent.server.transcript`, over `restore`'s own `{"turns": []}`);
         a payload whose `turns` cannot be read is damage, and reading it as `[]`
         is a window that shows a blank history and marks itself restored
-        (DESIGN.md §11.1: a value that cannot be read is not a value that is
+        (SDD Appendix C: a value that cannot be read is not a value that is
         absent).
         """
         ...
@@ -357,7 +357,7 @@ class MCPAgentClient:
         # means the server switched and the reference is the one to carry —
         # which is what the `[refused]` prefix test used to be, read off a
         # sentence.  A shape this build cannot read raises rather than adopting:
-        # `_unreadable` has the argument (DESIGN.md §11.1).
+        # `_unreadable` has the argument (SDD Appendix C).
         if not isinstance(answer, dict) or "default" not in answer:
             raise _unreadable("answer with the switch it made", result)
         self._model = ref
@@ -539,7 +539,7 @@ class MCPAgentClient:
         # **The turn's answer is `text`, and a payload without it is refused.**
         # This used to read as `""`, which the window draws as a question with no
         # answer and no error — a failed turn presented as a finished one
-        # (DESIGN.md §11.1: a value that cannot be read is not a value that is
+        # (SDD Appendix C: a value that cannot be read is not a value that is
         # absent).  Raised here, after the `try`, so the connection stays: the
         # server answered, and it is the answer this build cannot read.
         payload = result.data

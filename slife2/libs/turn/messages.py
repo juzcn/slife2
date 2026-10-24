@@ -15,10 +15,10 @@ machine — is the only place that has to care that Anthropic disagrees.
 
 Dataclasses rather than dicts
 -----------------------------
-v1 passes raw dicts around and pays for it in every consumer that has to
-remember whether a tool call is ``{"id", "function": {"name", "arguments"}}`` or
-something flatter, and whether ``arguments`` is a dict or a JSON string.  Here
-those questions are answered once, in :meth:`ToolCall.to_wire`.
+Raw dicts would make every consumer remember whether a tool call is
+``{"id", "function": {"name", "arguments"}}`` or something flatter, and whether
+``arguments`` is a dict or a JSON string.  Dataclasses answer those questions
+once, in :meth:`ToolCall.to_wire`.
 """
 
 from __future__ import annotations
@@ -127,11 +127,10 @@ class Message:
     #: **Not one of the OpenAI wire's fields**, and it travels anyway: this is
     #: the shape *we* pass a conversation around in, and each provider adapter
     #: builds its own request from it — so a field the provider has no name for
-    #: can ride here and be renamed or dropped at the edge.  That is v1's
-    #: arrangement exactly, and it is what makes the two things reasoning has to
-    #: do possible at once: `openai_server` re-sends it as DeepSeek's
-    #: `reasoning_content`, and `anthropic_server` and the responses server drop
-    #: it, because those two have nowhere to put it.
+    #: can ride here and be renamed or dropped at the edge.  That is what makes
+    #: the two things reasoning has to do possible at once: `openai_server`
+    #: re-sends it as DeepSeek's `reasoning_content`, and `anthropic_server` and
+    #: the responses server drop it, because those two have nowhere to put it.
     #:
     #: Kept on the message rather than only streamed at the reader, because the
     #: turn log stores messages: a conversation read back after a restart that

@@ -11,9 +11,8 @@ prompts with holes in them, so they are all templates here rather than one
 template and one f-string.
 
 The prompt is a Jinja2 template rather than a config string, so the parts of it
-that depend on *who is asking* can be written as such.  slife v1 does the same,
-and for the same reason: a prompt is text with holes in it, and a template is
-the thing that says where the holes are.
+that depend on *who is asking* can be written as such: a prompt is text with
+holes in it, and a template is the thing that says where the holes are.
 
 **It is rendered when a conversation starts, not once at startup.**  The agent
 name is a property of the conversation — `send_message(agent, ...)` names it —

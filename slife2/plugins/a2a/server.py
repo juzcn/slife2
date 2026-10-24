@@ -1,12 +1,12 @@
 """slife2-a2a — the A2A mesh, as a plugin.
 
-v1's `slife.plugins.a2a.server`, and the two things that changed are DESIGN.md §1.4's and
-DESIGN.md §6.2's rather than anything about the mesh.
+The two things worth stating first are SDD §2.6's and SDD §5.4's rather than
+anything about the mesh.
 
-**DESIGN.md §1.4: one process, one mesh per member.**  v1 spawned one plugin per agent, so its
-module globals *were* that agent's — one mesh, one set of queues, one identity.
-slife2's servers are shared, so the same things live in a :class:`Session` keyed
-by the **client id every call carries**, exactly as `slife2-wechat`'s login does.
+**SDD §2.6: one process, one mesh per member.**  slife2's servers are shared,
+so one mesh, one set of queues and one identity live in a :class:`Session`
+keyed by the **client id every call carries**, exactly as `slife2-wechat`'s
+login does.
 That is not a formality here: the name *is* the mesh identity — the MQTT client
 id and the request topic's last segment — so a second member is a second
 connection with a second card, and the name-collision check that protects it is
@@ -20,31 +20,29 @@ whole of the difference between the two instances of this module.  Everything th
 local one adds is the part a peer without a process needs: a place held for it by
 somebody else (:data:`MEMBER`), a road that is not a window (`run_turn`), and a
 send path that gives the receiver its place before it publishes (`send_message`).
-`SDD` §3.5 and DESIGN.md §6.6 are where those are argued.
+`SDD` §3.2 and SDD §4.5 are where those are argued.
 
-**DESIGN.md §6.2: the drain tool was the seam, and the seam is gone.**  v1's harness polled
-`__a2a_drain_incoming` once a second and injected what it found into the agent's
-inbox.  There is no harness here, and what replaced that seam is two roads out of
-one queue: an inbound message for an *agent* is handed to the terminal showing
-that conversation — `slife2.libs.harness.handover`, the same queue the person's own
-typing goes into — and one for a subagent, which has no window and never will, is
-run as a turn in its own conversation (`run_turn`).  So the five queues become
-**one ordering queue per session** with one writer behind it, which is the job the
-queues were doing for the harness: they kept arrival order, and they kept a mesh
-callback from blocking the MQTT reader loop.
+**SDD §5.4: there is no drain tool, because there is no harness seam.**  What
+stands in its place is two roads out of one queue: an inbound message for an
+*agent* is handed to the terminal showing that conversation —
+`slife2.libs.harness.handover`, the same queue the person's own typing goes
+into — and one for a subagent, which has no window and never will, is run as a
+turn in its own conversation (`run_turn`).  So there is **one ordering queue
+per session** with one writer behind it, doing the job the harness's queues
+did: keeping arrival order, and keeping a mesh callback from blocking the MQTT
+reader loop.
 
 **It carries a second kind of thing, which is not a message at all.**  A
 presence transition — a peer arriving, a peer going — is a *note*: the window
 draws it and nothing else happens, no turn is run and the conversation never
-learns of it.  v1 kept presence out of the inbox for the same reason (its TUI had
-an activity feed and its model a per-turn prompt); here the roster a model can
-ask for is `peer_agent_list`, and a peer that wants to be answered sends a task.
+learns of it.  Presence stays out of the inbox for that reason: the roster a
+model can ask for is `peer_agent_list`, and a peer that wants to be answered
+sends a task.
 One queue, one writer, two kinds — because arrival order is worth keeping across
 both.
 
-**Who is on the mesh is a window.**  v1's plugin *was* its agent's process, so
-being up and being online were the same fact.  A shared process has to decide,
-and reading it off a file of past work made it mean "has spoken at least once,
+**Who is on the mesh is a window.**  A shared process has to decide, and
+reading it off a file of past work made it mean "has spoken at least once,
 ever": a card for a conversation nobody was having, and none for the window
 somebody had just opened.  So the mesh is joined by `join` for as long as a
 window holds that call, and by an `a2a_*` call for as long as the task it
@@ -57,15 +55,14 @@ and the re-send arrives as a fresh request with a fresh bridge.  The harness
 stores nothing and announces nothing; a peer's own `task_list` is where a task
 still waiting is visible, and where it can cancel or re-send.
 
-Two things v1 had here are deliberately absent.  `__check` has no port: v2 has no
-`system_health` and no `__`-prefixed tools at all, and what it reported is now
-`peer_agent_list`' answer, which is where a model would look anyway.
+**`__check` is deliberately absent.**  There is no `system_health` and no
+`__`-prefixed tool at all, and what it reported is `peer_agent_list`' answer,
+which is where a model would look anyway.
 
-**And the broker is started rather than merely probed**, which is the one place
-this port contradicts v1's own rule and is the operator's call rather than a
-discovery: v1 left mosquitto to the user and treated a listener as the feature's
-on/off switch, where here a config that says `peer_agent:` has said it wants
-the mesh.
+**And the broker is started rather than merely probed**, which is the
+operator's call rather than a discovery: mosquitto is not left to the user with
+a listener treated as the feature's on/off switch — a config that says
+`peer_agent:` has said it wants the mesh.
 `slife2/plugins/a2a/broker.py` holds the policy and the hard failure.
 """
 
@@ -214,29 +211,29 @@ CHANNEL = REMOTE.channel
 #: as written: stored text carries it into a transcript, and the window takes it
 #: back off by this string rather than by a second copy of the spelling.
 #:
-#: **Word-shaped, like every other name this build writes into a row.**  v1
-#: spelled it `[A2A:`, and capitals are the convention for the *other* kind of
-#: bracket — `[TURN:{…}]`, which says "this is what the process knows about the
-#: conversation, not what was said" (`slife2.plugins.wechat.server`'s module docstring,
-#: DESIGN.md §2.4).  This one *is* what was said: it goes into the turn's row
-#: and comes back out of it verbatim, so v1's capitals told the model the
-#: opposite of the truth about it.  What is *not* renamed is anything that names
+#: **Word-shaped, like every other name this build writes into a row.**
+#: Capitals are the convention for the *other* kind of bracket — `[TURN:{…}]`,
+#: which says "this is what the process knows about the conversation, not what
+#: was said" (`slife2.plugins.wechat.server`'s module docstring, SDD §5.5).
+#: This one *is* what was said: it goes into the turn's row and comes back out
+#: of it verbatim, so capitals would tell the model the opposite of the truth
+#: about it.  What is *not* renamed is anything that names
 #: the plugin — the `a2a` channel and its config key — because those are this
 #: plugin's own name rather than a word in somebody's conversation.
 #:
 #: **`PeerAgent`, because `Agent` alone is the one word this marker must not
 #: say.**  Its `from` field is a peer and never the receiver, for the reason the
-#: marker's own docstring gives — v1 measured receivers reading the sender as
-#: themselves — and a name that says "an agent did this" reintroduces exactly
+#: marker's own docstring gives — receivers read the sender as themselves — and
+#: a name that says "an agent did this" reintroduces exactly
 #: that ambiguity on the line where the model is told who spoke.  `Peer` is what
 #: settles it, and it is the word the window's bubble uses too
 #: (`slife2.tui.widgets.channel_prefix`).
 MARKER_PREFIX = REMOTE.marker
 
-#: How many inbound messages may be waiting for a hand-over.  v1's bound on its
-#: queues, and for v1's reason: a peer flooding a conversation must not grow this
-#: process without limit.  Past it the *oldest* waiting message is dropped, which
-#: is the one whose moment has most likely passed.
+#: How many inbound messages may be waiting for a hand-over.  A peer flooding a
+#: conversation must not grow this process without limit.  Past the bound the
+#: *oldest* waiting message is dropped, which is the one whose moment has most
+#: likely passed.
 MAX_QUEUED = 500
 
 #: How many subagent turns may be in flight at once.  **The member road submits
@@ -278,8 +275,8 @@ def marker(
     and withdrawals.
 
     The key is ``from``, not ``agent_name`` — that word in a system prompt is
-    the agent's own identity, and v1 measured the confusion it caused: receivers
-    misread the sender as themselves.  The marker is machine-facing; the window
+    the agent's own identity, and using it here made receivers misread the
+    sender as themselves.  The marker is machine-facing; the window
     drops it for display (the ``PeerAgent(<peer>)> `` bubble prefix instead).
     """
     # ``from`` — the peer's name — deliberately not ``agent_name``: that word
@@ -348,11 +345,11 @@ def peer_phrase(net: Net, peer: str) -> str:
 class Session:
     """One member's mesh, its connect state, and its delivery queue.
 
-    The queue is the piece DESIGN.md §6.2's removal of the drain leaves behind.  A mesh
+    The queue is the piece SDD §5.4's removal of the drain leaves behind.  A mesh
     callback runs on the MQTT reader's stack, so it must not await a hop to
     another server; and arrival order is the order the model should read things
-    in.  One queue with one writer behind it is both, and it is exactly what
-    v1's five queues were, minus the harness on the far end.
+    in.  One queue with one writer behind it is both, and it does what five
+    queues did when a harness sat on the far end.
 
     **`agent` is the maker and `subagent` the member, which is the client id
     every server in this system keys by** — and which of them a delivery runs a
@@ -513,7 +510,7 @@ async def run_turn(
     so there is nothing to find; and its answer does not go to a person at all.
     It goes to its maker, which is a model, and what the maker is handed is a
     message in *its own* conversation — the member's turn is in the member's
-    store, where its maker can read it.  DESIGN.md §6.6 states that cost and
+    store, where its maker can read it.  SDD §4.5 states that cost and
     accepts it.
 
     **The turn is run by the agent server, so it is an ordinary turn**: the same
@@ -599,10 +596,9 @@ async def run_turn(
 def _wire(session: Session) -> None:
     """Attach this session's callbacks to its mesh.
 
-    Each one renders the message v1's drain loop rendered for the same event,
-    from the same fields — the shapes are v1's deliberately, because a
-    conversation that reads the same in both builds is one less thing to
-    relearn.
+    Each one renders the message that event produces, from the fields the
+    event carries — the shapes are fixed deliberately, because a stable
+    rendering is one less thing for a reader of the transcript to relearn.
     """
 
     def on_inbound_task(
@@ -651,7 +647,7 @@ def _wire(session: Session) -> None:
         `cancelled` boolean and a `failed` one, of which only the second could
         mean two different things, and of which the first could not express the
         third ending at all.  A peer that *answered* with a failure was rendered
-        as "completed" — the confident negative DESIGN.md §11.1 forbids — because
+        as "completed" — the confident negative SDD Appendix C forbids — because
         the renderer had no value that said so.
         """
         # Nothing to say about an empty *success*.  A withdrawal, a failure and
@@ -669,7 +665,7 @@ def _wire(session: Session) -> None:
             # this is not the peer answering and must not be rendered as one:
             # "completed"/"replied" over a message no peer sent is exactly the
             # confident negative the model would act on instead of re-sending
-            # (DESIGN.md §11.1).  The words are the mesh's — the failure is the
+            # (SDD Appendix C).  The words are the mesh's — the failure is the
             # requester's, not the peer's — and the marker and channel stay a
             # terminal reply's, so the line lands where the task was discussed.
             if kind == "message":
@@ -713,7 +709,7 @@ def _wire(session: Session) -> None:
         # nothing: the peer that wants to talk sends a task, and the roster is
         # `peer_agent_list`' answer.  Handing a transition to the conversation
         # instead spends a whole turn and a context on a fact nobody has to act
-        # on, which is what v1 avoided by never putting presence in the inbox.
+        # on, so presence stays out of the inbox.
         #
         # **And on the local network nothing is drawn at all.**  The cards here
         # are the maker's own subagents, so the line this would draw in the
@@ -1288,7 +1284,7 @@ def build_server(
         the guard is one comparison.
 
         **A teardown that could not retire the name is reported, not swallowed**
-        (DESIGN.md §6.3): the offline card is how a peer is told this member left,
+        (SDD §9.2): the offline card is how a peer is told this member left,
         and a failure here leaves it advertised with nobody to retire it.
         """
         sessions.pop(key, None)
@@ -1299,7 +1295,7 @@ def build_server(
                 await writer
         try:
             await session.mesh.disconnect()
-        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this member left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
+        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this member left, and a failure here leaves it advertised online with nobody to retire it (SDD §9.2)
             logger.error(
                 "a2a %s: the mesh would not leave the broker, so it may stay "
                 "advertised: %s",
@@ -1310,7 +1306,7 @@ def build_server(
     async def connected(agent: str, reason: str, subagent: str = "") -> Session:
         """This member's mesh, connected — or a refusal naming why it is not.
 
-        Double-checked under the session's lock, v1's shape: two calls arriving
+        Double-checked under the session's lock: two calls arriving
         together must not both dial the broker, and a mesh whose connect failed
         is discarded rather than half-kept, so a retry starts from nothing.
 
@@ -1357,7 +1353,7 @@ def build_server(
                 # already taken) — never leak a half-started mesh on retry.
                 try:
                     await session.mesh.disconnect()
-                except Exception as teardown:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: a responder that advertised before the outbound connect failed is still on the broker, and a failure here leaves it advertised with nobody to retire it (DESIGN.md §6.3)
+                except Exception as teardown:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: a responder that advertised before the outbound connect failed is still on the broker, and a failure here leaves it advertised with nobody to retire it (SDD §9.2)
                     logger.error(
                         "a2a %s: the mesh would not be torn down after a failed "
                         "connect, so it may stay advertised: %s",
@@ -1536,11 +1532,10 @@ def build_server(
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
         """Bring the broker up — the one start-up fact that is not a window's.
 
-        **Nothing joins the mesh here, and that is the change this port needed.**
-        v1's plugin *was* its agent's process, so coming up meant coming online;
-        a shared process has no such moment.  What puts an agent on the mesh is a
-        window showing it (`join`), and an `a2a_*` call for as long as the task
-        it started may be answered.
+        **Nothing joins the mesh here, and that is deliberate.**  A shared
+        process has no moment at which it is simply online.  What puts an agent
+        on the mesh is a window showing it (`join`), and an `a2a_*` call for as
+        long as the task it started may be answered.
 
         **And nothing is announced.**  A restart starts with no inbound bridges —
         they died with the previous process — so there is nothing here to finish.
@@ -1568,7 +1563,7 @@ def build_server(
                     session.writer.cancel()
                 try:
                     await session.mesh.disconnect()
-                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (SDD §9.2)
                     logger.error(
                         "a2a %s: the mesh would not leave the broker on "
                         "shutdown, so it may stay advertised: %s",
@@ -1642,7 +1637,7 @@ def build_server(
                 if session.release(WINDOW):
                     try:
                         await session.mesh.disconnect()
-                    except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (DESIGN.md §6.3)
+                    except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left, and a failure here leaves it advertised online with nobody to retire it (SDD §9.2)
                         logger.error(
                             "a2a %s: the mesh would not leave the broker as its "
                             "window left, so the agent may stay advertised: %s",
@@ -1651,7 +1646,7 @@ def build_server(
                         )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # The mesh tools (standard A2A operations, v1's four)
+    # The mesh tools (the four standard A2A operations)
     # ═══════════════════════════════════════════════════════════════════════
     #
     # The standard A2A-over-MQTT profile is async-native: a message/send is typed

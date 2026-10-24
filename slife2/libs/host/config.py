@@ -1,7 +1,6 @@
 """slife2.yaml — one config file, read by every process and by the launcher.
 
-The shape is slife v1's, because it already answers the questions a model
-configuration has to answer:
+The shape answers the questions a model configuration has to answer:
 
     providers:
       deepseek:
@@ -54,14 +53,14 @@ there is no process for slife2 to start, no URL, and nothing to keep alive — s
 it is not a `mcp:` entry, and nothing about it is a plugin either, because
 slife2 did not write it.  What it shares with both is the thing that matters
 here: **an entry is the operator's opt-in**, and this file is where the operator
-says it.  That is v1's `cli:` section, ported as configuration.
+says it.  That is what the `cli:` section is for.
 
 **`slife2-cli` reads this section**, and declares one catalogue row per entry
 (`cli:yt-dlp`) so that `tool_search` finds a command by what it does.  What is
 still missing is the tool that would *run* one — the row is declared and the
-entry is not yet a tool the model can call (DESIGN.md §10) — so what is settled
+entry is not yet a tool the model can call (SDD §14.2) — so what is settled
 for now is where an entry is written down and what it may say, which is what
-lets a config copied from v1 keep working when that tool lands.  The other half
+lets a config written today keep working when that tool lands.  The other half
 of the same family, `skills/`, is read by `slife2-skills`, which serves
 `skill_use`; where a skill's key comes from is the `skills:` section below.
 
@@ -210,10 +209,10 @@ SEND_MESSAGE = "send_message"
 CANCEL_TASK = "cancel_task"
 LIST = "list"
 BROADCAST = "broadcast"
-#: **The fifth of the original set, and the one that is not v1's.**  A task is a
-#: thing this conversation is waiting on or owes an answer to, and after a
-#: restart — or after an answer that arrived as a message nobody connected to
-#: the id — the only way to ask what is still open was to remember.
+#: **The fifth of the set.**  A task is a thing this conversation is waiting on
+#: or owes an answer to, and after a restart — or after an answer that arrived
+#: as a message nobody connected to the id — the only way to ask what is still
+#: open was to remember.
 TASK_LIST = "task_list"
 
 #: The group-chat verbs, one family on both networks.  **The group is a named
@@ -359,7 +358,7 @@ class Net:
 
 
 #: The remote network: an agent's peers, which may be on another machine and on
-#: somebody else's broker.  v1's mesh, unchanged.
+#: somebody else's broker.
 #:
 #: **Its names split along one line: semantic above, technical below.**  What a
 #: model or a person writes is *peer agents* — `peer_agent_send_message`,
@@ -447,8 +446,9 @@ LOCAL = Net(
 #: **`Agent` and not the agent's own name in the word**, for `PeerAgent`'s
 #: reason one network over: the bubble and envelope are read by a model that is
 #: given its own name in its system prompt, and a word that was just a name
-#: would be the sender/receiver confusion v1 measured.  `Agent(...)` says what
-#: the sender is, and the name in the parentheses says which one.
+#: would be the sender/receiver confusion the naming is there to prevent.
+#: `Agent(...)` says what the sender is, and the name in the parentheses says
+#: which one.
 LOCAL_AGENT = replace(LOCAL, channel="agent", marker="[Agent:", bubble="Agent")
 
 #: The remote network's section key — what a person writes in `slife2.yaml`
@@ -536,8 +536,7 @@ class Plugin:
 #: It served the turns and the tool catalogue, and neither needed a process: a
 #: store has one writer, and "one writer" is a property of a SQLite file, not of
 #: a server.  The turns are `context`'s now and the catalogue is the hub's, both
-#: out of the same library (`slife2.libs.store.db`) — v1's own answer was the
-#: same, `memdb` shipping as a plugin *and* being imported.
+#: out of the same library (`slife2.libs.store.db`).
 PLUGINS: tuple[Plugin, ...] = (
     # One port per wire protocol, not per provider: a process speaks one format,
     # and `stream_chat(provider=...)` picks whose credentials.
@@ -569,7 +568,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # above, so they are served by a process of their own rather than borrowed
     # from `openai-completions`: that process is built from the chat providers,
     # and there is no chat provider here to attach an embedding model to.  It is
-    # a plugin (rather than a library) for DESIGN.md §1.1's reason — it holds a key — and
+    # a plugin (rather than a library) for SDD §2.4's reason — it holds a key — and
     # it identifies itself by `describe`, the tool the db calls before it can
     # build an index.  See `slife2.plugins.llm.embeddings_server`.
     Plugin(
@@ -635,7 +634,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # WeChat, and the one plugin here that is nobody's family: it declares no
     # catalogue rows and owns no entries, and what it holds is a login per agent
     # and a conversation with somebody off this machine.  It is a plugin for the
-    # reason DESIGN.md §1.1's first table row gives — it holds a credential, and a library
+    # reason SDD §2.4's first bullet gives — it holds a credential, and a library
     # would put the token in every importer — and the only thing written down
     # about it is an address; a login is scanned rather than configured, and
     # lives inside the agent's own directory.  It identifies itself by
@@ -663,8 +662,8 @@ PLUGINS: tuple[Plugin, ...] = (
         probe="note_list",
         port=24035,
     ),
-    # Rendering, speech and transcription, behind `media:`.  A plugin for DESIGN.md §1.1's
-    # table — it holds a provider's key and speaks to somebody else's endpoint —
+    # Rendering, speech and transcription, behind `media:`.  A plugin for SDD §2.4's
+    # test — it holds a provider's key and speaks to somebody else's endpoint —
     # and a *family* of endpoints rather than one, which is why it has a module
     # of its own.  It identifies itself by `generate_image`, the first of the
     # four capabilities and the one a config is most likely to have.
@@ -677,7 +676,7 @@ PLUGINS: tuple[Plugin, ...] = (
     ),
     # A public HTTPS URL for a local file, so something that cannot read this
     # machine's disk — a vision model, a chat API that takes links — can fetch
-    # one anyway.  A plugin for DESIGN.md §1.1's reason: what it holds is somebody else's
+    # one anyway.  A plugin for SDD §2.4's reason: what it holds is somebody else's
     # connection (an ngrok session, an SSH forward, a cloudflared child), and it
     # is the one plugin here that serves a second HTTP route beside its MCP
     # endpoint, because the far end fetches `/share/<token>` through the tunnel.
@@ -764,7 +763,7 @@ PLUGINS: tuple[Plugin, ...] = (
         port=24039,
     ),
     # Agent-to-agent traffic over MQTT, on the published A2A-over-MQTT profile.
-    # A plugin for DESIGN.md §1.1's reason — what it holds is somebody else's connection —
+    # A plugin for SDD §2.4's reason — what it holds is somebody else's connection —
     # and the only one here whose *identity* is per agent: the agent name is the
     # MQTT client id, so one shared process holds one mesh per agent it serves.
     # **Its key, its section and its process name say three different layers**:
@@ -951,7 +950,7 @@ def _cryptfile_lookup(key: str) -> str | None:
     Argon2/AES-encrypted; no password is no fallback, because guessing one would
     turn a missing secret into a wrong one.  A password that is present but does
     not decrypt the file raises, like a keyring that refused: it is an answer
-    about the store, not an absence (DESIGN.md §11.1).
+    about the store, not an absence (SDD Appendix C).
 
     **The file's location is credstore's.**  `check_backend()` owns
     `CREDSTORE_FILE` and the `~/.credstore/credentials.crypt` default, and
@@ -1005,7 +1004,7 @@ def _credstore_lookup(key: str) -> str | None:
     a platform credstore does not support) raises instead, because reading that
     as "not found" turns a credential nobody could read into a credential that
     is absent, and the `${VAR}` text then travels as the secret itself
-    (DESIGN.md §11.1).  The failure lands where the secret is resolved.
+    (SDD Appendix C).  The failure lands where the secret is resolved.
     """
     try:
         from credstore import get_credential
@@ -1031,7 +1030,7 @@ def resolve_secret(value: object) -> str:
     installed, a `resolve_uri` that raises — the credential is not stored, the
     backend is locked — is allowed out: reading it as "not found" would leave
     the ``keyring:`` text to travel as the secret itself, which is the
-    deformation DESIGN.md §11.1 names.  The failure lands where the secret is
+    deformation SDD Appendix C names.  The failure lands where the secret is
     resolved.
 
     **A credential that was never stored is a config mistake, and it is said as
@@ -1213,8 +1212,8 @@ class ModelSettings:
     #: reasoning is carried *back* to it: the turn keeps it, and
     #: `slife2.plugins.llm.openai_server` re-sends it as `reasoning_content`, which the
     #: DeepSeek reasoners require on every assistant message once thinking has
-    #: been asked for.  v1's rule, and the two belong together — a model that
-    #: thinks is the model whose endpoint knows the field's name.  Nothing
+    #: been asked for.  The two belong together — a model that thinks is the
+    #: model whose endpoint knows the field's name.  Nothing
     #: depends on it otherwise: this is a fact about the model, not a switch.
     reasoning: bool = False
     #: Modalities accepted.  This is the config that says whether a model can
@@ -1237,7 +1236,7 @@ class ModelSettings:
     #: **Not tri-state like `store`, and the difference is which way the default
     #: has to fall.**  There, saying nothing leaves the endpoint's own default in
     #: place and that is the right one.  Here it is not: usage arrives only
-    #: because it was asked for, and §3.5 of DESIGN.md is the measurement that
+    #: because it was asked for, and §3.5 of SDD is the measurement that
     #: made the counts load-bearing — an adapter reading only the documented
     #: OpenAI shape reported zero tokens against a real endpoint.  So an absent
     #: value means *send*, and the escape hatch is a marked one.
@@ -1341,9 +1340,9 @@ class EmbeddingProviderSettings:
 class EmbeddingsSettings:
     """Where vectors come from — and there is always somewhere.
 
-    **No `enabled` switch, on purpose.**  v1 had one, and its cost was a
-    misconfiguration that looked exactly like a working system with nothing to
-    recall: semantic search quietly off, every keyword search still answering.
+    **No `enabled` switch, on purpose.**  One would cost a misconfiguration
+    that looked exactly like a working system with nothing to recall: semantic
+    search quietly off, every keyword search still answering.
     The db plugin cannot be run without an embedding model, so the switch had
     one useful setting, and a setting with one useful value is a way to be wrong.
     """
@@ -1362,7 +1361,7 @@ class EmbeddingsSettings:
                 time — so reaching this means a `Config` assembled in code
                 rather than read from a file — or if `active` names a provider
                 this config does not have.  Substituting the first for an
-                unknown name is the deformation DESIGN.md §11.1 names: vectors would come
+                unknown name is the deformation SDD Appendix C names: vectors would come
                 from an endpoint nobody chose, and the index's recorded identity
                 would change with nothing in any file to say why.
         """
@@ -1419,7 +1418,7 @@ class AgentTaskSettings:
     #: A cap rather than a preference, and the only bound this feature has: a
     #: task may start a task — the tool set is the one catalogue and nothing
     #: filters it — so without a cap a model can grow loops without limit.  What
-    #: it does not bound is how much work happens over *time*; DESIGN.md §10
+    #: it does not bound is how much work happens over *time*; SDD §14.2
     #: holds that one open, and `agent_task_list` with `agent_task_cancel` is
     #: what makes it visible and stoppable in the meantime.
     #:
@@ -1481,7 +1480,7 @@ class SubagentSettings:
     #: without this a model can grow a tree of them without limit.  What it costs
     #: when it does is small per member — a subagent is a conversation in the
     #: shared agent server, measured at ~1.5 MB against a `--headless` instance's
-    #: ~100 MB (`DESIGN.md §6.6`) — so the number here is about a runaway rather
+    #: ~100 MB (`SDD §4.5`) — so the number here is about a runaway rather
     #: than about the machine, and it is larger than the four an agent task gets
     #: because a subagent is a thing an agent *has* rather than a run it started.
     max_running: int = 32
@@ -1624,9 +1623,8 @@ class ToolServerSettings:
 
 
 #: How many function tools the model's list may hold before the least recently
-#: used are evicted.  v1's `tool_load: threshold: 100`, and the number is v1's:
-#: it was arrived at by watching a real tool set, and nothing about slife2 is a
-#: reason to differ.
+#: used are evicted.  `tool_load.threshold`, and the number was arrived at by
+#: watching a real tool set: nothing about slife2 is a reason to differ.
 DEFAULT_TOOL_LOAD = 100
 
 #: The tools every configuration starts with in the model's list, **and the one
@@ -1637,7 +1635,7 @@ DEFAULT_TOOL_LOAD = 100
 #:
 #: * `tool_search` and `func_tool_load` are how a model reaches anything that is
 #:   not already in front of it.  A model that has quietly lost them has no way
-#:   to find the rest, which is the failure DESIGN.md §4.1 is built around.
+#:   to find the rest, which is the failure SDD §7.1 is built around.
 #: * `_func_tool_unload` and `_check_new_input` are written into conversations as
 #:   tool pairs — the turn-boundary trim and a message delivered inside a running
 #:   turn.  A pair names a tool the request declares, so a request that omitted
@@ -1722,7 +1720,7 @@ class ToolLoadSettings:
 #: nobody controls rather than on what a model asked for once.
 #:
 #: What would move it again is the same instrument — the rows themselves, so
-#: re-reading it is a query, which is the observation DESIGN.md §4.3 makes about the tool
+#: re-reading it is a query, which is the observation SDD §7.4 makes about the tool
 #: list's threshold.
 DEFAULT_TOOL_RESULT_TOKENS = 8000
 
@@ -1772,9 +1770,9 @@ class CliToolSettings:
     there is nothing to connect to: a CLI entry is a program already installed
     on this machine, named so that the model can be told it exists.
 
-    **`command` is one string, and it may be more than one word.**  v1 allowed
-    `python -m mytool` as readily as `gh`, and a port that quietly narrowed that
-    to a single binary would refuse an entry the file it was copied from
+    **`command` is one string, and it may be more than one word.**  A command
+    such as `python -m mytool` is as acceptable as `gh`, and quietly narrowing
+    that to a single binary would refuse an entry the file it was copied from
     accepted.  How a caller turns it into a process is the caller's business —
     this class records what the operator wrote and nothing more.
 
@@ -1846,9 +1844,9 @@ class SkillSettings:
     enabled: bool = True
 
 
-#: The four things a media provider can be asked for.  A closed set, and it is
-#: v1's: each one names a *capability* rather than a model family, because that
-#: is what a caller knows it wants — "make me a picture" — while which model
+#: The four things a media provider can be asked for.  A closed set: each one
+#: names a *capability* rather than a model family, because that is what a
+#: caller knows it wants — "make me a picture" — while which model
 #: draws it is the config's business.
 MEDIA_KINDS = ("image", "video", "tts", "asr")
 
@@ -1863,9 +1861,9 @@ class MediaModelSettings:
     draws pictures.
 
     `params` is free-form and is the model's own defaults — a resolution, an
-    aspect ratio, a duration — merged under whatever the call passes.  v1's
-    shape, and it is what lets a config carry "this model always renders 720P"
-    without the tool growing a field per provider.
+    aspect ratio, a duration — merged under whatever the call passes.  That
+    shape is what lets a config carry "this model always renders 720P" without
+    the tool growing a field per provider.
     """
 
     model: str
@@ -1921,8 +1919,8 @@ class MediaSettings:
     ) -> tuple[MediaProviderSettings, MediaModelSettings]:
         """The provider and model one request should use.
 
-        v1's four steps, in its order: an explicit `provider/model`, then the
-        bare model name across providers, then this section's `defaults[kind]`,
+        Four steps, in order: an explicit `provider/model`, then the bare
+        model name across providers, then this section's `defaults[kind]`,
         then the first configured model of that kind.  Each step is a *weaker*
         statement than the one before it, so nothing here can override something
         the caller said.
@@ -2022,7 +2020,7 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` falls back rather than raising**, which is DESIGN.md §8.1's
+    **An unknown `active:` falls back rather than raising**, which is SDD §12.1's
     registered exception and the reason a tunnel is allowed it (it is no longer
     shared with `embeddings.active_model`, which now refuses an undefined
     name): a tunnel is a *subordinate* dependency, and a name this build does
@@ -2068,22 +2066,21 @@ class A2ASettings:
     """The `peer_agent:` section: where the peer network's broker is, and whether
     there is one.
 
-    **An absent section is the whole of the off switch**, which is v1's rule and
-    the reason there is no `enabled:` key here — a section that carried one would
-    have two ways of saying the same thing and a way of contradicting itself.
-    v1 went further and made the section's *presence* merely permission to
-    **probe** the broker, deciding enablement at runtime on whether anything
-    answered; that half does not port, because it existed to decide whether to
-    spawn a per-agent plugin process and there is no spawn to gate here.  The
-    plugin always starts (DESIGN.md §1.4: every plugin the config names is started and
+    **An absent section is the whole of the off switch**, and the reason there
+    is no `enabled:` key here — a section that carried one would have two ways
+    of saying the same thing and a way of contradicting itself.  Presence is
+    also more than permission to **probe** the broker: enablement is not
+    decided at runtime by whether anything answered, because there is no
+    per-agent plugin process to spawn and so no spawn to gate.  The plugin
+    always starts (SDD §4.2: every plugin the config names is started and
     shared) and what the section decides is whether it opens a mesh at all.
 
-    **Mosquitto is a hard constraint and not a default.**  v1 carried a
-    `transport:` field with an http skeleton behind it and answered a value it
-    did not implement by disabling the feature with a warning at config load —
-    which is the shape this project refuses: a config naming a transport that
-    does not exist is a mistake in a file a person edits, and a warning on the
-    way past it means the model is offered `a2a_*` tools for a mesh that was
+    **Mosquitto is a hard constraint and not a default.**  A `transport:` field
+    with an http skeleton behind it would invite a value this build does not
+    implement, and answering that by disabling the feature with a warning at
+    config load is the shape this project refuses: a config naming a transport
+    that does not exist is a mistake in a file a person edits, and a warning on
+    the way past it means the model is offered `a2a_*` tools for a mesh that was
     silently switched off.  So the field is a `provider:` naming the broker
     implementation, exactly one value is accepted, and anything else is a
     `ConfigError` at load.  Adding a provider is adding a branch to
@@ -2100,9 +2097,8 @@ class A2ASettings:
     #: Where the broker is.  **The operator's to run, unless it is this
     #: machine's own and nothing is there**: `slife2.plugins.a2a.broker` probes the
     #: address and, for a *local* one that is absent, starts and supervises a
-    #: `mosquitto` — v1's rule was to dial and never spawn, and this build
-    #: starts one because a mesh with no broker is a feature that silently does
-    #: nothing.  A remote address is still only ever dialled.
+    #: `mosquitto`, because a mesh with no broker is a feature that silently
+    #: does nothing.  A remote address is still only ever dialled.
     broker_host: str = "localhost"
     broker_port: int = 1883
     #: The first two segments of the topic namespace,
@@ -2601,7 +2597,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
 
     A file that is there but cannot be *stat'd* is neither: it raises, naming
     the path, rather than being read as "changed" and quietly answered with a
-    fresh object (DESIGN.md §11.1).
+    fresh object (SDD Appendix C).
 
     **And the answer follows the caller's home, like every other read a shared
     plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.home`,
@@ -2621,7 +2617,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
             # the built-in defaults while `load("/tmp/typo.yaml")` raised
             # `config file not found`.  A caller that named a file is asking
             # about *that* file, and answering with a different configuration is
-            # the silent fallback `load` refuses (DESIGN.md §11.1).
+            # the silent fallback `load` refuses (SDD Appendix C).
             return load(explicit)
         # The `None` key is the "there was no file" state, so a file appearing
         # afterwards takes the reload path below rather than being missed.
@@ -2637,7 +2633,7 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         # A stat that failed is not a file that changed.  Reading it as one
         # would hand a fresh `Config` to a caller whose whole staleness test is
         # object identity, so the edit would look like it never happened
-        # (DESIGN.md §11.1).  `load` reports an unreadable file the same way.
+        # (SDD Appendix C).  `load` reports an unreadable file the same way.
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
     cached = _latest.get(path)
@@ -2860,18 +2856,18 @@ def _a2a(
     whole of that rule.
 
     **Absent means off**, so the built-in answer comes back with
-    `configured=False` and the plugin opens no mesh.  The shape is v1's —
-    `broker:` nested with `host` and `port` under it — so a `slife.yaml` copied
-    over keeps working and keeps meaning the same thing.
+    `configured=False` and the plugin opens no mesh.  The shape is `broker:`
+    nested with `host` and `port` under it, so a config file that already says
+    where the broker is needs no rewriting.
 
     **An unknown `provider:` is refused rather than downgraded.**  This is the
     section's whole difference from `file_tunnel.active`, the one remaining
-    section that falls back (DESIGN.md §8.1): that names a *subordinate* dependency this
+    section that falls back (SDD §12.1): that names a *subordinate* dependency this
     build may not have, where falling back leaves a working system; this names
     the transport of the feature, where falling back would leave `a2a_*` tools
-    offered to a model for a mesh that is not running.  v1 answered that case
-    with a warning and `enabled = False`, which is the silence-with-tools
-    outcome, so it does not port.
+    offered to a model for a mesh that is not running.  Answering that case
+    with a warning and `enabled = False` would be the silence-with-tools
+    outcome, so it is refused here.
 
     **`--a2a-broker` is applied here, after the file**, so the flag wins over the
     section it is an override of and everything downstream sees one answer.  It
@@ -3022,7 +3018,7 @@ def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
 def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
     """The `tool_load:` section, defaulted.
 
-    Absent means v1's default rather than an error, the same rule every other
+    Absent means the default rather than an error, the same rule every other
     section follows.  A present one has to hold a positive number: a threshold of
     zero is a tool list that is always empty, which is not a configuration to
     accept quietly — the model would have `tool_search` and no way to keep what
@@ -3085,10 +3081,10 @@ def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
 def _media(raw: Any, base: MediaSettings) -> MediaSettings:
     """The `media:` section.  Absent is empty, and empty is a working system.
 
-    **Refused rather than skipped**, which is the opposite of v1 and right for
-    where the parsing happens.  v1's plugin read the section itself at call
-    time, so a bad entry had to be skipped — refusing would have taken the whole
-    plugin down over one provider.  Here the config is parsed once, at load,
+    **Refused rather than skipped**, which is right for where the parsing
+    happens.  A plugin that read the section itself at call time would have to
+    skip a bad entry — refusing would take the whole plugin down over one
+    provider.  Here the config is parsed once, at load,
     where this project's rule is that the loader is the judge: a `media:` entry
     naming no model is a typo worth refusing before anything is asked of a
     provider, and the file a person reads is the file that would have to be
@@ -3125,8 +3121,8 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     The first is this module's rule everywhere — a `providers:` that is not a
     mapping, or an entry that is not one, is a mistake in a file a person
     edits, and every other section refuses it at load rather than at the call
-    that finds it.  The second is the opposite, and it is v1's: a tunnel
-    provider is a *subordinate* dependency, so an `active:` naming something
+    that finds it.  The second is the opposite: a tunnel provider is a
+    *subordinate* dependency, so an `active:` naming something
     this build cannot construct — a typo, a provider removed since the config
     was written, a config copied from another machine — degrades to the default
     with a warning instead of a plugin that will not load.  What makes that
@@ -3334,7 +3330,7 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     providers that do exist.**  It used to fall back to the first provider, so
     vectors came from an endpoint nobody chose and the index's recorded
     identity changed underneath — a name the config does not define is not a
-    vote for the first name that does (DESIGN.md §11.1).  A section that names
+    vote for the first name that does (SDD Appendix C).  A section that names
     no `active_model` still takes the first, which is the designed default and
     not a substitution.
     """
@@ -3368,8 +3364,8 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
 def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
     """One `embeddings.providers:` entry: an OpenAI-compatible endpoint.
 
-    Its address is required, and not only its key.  That is v1's rule and it
-    closes a real hole rather than a hypothetical one: an entry carrying a key
+    Its address is required, and not only its key.  That closes a real hole
+    rather than a hypothetical one: an entry carrying a key
     with nowhere to send it makes the OpenAI client fall back to its **own**
     default host, which means the key and every document in the history are
     posted to somebody else's server.
@@ -3396,14 +3392,14 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
 
 
 #: The proxy a `rest-api:` entry is expanded into when it does not name a command
-#: of its own: an OpenAPI document in, an MCP server out.  Both halves are v1's,
-#: kept because they are what the ecosystem actually publishes — there is no
-#: other well-known tool that does this — and because keeping them in one place
-#: is what lets the *hub* stay ignorant of REST entirely.
+#: of its own: an OpenAPI document in, an MCP server out.  Both halves are what
+#: the ecosystem actually publishes — there is no other well-known tool that
+#: does this — and keeping them in one place is what lets the *hub* stay
+#: ignorant of REST entirely.
 OPENAPI_PROXY_COMMAND = "uvx"
 OPENAPI_PROXY_ARGS = ("mcp-openapi-proxy",)
 
-#: The environment the proxy reads.  v1's names, for the same reason.
+#: The environment the proxy reads, under the names the proxy knows.
 OPENAPI_SPEC_URL = "OPENAPI_SPEC_URL"
 OPENAPI_SERVER_URL = "SERVER_URL_OVERRIDE"
 OPENAPI_API_KEY = "API_KEY"
@@ -3581,7 +3577,7 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     section that holds entries (`_cli_tools`, `_tool_server`).  Read as an empty
     enabled entry it dropped the operator's key with nothing said, and the model
     later ran a playbook that died on the credential this section exists to
-    supply (DESIGN.md §11.1).
+    supply (SDD Appendix C).
     """
     entries = _mapping(raw.get("skills"), "skills")
     for name, spec in entries.items():

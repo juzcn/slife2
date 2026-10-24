@@ -1,6 +1,6 @@
 """Writing `slife2.yaml` — the one place that edits the operator's file.
 
-**A library, and not a plugin, by the test `DESIGN.md` §1.1 states**: it holds a
+**A library, and not a plugin, by the test `SDD` §2.4 states**: it holds a
 file and nothing else, and a file needs no process — "one writer is what a SQLite
 lock already is", which is the same reason `slife2.libs.store.db` is imported rather than
 asked.  What imports it is the four plugins that own a section: `mcp:` by
@@ -61,9 +61,9 @@ def _yaml() -> YAML:
     """The round-trip loader, set up to edit `slife2.yaml` without reformatting it.
 
     `typ="rt"` is what keeps comments, quote styles and key order.  Each of the
-    four settings below undoes a ruamel default that is wrong for this file, and
-    v1's `_yaml_doc.new_yaml` is where they were arrived at — measured against
-    its own configs, which are 65–77% comments and just as Chinese:
+    four settings below undoes a ruamel default that is wrong for this file;
+    they were arrived at by measurement against configs that are 65–77% comments
+    and just as Chinese:
 
     - **preserve_quotes** — the file's own quote style survives a rewrite.
     - **allow_unicode** — without it non-ASCII is dumped as `\\uXXXX`, so every
@@ -133,11 +133,11 @@ def _swap(path: Path, text: str) -> None:
                 os.chmod(tmp, path.stat().st_mode & 0o7777)
             except OSError as exc:
                 # **Said out loud, because the mode is a promise this makes.**
-                # DESIGN.md §8.3 states the swap as preserving the file's mode;
+                # SDD §11.8 states the swap as preserving the file's mode;
                 # swallowing this left the config at `mkstemp`'s `0600`, which
                 # *tightens* a file somebody had made group-readable — an
                 # unreadable config for another user of the same machine, and
-                # nothing anywhere to say why (DESIGN.md §11.1).
+                # nothing anywhere to say why (SDD Appendix C).
                 logger.warning("%s: the file's mode was not kept: %s", path, exc)
         os.replace(tmp, path)
     except BaseException:
@@ -172,7 +172,7 @@ def read_section(
     system starts, and disagreeing *quietly*: a listing tool would report a
     section that has four entries as one that has none, and the operator would
     see the truth only on the next start.  Reading a value that is not there as
-    a value that is empty is the first deformation in DESIGN.md §11.1, and the
+    a value that is empty is the first deformation in SDD Appendix C, and the
     listing tools are exactly where it does the most damage — the model is told
     about a config nobody has.
     """
@@ -230,7 +230,7 @@ def _section(
     destroyed.  The operator's `mcp: "oops"` became `mcp: {}` on the way past,
     and the tool that did it reported success; the write is refused now, naming
     the section, because a value that cannot be read is not a value that is
-    absent (DESIGN.md §11.1) — and the one place that difference is *data loss*
+    absent (SDD Appendix C) — and the one place that difference is *data loss*
     rather than a wrong answer is here.
     """
     current = document.get(section)
@@ -600,7 +600,7 @@ def set_enabled(
         entry = current[name]
         if not isinstance(entry, dict):
             # Not replaced by an empty entry: that write reported success and
-            # destroyed whatever the operator had put there (DESIGN.md §11.1).
+            # destroyed whatever the operator had put there (SDD Appendix C).
             raise ConfigError(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "switch. Fix the entry, or take it out."
@@ -652,7 +652,7 @@ def update_entry(
         if raw is not None and not isinstance(raw, dict):
             # Handed to `change` as "not there yet" this used to *become* the
             # entry `change` returns, which is the operator's value replaced by
-            # a tool's idea of it (DESIGN.md §11.1).
+            # a tool's idea of it (SDD Appendix C).
             raise ConfigError(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "change — fixing it would replace what is there."

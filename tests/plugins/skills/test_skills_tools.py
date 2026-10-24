@@ -517,7 +517,7 @@ async def test_the_switch_is_written_for_a_skill_with_no_entry_yet(
 async def test_the_listing_says_what_each_skill_is_for_and_what_it_needs(
     isolated_runtime: Path,
 ) -> None:
-    """The half DESIGN.md §10 named as next: the name a model reads with `skill_use`
+    """The half SDD §14.2 named as next: the name a model reads with `skill_use`
     has to come from somewhere, and its requirements are worth knowing *before*
     reading instructions that would fail halfway through."""
     config_on_disk(isolated_runtime)

@@ -68,7 +68,7 @@ def config(**task_overrides: Any) -> Config:
 class Discriminator:
     """The context plugin's one model call, scripted — and counted.
 
-    `{}` is DESIGN.md §2.4's common answer: what is in hand is the answer, so nothing is
+    `{}` is SDD §5.5's common answer: what is in hand is the answer, so nothing is
     fetched and nothing is written.  Counting the calls is how "one turn, one
     rebuild" is asserted rather than assumed, and the two are the same fact.
     """
@@ -338,7 +338,7 @@ async def test_the_four_tools_are_the_models_and_nothing_else_is(
         AGENT_TASK_START,
         AGENT_TASK_STATUS,
     ]
-    # The gate (DESIGN.md §4.1): a tool the model may call says so, and absence is the
+    # The gate (SDD §7.1): a tool the model may call says so, and absence is the
     # answer "no" rather than "nobody has decided yet".
     assert all(for_the_model(t.meta) for t in tools)
 
@@ -407,7 +407,7 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
 async def test_the_context_is_rebuilt_exactly_once(hub: Client, store: Store) -> None:
     """One turn, so one rebuild — and *not* zero, which is the thing that would
     be wrong: a context that was never chosen is the one turn in this system
-    whose context nobody decided (DESIGN.md §2.4)."""
+    whose context nobody decided (SDD §5.5)."""
     built = build(text_turn("done"), hub=hub, context=store)
     await start(built)
     await settle(built)
@@ -472,7 +472,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     what it held from that point on — the identical deformation the agent
     server's `_adopt` was fixed for.  Both halves of one answer are read the same
     way: a missing or null `turn_ids` is refused, naming the payload
-    (DESIGN.md §11.1: a value that cannot be read is not a value that is
+    (SDD Appendix C: a value that cannot be read is not a value that is
     absent).  A task has no record to corrupt, so the refusal is the task's own
     failed answer rather than a store that quietly kept the context it had.
     """
@@ -914,7 +914,7 @@ async def test_cancelling_a_running_task_takes_its_answer_with_it(
     hub: Client, store: Store, window: Window
 ) -> None:
     """A task that was called off has nothing to report, so nothing is handed
-    over — DESIGN.md §2.5's rule for a cancelled turn, one level down."""
+    over — SDD §5.6's rule for a cancelled turn, one level down."""
     built = build(
         text_turn(
             "never sent",
@@ -1104,7 +1104,7 @@ async def test_a_name_that_has_been_started_again_is_a_different_task(
 async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
     hub: Client, store: Store, caplog: pytest.LogCaptureFixture, monkeypatch
 ) -> None:
-    """The trim is not optional (DESIGN.md §6.4), and a task has no next turn for a dead
+    """The trim is not optional (SDD §9.3), and a task has no next turn for a dead
     hub to surface on.
 
     The agent server can leave its trim best-effort because its next request
@@ -1139,7 +1139,7 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     shape a daemon from another build returns — as an honest no-op, so no pair
     was written and the record never said the list had shrunk.  Absent is not
     empty: both halves of the answer are read strictly, so a missing key is a
-    failure and only a *readable* empty answer is a verdict (DESIGN.md §11.1: a
+    failure and only a *readable* empty answer is a verdict (SDD Appendix C: a
     failure is not a verdict).  The skip is still best-effort and said at
     `error`, naming the task, because the trim is post-turn bookkeeping.
     """
@@ -1169,7 +1169,7 @@ async def test_an_async_calls_status_is_carried_not_read_off_its_words() -> None
     status is the whole of what `agent_task_status`/`agent_task_list` answer
     from.  The coroutine now answers the pair a foreground call comes back as
     (`ToolRegistry.execute`), so `ok` decides and the words decide nothing
-    (DESIGN.md §11.1, "a failure is not a verdict").
+    (SDD Appendix C, "a failure is not a verdict").
 
     Three cases, because the two the pair exists to tell apart are exactly the
     two the words cannot: a call that failed *without* saying "Error", a call
@@ -1229,7 +1229,7 @@ async def test_a_hand_back_that_could_not_land_says_why(
     said *why*, so a delivery that could not land left a silence with no cause
     beside it.  The exception is now logged at `warning`, naming the task, and
     the suppress is kept: a hand-back that cannot land is a result `check_async`
-    can still offer rather than an error with no reader (DESIGN.md §11.1, "a
+    can still offer rather than an error with no reader (SDD Appendix C, "a
     failure is not a verdict" — said out of band).
     """
     import slife2.libs.harness.async_tasks as async_tasks

@@ -42,7 +42,7 @@ a signature — see below).  A test helper's ``timeout: float = 5.0`` is a fixtu
 a test helper's ``timeout: float = _T.timeouts.ready.probe`` is the capture bug
 in a file that is about to assert the registry works.
 
-Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and DESIGN.md §9.2):
+Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and SDD §12.4):
   * values live in ``slife2/helpers/timeouts.py`` — consumers read them at call time
     via ``slife2.helpers.timeouts.timeouts.<role>.<key>``;
   * budgets (``work``/``ready``/``grace``/``transport``/``storage``/
@@ -51,9 +51,8 @@ Model rules behind this gate (see ``slife2/helpers/timeouts.py`` and DESIGN.md �
     second seat for a value nobody can find;
   * ``slife2/helpers/timeouts.py`` itself is the registry — exempt.
 
-This is v1's gate, ported: the same rules, because the failure it prevents is
-the same one — a number nobody can find, and an outer bound nobody checked the
-inner bounds against.
+The gate enforces the same rules, because the failure it prevents is a number
+nobody can find, and an outer bound nobody checked the inner bounds against.
 """
 
 import ast
@@ -93,7 +92,7 @@ def _source_line(path: Path, node: ast.AST) -> str:
     return lines[node.lineno - 1] if 0 < node.lineno <= len(lines) else ""
 
 
-#: The exemption marker.  v1 spelled it as a `noqa` for timeouts; newer ruff
+#: The exemption marker.  A `noqa` for timeouts is not an option: newer ruff
 #: reads that shape as a malformed directive and warns on every run, so the same
 #: claim is made as a plain note instead.  It says *why* the literal stays, and
 #: this gate is what reads it.

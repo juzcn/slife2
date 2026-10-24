@@ -1,9 +1,8 @@
 """The time-window grammar a model writes.
 
-Ported from v1's `tests/test_timeutil.py` along with the module, because the
-parts worth testing are the parts that are *not* obvious: a period word names an
-edge rather than an instant, `<N> months ago` clamps at a month end, and a bound
-nobody understands has to be an error rather than an empty window.
+The parts worth testing are the parts that are *not* obvious: a period word names
+an edge rather than an instant, `<N> months ago` clamps at a month end, and a
+bound nobody understands has to be an error rather than an empty window.
 """
 
 from __future__ import annotations
@@ -234,9 +233,8 @@ def test_an_ago_offset_is_measured_back_from_today(unit: str, today: date) -> No
 
 
 def test_an_ago_offset_clamps_at_a_short_month() -> None:
-    """`timedelta` cannot say "a month", which is why v1 has `relativedelta`.
-
-    slife2 has six lines instead, and the case that decides whether they are
+    """`timedelta` cannot say "a month", so slife2 has six lines instead of
+    reaching for `relativedelta`, and the case that decides whether they are
     right is the one where the day does not exist in the target month: the 31st
     of March minus a month is the 28th of February, not the 3rd of March and not
     an exception.
@@ -331,8 +329,8 @@ def test_the_error_says_what_the_grammar_is() -> None:
 
 
 def test_the_tool_tells_the_model_the_grammar_it_implements() -> None:
-    """The sentence is single-sourced, the way v1's `description=` single-sources
-    it.
+    """The sentence is single-sourced, the way a `description=` argument would
+    single-source it.
 
     A tool's docstring has to be a string *literal* to become `__doc__` at all,
     so the grammar cannot be interpolated into it from here — which makes this

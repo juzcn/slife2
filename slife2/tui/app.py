@@ -184,8 +184,7 @@ def configured_models(config: Config) -> list[ModelChoice]:
     Read here, at the moment the window opens, rather than by the window
     itself: `main` is the party that already knows where the config is, and a
     widget that went looking for the file would be a second answer to "which
-    models are there" — from a list the server has not seen.  v1 held its
-    models the same way.
+    models are there" — from a list the server has not seen.
 
     **The reference is built the way `Config.resolve` builds it**, so what a
     row names and what `model_switch` accepts are one string rather than two
@@ -227,7 +226,7 @@ class SlifeApp(App[None]):
         # be able to close the window — it is the interrupt to reach for while
         # something is selected, and that has to be safe to press.
         Binding("escape", "cancel", "Interrupt", show=False),
-        # The switch, and the key is v1's — `s` for switch.  Not ctrl+m, which
+        # The switch, and the key is `s` for switch.  Not ctrl+m, which
         # Textual aliases to enter, and not ctrl+g, which VS Code keeps for its
         # own goto-line.  What it opens is the picker; what applies the choice
         # is the *tool* the model calls (`model_switch`), so a person and a
@@ -245,8 +244,8 @@ class SlifeApp(App[None]):
         # the focused widget, and the focused widget is the prompt, whose
         # `TextArea` binds both keys to the ends of the line the cursor is on.
         # TextArea keeps the Emacs spelling of each (Ctrl+A / Ctrl+E), so the
-        # bargain slife v1 made — the transcript gets the obvious keys, the
-        # draft keeps a way to reach the line's ends — is affordable.
+        # bargain — the transcript gets the obvious keys, the draft keeps a way
+        # to reach the line's ends — is affordable.
         # PageUp/PageDown need no binding here: they are taken on the prompt
         # itself, because `TextArea` claims them and nothing else can.
         Binding("home", "scroll_home", "Scroll to top", priority=True),
@@ -315,7 +314,7 @@ class SlifeApp(App[None]):
         self._models = list(models)
         #: Whether a picker is on screen.  A second ctrl+s would stack a second
         #: one and leave the first's future unresolved, so the second press is
-        #: the one that does nothing — v1's guard, and v1's reason for it.
+        #: the one that does nothing — a guard, and a reason for it.
         self._switching = False
         #: Whether the subagent picker is being opened, or is on screen.  The
         #: same guard as `_switching` and for the same reason: a second press
@@ -451,8 +450,8 @@ class SlifeApp(App[None]):
 
         This is what keeps the design in one place: `app.tcss` says
         `$slife-amber`, the widgets say `PALETTE["amber"]`, and neither owns a
-        hex value.  slife v1 duplicates them, which is how a stylesheet and the
-        code that renders into it drift apart.
+        hex value.  A palette duplicated in two places is how a stylesheet and
+        the code that renders into it drift apart.
         """
         return {**super().get_css_variables(), **css_variables()}
 
@@ -1083,10 +1082,10 @@ class SlifeApp(App[None]):
         """
         # **The prompt is refused first.**  The loop is parked on that future,
         # and a row left undecided on a turn that is going away is an answer
-        # nobody will ever give — v1's rule, which denied the prompt *because*
-        # the turn was being cancelled rather than leaving it for the
-        # cancellation to sweep up.  Before the early return, so a row whose
-        # turn has already ended is still answered rather than left hanging.
+        # nobody will ever give — so the prompt is denied *because* the turn
+        # is being cancelled rather than left for the cancellation to sweep
+        # up.  Before the early return, so a row whose turn has already ended
+        # is still answered rather than left hanging.
         if self._approval is not None:
             self._approval.action_deny()
         if self._turn is None or self._turn.done():
@@ -1142,7 +1141,7 @@ class SlifeApp(App[None]):
         the key handler, so awaiting the choice here would block the message
         pump — and the message pump is what would deliver the very `Enter` that
         resolves the picker.  The choice is awaited by a worker instead, which
-        is v1's arrangement and v1's reason for it.
+        leaves the pump free to deliver it.
 
         What the picker decides with is `model_switch`, the tool the model
         itself calls, so there is one implementation of "switch the model" and
@@ -1277,8 +1276,8 @@ class SlifeApp(App[None]):
 
         **One at a time, structurally.**  The loop runs a batch's calls one after
         another and waits on each answer before the next, so two prompts cannot
-        arrive together — v1 needed a lock for this because its batch ran in
-        parallel; here the shape of the loop is the guarantee.
+        arrive together — no lock is needed, because the shape of the loop is
+        the guarantee.
         """
         future: asyncio.Future[bool] = asyncio.Future()
         prompt = self._transcript.add_approval(ApprovalPrompt(name, arguments, future))

@@ -277,7 +277,7 @@ def without_footnote(content: Any) -> Any:
 
     Only a *trailing* one is cut, and only when it is closed: a message may
     legitimately contain the literal marker in prose, and the footnote is always
-    a suffix.  That is v1's rule for its own envelope, for the same reason.
+    a suffix.  That is the rule the envelope itself follows, for the same reason.
     """
     if not isinstance(content, str) or not content.endswith(TURN_SUFFIX):
         return content
@@ -329,7 +329,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     **`answer_approval` is the one entry here that a *client* calls rather than
     a model or the harness**: it is how the window answers an `_approve`
     request a turn is parked on, and it is on this server because the waiting
-    turn is (`slife2.libs.turn.loop`'s gate, DESIGN.md §4.6).
+    turn is (`slife2.libs.turn.loop`'s gate, SDD §7.7).
     """
     async with Client(
         build_server(
@@ -609,7 +609,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     loop could name no turn of: the loop and the store disagreed about what the
     context was from that point on, and the next write persisted the wrong list.
     Both halves are one answer and are now read the same way — a missing or null
-    `turn_ids` is refused, naming the payload (DESIGN.md §11.1: a value that
+    `turn_ids` is refused, naming the payload (SDD Appendix C: a value that
     cannot be read is not a value that is absent).
     """
     store = UnreadableStore(restore={"messages": [], "turns": []})
@@ -630,7 +630,7 @@ async def test_a_rebuild_that_carried_no_counts_is_refused_rather_than_drawn_as_
     A reply that replaced the context list but omitted the two counts drew
     `[kept 0, recalled 0]` — a note reporting a decision nobody made, since the
     discriminator *was* paid and did decide.  The answer is refused the way a
-    shape `_adopt` cannot read is, naming the payload (DESIGN.md §11.1: a
+    shape `_adopt` cannot read is, naming the payload (SDD Appendix C: a
     failure is not a verdict).
     """
     store = UnreadableStore(
@@ -1041,16 +1041,16 @@ def wired(
 async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     context,
 ) -> None:
-    """v1's cut-in: the arrival is handed to the turn that is already running.
+    """The cut-in: the arrival is handed to the turn that is already running.
 
     The first turn here takes two iterations — the model asks for `skill_list` and is told
     — so there *is* a boundary after the message arrives, and at it the message
     is delivered as a call to `_check_new_input` and answered with its own words.
     The model reads it as something that arrived mid-turn, which is what it is.
 
-    Its sender is answered by that turn rather than by one of its own, which is
-    the half v1 had no need of: there, a sender was a channel that could give up,
-    and here it is a call parked on the lock expecting `{text, usage, iterations}`.
+    Its sender is answered by that turn rather than by one of its own: a sender
+    here is a call parked on the lock expecting `{text, usage, iterations}`, not
+    a channel that can give up.
     It gets the answer the message was actually given, and `injected` says so —
     without which a caller could not tell this from a turn of its own that
     happened to say the same thing.
@@ -1623,7 +1623,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     that cancellation abandons `run_turn_into`'s `finally` before the outcome is
     assigned, and `send_message`'s handler then finds an empty `outcome.messages`:
     it records nothing and re-raises, while the loop still holds the completed
-    turn's messages.  That is the row DESIGN.md §2.5's rule ("every turn of a loop that
+    turn's messages.  That is the row SDD §5.6's rule ("every turn of a loop that
     records is written") exists to guarantee, gone, and the loop's `covered`/
     `turn_ids` left out of step with the list — a completed turn the model will
     be sent again but the log has never heard of.
@@ -1682,7 +1682,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
 
         # **The loop is still whole.**  The completed turn is in the record *and*
         # still in the conversation, so the next turn is sent it exactly once —
-        # the two halves DESIGN.md §2.5 requires to agree, and the half a stale `covered`
+        # the two halves SDD §5.6 requires to agree, and the half a stale `covered`
         # would have broken.
         assert (await send(server, "two")).data["text"] == "second answer"
         assert prompts_seen(backend, 1) == [
@@ -2068,7 +2068,7 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     written, and the model went on believing it still held the tools that had
     gone.  Absent is not empty: both halves of the answer are read as strictly
     as `_adopt` reads the store's, so an answer without the key is a failure and
-    only a *readable* empty answer is a verdict (DESIGN.md §11.1: a failure is
+    only a *readable* empty answer is a verdict (SDD Appendix C: a failure is
     not a verdict).  The trim is post-turn, so the refusal is caught and logged
     rather than failing a turn that has already answered.
     """
@@ -2179,12 +2179,11 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
     the *default* model is a vision model, so this has to be built explicitly —
     which is the point: the check reads the config rather than assuming.
 
-    **The refusal is a tool result and not an exception**, which is the better
-    half of v1's version of it.  v1 refused to encode and had the harness write
-    an assistant message saying so, because its history must not end on an
-    unanswered user message; here the turn simply runs, the tool answers with
-    why, and the model reads that — so it can tell the person instead of the
-    turn failing with a message only a programmer sees.
+    **The refusal is a tool result and not an exception.**  The turn simply runs,
+    the tool answers with why, and the model reads that — so it can tell the
+    person instead of the turn failing with a message only a programmer sees.  A
+    tool result also needs no assistant line written for it: the history stays
+    well formed without the harness speaking for the model.
     """
     from slife2.libs.host.config import ModelSettings, ProviderSettings
 
@@ -2664,7 +2663,8 @@ async def test_a_model_that_cannot_read_images_is_refused_by_name(context, hub) 
     The config listing only `text` under `input` is the config saying so, and the
     alternative is a model that quietly ignores what it was handed.  Nothing was
     attached, so this is a refusal of the call rather than a fact about the
-    batch — v1 refused to encode for the same reason.
+    batch: the model's declared input is enough to refuse it before there is
+    anything to encode.
     """
     from slife2.libs.host.config import ProviderSettings
 
@@ -2830,7 +2830,7 @@ async def test_the_prompt_knows_whether_anybody_is_watching(
     `_approve` is a courtesy extended to somebody who is there, and the model is
     what decides whether to use it: nothing in the machinery branches on being
     unattended, so the prompt is where an unattended agent has to be able to find
-    out (`slife2 --headless`, DESIGN.md §7.4).  **And the server is what has to find
+    out (`slife2 --headless`, SDD §10.5).  **And the server is what has to find
     it out**, in a process that never saw that command line: the question is not
     about this call (`watched`) but about who is holding the agent's name, which
     is what the claim records.

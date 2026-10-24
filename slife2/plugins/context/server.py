@@ -1,12 +1,11 @@
 """slife2-context — a conversation's memory, and the context it runs on.
 
 **The turn log and the decision about it are one plugin, because they are one
-subject.**  This is v1's `memdb`, ported: it records every turn, it answers what
-was said before, it decides which turns the next turn runs on, and it is the
-thing that puts a conversation back on its feet after a restart.  The turns
-themselves come from the library (`slife2.libs.store.db`), and that is v1's arrangement too
-— there, the main process imports `memdb.store` directly for the restore path
-rather than reaching it over MCP, and here the whole plugin is that import with a
+subject.**  It records every turn, it answers what was said before, it decides
+which turns the next turn runs on, and it is the thing that puts a conversation
+back on its feet after a restart.  The turns themselves come from the library
+(`slife2.libs.store.db`): the plugin imports the store directly for the restore
+path rather than reaching it over MCP, so the whole plugin is that import with a
 serve face on it.
 
 Why the turns moved out of `slife2-db`
@@ -16,9 +15,9 @@ were wrong with that, and they are the same thing said twice.  The first is that
 a *store* which is shared by two clients has to be a process, and neither of
 these is: the turns have exactly one writer (this plugin) and so does the
 catalogue (the hub), and "one writer" is a property of a SQLite file rather than
-of a server.  The second is that v1's own answer was a library — `memdb` ships as
-a plugin *and* is imported, and `slife --headless` restores its session from
-`SessionStore` with no MCP transport in the path at all.
+of a server.  The second is that the store is a library — `TurnStore` is imported
+by the process that writes it, and the plugin is a serve face over that import
+rather than a second implementation of it.
 
 So the db plugin is gone.  What it was for — one holder of the schema, one
 embedder hop, one startup pass over every file — is what this plugin and the hub
@@ -46,15 +45,15 @@ and it has no `rebuild`: what the context *is* is not something a model gets to
 ask for, and the footnote it reads on each turn is how it says what it wants kept
 without ever calling anything (`slife2.libs.turn.context`).
 
-What is deliberately not ported
--------------------------------
-**The trim.**  In v1 the ceiling is held by two mechanisms: the per-turn rebuild
-selects against the window, and a trim after each save bounds what the selection
-missed.  With the rebuild on, the *selection* is the bound and the trim stands
-behind it as a guard for what no selection can see in advance — a turn whose tool
-results ballooned while it ran.  That guard is a separate change and it is named
-in DESIGN.md §10 rather than half-built here; what this plugin owes it is the
-persisted list and the write that maintains it, which both are.
+What is deliberately absent
+---------------------------
+**The trim.**  The ceiling is held by the per-turn rebuild selecting against the
+window; a trim after each save would additionally bound what the selection
+missed.  With the rebuild on, the *selection* is the bound, and the trim would
+stand behind it as a guard for what no selection can see in advance — a turn
+whose tool results ballooned while it ran.  That guard is a separate change and
+it is named in SDD §14.2 rather than half-built here; what this plugin owes it is
+the persisted list and the write that maintains it, which both are.
 """
 
 from __future__ import annotations
@@ -725,8 +724,8 @@ def build_server(
             than the context: a terminal that has just opened has to *show* what
             the previous one was showing, and the message list will not do —
             timestamps, the channel a turn arrived on and the turn's own
-            boundaries are the record's and not the model's.  v1 answered both
-            readers from one read for the same reason.
+            boundaries are the record's and not the model's.  One read answers
+            both readers for that reason.
         """
         store = await store_of(agent, subagent)
         turn_ids = await off_loop(store.context_turns)
@@ -756,7 +755,7 @@ def build_server(
         `except` folded a `ConfigError` in with a declared-absent window, so a
         broken config silently dropped the token cap and let a recall spend by
         count — the overfill the cap exists to stop.  A window that cannot be
-        *asked for* is a failure, not a zero (DESIGN.md §11.1: a weaker path is
+        *asked for* is a failure, not a zero (SDD Appendix C: a weaker path is
         not a substitute for a missing capability).
         """
         return int(current().resolve(model)[2].context_window)
@@ -975,7 +974,7 @@ def build_server(
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
         # Published before the caller is told, and a failure here **fails the
-        # turn**.  The list is authoritative (DESIGN.md §2.4): the caller adopts
+        # turn**.  The list is authoritative (SDD §5.5): the caller adopts
         # this answer as its context, so returning the in-memory rebuild while
         # the *persisted* list did not move leaves the two disagreeing, and the
         # next start replays the stale one — a conversation that comes back one
@@ -1013,10 +1012,10 @@ def build_server(
     ) -> list[int]:
         """Run one recall condition and fit its answer into the window.
 
-        The three caps are the caller's and not the store's, which is v1's split
-        and its reason: the store ranks, the policy caps, and the policy depends
-        on a model's window and on what the decision kept — neither of which the
-        store knows.
+        The three caps are the caller's and not the store's, and the reason is
+        the split of duties: the store ranks, the policy caps, and the policy
+        depends on a model's window and on what the decision kept — neither of
+        which the store knows.
 
         **The budget is headroom below the *ceiling*, and the ceiling is the
         bound a kept context is measured against.**  Subtracting the *floor*
@@ -1057,7 +1056,7 @@ def build_server(
             # dropped; without one, dropping the query and running the period
             # would be a different selection from the one the model asked for,
             # so the whole recall is dropped and the decision's other half, the
-            # keep-list, runs on its own — DESIGN.md §2.4's outcome when a
+            # keep-list, runs on its own — SDD §5.5's outcome when a
             # rebuild cannot do its job: keep the context it had.
             if not sentences:
                 logger.info("recall_query_has_no_term")

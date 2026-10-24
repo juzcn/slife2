@@ -4,14 +4,12 @@ Every A2A operation (send, result, cancel) records metadata here so the mesh can
 attribute results to their send and answer cancel/status lookups.  Internal
 bookkeeping only — the wire is the official ``a2a-over-mqtt`` SDK.
 
-v1's module, ported as it stands.  The one thing worth saying about the port is
-that the same in-memory store serves every agent's mesh in this process — v1 had
-one mesh per process, so a singleton was the same thing as "this agent's".  It is
-still right here, and for a reason rather than by inheritance: a task id is a
-`uuid4().hex`, so two agents cannot collide in the table, and the agent a record
-names is written into the record and read from it rather than taken from
-whichever mesh is asking.  What the sharing costs is one prune cap instead of
-one per agent, which is a bound on memory and not a fact about any task.
+The same in-memory store serves every agent's mesh in this process.  That is
+right for a reason rather than by inheritance: a task id is a `uuid4().hex`, so
+two agents cannot collide in the table, and the agent a record names is written
+into the record and read from it rather than taken from whichever mesh is
+asking.  What the sharing costs is one prune cap instead of one per agent, which
+is a bound on memory and not a fact about any task.
 """
 
 from __future__ import annotations

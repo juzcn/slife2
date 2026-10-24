@@ -1,7 +1,7 @@
 """`slife2-mcp-tools`' own five tools: the model editing `mcp:`.
 
 The family used to hold a section and declare it; now it can be *changed*, by
-the model, through the `mcp_*` names v1 used.  What these tests are about is the
+the model, through the `mcp_*` names.  What these tests are about is the
 three things that make that safe rather than clever: what is written is the file
 the operator reads, what is refused is refused before anything is written, and
 what changed takes effect here and now — with the connection rebuilt, not a flag
@@ -176,9 +176,8 @@ async def test_the_listing_pages_and_says_where_it_stopped(isolated_runtime) -> 
 async def test_setting_a_server_writes_it_and_connects_it(isolated_runtime) -> None:
     """**The whole of what an upsert does**, in one call: the file, and the link.
 
-    v1 could report a tool count because its gateway held the connection; so can
-    this, and for the same reason — the process that writes the entry is the
-    process that holds it.
+    A tool count is reportable because the gateway holds the connection — the
+    process that writes the entry is the process that holds it.
     """
     async with Client(family(isolated_runtime)) as client:
         answer = await ask(
@@ -204,9 +203,9 @@ async def test_setting_it_again_does_not_rebuild_the_link(isolated_runtime) -> N
     """An upsert a caller may repeat: identical settings, no teardown.
 
     What it costs to get this wrong is a fresh `npx` start and a new handshake
-    for a call that changed nothing — v1's bug was comparing the argument
-    (`${VAR}`) against the resolved pool (the key), so identical calls never
-    matched; both sides here go through the config layer and are both resolved.
+    for a call that changed nothing — comparing the argument (`${VAR}`) against
+    the resolved pool (the key) would mean identical calls never matched; both
+    sides here go through the config layer and are both resolved.
     """
     async with Client(family(isolated_runtime)) as client:
         await ask(client, "mcp_set", name="added", command="in-memory")

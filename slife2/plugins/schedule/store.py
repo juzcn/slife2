@@ -16,7 +16,7 @@ nothing.  That is why a run is addressed by *when it was due* rather than by an
 id: the due time is the run's identity, it is a thing the model can say, and a
 minted handle would be a second name for the same fact that can be lost.
 
-**One file per agent, and the file says whose it is.**  DESIGN.md §5.1 isolates agents by
+**One file per agent, and the file says whose it is.**  SDD §8.1 isolates agents by
 file rather than by a `WHERE` clause, and this is a store with one writer, so
 `<data>/agents/<agent>/schedule.db` is the same shape `turns.db` has — see
 `slife2.libs.host.paths`.  The `meta` row exists because the directory *cannot* carry the
@@ -645,7 +645,7 @@ class ScheduleStore:
 
         What the poll asks the agent-task plugin about.  A `pending` run with no
         task is *not* here — it is a trigger nobody acted on, which is a different
-        thing and one this plugin deliberately does not chase (DESIGN.md §10).
+        thing and one this plugin deliberately does not chase (SDD §14.2).
         """
         with self._connect() as connection:
             rows = connection.execute(

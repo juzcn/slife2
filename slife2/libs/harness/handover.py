@@ -1,7 +1,7 @@
 """Handing a message to a conversation the caller is not inside.
 
 **This is `slife2-tui`'s `submit` with the policy around it, and the policy is
-the whole of the module.**  DESIGN.md §6.1 makes `submit` this system's one path for
+the whole of the module.**  SDD §5.4 makes `submit` this system's one path for
 "something outside the conversation became a turn in it" — a WeChat message, an
 agent task's answer, a scheduled run coming due — and the design of that path is
 one sentence: **the window, and only the window.**

@@ -114,8 +114,8 @@ somewhere to land.  So the hub's own tools are exactly the set-level three —
 `tool_search`, `func_tool_load`, `_func_tool_unload` — and they are named as
 themselves rather than `{server}__{tool}`, because there is no server to name.
 Neither are ours for the neighbouring reason that the server is slife2:
-`turn_read`, not `context__turn_read`.  `model_name` is that rule and DESIGN.md
-DESIGN.md §4.1 is the argument for it.
+`turn_read`, not `context__turn_read`.  `model_name` is that rule and SDD
+SDD §7.1 is the argument for it.
 
 They are still *rows*, though — owned by this plugin, like every other tool's
 is owned by its source.  That is what makes one query enough to answer what the
@@ -133,8 +133,8 @@ OpenAPI is just how a REST API becomes one.
 
 What this deliberately does not do
 ----------------------------------
-v1's gateway also let the *model* add and remove servers, through `mcp_set` and
-friends, writing its own `tools.yaml`.  That is not ported.  slife2's config is
+The gateway deliberately does not let the *model* add and remove servers
+through `mcp_set` or friends, or write its own `tools.yaml`.  slife2's config is
 one file read by every process and by the launcher, and the launcher already
 refuses to let a command line name an arbitrary program; a language model
 choosing one is the same capability with a worse author.  The tools a model may
@@ -306,8 +306,8 @@ CLI_SOURCE = _CLI_SOURCE
 #: tool**, one the machinery drives rather than one the model chooses — and this
 #: is one of the exceptions to it: the model has it too, because the harness's
 #: trim is recorded in the conversation as a tool pair, and a pair names a tool
-#: the request declares (v1's rule, and the reason its `_func_tool_unload` is
-#: a `_` tool a model sees).  The other is `_check_new_input`, which reaches the
+#: the request declares (the rule, and the reason `_func_tool_unload` is a `_`
+#: tool a model sees).  The other is `_check_new_input`, which reaches the
 #: model the same way from the other direction — a message delivered inside a
 #: running turn (`ALWAYS_LOADED`, and `slife2.plugins.agent.server`).  So the model may
 #: call it with the names it
@@ -438,10 +438,9 @@ class Catalogue:
     one is the reason the `db` plugin stopped existing.  A store needs a process
     when something *else* has to reach it, and the two things that used to were
     the turns and this catalogue — one writer each, and one writer is a property
-    of a SQLite file rather than of a server.  v1 answers the same question the
-    same way: its `memdb` is a plugin *and* a library, imported by the host for
-    the paths where a hop buys nothing, and the tool catalogue there lives in the
-    host rather than in a plugin at all.
+    of a SQLite file rather than of a server.  The catalogue therefore lives in
+    the hub that serves it rather than in a plugin of its own: `ToolStore` is a
+    library, imported where a hop buys nothing, and the hub is its one writer.
 
     **Opened on first use, and once.**  Everything holding a `Catalogue` is built
     before there is a loop to open anything on — the upstreams, the hub's own
@@ -894,7 +893,7 @@ class Catalogue:
         A failure is not the error the model reads — this runs after a call that
         already happened, and the tool *did* run — but it is not nothing either:
         a stamp that did not land leaves the budget evicting the wrong tool, and
-        nothing else reads this write to notice.  DESIGN.md §11.1's rule for a bookkeeping
+        nothing else reads this write to notice.  SDD Appendix C's rule for a bookkeeping
         write is that it either lands or is reported, so it is logged, naming the
         tool, rather than suppressed.
         """
@@ -941,7 +940,7 @@ def _unpacked(text: str, ok: bool) -> tuple[str, bool]:
 #: What a source that has never been counted says where its counts go.
 #: `ToolStore.source_counts` has no row for a source with no rows at all, so a
 #: `tools` of `0` would be a count this process does not have — the absent value
-#: wearing the empty one's shape (DESIGN.md §11.1).
+#: wearing the empty one's shape (SDD Appendix C).
 NOT_COUNTED = "not counted"
 
 
@@ -966,7 +965,7 @@ def _server_row(
     **A source nobody has counted says so, rather than reporting zero.**  The
     counts come from `catalogue.sources`, which has an entry only for a source
     that has rows; one that never answered has none, and `0` there would be a
-    confident count this process does not have — the same confusion DESIGN.md §11.1 names
+    confident count this process does not have — the same confusion SDD Appendix C names
     between a value that is absent and the empty one it is spelled like.  A
     counted source keeps its number, so a reader that compares the two still can.
     """
@@ -1636,7 +1635,7 @@ SEARCH_LIMIT = 10
 #: and five filters on a search is five ways to ask a question that is not "find
 #: me the tool that does this": narrowing to one server, or to the rows that are
 #: switched off, is *reading the catalogue* — a different job with a different
-#: answer shape (a list, with no ranking), and DESIGN.md §10 of DESIGN says so.
+#: answer shape (a list, with no ranking), and SDD §14.2 of DESIGN says so.
 #:
 #: The single `query` that replaced them is gone too, and this is the reason:
 #: one string went to *both* legs, and one of the two cannot read a sentence.
@@ -1799,7 +1798,7 @@ def local_tools(
     caller.  With no names it is the *budget*: the agent server calls it that way
     at a turn boundary, the least recently used tools over `tool_load.threshold`
     go, and the answer names them.  With names it is the model saying what it is
-    done with, which is v1's meta tool.  Being a tool the *model* has is also
+    done with: a meta tool the model may call.  Being a tool the *model* has is
     what makes the harness's trim recordable: it is written into the
     conversation as a pair under this name, so the name has to be one the
     model's tool list declares — `_func_tool_unload` argues that, and it is the
@@ -2041,7 +2040,7 @@ def _unload_names(found: Mapping[str, Any], key: str) -> list[str]:
     the list.**  The five lists are the whole of the answer, and `unloaded` is
     the one a caller acts on: an unreadable `found` used to be rendered as the
     same "nothing to unload" a real no-op produces, which is a verdict rather
-    than a failure (DESIGN.md §11.1, "a failure is not a verdict").  Raising is what the
+    than a failure (SDD Appendix C, "a failure is not a verdict").  Raising is what the
     two callers already handle — `call_tool`'s local branch answers `ok` false,
     and the harness's trim leaves the list alone and logs why.
     """
@@ -2065,7 +2064,7 @@ def _unload_answer(found: Mapping[str, Any]) -> dict[str, Any]:
 
     Every list is read through `_unload_names`, so an answer this process cannot
     read fails rather than reading as "nothing to unload" — a model that lost
-    tools and reads that stops looking (DESIGN.md §11.1, "a failure is not a
+    tools and reads that stops looking (SDD Appendix C, "a failure is not a
     verdict").
     """
     return {
@@ -2154,7 +2153,7 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
 
     `status` is left as the catalogue's own word rather than filtered to unusable
     rows: `enabled` is an answer, and "its server is switched off" is exactly what
-    v1 kept the rows of a failing server to be able to say.
+    keeping the rows of a failing server is for.
 
     `description` is **never cut**.  It is the one thing a model chooses by, and
     `mcp-pandoc`'s is ninety lines against a catalogue median of one — a search
@@ -2222,7 +2221,7 @@ def _results(found: Mapping[str, Any]) -> dict[str, Any]:
     **A search answer that cannot be read is not a search that found nothing.**
     An empty `results` is a verdict a model acts on rather than a failure it
     retries, so only a *readable* empty list may say it; an answer with no
-    `results` list at all is damage, and it raises (DESIGN.md §11.1, "a failure is not a
+    `results` list at all is damage, and it raises (SDD Appendix C, "a failure is not a
     verdict").  `call_tool` turns the raise into `ok` false, so the model reads
     the failure instead of the confident negative.
     """
@@ -2252,7 +2251,7 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     families that are findable and not callable have to answer like grown-ups:
     the model read the name, tried it, and is owed the step that actually
     reaches the thing — `skill_use` for a playbook, and for a command the truth
-    that nothing runs one yet (DESIGN.md §10).
+    that nothing runs one yet (SDD §14.2).
     """
     if str(row.get("category") or "") == SKILL:
         return (
@@ -2280,7 +2279,7 @@ def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
     them differently: a switched-off entry is the operator's decision, a server
     that is not answering is one to try later (`servers` says which), and the two
     document families are findable and not loadable — `skill_use` reads a
-    playbook, and nothing runs an installed command yet (DESIGN.md §10).
+    playbook, and nothing runs an installed command yet (SDD §14.2).
     """
     outcome = str(answer.get("outcome") or "")
     if outcome in ("loaded", "already"):
@@ -2402,7 +2401,7 @@ def _parameters(schema: str) -> dict[str, Any]:
     **What it costs is registered, not argued away.**  A row whose *real* schema
     was damaged is handed to the model as a tool with no arguments, so the model
     calls it with none and reads the tool's own error several frames from the
-    cause — the weaker path standing in for a value nobody could read (DESIGN.md §11.1).
+    cause — the weaker path standing in for a value nobody could read (SDD Appendix C).
     Failing the row instead would need this half to tell the sentinel from the
     damage, which is the opinion it must not have; SDD Appendix C carries it
     for that reason.
@@ -2873,9 +2872,9 @@ def build_server(
         **An answer with no tool list is a failure, not an empty list.**  A
         catalogue whose shape this process does not know used to be served as no
         tools at all, which is the one answer the model cannot tell from a hub
-        that has nothing — and DESIGN.md §4.2's rule is the opposite in as many
+        that has nothing — and SDD §7.3's rule is the opposite in as many
         words: a hub that cannot read a plugin's tool list refuses to list
-        anything.  The same rule reaches a shape change here (DESIGN.md §11.1, "a value
+        anything.  The same rule reaches a shape change here (SDD Appendix C, "a value
         that cannot be read is not a value that is absent").
         """
         rows = found.get("tools")
@@ -3022,7 +3021,7 @@ def build_server(
                 server from the `mcp:` section is the opposite case and is
                 simply left out — it is the operator's configuration and somebody
                 else's process, and its tools are in the catalogue with `error`
-                on them.  See DESIGN.md §5.1 and §4.1.
+                on them.  See SDD §8.1 and §4.1.
 
         Args:
             wait: Whether this answer waits for the sources' declarations.
@@ -3306,10 +3305,10 @@ def build_server(
         this at a turn boundary (no names: enforce the budget), and the model
         may run it too (names: the tools it is done with).  The second caller is
         what makes the *first* one visible: the harness writes its trim into the
-        conversation as a tool pair, a pair names the tool it calls, and v1's
-        rule is the one to port — a pair whose name is not in the request's
-        declared tool list is a call the Responses and Messages backends reject.
-        So this is the single `_`-prefixed name a model sees (v1's exception,
+        conversation as a tool pair, a pair names the tool it calls, and a pair
+        whose name is not in the request's declared tool list is a call the
+        Responses and Messages backends reject.
+        So this is the single `_`-prefixed name a model sees (the exception,
         and the reason `slife2.plugins.toolhub.server.model_name` does not filter it), and the
         harness's own trim is a call this tool could genuinely have made.
 

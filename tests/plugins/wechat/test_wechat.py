@@ -7,11 +7,10 @@ object, not a queue of canned answers.  That is what lets the cases worth
 writing be written at all, because they are the ones where the same call is made
 twice and the answer changes.
 
-Four things here are the port's own, and each has a test that a faithful copy of
-v1 would fail: the login is **per agent** rather than per process, a message is
-**delivered by the plugin** rather than by a harness, the cursor does not
-**restamp the login's age**, and a revoked token is read out of a `200` rather
-than out of a status code.
+Four things here are this design's own, and each has a test: the login is
+**per agent** rather than per process, a message is **delivered by the plugin**
+rather than by a harness, the cursor does not **restamp the login's age**, and a
+revoked token is read out of a `200` rather than out of a status code.
 """
 
 from __future__ import annotations
@@ -312,11 +311,11 @@ async def test_the_four_tools_are_the_models_and_nothing_else_is() -> None:
 async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
     """**A shared process cannot guess the conversation, so it refuses.**
 
-    v1 knew without being told: its plugin was one agent's, so the agent *was*
-    the process.  Here the login is the agent's and the caller is the only party
-    that says which — so a call with no client id is *refused* rather than
-    answered about somebody else's WeChat, and the refusal is a `ToolError`
-    rather than a sentence a transcript would read as a success.
+    The login is the agent's, so the process cannot know whose conversation a
+    call means: the caller is the only party that says which.  So a call with no
+    client id is *refused* rather than answered about somebody else's WeChat,
+    and the refusal is a `ToolError` rather than a sentence a transcript would
+    read as a success.
     """
     async with Client(served()) as client:
         with pytest.raises(ToolError, match="did not say which conversation"):
@@ -519,7 +518,7 @@ def test_a_missing_qr_renderer_refuses_rather_than_calling_a_url_a_code(
 
     Without `qrcode` the payload was returned as it came — a link the login tool
     then told the model to show "so it can be scanned", which is false
-    (DESIGN.md §11.1: a weaker path must not be selected silently).  The
+    (SDD Appendix C: a weaker path must not be selected silently).  The
     renderer refuses now, and the caller says what actually happened.
     """
     monkeypatch.setitem(sys.modules, "qrcode", None)
@@ -615,8 +614,8 @@ async def test_a_redelivery_is_dropped_and_a_real_repeat_is_not(
     The bridge re-serves recent messages until the cursor advances, so the same
     message arrives twice and only the second may be dropped.  But two identical
     texts in **one** answer are somebody sending "ok" twice, so the window is
-    consulted per *batch* — which is the distinction v1's first version got
-    wrong in the direction that loses a message.
+    consulted per *batch* — the distinction that decides which way a repeated
+    text is read, and the wrong way loses a message.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -654,8 +653,8 @@ async def test_a_photo_is_skipped_without_burning_the_conversation(
 
     The dedup key is derived from the text, so an image — whose text is empty —
     would key every later message in that conversation to the same value and
-    drop them.  The skip happens *before* the key is recorded, which is the
-    ordering fix v1 shipped.
+    drop them.  The skip happens *before* the key is recorded, so an image's
+    empty text never becomes the key for what follows.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -811,9 +810,9 @@ async def test_an_aged_login_is_never_offered_to_the_server(
 ) -> None:
     """A token past its life is not worth a call, and the answer says why.
 
-    v1 checked the age before using a session and this keeps that: an expired
-    login is a sentence about scanning again rather than a rejected request that
-    reads like a network fault.
+    The age is checked before a session is used: an expired login is a sentence
+    about scanning again rather than a rejected request that reads like a
+    network fault.
     """
     signed_in(
         "jack", saved_at=time.time() - (_T.timeouts.pacing.wechat_session_max_age + 60)
@@ -836,11 +835,10 @@ async def test_a_rejected_login_is_forgotten_rather_than_retried(
 ) -> None:
     """A `200` carrying an error envelope is a *rejection*, not silence.
 
-    This is the failure v1 shipped and then fixed: read as "no messages", a
-    revoked token leaves a poll loop spinning and a status tool answering
-    `connected` while nothing arrives.  Here the envelope stops the loop and the
-    file goes, because a dead token left in place makes every later read a
-    phantom login.
+    Read as "no messages", a revoked token would leave a poll loop spinning and
+    a status tool answering `connected` while nothing arrives.  So the envelope
+    stops the loop and the file goes, because a dead token left in place makes
+    every later read a phantom login.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -1323,15 +1321,14 @@ async def test_two_agents_are_two_logins(monkeypatch: pytest.MonkeyPatch) -> Non
     assert not jill_saved
 
 
-# --- and the file v1 left behind ----------------------------------------------
+# --- and a login file already on disk -----------------------------------------
 
 
-def test_a_login_file_from_v1_is_adopted_as_it_stands() -> None:
-    """The port reads v1's file, so nobody has to scan again.
+def test_a_login_file_is_adopted_as_it_stands() -> None:
+    """An existing login file is adopted as it stands, so no scan is needed.
 
-    Same name, same keys, same meaning: a session saved by
-    `slife/plugins/wechat` is a session this plugin resumes, which is the only
-    reason the format was kept rather than improved.
+    Same name, same keys, same meaning: a login file is a session this plugin
+    resumes, which is the only reason the format is kept rather than improved.
     """
     (agent_dir("jack") / "wechat.yaml").write_text(
         "bot_token: d834a0dbf318@im.bot:0600\n"
@@ -1374,7 +1371,7 @@ async def test_a_damaged_login_file_is_named_rather_than_read_as_no_login(
 
     A torn cache answered `{}`, and the status sentence built from that said
     "no login is saved" over a file that was right there — telling somebody who
-    had already scanned to scan a fresh code (DESIGN.md §11.1).  The outcome is
+    had already scanned to scan a fresh code (SDD Appendix C).  The outcome is
     kept, because a login is still had by scanning, but the file and its damage
     are named in what the model reads, through `restore_note`.
     """
@@ -1499,7 +1496,7 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     The window takes the message and the response is lost — a timeout inside
     `submit`, which is what `transport.window` bounds — so the words may already
     be down the stream.  Retrying on *any* exception is how one WeChat message
-    runs as two turns and draws two replies, the failure DESIGN.md §6.2 and §6.4 call
+    runs as two turns and draws two replies, the failure SDD §9.1 and §6.4 call
     worse than a late answer.  `slife2.libs.harness.handover` classifies this as
     *unknown* rather than a refusal, so no retry is taken.
     """

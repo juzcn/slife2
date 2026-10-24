@@ -7,12 +7,12 @@ stand in for the whole contract.
 
 Why a tagged union rather than a method per event
 -------------------------------------------------
-v1 gives its event handler eight methods (`on_text_chunk`, `on_tool_call`,
-`on_tool_approval`, ...).  The cost shows up the moment a ninth event is added:
-every observer in the codebase — the TUI, the tests, the recorder — has to grow
-a method, whether or not it cares about the new event.  Here, adding a variant is
-one dataclass and one line in `_DECODERS`; observers that do not match on it keep
-working untouched.
+A method-per-event handler would need eight methods (`on_text_chunk`,
+`on_tool_call`, `on_tool_approval`, ...).  The cost shows up the moment a ninth
+event is added: every observer in the codebase — the TUI, the tests, the
+recorder — has to grow a method, whether or not it cares about the new event.
+Here, adding a variant is one dataclass and one line in `_DECODERS`; observers
+that do not match on it keep working untouched.
 
 The price is that observers pattern-match (`case TextDelta():`) rather than
 implement a named method, which is slightly more verbose at the call site.  That
@@ -117,11 +117,10 @@ class ToolCallStarted:
     arguments: dict[str, Any] = field(default_factory=dict)
     #: Which model call of this turn asked for it (1-based), and the cap that
     #: turn is running under — `0` for no cap, the same spelling
-    #: `max_iterations` uses everywhere else.  v1's `iteration`/
-    #: `max_iterations`, carried on the call rather than on an event of its own
-    #: for the reason v1 carried them here: a tool call is the only thing that
-    #: marks an iteration, so this is where somebody watching a long turn sees
-    #: it advancing.
+    #: `max_iterations` uses everywhere else.  They are carried on the call
+    #: rather than on an event of their own because a tool call is the only
+    #: thing that marks an iteration, so this is where somebody watching a long
+    #: turn sees it advancing.
     #:
     #: `iteration` of 0 is **"nobody said" rather than an iteration**: a rebuilt
     #: transcript has no iteration numbers to draw, and neither has a server

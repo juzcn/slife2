@@ -2,7 +2,7 @@
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
-it answers, and the four rules the port had to keep — a day accumulates while a
+it answers, and the four rules the cabinet keeps — a day accumulates while a
 note is replaced, a file's bytes are never indexed, a path from a model cannot
 leave the cabinet, and a save that cannot embed stores nothing.
 
@@ -378,10 +378,10 @@ def test_two_mirror_writes_do_not_share_a_temporary_file(
 
 @pytest.mark.asyncio
 async def test_a_days_diary_accumulates_because_two_entries_are_two_facts() -> None:
-    """The port's first rule, and the reason only two kinds have a remove tool.
+    """The first rule, and the reason only two kinds have a remove tool.
 
     Nothing in a later entry says which part of the earlier one it replaces, so
-    appending is the only honest thing a second write of one day can do — v1's
+    appending is the only honest thing a second write of one day can do — the
     distinction between a document and a log, kept whole.
     """
     async with Client(cabinet()) as client:
@@ -956,7 +956,7 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 
     An answer with no `results` key used to render as the same "Nothing matched"
     a real miss produces, and that is a verdict a model acts on rather than a
-    failure it retries (DESIGN.md §11.1, "a failure is not a verdict").  Only a
+    failure it retries (SDD Appendix C, "a failure is not a verdict").  Only a
     *readable* empty list may say it; anything else fails the call.
     """
 
@@ -974,7 +974,7 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
     """A file has no text of its own, so describing it is the only way in — and
     writing a summary **re-embeds** it, because the stored vector was the text
-    without it (DESIGN.md §5.3's one asymmetry)."""
+    without it (SDD §8.3's one asymmetry)."""
     source = data_dir() / "spec.txt"
     source.write_text("body text\n", encoding="utf-8")
 
@@ -1026,10 +1026,10 @@ async def test_a_path_from_a_model_cannot_leave_the_cabinet() -> None:
 def test_one_corpus_is_one_table(tmp_path: Path) -> None:
     """Six kinds are six values of a column, so the two legs fuse on a rowid.
 
-    v1 had four tables and a view to union them, and had to synthesise a global
-    id out of a per-kind offset for the fusion to have anything to rank. Here the
-    rowid *is* the corpus id — and the FTS table is written in the same
-    transaction as the row, which is why there is no trigger anywhere.
+    One table also means no view to union and no synthesised global id out of a
+    per-kind offset for the fusion to rank: the rowid *is* the corpus id — and
+    the FTS table is written in the same transaction as the row, which is why
+    there is no trigger anywhere.
     """
     store = store_of(tmp_path / ".index.db")
     with store._connect() as connection:
@@ -1072,7 +1072,7 @@ def test_a_slug_keeps_what_a_person_reads_and_never_collides_silently() -> None:
 def test_a_file_is_what_it_is_when_it_has_nothing_else() -> None:
     """The vector text of a file is its identity, or it has no vector at all.
 
-    Measured while porting: composing a file's vector text from its summary alone
+    Measured: composing a file's vector text from its summary alone
     left every summary-less file with no vector, which `sync` then reported as a
     failed save it could never clear.
     """

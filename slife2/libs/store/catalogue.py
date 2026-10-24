@@ -1,4 +1,4 @@
-"""The tool catalogue — v1's `tools.db`.
+"""The tool catalogue — `tools.db`.
 
 One row per tool the model may be given, with two indexes over the rows: a
 keyword one (`tool_fts`) and a semantic one (`tool_vec`).  **The machinery those
@@ -15,7 +15,7 @@ model has loaded — is a property of the machine.
 **The hub opens this file, and holds nothing else of it.**  The catalogue used
 to be served over MCP by a plugin of its own; it is an in-process `ToolStore`
 now (`slife2.plugins.toolhub.server.Catalogue`), because a store has one writer and one writer
-is what a SQLite lock already is (DESIGN.md §1.1).  The split that survives is
+is what a SQLite lock already is (SDD §2.4).  The split that survives is
 the one that matters: which tools exist is the hub's decision, what is known
 about them is this file's record.
 
@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 #: The categories whose owner is a *server* — and therefore the only rows with a
 #: load state and a connectivity verdict.  This set is the whole of what "is
 #: this a function tool?" means, so there is no second column to keep in sync
-#: with it: v1 dropped its derived `type` column for exactly this reason.
+#: with it: a derived `type` column would be exactly that second column.
 #:
 #: `plugin` is ours, and it is the only one of the three that is: a plugin is a
 #: server slife2 starts and therefore one that carries the plugin contract
@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 #: sentence — a plugin *is* an MCP server, so calling ours "MCP servers" would
 #: distinguish them from the twenty under `mcp:` not at all — and the
 #: difference it names is load-bearing: `required` on the hub's connection, a
-#: missing one failing the turn, and tools that start loaded (DESIGN.md §4.1).
+#: missing one failing the turn, and tools that start loaded (SDD §7.1).
 PLUGIN = "plugin"
 
 FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
@@ -101,8 +101,8 @@ SKILL = "skill"
 CLI = "cli"
 
 #: Everything the code can write, which is what the live table's `CHECK` must
-#: accept.  v1 also had `job`, and a `plugin` that was a package of somebody's
-#: own code rather than a server; nothing writes `job` here yet, and adding one
+#: accept.  There is no `job` category, and none for a package of somebody's
+#: own code rather than a server; nothing writes `job` yet, and adding one
 #: later is free: the DDL is checked at open and a file that is not this build's
 #: is rebuilt rather than migrated — which is what adding `cli` did.
 CATEGORIES = FUNCTION_CATEGORIES | {SKILL, CLI}
@@ -218,8 +218,8 @@ def _check_values(ddl: str, column: str) -> set[str] | None:
 #: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
 #: its name far more often than by anything else about it — "the calculator" and
 #: `calc` have to meet — so the name dominates and the schema, which is
-#: long and full of punctuation, counts for least.  v1's weights, plus
-#: `returns` at the description's second tier: it is prose about the answer,
+#: long and full of punctuation, counts for least.  The weights put `returns`
+#: at the description's second tier: it is prose about the answer,
 #: and a model may look for a tool by what it hands back ("returns an image
 #: URL") as well as by what it does.
 BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5, 1.0)
@@ -321,7 +321,7 @@ CREATE TABLE IF NOT EXISTS meta (
 #: The columns a search result carries, in the order it carries them.  `schema`
 #: is reported as a *size* rather than as text: it is the tool's whole parameter
 #: JSON, a model reading a result has no use for it, and what it does tell a
-#: reader is whether the tool declares anything at all.  v1's choice.
+#: reader is whether the tool declares anything at all.
 _SEARCH_COLUMNS = (
     "name",
     "description",
@@ -392,12 +392,11 @@ def tool_document(row: Mapping[str, Any]) -> str:
     to this function is a change to the vector identity
     (`TOOL_DOCUMENT_VERSION`).
 
-    **Every row has one, so every row has a vector.**  v1 asked whether the
-    *schema* was worth embedding, because in v1 the column held the whole tool
-    definition; here it holds only the parameters, and a tool with none is
-    exactly the kind a model looks for by what it does — "open a page and take a
-    screenshot" is a description, not an argument list.  A name is never empty,
-    so the document never is either.
+    **Every row has one, so every row has a vector.**  The *schema* is worth
+    embedding because it holds only the parameters — the whole tool definition
+    is not here — and a tool with none is exactly the kind a model looks for by
+    what it does: "open a page and take a screenshot" is a description, not an
+    argument list.  A name is never empty, so the document never is either.
     """
     parts = [str(row.get("name") or ""), str(row.get("description") or "").strip()]
     returned = _indexable(row.get("returns"))
@@ -569,9 +568,9 @@ class ToolStore:
         one thing more: the only column here that is not derived from a server
         is `load_status`, so a stale file costs the model its loaded set — one
         `tool_search` and a `func_tool_load` each to get back — where an upgrade
-        in place would be a permanent second way to build these tables.  v1
-        reported the stale file and asked a person to delete it; this deletes
-        and rebuilds, because a rebuild is a statement this layer can run
+        in place would be a permanent second way to build these tables.  This
+        deletes and rebuilds rather than reporting the stale file and asking a
+        person to delete it, because a rebuild is a statement this layer can run
         itself, and the report is a log line naming the file.
         """
         with self._connect() as connection:
@@ -901,11 +900,11 @@ class ToolStore:
                 updated.append(name)
 
             for name in plan["reconnected"]:
-                # No `status != 'disabled'` guard here, and that is the one place
-                # this differs from v1: a merge only ever runs for a source that
-                # has just answered, and a source that answers is one the config
-                # connects — so a row left `disabled` by an older config is a row
-                # whose switch has been turned back on.
+                # No `status != 'disabled'` guard here, and that is deliberate: a
+                # merge only ever runs for a source that has just answered, and
+                # a source that answers is one the config connects — so a row
+                # left `disabled` by an older config is a row whose switch has
+                # been turned back on.
                 connection.execute(
                     "UPDATE tool SET status = ? WHERE name = ? AND status != ?",
                     (STATUS_ENABLED, name, STATUS_ENABLED),
@@ -1125,7 +1124,7 @@ class ToolStore:
             # `plugin`, `mcp` and `rest` row in the file and their vectors, on
             # a call it was asked for outright.  `__init__` already declines to
             # run the pass for that store; the state it declines to run is now
-            # the state the method has (DESIGN.md §11.1).
+            # the state the method has (SDD Appendix C).
             return {"forgotten": 0}
         known = self.known
         with self._connect() as connection:
@@ -1338,10 +1337,10 @@ class ToolStore:
         budget unable to meet its own cap.  The operator's list is now the whole
         of the protection — the tools loaded because somebody said so — and
         everything else is a candidate once it is no longer being called
-        (DESIGN.md §4.1, and `seed_autoload` for the baseline this reads).
+        (SDD §7.1, and `seed_autoload` for the baseline this reads).
 
-        **The count is of everything held, protected tools included** — v1's
-        arithmetic, and it is worth knowing what it means at the edges: a
+        **The count is of everything held, protected tools included**, and it
+        is worth knowing what it means at the edges: a
         threshold below the number of tools named in `autoload` means the budget
         can never be met, and every evictable tool goes.  A sane threshold is
         well above them, which is why the default is a hundred.
@@ -1400,8 +1399,8 @@ class ToolStore:
         What a call needs and what the gate does not carry: which source owns
         the name, and what that source calls the tool itself.  A routed call is
         gated on there being an instance behind the name and **not** on the load
-        state — v1's rule, and the right one: loading is about what the model can
-        *see*, and a name it just found with `tool_search` is a name it can use.
+        state — loading is about what the model can *see*, and a name it just
+        found with `tool_search` is a name it can use.
         """
         with self._connect() as connection:
             row = connection.execute(
@@ -1518,7 +1517,7 @@ class ToolStore:
         whole catalogue by accident, and a list of what exists is how a model or
         a person finds out what a category holds — which is why the store still
         answers it, and why the tool does not (`tool_search` refuses it: a
-        listing is a different question with a different shape, DESIGN.md §10 of DESIGN).
+        listing is a different question with a different shape, SDD §14.2 of DESIGN).
 
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is
@@ -2079,7 +2078,7 @@ class ToolStore:
 
 
 def _load_outcome(row: Mapping[str, Any], load_status: str) -> str:
-    """What flipping one row's load state would do — v1's refusals, in order.
+    """What flipping one row's load state would do — the refusals, in order.
 
     Order matters for one case: a row can be `loaded` *and* unusable — its
     server went down after the model loaded it — and answering "already loaded"
@@ -2106,8 +2105,8 @@ def _injectable_sql(sources: Sequence[str]) -> str:
     from `FUNCTION_CATEGORIES` — the same reason `_CATEGORY_CHECK` is.
 
     **A name beginning with `_` is not injected** — with the exceptions in
-    `MODEL_VISIBLE_HARNESS_TOOLS`, below.  v1's convention, and it is a name and
-    not a column for v1's reason: what makes a tool the machinery's is that the
+    `MODEL_VISIBLE_HARNESS_TOOLS`, below.  It is a convention expressed as a
+    name and not as a column: what makes a tool the machinery's is that the
     *machinery* calls it, and a fact about who calls a thing belongs on the
     thing, where both sides can read it without a second register to keep in
     step.  (`slife2.libs.turn.tools` is where the word is defined; the mark is about who
@@ -2118,7 +2117,7 @@ def _injectable_sql(sources: Sequence[str]) -> str:
     trim, `_check_new_input` for a message delivered inside a running turn.  Each
     is written into the conversation as a tool pair, a pair names a tool, and a
     request whose history calls a tool its `tools` array does not declare is a
-    400 from the Responses and Messages backends (v1's rule).  A tool the model
+    400 from the Responses and Messages backends.  A tool the model
     reads in its own history but cannot call would be inconsistent with itself,
     so each is injected, callable, and named the same way it is named here — and
     what qualifies one for this exception is being a pair, which is why the set

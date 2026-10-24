@@ -1,8 +1,8 @@
 """`model_*`: the model config tools, on the server that resolves the model.
 
-v1's four, ported to the process that turns `default:` and `providers:` into a
-conversation's model — the edit and the read that honours it are one process, so
-a switch needs no reload protocol between them.
+The four model config tools live in the process that turns `default:` and
+`providers:` into a conversation's model — the edit and the read that honours it
+are one process, so a switch needs no reload protocol between them.
 
 What these tests are about is what makes that safe: what is written is the file
 the operator reads, what is refused is refused before anything is written, and a
@@ -254,7 +254,7 @@ async def test_a_provider_on_a_new_protocol_starts_its_backend(
 
 @pytest.mark.asyncio
 async def test_the_default_model_cannot_be_removed(isolated_runtime) -> None:
-    """v1's rule, and the reason for it: the next conversation needs a model."""
+    """The rule, and the reason for it: the next conversation needs a model."""
     write_config(isolated_runtime)
     before = written(isolated_runtime)
 

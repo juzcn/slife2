@@ -1,12 +1,11 @@
 """The palette, defined once.
 
-This is slife v1's TUI design ported: a dark, low-chrome look with warm amber
-accents, GitHub-dark values.  The one thing changed in the porting is that the
-colours live here and nowhere else.
+The TUI design: a dark, low-chrome look with warm amber accents, GitHub-dark
+values.  The colours live here and nowhere else.
 
-slife v1 writes each hex value twice — once in `slife.tcss` and once in the
-Python that builds styled text — so the two can drift, and one of them is not
-checked by anything.  Textual lets an app publish custom CSS variables
+The alternative is to write each hex value twice — once in `slife.tcss` and once
+in the Python that builds styled text — so the two can drift, and one of them is
+not checked by anything.  Textual lets an app publish custom CSS variables
 (:meth:`App.get_css_variables`), so the stylesheet reads `$slife-bg` and the
 widgets read :data:`PALETTE`, and a colour can only be wrong in one place.
 

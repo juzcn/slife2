@@ -1,14 +1,14 @@
 """The broker: probed at the configured address, started if it is not there,
 **fatal if it still is not**, and stopped when the stack that started it goes.
 
-This is the one place this port departs from v1 on purpose, and the departure is
-the operator's call rather than a discovery.  v1's rule was that slife "does NOT
-spawn Mosquitto — the user must start it", and the presence of a listener *was*
-the feature's on/off switch: no broker, no mesh, everything else carried on.  Here
-a machine whose config says `peer_agent:` has said it wants the mesh, so a missing broker
-is a missing dependency rather than a preference — the plugin brings one up, and a
-broker that will not serve is a start that fails loudly instead of an `a2a_*` tool
-surface quietly attached to nothing.
+**This design spawns the broker on purpose**, and the choice is the operator's
+call rather than a discovery.  The rule could be that slife "does NOT spawn
+Mosquitto — the user must start it", with the presence of a listener *as* the
+feature's on/off switch: no broker, no mesh, everything else carries on.  Here
+a machine whose config says `peer_agent:` has said it wants the mesh, so a
+missing broker is a missing dependency rather than a preference — the plugin
+brings one up, and a broker that will not serve is a start that fails loudly
+instead of an `a2a_*` tool surface quietly attached to nothing.
 
 **And it is stopped by the take-down, because otherwise nothing ever would.**  The
 first version of this left it running — "a broker is a machine's, not a run's" —

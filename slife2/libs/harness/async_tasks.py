@@ -6,7 +6,7 @@ and may abandon it (`cancel_async`) — but it does not have to ask for the answ
 **the result is handed back into the conversation when it arrives**, which is what
 makes backgrounding a thing a model can use rather than a thing it must babysit.
 
-The rules, and each of them is v1's:
+The rules:
 
 * **The registry is the process's**, keyed by task id alone.  It is not keyed by
   conversation: the task belongs to the *call*, not to the conversation that
@@ -192,8 +192,8 @@ _handbacks: set[asyncio.Task[None]] = set()
 
 #: Bound on `_tasks` — an `_async: true` call the model never polls would
 #: otherwise keep its task in the dict (holding whatever the tool holds) for the
-#: whole session.  v1's number.  Only *finished* tasks are ever dropped: a
-#: running one is work, and forgetting it would be the one way to lose it.
+#: whole session.  Only *finished* tasks are ever dropped: a running one is
+#: work, and forgetting it would be the one way to lose it.
 MAX_ASYNC_TASKS = 100
 
 
@@ -223,10 +223,9 @@ def channel_for(tool: str) -> str:
 def started(task_id: str, call_id: str, tool: str) -> str:
     """What the model reads when a call has been handed to the background.
 
-    v1's sentence, verbatim, under the marker — the sentence is what the model
-    acts on (it names the two calls that work on the id), and the marker is what
-    everything else acts on.  It no longer says "poll for the result": the result
-    comes back on its own.
+    The sentence under the marker is what the model acts on (it names the two
+    calls that work on the id), and the marker is what everything else acts on.
+    It does not say "poll for the result": the result comes back on its own.
     """
     return (
         f"{marker(RUNNING, call_id=call_id, tool=tool, task_id=task_id)}\n"
@@ -323,7 +322,7 @@ async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
     the text began `"Error"`, which made a verdict out of a spelling: an answer
     that legitimately begins "Error" was recorded `failed`, and a tool the
     registry itself marked `ok=False` without that prefix was recorded
-    `finished` (DESIGN.md §11.1, "a failure is not a verdict").  A coroutine
+    `finished` (SDD Appendix C, "a failure is not a verdict").  A coroutine
     that *raises* is the one case left, and a raise is a failure because it is
     the only thing it can be.
     """
@@ -352,9 +351,9 @@ async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
     **Not raised when it cannot land.**  `deliver` answers whether it did, the
     task records that, and `check_async` offers the text to whoever asks next —
     so a hand-back that failed is a result the model can still get, rather than
-    an error with no reader (v1's arrival of last resort, kept).  The failure is
-    still *said*, at `warning` and naming the task: `delivered=False` is the
-    fact, but a fact with no reason beside it is a delivery nobody can explain.
+    an error with no reader.  The failure is still *said*, at `warning` and
+    naming the task: `delivered=False` is the fact, but a fact with no reason
+    beside it is a delivery nobody can explain.
 
     A result that *did* land is dropped here: holding it would be keeping an
     answer nobody can ask for twice, which is the mistake in the other direction
@@ -451,13 +450,12 @@ def _answer(task: Task, task_id: str) -> dict[str, Any]:
 async def check_async(arguments: dict[str, Any]) -> dict[str, Any]:
     """Answer where one background call stands.
 
-    **Status, not a result**, because the result is handed back on its own — and
-    that is the difference from v1, where this was the only way an answer ever
-    came back.  What is still carried here is the *undelivered* result: a call
-    whose hand-back did not provably reach a conversation stays readable until
-    somebody reads it, and then it goes.
+    **Status, not a result**, because the result is handed back on its own —
+    the answer here is only where the call stands.  What is still carried here
+    is the *undelivered* result: a call whose hand-back did not provably reach
+    a conversation stays readable until somebody reads it, and then it goes.
 
-    Reading is what removes a finished task from the registry, as it was in v1:
+    Reading is what removes a finished task from the registry:
     a task read twice would otherwise be a task kept for the whole session.
     """
     task_id = str(arguments.get("task_id") or "")
@@ -492,7 +490,7 @@ async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     thrown away.**  There is nothing to cancel — the work is over — but a task
     whose hand-back never provably landed is still holding the one copy of its
     result (`Task.delivered`/`result`), and popping it while answering only
-    "nothing to cancel" would lose that copy for good.  DESIGN.md §4.6 says the
+    "nothing to cancel" would lose that copy for good.  SDD §7.7 says the
     alternative to returning a result is losing it, and losing it in silence is
     the worse of the two, so this case is answered with exactly what
     `check_async` would have said.  What tells the two apart is `status`, and

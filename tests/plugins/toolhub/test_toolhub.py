@@ -902,7 +902,7 @@ async def test_an_uncounted_source_says_not_counted_rather_than_zero() -> None:
     only for a source that has rows.  A source that has never answered used to
     report `tools: 0` / `loaded: 0` — a confident zero about a fact this process
     does not have, on the very tool a person reads when a tool is missing
-    (DESIGN.md §11.1, "a value that cannot be read is not a value that is
+    (SDD Appendix C, "a value that cannot be read is not a value that is
     absent").  A source that *has* been counted keeps its number, so the two
     cases stay apart.
     """
@@ -1146,7 +1146,7 @@ async def test_a_servers_tools_are_on_demand_until_they_are_loaded() -> None:
         assert "fake__echo" in names(after.data)
 
         # And the call works either way — loading is about *seeing* a tool, and
-        # the route is what makes one callable (v1's rule, kept).
+        # the route is what makes one callable.
         assert (await call(hub, "fake__echo", {"text": "hi"}))["ok"] is True
 
 
@@ -1215,8 +1215,8 @@ async def test_a_stamp_that_cannot_be_written_is_said_not_swallowed(
     """**The LRU stamp is a write, and a write that failed is not a write that
     happened.**  `Catalogue.touch` feeds the budget's eviction order, and it is
     written beside the call it stamps — so a suppressed failure leaves the
-    budget evicting the wrong tool with nothing anywhere to say so (DESIGN.md
-    DESIGN.md §11.1).  The call the model made still succeeded, so this is not the model's
+    budget evicting the wrong tool with nothing anywhere to say so (SDD
+    SDD Appendix C).  The call the model made still succeeded, so this is not the model's
     error; it is logged, naming the tool, out of band.
     """
 
@@ -1563,7 +1563,7 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 
     "Nothing matched" is a verdict a model acts on rather than a failure it
     retries, and an answer with no `results` key used to be rendered as exactly
-    that — a confident negative made out of damage (DESIGN.md §11.1, "a failure
+    that — a confident negative made out of damage (SDD Appendix C, "a failure
     is not a verdict").  Only a *readable* empty list may say it; anything else
     comes back as `ok` false with the failure named.
     """
@@ -2064,7 +2064,7 @@ async def test_a_trim_answer_without_unloaded_is_not_a_trim_that_took_nothing(
     without an `unloaded` key was rendered as the same "nothing to unload: the
     list is within its budget" a real no-op produces — a verdict a model acts on
     rather than a failure it retries, and the worst one to be wrong about, since
-    the model has just lost tools (DESIGN.md §11.1, "a failure is not a verdict").
+    the model has just lost tools (SDD Appendix C, "a failure is not a verdict").
     Only a readable empty list may say it; anything else raises, and the local
     route answers `ok` false.
     """
@@ -2713,10 +2713,10 @@ async def test_a_catalogue_answer_without_tools_fails_the_list(
 
     An answer with no `tools` key used to be served as an empty tool list, which
     is the one answer a model cannot tell from a hub that has nothing — a shape
-    change would hand it zero tools and report success.  DESIGN.md §4.2 says the
+    change would hand it zero tools and report success.  SDD §7.2 says the
     opposite in as many words: a hub that cannot read a plugin's tool list
     refuses to list anything, so the list fails and names what came back
-    (DESIGN.md §11.1, "a value that cannot be read is not a value that is absent").
+    (SDD Appendix C, "a value that cannot be read is not a value that is absent").
     """
     monkeypatch.setattr(ToolStore, "injectable", lambda self, sources: {"rows": []})
 

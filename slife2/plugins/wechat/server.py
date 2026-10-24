@@ -5,28 +5,25 @@ What this module adds is the part that makes it a *plugin* here: a session per
 agent, the poll loop that watches each one, the delivery that turns an incoming
 message into a turn, and the four tools the model uses to log in and reply.
 
-**One process, one login per agent** — and that sentence is the whole of what
-changed in the port.  v1 ran one wechat child per agent, so its module globals
-*were* that agent's: `_client`, `_pending`, `_seen_keys` were one login, one
-queue and one dedup window because there was exactly one agent in the process.
-slife2's plugins are shared (`slife2.libs.plugin.protocol`), so those four things live in
-a :class:`Session` keyed by the calling agent — the first half of the client id
-every call already carries (`slife2.libs.plugin.audience`).  A second agent that scans its
+**One process, one login per agent.**  The process is shared, so a login, a
+queue and a dedup window cannot live in module globals — they would belong to
+whichever agent happened to use them.  slife2's plugins are shared
+(`slife2.libs.plugin.protocol`), so those four things live in a :class:`Session`
+keyed by the calling agent — the first half of the client id every call
+already carries (`slife2.libs.plugin.audience`).  A second agent that scans its
 own QR gets its own session file, its own poll loop and its own conversation,
 and neither can see the other's.
 
-**The plugin hands each message to the window.**  v1's harness polled the
-plugin for messages (`__wechat_drain_incoming`) and injected them into the inbox
-itself, so the plugin's job ended at "here is what arrived" and a second process
-decided what that meant.  Here the plugin delivers: the window showing this
+**The plugin hands each message to the window.**  The plugin delivers the
+message rather than leaving it for a harness to poll: the window showing this
 agent's conversation takes the message into the same queue the person's own
 typing goes into, and runs it as the same kind of turn — so a message sent from a
 phone is *visible in the terminal*, wears the channel it came in on, and is
 answered there, with the one inbox this system has (see `slife2.plugins.tui.server`).
-That is why v1's drain tool has no port either: it *was* the seam, and the seam is
-gone because the terminal is where the message lands.
+There is no drain tool, because there is no harness-side seam to drain across:
+the terminal is where the message lands, and delivery happens here.
 
-**The reply is the model's to send**, unchanged from v1. Nothing in this process
+**The reply is the model's to send.**  Nothing in this process
 auto-dispatches an answer — the model reads who wrote (the marker below), calls
 `wechat_send_message`, and a turn that says nothing sends nothing.
 
@@ -45,8 +42,8 @@ nothing more).  So the prompt is prefixed —
 
 — with the JSON keys *named after the arguments of `wechat_send_message`*, so
 that replying is copying two values across rather than translating between two
-vocabularies.  v1 kept the same marker in `slife/agent/message_history.py`, case
-and all, because a session file and a habit both survive a port.
+vocabularies.  The marker is kept case and all, because a session file and a
+habit both outlive the process that wrote them.
 
 **And the case is the tell — by convention, which is all it can be.**  A
 conversation carries two markers, and whether the name is in capitals says which
@@ -104,13 +101,11 @@ INSTRUCTIONS = (
     "and answering it is this end's job — nothing here replies for you."
 )
 
-# ── Cadence, and v1's numbers ───────────────────────────────────────────
-# v1 kept these in a global timeouts registry (`slife.timeouts`) that every
-# plugin read.  There is no such registry here — a number is a constant beside
-# the loop it paces, and a module about WeChat does not need to be reachable
-# from a module about anything else.  The values are v1's, because each was
-# arrived at against the live bridge and nothing about the port changes the
-# bridge.
+# ── Cadence ─────────────────────────────────────────────────────────────
+# A number is a constant beside the loop it paces, not a value in a global
+# timeouts registry every plugin reads: a module about WeChat does not need to
+# be reachable from a module about anything else.  Each value was arrived at
+# against the live bridge, and nothing here changes the bridge.
 
 #: How long to wait between polls.  The call itself blocks until the bridge has
 #: something to say, so this is the pause *after* an answer, not the latency.
@@ -186,7 +181,7 @@ def render_qr(content: str) -> str:
     **Without `qrcode` this refuses rather than handing back the payload.**  It
     used to return the content as it came — a URL the caller then told the model
     to show "so it can be scanned", which is not something a URL can be, so a
-    weaker path was selected silently (DESIGN.md §11.1).  The `ImportError`
+    weaker path was selected silently (SDD Appendix C).  The `ImportError`
     goes to the caller, which says what actually happened instead of reading a
     link as a code.
     """
@@ -227,9 +222,8 @@ class Window:
     — somebody sending "收到" twice a minute apart is two messages.  A window is
     what tells those apart, and the window is why the answer is not a set.
 
-    v1 wrote this with `cachetools.TTLCache`; what that does is a dict and a
-    cut-off, and this project does not declare a dependency for a dict and a
-    cut-off.
+    A TTL cache is a dict and a cut-off, and this project does not declare a
+    dependency for a dict and a cut-off.
     """
 
     def __init__(self, window: float, limit: int) -> None:
@@ -256,7 +250,7 @@ class Window:
 class Session:
     """One agent's WeChat: its login, its cursor, its loop, its queue.
 
-    Everything v1 held in module globals, keyed by the agent it belongs to.
+    Everything a process keeps for one login, keyed by the agent it belongs to.
     """
 
     def __init__(self, agent: str, *, http: Http, home: str = "") -> None:
@@ -298,7 +292,7 @@ class Session:
         self.inflight: set[asyncio.Task[None]] = set()
         #: The last cursor written to the file, so it is written on change only.
         self.persisted: str = ""
-        #: A QR login in progress, and v1's four words for where it is.
+        #: A QR login in progress, and the four words for where it is.
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
         self.qr_error: str = ""
         #: The code in hand and what it encodes.  **The session's, not the
@@ -320,19 +314,18 @@ class Session:
 
 
 # ── The session file ────────────────────────────────────────────────────
-# One `wechat.yaml` per login, inside the agent's own directory.  v1 kept
-# `wechat_<agent>.yaml` beside the data, and the *keys* and the short-lived-token
-# reasoning come over from it unchanged, so a session v1 saved is adopted here
-# without anybody scanning anything again; the path does not, because the
-# directory already names the agent and a filename repeating it is a second name
-# to keep in step with a rename.
+# One `wechat.yaml` per login, inside the agent's own directory.  The *keys*
+# and the short-lived-token reasoning are the file's own, so a saved session is
+# adopted here without anybody scanning anything again; the path names only the
+# agent, because the directory already does and a filename repeating it is a
+# second name to keep in step with a rename.
 #
 # What the path cannot carry is the agent's **raw** name, which is why the file
 # states it under `AGENT_KEY`: the directory holds the *sanitised* one (`a/b`
 # lands in `a_b/`), and a session resumed under the directory name would be a
 # second key for one login — a tool call from the raw name would adopt the same
 # token and start a second poll loop.  The token itself lives in plain text on
-# purpose: it expires in about a day, and v1's note says why that is not worth a
+# purpose: it expires in about a day, which is why that is not worth a
 # credential store.
 
 
@@ -353,7 +346,7 @@ def _read_session(path: Path) -> tuple[dict[str, Any], str]:
     read the name out of the file rather than the directory it sits in.
 
     **A file that will not parse is named, not read as no file at all**
-    (DESIGN.md §11.1).  The outcome stays a cache miss — a login can be had
+    (SDD Appendix C).  The outcome stays a cache miss — a login can be had
     again by scanning, and refusing to start over one would trade the whole
     feature for it — but an empty mapping on its own is indistinguishable from
     a machine that never scanned, so the status answer built from it told
@@ -549,9 +542,9 @@ class Wechat:
 
         **The session files are the set of agents that have a login** — a shared
         process cannot be told which agents exist by anybody, and the files are
-        already the record of who scanned a QR here.  v1 got the same effect
-        from its harness calling `wechat_check_status` once at startup; the
-        files are the better answer, because they survive the harness.
+        already the record of who scanned a QR here.  The files are the set,
+        rather than a harness call at startup, because they survive the
+        harness.
 
         **Whose login a file is comes from the file, not the directory.**  The
         directory holds the *sanitised* agent name (`a/b` lands in `a_b/`), so a
@@ -563,7 +556,7 @@ class Wechat:
         token (`AGENT_KEY`, :func:`save_session`) and read back here, exactly as
         `slife2-schedule` reads its ledger's owner out of the ledger.
 
-        A file too old to carry one — v1's, or one written before this key — is
+        A file too old to carry one — one written before this key — is
         **skipped and named in the log**, which is what `slife2-schedule` and
         `slife2-a2a` do with a ledger whose owner is not written down.  The
         fallback that used to be here (the directory name) looked right for the
@@ -688,9 +681,9 @@ class Wechat:
     async def ready(self, session: Session) -> None:
         """Adopt this agent's saved login, once per call at most.
 
-        **A status read is one of the things that restores**, which is v1's
-        behaviour and its reason: nothing else knows the agent exists until it
-        asks, and a login that is saved but not live is the state a person is
+        **A status read is one of the things that restores**, and for a plain
+        reason: nothing else knows the agent exists until it asks, and a login
+        that is saved but not live is the state a person is
         most likely to be looking at.  Every path is cheap when there is
         nothing to do — no file means no call, and a live session returns at the
         first line.
@@ -699,8 +692,8 @@ class Wechat:
             return
         saved, damage = _read_session(session_path(session.agent))
         if damage:
-            # **The file is named, not read as no login at all** (DESIGN.md
-            # DESIGN.md §11.1).  The status answer repeats `restore_note` verbatim, so a
+            # **The file is named, not read as no login at all** (SDD
+            # SDD Appendix C).  The status answer repeats `restore_note` verbatim, so a
             # damaged cache now says which file it is and what was wrong with it
             # rather than telling somebody who already scanned to scan again.
             session.restore_note = damage
@@ -797,7 +790,8 @@ class Wechat:
             client.updates_buf = seed
         session.persisted = seed
         # And the peer, so a model that only reads status still knows who to
-        # answer — v1 seeded this from the login for the same reason.
+        # answer — the login's own account is seeded as a contact for this
+        # reason.
         owner = str(saved.get("ilink_user_id") or "")
         if owner:
             client.last_contact = {"from_id": owner, "context_token": ""}
@@ -950,7 +944,7 @@ class Wechat:
         **Text only.**  Anything that is not a text item is skipped *before* the
         dedup key is recorded, because an image or a voice note would otherwise
         burn the key for the conversation and take the next real message with
-        it — v1 found that one, and the ordering is the fix.
+        it, so the ordering is the fix.
         """
         items = message.get("item_list")
         first = items[0] if isinstance(items, list) and items else {}
@@ -968,8 +962,8 @@ class Wechat:
         # *before* this answer arrived is the bridge re-serving a message the
         # previous poll already had, so it is dropped.  A key this batch already
         # delivered is somebody having sent the same words twice, so it is not —
-        # which is the case v1 shipped a version without, and the version lost
-        # the second "ok".
+        # the case a dedup on the window alone loses, taking the second "ok"
+        # with the replay.
         #
         # The cost is stated rather than hidden: a repeat of a text seen inside
         # the last `_T.timeouts.pacing.wechat_dedup` that arrives *alongside its own replay* is
@@ -1052,7 +1046,7 @@ class Wechat:
         file the poll loop spends its life touching — while a re-stamped
         `saved_at` would be worse than wasteful, because that field is the
         login's age and refreshing it every few seconds is a login that never
-        expires.  v1 merged the cursor into the file for the same reason.
+        expires.
 
         **A cursor that did not land is not a cursor that moved, and it is said
         out loud.**  This was a `debug` line, which made the one consequence it
@@ -1156,7 +1150,7 @@ class Wechat:
     def _remember_code(self, session: Session, content: str) -> str:
         """Draw *content* and keep it on the session, where a status can hand it out.
 
-        **The `ImportError` policy lives here, in one place** (DESIGN.md §11.1):
+        **The `ImportError` policy lives here, in one place** (SDD Appendix C):
         without the rendering library `qr` is empty and `qr_url` is the address
         to send instead, so a reply never tells someone to scan a link.  Any
         other failure propagates — the caller knows whether that is a failed
@@ -1527,8 +1521,8 @@ class Wechat:
 
         The one thing a model cannot work out for itself: the peer and the token
         arrive with a message, and a model that has lost them — a new turn, a
-        trimmed context — has no way to ask a person.  v1 seeded the login's own
-        account as a contact for this reason: until somebody writes there is
+        trimmed context — has no way to ask a person.  The login's own account
+        is seeded as a contact for this reason: until somebody writes there is
         still one peer a message can reach, and it is whoever scanned the code.
         """
         contact = session.client.last_contact
@@ -1569,7 +1563,7 @@ class Wechat:
 
         # A rejected token comes back as a 200 carrying an error envelope, and
         # a send that reads that as success is a reply the model believes it
-        # delivered.  v1 lost this half and found it.
+        # delivered.
         if ilink.error_envelope(result):
             client.auth_failed = True
             client.last_error = ilink.envelope_error(result) or "send rejected"
@@ -1613,8 +1607,7 @@ class Wechat:
         session.qr = ""
         session.qr_url = ""
         # A fresh client rather than a cleared one, so nothing of the old
-        # session survives in a field somebody forgot to reset — which is what
-        # v1 did, and why.
+        # session survives in a field somebody forgot to reset.
         session.client = IlinkClient(http=self._http)
         session.persisted = ""
         session.saved_at = 0.0

@@ -8,8 +8,8 @@ name: Publish to PyPI
 #
 #   v0.1.0  ->  the version in pyproject.toml, built from the commit under it
 #
-# **A workflow of its own rather than a job in `ci.yml`, which is v1's
-# arrangement kept.**  `ci.yml` is the gate and runs on pushes to `main`; this
+# **A workflow of its own rather than a job in `ci.yml`.**  `ci.yml` is the gate
+# and runs on pushes to `main`; this
 # is the release and runs on tags, so the two answer to different events and
 # neither waits for the other's trigger.  What that means for a release is
 # worth stating plainly: the gate here is that the commit was already green on

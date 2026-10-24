@@ -27,7 +27,7 @@ width can be *measured*; an input limit cannot be measured without sending the
 oversized input, which is the failure this module's history records — a rejected
 chunk, and an indexer stalled on that turn for ever.  So the limit comes from
 the table or the endpoint's listing, and a model whose endpoint reports neither
-is refused rather than handed a default (DESIGN.md §11.1).
+is refused rather than handed a default (SDD Appendix C).
 """
 
 from __future__ import annotations
@@ -68,10 +68,10 @@ _KNOWN_MODELS: dict[str, tuple[int, int]] = {
 }
 
 #: Characters per token, for turning that limit into a character budget.  One,
-#: deliberately: an earlier estimate of about four let a thirty-thousand
-#: character line of escaped JSON ride as a single chunk, and the model rejected
-#: it — after which v1's indexer stalled on that turn forever.  Overestimating
-#: the budget costs a shorter chunk; underestimating it costs the turn.
+#: deliberately: an estimate of about four lets a thirty-thousand character line
+#: of escaped JSON ride as a single chunk, and the model rejects it — after which
+#: the indexer stalls on that turn forever.  Overestimating the budget costs a
+#: shorter chunk; underestimating it costs the turn.
 _CHARS_PER_TOKEN = 1
 
 
@@ -139,10 +139,10 @@ class EmbeddingClient:
         tokens.**  The width *can* be measured — a one-character probe's length
         is the answer — but an input limit cannot be measured without sending
         the oversized input, which is the exact failure this module's history
-        records: a chunk past the limit was rejected, and v1's indexer stalled on
+        records: a chunk past the limit is rejected, and the indexer stalls on
         that turn for ever.  So the limit is asked for, and a model whose
         endpoint does not report one is refused rather than handed a guess
-        (DESIGN.md §11.1).
+        (SDD Appendix C).
 
         Raises:
             RuntimeError: If neither the table nor the endpoint answers — either
@@ -181,8 +181,8 @@ class EmbeddingClient:
         limit.**  The width can be measured without the endpoint's help, so an
         unreadable listing there falls through to the probe; an input limit
         cannot, so the two answers must stay apart and this one is raised rather
-        than returned as a `0` the caller cannot tell from silence (DESIGN.md
-        DESIGN.md §11.1).
+        than returned as a `0` the caller cannot tell from silence (SDD
+        SDD Appendix C).
 
         Raises:
             RuntimeError: If the listing itself could not be read, naming the
@@ -250,7 +250,7 @@ class EmbeddingClient:
         **Here an unreadable listing may be the silent one.**  The ladder this
         feeds measures the width without the endpoint's help, so a listing that
         could not be read and one that reports no width both fall to the probe —
-        the difference the input limit cannot afford (DESIGN.md §11.1).
+        the difference the input limit cannot afford (SDD Appendix C).
         """
         try:
             listing = await self.client().models.list()

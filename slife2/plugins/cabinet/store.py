@@ -3,12 +3,9 @@
 The cabinet holds **notes** (keyed by subject), a **diary** (keyed by date),
 **files** (bytes on disk, metadata here), **reports** (keyed by title),
 **dumps** (one tool's own output, keyed by the call that produced it) and
-**images** (a picture a turn carried, keyed by its digest).  v1
-called this plugin `memfiles` and its store had four tables, a `cabinet_docs`
-view that unioned them and twelve triggers keeping a shared FTS table in step
-(`slife/plugins/memfiles/schema.sql`).  What is kept is the *design* that made
-those things one thing, and what is dropped is the machinery slife2 does
-without:
+**images** (a picture a turn carried, keyed by its digest).  What is kept is
+the *design* that made those things one thing, and what is dropped is the
+machinery slife2 does without:
 
 **A dump is the harness's, and it is here because it is text.**  A result too
 large for the conversation is shortened for the model and kept whole for
@@ -19,7 +16,7 @@ budget in hand.  Bytes belong on disk, but a tool's output is text, and text
 belongs where the cabinet's other text is: this kind is a dump rather than a
 note because nothing about it was written by anybody, and it is in **this
 corpus** rather than in a directory of its own because the thing looking for it
-later is a search.  The cost is the one DESIGN.md §5.3 names — a rank only means
+later is a search.  The cost is the one SDD §8.3 names — a rank only means
 something inside the corpus that produced it — and a dump is the one kind
 nobody wrote, so a search that names no kind reaches machine output ranked
 against a person's notes.  Whether a search that named no kind should skip this
@@ -39,7 +36,7 @@ bound is a property of the tool rather than a hope about how a model uses it.
 **A dump is not what a search that named no kind is for.**  A result over the
 window is a tool's *output*, and the address a model has for it is the marker in
 the transcript — so the corpus does not have to carry it for retrieval, and
-machine output ranked against a person's own notes is the dilution DESIGN.md §5.3 warns
+machine output ranked against a person's own notes is the dilution SDD §8.3 warns
 about: one rank, and the thing nobody wrote matching on every word it happens to
 contain.  Naming the kind reaches it (`kind="dump"`), which is also how it is
 browsed and listed.
@@ -56,30 +53,28 @@ and not a second fact about anything.
 report, a dump and an image are six *values* of `kind` in `cabinet_doc`, with
 the union of the columns they need.  That is the "four kinds are ONE corpus" rule read literally:
 the rowid **is** the corpus id, so the two legs of a search fuse on `rowid` the
-way the turns and the tool catalogue already do (`slife2.libs.store.index.fuse_ranked`), where
-v1 had to synthesise a global id out of a per-kind offset.  Four tables also
-meant the FTS table could only be kept correct by a trigger per kind per verb;
-here the keyword text is written in the same transaction as the row that
+way the turns and the tool catalogue already do (`slife2.libs.store.index.fuse_ranked`),
+with no global id synthesised out of a per-kind offset.  Per-kind tables would
+also mean the FTS table could only be kept correct by a trigger per kind per
+verb; here the keyword text is written in the same transaction as the row that
 produced it, which is how both of slife2's other stores do it and why this
 module has no trigger at all.
 
 **The per-kind facts are a table of their own** (`SPECS`): which column is the
 key, which column is the time axis a list orders by, whether a second write
 appends or replaces, and where the markdown mirror goes.  Every one of those is
-a fact about a kind rather than about a document, and v1 spelled each of them
-out four times over — once per table, once per view arm, once per trigger set,
-once per upsert.
+a fact about a kind rather than about a document, so each is spelled out once
+rather than once per table, view arm, trigger set and upsert.
 
-**Every write embeds, and there is no drainer.**  v1's memfiles shared `memdb`'s
-`SemanticManager`, a background drainer that walked unembedded documents and
-caught them up on its own schedule.  slife2 has no such thing and does not need
-one: a turn is stored with its vector in one transaction, and this store is the
-same — **a write that cannot embed stores nothing**, which is why the plugin
-removes the bytes it copied when the embedding call fails.  What is left of the
-drainer is the one pass `sync` makes when a cabinet is opened by a *different*
-embedding model, and it is a rebuild rather than a drain: it does not remember
-which rows are missing (the index is derived, so "missing" is a query) and it
-does not run in the background.
+**Every write embeds, and there is no drainer.**  There is no background walk
+over unembedded documents catching them up on its own schedule, and none is
+needed: a turn is stored with its vector in one transaction, and this store is
+the same — **a write that cannot embed stores nothing**, which is why the plugin
+removes the bytes it copied when the embedding call fails.  What stands in
+place of a drainer is the one pass `sync` makes when a cabinet is opened by a
+*different* embedding model, and it is a rebuild rather than a drain: it does
+not remember which rows are missing (the index is derived, so "missing" is a
+query) and it does not run in the background.
 
 **A document is written twice, and the file is the one a person reads.**  Every
 kind but `file` also lands as markdown under the cabinet directory — `notes/`,
@@ -93,14 +88,13 @@ unambiguous, and the readable name plus a digest of the key where it is not).
 
 **The cabinet is one directory per agent** — `agents/<agent>/cabinet/` — and it
 is one *directory* rather than a set of files, which is what makes copying or
-deleting a cabinet one operation.  Its contents are v1's (`notes/`, `diary/`,
-`reports/`, and the saved files by category) so a v1 cabinet's documents are
-adopted by copying them in; what is dropped from v1's layout is the `files/`
-level that used to wrap the categories, which only existed because the cabinet's
-*own* directory was called `<agent>.files/`.  The index (`.index.db`) is this
-build's own and is not promised to be v1's: a vector index is not portable
-across embedding models anyway, and slife2's rule for a changed model is a
-rebuild rather than a migration.
+deleting a cabinet one operation.  Its contents are `notes/`, `diary/`,
+`reports/`, and the saved files by category, so an existing cabinet's documents
+are adopted by copying them in; there is no `files/` level wrapping the
+categories, because the cabinet's *own* directory already names the agent.  The
+index (`.index.db`) is this build's own and is not portable: a vector index
+does not survive an embedding-model change anyway, and slife2's rule for a
+changed model is a rebuild rather than a migration.
 """
 
 from __future__ import annotations
@@ -212,10 +206,10 @@ class Spec:
     six keys, which is why this is a column and not six tables.
     """
 
-    #: The column a list orders by and a since/until window filters on.  v1's
-    #: `_KIND_SPECS`, kept because each kind really does have its own axis: a
-    #: note is *when it was last written*, a diary is *the day it is about*, and
-    #: a file and a report are when they arrived.
+    #: The column a list orders by and a since/until window filters on.  Each
+    #: kind really does have its own axis: a note is *when it was last written*,
+    #: a diary is *the day it is about*, and a file and a report are when they
+    #: arrived.
     time: str
     #: Whether that column holds a **day** rather than a moment.  A diary's axis
     #: is `YYYY-MM-DD`, so a window on it is day-granular and a datetime bound
@@ -224,7 +218,7 @@ class Spec:
     #: Whether a second write under one key **appends** rather than replaces.
     #: A day and a report's title accumulate — two entries under one date are two
     #: facts about it — and the two kinds that hold one current thing per key are
-    #: the two with a remove tool.  v1's rule, and the whole of it.
+    #: the two with a remove tool.
     appends: bool
     #: The markdown mirror's directory, or `""` for the kind whose bytes *are*
     #: the file.  A saved file is not mirrored: the cabinet keeps the bytes, and
@@ -291,10 +285,9 @@ def index_path(agent: str, subagent: str = "") -> Path:
 
 
 # ── The text a document is found by, and the text it is about ────────────────
-# v1's rule, and the one place the port's shape is visible in the search: which
-# column a leg reads is a decision about a *kind*'s columns, and here the four
-# kinds have been flattened into one row — so the composition is a function of
-# the row rather than of the view arm it came from.
+# Which column a leg reads is a decision about a *kind*'s columns, and here the
+# kinds share one row — so the composition is a function of the row rather than
+# of the view arm it came from.
 
 
 def search_text(row: Mapping[str, Any]) -> str:
@@ -333,8 +326,8 @@ def vector_text(row: Mapping[str, Any]) -> str:
     nothing to embed until somebody described it, so a cabinet of saved files
     would be missing from the vector index from the moment it was saved — and
     `sync` would report every one of them as a document with no vector, a
-    "failed save" it could never clear.  v1's rule, and why v1 composed a
-    file's body the same way (DESIGN.md §5.3).
+    "failed save" it could never clear.  That is why a file's body is composed
+    the same way (SDD §8.3).
 
     Tags are out of it, unlike the keyword text: a tag is a word somebody chose
     to file a document under, and a vector built from one describes the filing
@@ -517,10 +510,10 @@ def resolve(root: Path, relative: str) -> Path:
 _SCHEMA = f"""
 -- The corpus: six kinds of document in one table.
 --
--- **One table rather than one per kind plus a view**, which is the design v1
--- reached for a view to express: the kinds are one corpus, and a corpus whose
--- rows live in four tables is a corpus that has to be unioned back together
--- before it can be ranked.  A `kind` column says what the row is, `key` is what
+-- **One table rather than one per kind plus a view**: the kinds are one
+-- corpus, and a corpus whose rows live in four tables is a corpus that has to
+-- be unioned back together before it can be ranked.  A `kind` column says what
+-- the row is, `key` is what
 -- a read and a remove tool take, and the columns the kinds do not use are empty
 -- rather than absent.
 --
@@ -713,10 +706,9 @@ class CabinetStore:
     async def sync(self, embedder: Embedder) -> dict[str, Any]:
         """Make both indexes this embedder's, or say what is missing.
 
-        **One pass, and it is a rebuild rather than a catch-up.**  v1's drainer
-        remembered which documents had no vector and embedded them on its own
-        schedule; here a document can only be missing from the index when the
-        index belongs to a different embedder or was built by different rules --
+        **One pass, and it is a rebuild rather than a catch-up.**  A document
+        can only be missing from the index when the index belongs to a
+        different embedder or was built by different rules --
         because every write embeds in the same transaction, and a vector is
         dropped only by the branch below.  So the question "does this index need
         rebuilding" is one read of `index_meta`, and the answer is a *rebuild*
@@ -959,9 +951,8 @@ class CabinetStore:
         The order is the contract: `write` calls this first, so a save that
         cannot embed has stored nothing yet, and the branch that has to undo
         something (the plugin's copy of a file) has only its own work to undo.
-        v1's drainer is what made that order unnecessary — an unembedded document
-        was simply caught up later — and slife2 has no drainer, so a save that
-        cannot embed is a save that did not happen.
+        There is no drainer to catch an unembedded document up later, so a save
+        that cannot embed is a save that did not happen.
 
         An empty text is no vectors rather than an empty embedding: a document
         with nothing to say about itself is one the keyword leg still finds.
@@ -1306,7 +1297,7 @@ class CabinetStore:
         """`cabinet_summarize`: a model's description of a row already saved.
 
         **A file or an image is re-embedded and the text kinds are not**, which
-        is the one asymmetry DESIGN.md §5.3 states: a summary is part of the text
+        is the one asymmetry SDD §8.3 states: a summary is part of the text
         a file's (or an image's) vector is built from, since neither has text of
         its own, so the stored vector is now the wrong vector for its row and
         has to be replaced.  A note's vector is its body, which a summary does
@@ -1386,7 +1377,7 @@ class CabinetStore:
         `choice_row` and not a document**: a page is a thing to choose from, and
         the whole of one is what a read tool is for.  `category` narrows to a
         directory of saved files, which is the one filter a kind has that the
-        others do not (v1's `file_list`).
+        others do not.
 
         `total` is counted before the page is cut, so "there are 40 and here are
         10" is answerable rather than a model guessing from a full page.
@@ -1438,7 +1429,7 @@ class CabinetStore:
 
         Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
         because both of its callers have one; a cabinet's kinds use their own
-        axes and v1 made the same distinction.  The bound grammar is
+        axes.  The bound grammar is
         the shared one (`slife2.helpers.timeutil`), so a model writes `yesterday` here
         as it does anywhere else.
 
@@ -1509,7 +1500,7 @@ class CabinetStore:
 
         **One corpus, whatever `kind` says.**  A filter narrows what is *shown*
         and never what is ranked, because a rank only means something inside the
-        corpus that produced it (DESIGN.md §5.3): one index per kind would be one corpus per
+        corpus that produced it (SDD §8.3): one index per kind would be one corpus per
         kind, and a query spanning them would answer with an order nothing
         measured.
 
@@ -2028,9 +2019,9 @@ def parse_tags(value: Any) -> str:
     """Tags as the row holds them: one comma-separated string.
 
     A model writes them as a list or as a string, and a column holding both
-    shapes is a column two readers have to agree about.  v1's choice; the
-    alternative — a join table — is a second thing to keep in step for a field
-    nothing ever queries alone.
+    shapes is a column two readers have to agree about.  The alternative — a
+    join table — is a second thing to keep in step for a field nothing ever
+    queries alone.
     """
     if isinstance(value, str):
         return value.strip()

@@ -3,13 +3,12 @@
 **A cron expression is a question about a calendar, and this is where that
 question is asked.**  It is a library rather than a plugin because there is
 nothing here to hold: no credential, no connection, no loop — a parser and a
-timezone policy, which is what DESIGN.md §1.1's table calls a library.  The plugin that
+timezone policy, which is what SDD §2.4 calls a library.  The plugin that
 *holds* the timers is `slife2.plugins.schedule.server` and it imports this.
 
-**`croniter` underneath, and nothing outside this module imports it.**  That is
-the arrangement v1 landed on after planning the opposite, and the reason is in
-the corners rather than in the fields: cron's `day_or` rule (a restricted
-day-of-month and a restricted day-of-week are a **union**, not an
+**`croniter` underneath, and nothing outside this module imports it.**  The
+reason is in the corners rather than in the fields: cron's `day_or` rule (a
+restricted day-of-month and a restricted day-of-week are a **union**, not an
 intersection) is nobody's first guess, `get_prev` is what a catch-up sweep
 needs and hand-rolling it backwards is its own class of bug, and `is_valid`
 with `strict=True` is what rejects `0 9 31 2 *` — February the 31st, a task

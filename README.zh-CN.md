@@ -7,12 +7,11 @@
 agent 主循环、工具 hub、模型后端、记忆以及每一项能力，都是 slife2 启动并共享的
 MCP server。
 
-本文件是用户手册。系统设计见 [SDD.md](SDD.md)，设计决策与实测记录见
-[DESIGN.md](DESIGN.md)。
+本文件是用户手册。设计——架构、plugin 契约、决策及其依据的实测——见
+[SDD.md](SDD.md)。
 
 **目录**
 
-- [概述](#概述)
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [快速开始](#快速开始)
@@ -21,34 +20,9 @@ MCP server。
 - [配置](#配置)
 - [能力](#能力)
 - [数据位置](#数据位置)
-- [架构](#架构)
 - [开发](#开发)
 - [已知限制](#已知限制)
 - [许可证](#许可证)
-
-## 概述
-
-slife2 围绕四条规则构建。
-
-1. **plugin 是 slife2 自己的一个 MCP server。** 它通过 Streamable HTTP 使用
-   MCP，并实现一份很小的附加契约：状态按 client id 而不是按 session 保存；
-   每个面向模型的工具都声明自己的受众；客户端可以校验 server 的身份；
-   每个 plugin 在中央注册表中占一行。plugin 是必需的：如果某个 plugin
-   无法连接，这一轮就会失败。`mcp:` 下的外部 MCP server 是可选的；
-   无法连接时，模型只是少一些工具。
-
-2. **凭证只留在使用它的进程里。** provider 的 key 住在调用该 provider 的模型
-   server 中。工具 server 的 key 住在拥有该连接的 plugin 中（`mcp:` 归
-   `slife2-mcp-tools`，`rest-api:` 归 `slife2-restapi-tools`）。agent 主循环
-   不 import 任何 provider SDK，也不持有任何 key。
-
-3. **server 在整台机器上共享。** launcher 启动配置所需的 server，并复用已经
-   在运行的那些。server 是守护进程，所以关闭一个窗口不会打断另一个窗口。
-   最后一个客户端退出时，会停掉正在运行的 server；使用 `--keep-servers`
-   可以保留它们。
-
-4. **`slife2.yaml` 是“存在什么”的唯一描述。** provider、server、工具来源、
-   embedding、媒体后端、隧道和网络设置都从该文件读取，没有第二份配置存储。
 
 ### 术语
 
@@ -586,55 +560,30 @@ skills:
 
 ### 对话与记忆
 
-对话不会无界地累积上下文。`slife2-context` 保存轮次日志，并在每一轮之前进行
-一次模型调用，决定：
+对话不会无界地累积上下文。每一轮之前，`slife2-context` 进行一次模型调用，决定
+保留哪些轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的结果上按时间顺序
+运行。如果召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的
+上下文；轮次存储缺失则使该轮失败。
 
-- 手头的对话中保留哪些轮次；
-- 从日志中召回哪些轮次。
+模型用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用
+`turn_read` 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list`
+按最新优先，每轮一行；`since`/`until` 接受 ISO 日期或 `yesterday`、
+`last month`、`3 days ago` 之类的说法，`limit`/`offset` 按 `total` 翻页。
+`turn_search` 使用同一个时间窗口，返回同样的一行外加 `similarity` 分数；它的
+`query` 词把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受 agent
+参数：调用本身携带对话身份，因此模型只能读取自己的历史。
 
-这一轮在两者合并后的结果上运行，按时间排序。这次调用读取整个手头对话，而不是
-只看新消息，因为追问通常通过上面的轮次来指代对象。回答是一次选择，绝不是倾倒；
-如果召回匹配到的内容超过容量，只返回放得下的部分。
+被重建进上下文的每一轮都带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。
+大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
+是发送者写的，会随消息一起存储。
 
-被决策读取的每一轮都带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。
-最新的轮次也有脚注，因此它们和被恢复的轮次一样可寻址。大写 marker 是 harness
-添加的注解，不属于存储记录。读起来像词的 marker（例如 `[Wechat:{…}]`）是发送者
-写的，会随消息一起存储。
-
-模型可以用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用
-`turn_read` 读完整的某一轮。`turn_list` 按最新优先，每轮一行；`since`/`until`
-接受 ISO 日期或 `yesterday`、`last month`、`3 days ago` 之类的说法，
-`limit`/`offset` 按 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的
-一行外加 `similarity` 分数，并且没有 `offset`——它回答的是最匹配的几轮，而不是
-窗口内的全部轮次。它的 `query` 词把包含这些词的轮次排在前面，但不是过滤器：没有
-句子时，同一组词也会按语义读取，所以命中可能并不包含它们，较低的 `similarity`
-就是这种情形的说明。三个工具都不接受 agent 参数：调用本身携带对话身份，因此模型
-只能读取自己的历史。
-
-`turn_summarize` 把摘要和标签写到某一轮上——当前正在运行的一轮，或按 id 指定的
-历史轮次——让关键词搜索能找到它。它们进入关键词腿读取的文本；语义腿不使用它们。
-
-每一轮存储时都会建立两个索引：一个按“这一轮靠什么被找到”的文本建立的关键词
-索引，一个按“它讲的是什么”建立的向量索引。两个索引都派生自轮次，也可以从轮次
-重建。修改 `embeddings:` 下的 embedding 模型后，下次启动会重新嵌入全部历史。
-
-有两个 harness 决策不是工具：
-
-- `restore` 在对话开始时重放已保存的上下文。
-- `rebuild` 在每一轮之前执行上下文决策。
-
-如果 rebuild 决定保留手头的全部内容，就不会重建任何东西。判别器超时、provider
-报错或回答无法解析时，会保留现有上下文并继续运行该轮。轮次存储缺失则会使该轮
-失败，和其他缺失的 plugin 一样。
-
-上下文决策使用的召回属于存储自身；`turn_search` 是模型自己进入同一索引的入口，
-它的结果只是工具输出，不会改变已经选定的上下文。
+状态栏报告上一次模型调用留下的上下文大小及其占模型窗口的比例。每一轮之前，
+一条注释会说明上下文决策保留了什么、召回了什么。
 
 ### 工具
 
-`slife2-toolhub` 是唯一决定模型可以看到哪些工具的进程。它自己不去连接外部
-server。`slife2-mcp-tools` 持有 `mcp:` 连接，`slife2-restapi-tools` 持有
-`rest-api:` 连接；它们各自声明来源及其提供的工具，hub 合并声明、命名工具、
+`slife2-toolhub` 拥有模型的工具清单。`slife2-mcp-tools` 持有 `mcp:` 连接，
+`slife2-restapi-tools` 持有 `rest-api:` 连接；hub 合并它们声明的来源、命名工具、
 把关并把调用路由回来源。
 
 hub 提供三个集合级工具：
@@ -645,37 +594,25 @@ hub 提供三个集合级工具：
 - `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
 
 模型可以调用 `tool_search` 返回的名字而不加载它，但加载会让它保留在每次请求
-随附的清单中。模型的清单在每次模型调用前都从 hub 重新读取，因此轮次中加载的
-工具从下一次迭代起可用。
-
-`tool_load.autoload` 列出每次请求都随附在清单中的工具，按模型调用它们的名字书写
-——plugin 工具的裸名（`turn_read`），或外部 server 的 `{server}__{tool}`。其他一切
-（包括 plugin 的工具）都通过 `tool_search` 发现，再用 `func_tool_load` 加载。这个
-清单以工具为单位而不是以 server 为单位：一个 server 可能提供九十个工具，其中只有
-两个需要每轮都在。系统赖以工作的五个名字是必需的，配置缺少任何一个都会启动失败。
+随附的清单中。`tool_load.autoload` 列出启动即加载的工具，按模型调用它们的名字
+书写——plugin 工具的裸名（`turn_read`），或外部 server 的
+`{server}__{tool}`。其他一切通过 `tool_search` 发现，再用 `func_tool_load`
+加载。
 
 已加载清单由 `tool_load.threshold` 限制（默认 100）。超过限制时，最近最少被
-调用的工具会被卸载；`tool_load.autoload` 中的名字永远不会被卸载。从未
-被调用过的工具按加载时间排序。裁剪发生在轮次边界；被移除的名字会作为一次工具
-调用及其结果写入对话，因此模型会知道清单缩小了。被逐出的代价是一次搜索和一次
-加载，而不是失去一种能力。
+调用的工具会被卸载；`tool_load.autoload` 中的名字永远不会被卸载。裁剪发生在
+轮次边界，并作为一次工具调用及其结果写入对话，因此模型会知道清单缩小了。
 
 工具命名：
 
 - `mcp:` 条目提供的工具名为 `{server}__{tool}`，例如
   `arxiv__arxiv_search_papers`。
-- plugin 自己的工具使用裸名，例如 `turn_read`。哪个 plugin 提供工具是系统内部
-  的事实，不需要出现在模型读取的名字里。
+- plugin 自己的工具使用裸名，例如 `turn_read`。
 
-每个工具结果都是一个 JSON 对象。列表回答：
-
-```json
-{"<noun>": [], "total": 0, "limit": 20, "offset": 0}
-```
-
-`total` 说明是否还有下一页。读取回答该行自己的字段。拒绝或未找到会抛出
-`ToolError`，harness 将其作为失败调用连同原因交给模型。`_check_new_input`
-是唯一例外：它原样返回一个人的消息。
+每个工具结果都是一个 JSON 对象。列表回答
+`{"<noun>": [], "total": 0, "limit": 20, "offset": 0}`；`total` 说明是否还有
+下一页。读取回答该行自己的字段。拒绝或未找到会抛出 `ToolError`，harness 将其
+作为失败调用连同原因交给模型。`_check_new_input` 原样返回一个人的消息。
 
 任何回答都不应超过 `tool_result.tokens`。可能增长的列表使用 `limit`/`offset`；
 无法设界的输出会保存为 dump（见[文件柜](#文件柜)）。
@@ -795,37 +732,28 @@ unexpose_local_image(token)   -> 该 URL 失效
 | `image` | 内容摘要 | 由 harness 写入；字节在 `pictures/`。 |
 
 笔记、文件和图片是文档：第二次写入就是它们的内容，因此只有笔记和文件有删除
-工具。日记和报告是日志：同一日期或标题下的两条记录是两个事实，后一段文字不会
-说明它替换了前一段的哪一部分。
+工具。日记和报告是日志：同一日期或标题下的两条记录是两个事实。
 
 dump 是对对话而言过大的工具输出。输出会完整保存，以工具调用 id 为键；对话携带
-输出自身若干行的选集，并在 `tool_result.tokens` 之内。不做任何改写。选集由一次
-判别器调用完成：它接收输出、手头对话和当前输入，并回答行范围。模型可以用
-`dump_read` 读回 dump 的任意部分，这是一个会搜索的读取器：`pattern` 查找行，
-`context` 加上相邻行，`offset` 从某一行开始读（负数从末尾算），`limit` 少读一些。
-每个回答都保持在同一个 token 预算内。除非 `kind` 为 `dump`，搜索不会看到 dump。
+输出自身若干行的选集，并在 `tool_result.tokens` 之内，不做任何改写。模型可以用
+`dump_read` 读回任意部分，这是一个会搜索的读取器：`pattern` 查找行，`context`
+加上相邻行，`offset` 从某一行开始读（负数从末尾算），`limit` 少读一些。除非
+`kind` 为 `dump`，搜索不会看到 dump。
 
-图片是某一轮携带过的画面。它完整保存在 `pictures/` 下，按内容摘要为键，轮次行
-携带一个 `[Image:…]` 引用而不是像素。`image_source` 解析这个引用，
-`attach_image` 是模型再次看到图片的路径。`http(s)` 图片不会在这里获取：行里
-保留 URL，由 provider 去取。不指定 kind 的搜索会看到图片；它们是人附加的内容，
-与 dump 不同。
+图片完整保存在 `pictures/` 下，按内容摘要为键，轮次行携带一个 `[Image:…]` 引用
+而不是像素。`image_source` 解析这个引用，`attach_image` 是模型再次看到图片的
+路径；`http(s)` 图片由 provider 去取，不在这里获取。不指定 kind 的搜索会看到
+图片。
 
 每个文档都会写两遍：文件柜索引中的一行，以及 `agents/<agent>/cabinet/` 下的
 Markdown 文件（`notes/`、`diary/`、`reports/`），无需 slife2 即可打开、编辑或
-删除。主题名如果本身不是全小写，文件名中会带一个短摘要
-（`notes/Python~6e3604888c.md`），因为 Windows 和 macOS 将 `Python.md` 和
-`python.md` 视为同一个文件。保存文件的字节也放在文件柜下，但不进入索引；
-`file_read` 返回文件文本，遇到 PDF、图片或压缩包会说出它是什么而拒绝。其他编码
-的文本会被解码，并在回答中说明编码。
+删除。保存文件的字节放在文件柜下，但不进入索引；`file_read` 返回文件文本，
+遇到 PDF、图片或压缩包会说出它是什么而拒绝。其他编码的文本会被解码，并在回答
+中说明编码。
 
-`cabinet_search` 接受与 `tool_search` 相同的两种输入：`keywords` 是要找的词，
-`sentences` 是按语义匹配的问题。词不是过滤器：只给词时，同一组词也会被当作句子
-交给语义腿，所以命中可能来自语义而并不包含这些词；`matched_in` 说明词确实在哪里
-被找到。多个句子就是多个问题，每个问题只会增加结果。`cabinet_summarize` 为文档
-写描述；为文件或图片写描述会重新嵌入它，因为描述是构建其向量所用材料的一部分。
-
-`file_save` 复制本机已有的文件，不获取 URL。文件柜没有 `grep` 搜索腿。
+`cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
+`cabinet_summarize` 为文档写描述；为文件或图片写描述会重新嵌入它。`file_save`
+复制本机已有的文件，不获取 URL。文件柜没有 `grep` 搜索腿。
 
 ### 微信
 
@@ -870,8 +798,7 @@ agent 任务是由同一个 agent 运行的独立循环，以名称和描述启�
 | `agent_task_cancel` | 停止任务并报告调用后的状态。 |
 
 任务以 agent 身份运行，使用相同的系统提示词、模型、工具和上下文决策。它没有
-启动它的那个轮次：`restore` 读取已存储的轮次列表，而轮次只在结束时写入，因此
-描述必须重述相关上下文。任务的轮次不会写入 agent 的对话。它的回答作为一条带有
+启动它的那个轮次，因此描述必须重述相关上下文。它的回答作为一条带有
 `[AgentTaskResult:{…}]` marker 的消息，在 `agent-task:<name>` channel 上投递，
 并绘制为 `AsyncTask(<name>)>`。如果没有窗口显示该对话，回答会被报告为
 `undelivered`，日志会说明这一点。
@@ -940,23 +867,22 @@ agent 的 peer 是其他 agent，通过公开发布的 A2A-over-MQTT profile 通
 `task_response` 使用 marker 中的 `task_id` 完成此 agent 收到的任务。方向由 `from`
 表示；`agent_name` 是 agent 自己的身份。
 
-每个 agent 有一张 mesh，因为 agent 名称就是 MQTT client id 和请求主题的最后
-一段。同一台机器上的两个 agent 是两个 peer。一个 agent 从两个地方被访问时，
-会在加入之前被名称冲突检查拒绝。subagent 不在这张网上：它没有对外身份，只能
-通过其创建者的本地 subagent 网络访问。
+每个 agent 有一张 mesh：agent 名称就是它的 MQTT 身份，因此同一台机器上的两个
+agent 是两个 peer，同一个名字的第二个活实例会在加入前被拒绝。subagent 不在这张
+网上；它只通过其创建者的本地 subagent 网络访问。
 
 在线状态作为 harness 行绘制，而不是轮次：`[⚡ jill online]`。花名册可通过
 `peer_agent_list` 获取。窗口持有 `join` 调用期间，agent 就在 mesh 上；
-`--headless` 在没有窗口的情况下持有同一个调用。入站任务不持久化：进行中的
-任务保存在内存中，重启后从零开始。
+`--headless` 在没有窗口的情况下持有同一个调用。进行中的任务保存在内存中，重启
+后从零开始。
 
 群是一个带群主的有名成员名单，通过 `peer_agent_group_set` 创建，不需要邀请或
 接受。群消息作为即发即忘事件投递给其他所有成员——绝不会回送给发送者——以
 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker 到达，频道为
 `peer_agent_group:<group>:<sender>`。查看成员是单独的操作
-（`peer_agent_group_member_list`），就像聊天软件一样，因此大群不会在每条消息里
-重复整份名单。**群聊是随意的**：没有成员必须回复，沉默不是 `pending` 或
-`undelivered`；`sent` 只是发布数量。需要回答时用一对一的 send 工具。每个成员把学到的内容保存在
+（`peer_agent_group_member_list`）。**群聊是随意的**：没有成员必须回复，沉默不是
+`pending` 或 `undelivered`；`sent` 只是发布数量。需要回答时用一对一的 send 工具。
+每个成员把学到的内容保存在
 `agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
 会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或
 解散群；成员的退出方式是 `peer_agent_group_leave`。
@@ -1010,14 +936,12 @@ subagent 通过 `subagent_set` 创建，通过 `subagent_remove` 移除。创建
 非 fork 的 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的
 `turns.db`、`subagent.yaml`、文件柜和媒体目录。fork 在该目录下只有
 `subagent.yaml` 记录：它不存储轮次，对话作为创建者对话的副本保存在内存中，
-只读取创建者的 turn log 作为上下文，不向其中写入；文件柜和媒体也共享创建者的。
-fork 是会话级（session-lived）的，就像创建者在当前会话中的一个临时分身：
-agent server 下次启动时会删除上一会话留下的所有 fork 记录，名称重新可用。
+只读取创建者的 turn log 作为上下文，文件柜和媒体也共享创建者的。fork 是会话级
+的；agent server 下次启动时会删除上一会话留下的所有 fork 记录，名称重新可用。
 **fork 不能被拉进群**：它是临时的，名单里留下它就会一直向一个没人应答的名字
-发送；`subagent_group_set` 会拒绝 fork，fork 的群消息也会被丢弃。
-微信和 peer agent 网络属于 agent，不属于 subagent；定时任务也留在 agent 上。
-树只到一层：subagent 不能创建或移除 subagent，因为本地网络只为其创建者自己的
-subagent 保留位置，再下一层没有位置。
+发送；`subagent_group_set` 会拒绝 fork，fork 的群消息也会被丢弃。定时任务留在
+agent 上。树只到一层：subagent 不能创建或移除 subagent，因为本地网络只为其
+创建者自己的 subagent 保留位置，再下一层没有位置。
 
 移除 subagent 时，先通知本地网络释放其位置，再停止其循环，最后删除其目录。
 如果网络通知无法完成，subagent 保持不变。正在观看该 subagent 的窗口会被告知
@@ -1101,70 +1025,18 @@ server 跨数据目录共享。为一个 home 启动的 server 为该机器上�
 个 home 配置它；如果两个 home 为同一个名称给出不同命令，日志会报告分歧，并使用
 正在运行的那个。
 
-## 架构
-
-### 分层
-
-包按模块“是什么”划分，而不是按大小划分：
-
-| 目录 | 内容 |
-|---|---|
-| `slife2/plugins/` | 每个 plugin 一个进程。每个 plugin 有一个带 `main` 和 `SERVER_NAME` 的模块。 |
-| `slife2/clients/` | 一次 MCP 跳转的客户端部分。 |
-| `slife2/libs/` | 被多个组件 import 的库。 |
-| `slife2/helpers/` | 小型无状态辅助函数。 |
-| `slife2/tui/` | 终端窗口。它是客户端，不提供任何东西。 |
-
-plugin 目录可以保留自己的私有库，例如 `plugins/cabinet/store.py` 或
-`plugins/schedule/expressions.py`；`libs/` 用于被多个组件 import 的代码。
-
-依赖方向是单向的：
-
-```text
-tui/ -> MCP -> plugins/agent/ -> libs/turn/loop.py
-     -> {libs/model/base.py, libs/turn/tools.py, libs/turn/events.py,
-         libs/turn/messages.py} -> libs/host/config.py
-```
-
-主循环既不 import agent server，也不 import 终端。它接收一个 backend 和一个
-返回工具注册表的协程；注册表来自哪里是 agent server 的职责。
-
-### Plugin 注册表
-
-`libs/host/config.py` 的 `PLUGINS` 中每个 plugin 一行。一行记录：
-
-- `servers:` 中使用的键；
-- 提供它的模块；
-- 它应答的 MCP 名称；
-- 用于识别它的探针工具；
-- 默认端口；
-- 它是否为模型 API 后端。
-
-启动顺序、默认地址、server 名称常量和 launcher 规格都从该表派生。添加 plugin
-就是写模块并添加一行；删除就是删除两者。
-
-`libs/plugin/protocol.py` 提供共享的 server 脚手架（`serve_plugin`）。server 提供
-三个钩子：构建什么、关于启动说什么，以及它需要什么。所有 server 都走这条路径，
-包括模型后端，它们通过一层包装到达同一个函数。
-
 ## 开发
 
-### 测试
+在源码检出目录中：
 
 ```bash
 uv run pytest                  # 快车道：单元与集成测试，并行
 uv run pytest -m unit          # 仅单元测试
 uv run pytest -m integration   # 需要绑定 socket 或启动进程的测试
-uv run pytest -m e2e           # 整套服务作为进程（约 70 秒）
+uv run pytest -m e2e           # 整套服务作为进程
 uv run ruff check . && ruff format --check .
 uv run pyright
 ```
-
-默认运行会跨所有核心执行（`addopts` 中的 `-n auto`），并排除 `e2e` 标记。
-
-快车道不需要 API key，也不需要运行中的 server。模型是假的，server 通过 FastMCP
-的内存传输驱动：真实的 MCP 消息和进度通知，不绑定端口。集成测试绑定临时端口，
-因此测试套件可以在正在运行的服务旁边运行。
 
 在 Windows 上，`uv run pytest` 无法与正在运行的实例并存：`uv` 每次运行都会重写
 `.venv\Scripts\` 下的入口，而运行中的实例占着 `slife2.exe`（`os error 32`）。
@@ -1174,24 +1046,7 @@ uv run pyright
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-端到端车道将真实整套服务作为进程启动：launcher、十八个守护进程、磁盘上的配置，
-以及一个桩 OpenAI 兼容 provider。它验证启动顺序、跨进程轮次、工具路由、进度
-通知、大输出处理和对话恢复。
-
-共享测试替身位于 `tests/fakes.py`：一个桩模型、一个桩 embedder、假的窗口和 mesh
-客户端，以及被多个测试模块使用的工厂。
-
-### CI
-
-CI 在 Ubuntu、macOS 和 Windows 上使用 Python 3.13 运行：
-
-1. 在每个操作系统上执行只读的 `install --dry-run`；
-2. 构建 wheel；
-3. 断言解释器可以加载 SQLite 扩展；
-4. `ruff check` 与 `ruff format --check`；
-5. `pyright`；
-6. 默认测试车道；
-7. 端到端车道。
+测试车道、CI 矩阵、项目结构和 plugin 注册表见 [SDD.md](SDD.md) 第 13 节和附录 B。
 
 ## 已知限制
 

@@ -28,25 +28,22 @@ own (presence publishing stays inside the SDK, untouched); the outbound
 client (identifier ``{org}/{unit}/{agent}-out``) only subscribes discovery
 + our reply sessions and publishes requests — never presence.
 
-**One mesh per member, in a process that serves several.**  v1's identity *was*
-the process: `--agent` named the MQTT client id, so there was one of these.  Here
-the plugin holds one per member it serves, and everything below is unchanged by
-that — the collision check, the two client ids and the topic namespace are all
-keyed by the name this object was built with.  What the name *is* comes from the
-caller's client id rather than from the config, which is why it is a constructor
-argument here and a config field in v1.  **A member is either the agent or one of
-its subagents**: the second is a peer on the *local* network and only there, so
-it is a client id's second half — the two arguments below — and the name it
-answers as is the one it is addressed by.
+**One mesh per member, in a process that serves several.**  The plugin holds one
+per member it serves, and everything below follows from that — the collision
+check, the two client ids and the topic namespace are all keyed by the name this
+object was built with.  What the name *is* comes from the caller's client id
+rather than from the config, which is why it is a constructor argument.  **A
+member is either the agent or one of its subagents**: the second is a peer on
+the *local* network and only there, so it is a client id's second half — the two
+arguments below — and the name it answers as is the one it is addressed by.
 
 **What puts an agent on the mesh is somebody being there.**  One of these is
 connected because a window is showing that agent — `slife2.tui.client.MeshClient`
 holds the call that says so, and cancelling it is the departure, so the card and
 the last will are both honest about when the agent left — or because an `a2a_*`
 call needed the mesh and kept it for as long as the task it started may still be
-answered.  v1's plugin *was* the agent's process, so its lifetime settled this by
-construction; a shared process has to decide, and `slife2.plugins.a2a.server`'s `join`
-is where it is decided.
+answered.  A shared process has to decide, and `slife2.plugins.a2a.server`'s
+`join` is where it is decided.
 
 **A subagent's place is the third case, and it is the plugin's own.**  Nobody is
 watching a subagent and nothing of its own ever reaches for the mesh, so the
@@ -54,11 +51,11 @@ place is held for it by the one party that knows it is wanted: the maker's next
 message, which cannot be delivered to a name nobody is listening for.  So
 `slife2.plugins.a2a.server.place_for` gives the receiver its place before it
 publishes — once, for the rest of the process — and this object is what it holds
-(DESIGN.md §6.6, "the road").
+(SDD §4.5, "the road").
 
-The timeouts are v1's numbers, and they are module constants rather than v1's
-`slife.timeouts` registry: that registry existed so a value could be re-read at
-call time in a long-lived harness process, and nothing here wants one.
+The timeouts are module constants rather than a `slife.timeouts` registry,
+because a value re-read at call time is something a long-lived harness process
+can want and this module does not.
 """
 
 from __future__ import annotations
@@ -103,9 +100,9 @@ _MAX_INFLIGHT = 16
 #: ``build_card`` nests extensions under ``capabilities.extensions``.
 _INSTANCE_EXT = "instance"
 
-# How long `connect()` waits for both connections to be live.  A broker probe
-# ran before this in v1; here the caller has already decided the machine is on
-# the mesh, so a failure to connect is reported by this deadline.
+# How long `connect()` waits for both connections to be live.  The caller has
+# already decided the machine is on the mesh, so a failure to connect is
+# reported by this deadline.
 
 # How long the pre-join name probe listens for a retained card.  MQTT has no
 # end-of-retained marker, so silence within this budget *is* the answer "no
@@ -158,12 +155,12 @@ def member_name(agent: str, subagent: str = "") -> str:
 class FIFOCache(dict):
     """A dict that forgets its oldest entry past a cap.
 
-    v1 took this from `cachetools`; this project does not declare a dependency
-    for a dict and a cut-off (`slife2.plugins.wechat.server`'s `Window` makes the same call
-    about v1's `TTLCache`).  A `dict` is insertion-ordered, so the oldest key is
+    This project does not declare a dependency for a dict and a cut-off
+    (`slife2.plugins.wechat.server`'s `Window` makes the same call about
+    `TTLCache`).  A `dict` is insertion-ordered, so the oldest key is
     always `next(iter(self))` and the eviction is one line — and the API the mesh
-    uses (`[]=`, `get`, `pop`, `values`, `clear`, `len`) is `dict`'s own, which is
-    what lets the ported code below stay as it was written.
+    uses (`[]=`, `get`, `pop`, `values`, `clear`, `len`) is `dict`'s own, so the
+    code below needs no adapter.
     """
 
     def __init__(self, maxsize: int) -> None:
@@ -178,11 +175,11 @@ class FIFOCache(dict):
 
 # ── Card: who a peer is, and what may be printed about it ───────────────
 #
-# v1 kept this in `a2a/card.py`, apart from the mesh, because the TUI and the
-# per-turn prompt both imported it.  Neither reader survives the port — the TUI
-# draws a `PeerAgent(<peer>)> ` bubble from the channel, and a presence *change* now
-# reaches the model as a message — so the two things this project actually uses,
-# the record and the scrubber, are here beside the code that produces them.
+# The card sits beside the mesh rather than in a module of its own, because no
+# reader needs it apart from the mesh — the TUI draws a `PeerAgent(<peer>)> `
+# bubble from the channel, and a presence *change* reaches the model as a
+# message — so the two things this project actually uses, the record and the
+# scrubber, are here beside the code that produces them.
 
 AgentName = NewType("AgentName", str)
 """Identifies an agent by its name — the mesh identity, and the MQTT client id."""
@@ -224,10 +221,9 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     (``"status_change"`` — a heartbeat from an already-known peer) so callers can
     filter them out.
 
-    **The words are v1's and the trailing status is not.**  v1 wrote
-    ``⚡ jill online [online]`` because its line was also read by a model, which
-    was told the wire's status verbatim; here the only reader is a window, and
-    ``online`` twice in one line is a fact the first word already carries.  What
+    **The words are for a window, and the trailing status is left out.**  The
+    line's only reader is a window, so the wire's status verbatim would put
+    ``online`` twice in one line — a fact the first word already carries.  What
     a peer *is* on the wire is still in the card and still decides whether this
     is a transition at all (`_handle_discovery`); it is not shown.
 
@@ -261,7 +257,7 @@ def _decode_payload(msg) -> dict | None:
     """Decode an MQTT payload to JSON; ``None`` when there is nothing to read.
 
     **An empty payload and a corrupt one are not the same answer**
-    (DESIGN.md §11.1).  An empty body is how a publisher retires a card
+    (SDD Appendix C).  An empty body is how a publisher retires a card
     (``_handle_discovery``), so it is ``None`` without a word.  A body that is
     not JSON is somebody else's process sending this build something it cannot
     read, and the caller drops it either way — so a silent ``None`` left the
@@ -569,7 +565,7 @@ def _reply_state(data: dict) -> str:
     more input" ends its requester ladder here; this system has no way to
     continue an interrupted task, so such a reply is recorded as `failed` and
     read that way — the honest ending available, and the same word the store's
-    row carries (DESIGN.md §10, "an interrupted peer task").
+    row carries (SDD §14.2, "an interrupted peer task").
     """
     result = data.get("result") or {}
     status = result.get("statusUpdate", {}).get("status", {})
@@ -796,8 +792,8 @@ class A2AMesh:
 
         Returns a description of the claim, or ``None`` when the name is free.
 
-        **A probe that failed is not a probe that found nothing** (DESIGN.md
-        DESIGN.md §11.1).  A connection that could not be made or read used to be
+        **A probe that failed is not a probe that found nothing** (SDD
+        SDD Appendix C).  A connection that could not be made or read used to be
         swallowed at debug and answered ``None``, which reads as "the name is
         free" — the one verdict this check exists to give, and the one it must
         never guess: a duplicated name means every task sent to it runs twice.
@@ -960,14 +956,14 @@ class A2AMesh:
         `UNREACHABLE` and not one of the three peer verdicts, because no peer
         said anything: this is the requester's failure, and rendering it as an
         answer is the confident negative `slife2.libs.turn.loop` would act on
-        instead of re-sending (DESIGN.md §11.1).  The words do not claim what
+        instead of re-sending (SDD Appendix C).  The words do not claim what
         cannot be known — the ladder had not run out, so whether the peer has the
         message is exactly what is unknown.
 
         **The record is left alone, and that is `_deliver`'s rule rather than an
         omission.**  No reply arrived, so the peer's real ending is unknown, and
         a row marked `failed` would be a verdict this process has no business
-        giving (DESIGN.md §11.1).  The correlation routes do go with the teardown, so a
+        giving (SDD Appendix C).  The correlation routes do go with the teardown, so a
         terminal reply from a peer that did receive the message lands as
         `a2a_reply_unknown_corr` — which is the second thing the notice says: the
         sender has to send it again.
@@ -1412,7 +1408,7 @@ class A2AMesh:
         envelope is told it is a failure so it is not rendered as an answer.
         The store record is deliberately left alone: no reply arrived, so the
         peer's real ending is unknown, and marking the row `failed` would be a
-        verdict this process has no business giving (DESIGN.md §11.1).  Left
+        verdict this process has no business giving (SDD Appendix C).  Left
         `pending`, a late terminal still routes — the ``finally`` below keeps
         every correlation for exactly that — and records the true outcome.
 

@@ -192,7 +192,7 @@ async def test_tool_call_runs_and_feeds_back() -> None:
 
 
 async def test_a_harness_tool_is_called_through_the_registry() -> None:
-    """v1's auto-invoke: the *same* path the model's own calls take.
+    """The auto-invoke: the *same* path the model's own calls take.
 
     The point is where the pair's text comes from.  The harness names a tool and
     the loop runs it out of `self._tools` — the registry whose `specs` went out
@@ -217,7 +217,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     def auto() -> AutoCall | None:
         """Asked at the top of *every* iteration; delivers once, on the second.
 
-        The gate is the caller's, and it is the cheap half of v1's split: whether
+        The gate is the caller's, and it is the cheap half of the split: whether
         anything arrived is answerable without a call, and which tool answers it
         is this side's business only because there is one.
         """
@@ -272,8 +272,8 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
         "assistant",
         "tool",
     ]
-    # Nobody watching is shown a tool call for it: v1 routes around the
-    # tool-execution path, so the reader sees the model's `c1` and no other.
+    # Nobody watching is shown a tool call for it: the auto-invoke routes around
+    # the tool-execution path, so the reader sees the model's `c1` and no other.
     assert [
         event.call_id for event in observer.events if isinstance(event, ToolCallStarted)
     ] == ["c1"]
@@ -371,7 +371,7 @@ async def test_the_step_travels_with_the_call() -> None:
     """The panel's counter is built from the event, so the loop has to send it.
 
     Two tool calls in two iterations, the second of which ends the turn: the pair of
-    numbers v1 showed beside a running tool (`(3/30)`) is these two fields, and
+    numbers shown beside a running tool (`(3/30)`) is these two fields, and
     the loop is the only thing that knows both.
     """
     backend = FakeBackend(
@@ -442,7 +442,7 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
     guarantees is that nothing half-written is in the list; what happens to that
     trailing user message is the owner's decision, and the owner is the agent
     server — which keeps it, and records it, because losing it is the failure
-    the whole loop design exists to prevent.  See DESIGN.md §2.5.
+    the whole loop design exists to prevent.  See SDD §5.6.
     """
     backend = FakeBackend(
         text_turn(
@@ -719,8 +719,8 @@ async def test_cancelling_a_finished_background_call_keeps_its_result() -> None:
     did not provably land (`Task.delivered`/`result`), and `cancel_async` reaches
     that very state whenever it is called *after* the work is over.  Answering
     the state alone and popping the task would throw that result away — the one
-    copy of an answer nobody can ask for a second time — which is `DESIGN.md`
-    DESIGN.md §4.6's "the alternative to returning it is losing it", and losing it in
+    copy of an answer nobody can ask for a second time — which is `SDD
+    SDD §7.7's "the alternative to returning it is losing it", and losing it in
     silence is the worse of the two.  So the answer carries it, exactly as
     `check_async` would have: `status` says the call was already over (and so
     that *this* call cancelled nothing), and `result` is the answer itself.

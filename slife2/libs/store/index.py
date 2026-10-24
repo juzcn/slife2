@@ -27,7 +27,7 @@ tables exists to make room for one, and there is no migration layer: a table
 that does not match what the configuration now says (a different normalization
 rule, a different model, a different width) is dropped and built again, which is
 what `rebuild_vector_index` does and what `vector_identity` decides. The cost is
-paid at startup rather than carried as an upgrade path (DESIGN.md §5.2).
+paid at startup rather than carried as an upgrade path (SDD §8.2).
 
 **Embeddings are a hard dependency, not a feature flag.** A row is written with
 its vectors in one transaction, so a write that cannot embed writes nothing —
@@ -311,7 +311,7 @@ def _rowid(cursor: sqlite3.Cursor, *, what: str) -> int:
     an INSERT that did not happen used to leave several rows agreeing on `0` —
     a turn nothing could ever find, in an index that counted as complete.
     `lastrowid` is `None` only when the statement recorded nothing, which is a
-    fault rather than a case to carry on from (DESIGN.md §11.1).
+    fault rather than a case to carry on from (SDD Appendix C).
     """
     rowid = cursor.lastrowid
     if rowid is None:
@@ -484,8 +484,8 @@ def vector_ddl(dimension: int, table: str = "turn_vec") -> str:
     the reason is not preference.  It decides whether `1 - distance` is a
     similarity at all: a backend does not have to return unit-norm vectors, so
     on an L2 table that arithmetic yields numbers that are plausible and wrong
-    rather than visibly broken.  v1 shipped that bug — distances past 18, every
-    strong hit clamped to zero similarity — and the fix was this clause.
+    rather than visibly broken.  Without this clause, distances past 18 clamp
+    every strong hit to zero similarity; declaring the metric is the fix.
 
     The accepted spelling was checked against the installed extension rather
     than its documentation, which describes itself as a work in progress.
@@ -923,8 +923,7 @@ def meanings_by_cosine(
 # --- fusing the two legs ------------------------------------------------------
 
 #: The fusion's constant: how quickly rank stops mattering.  Sixty is the value
-#: the literature uses and v1 shipped; nothing about this store is a reason to
-#: differ.
+#: the literature uses; nothing about this store is a reason to differ.
 RRF_K = 60
 
 

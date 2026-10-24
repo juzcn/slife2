@@ -1,9 +1,9 @@
 """The widgets the TUI is made of.
 
-The design is slife v1's, ported: a low-chrome dark transcript, borderless
-messages marked by a bold amber prefix, tool calls as collapsible bordered
-panels, and a single dim status row.  What follows is what is load-bearing about
-it, because most of these choices look arbitrary until you change one.
+The design is a low-chrome dark transcript, borderless messages marked by a
+bold amber prefix, tool calls as collapsible bordered panels, and a single dim
+status row.  What follows is what is load-bearing about it, because most of
+these choices look arbitrary until you change one.
 
 **Nothing the model produces is parsed as markup.**  Every string that came from
 a model, a tool or a user goes through `Text(...)`, which does not interpret
@@ -31,7 +31,7 @@ height that is already out of date by the time it lands.
 is opened by whatever has something to put in it — the first delta, a resumed
 stream after a tool panel, the final answer — so a signature painted
 unconditionally leaves a bare `slife2>` row in the transcript for every
-iteration that has only reasoning to show.  slife v1 signs the message, not the
+iteration that has only reasoning to show.  The message is signed, not the
 widget.
 """
 
@@ -170,11 +170,11 @@ def channel_prefix(channel: str) -> str:
     """What a turn's channel is called on screen.
 
     **One function, and every reader of a channel asks it** — the live prompt and
-    the rebuild both go through :meth:`ChatView.add_user` — which is v1's
-    arrangement (`Channel.display_prefix`): a prefix decided in two places is two
-    answers to "who said this", and the disagreement surfaces on the screen,
-    where nobody can tell which one is wrong.  Which channels are the person's
-    own is :func:`is_own_channel`, asked here rather than spelled again.
+    the rebuild both go through :meth:`ChatView.add_user`: a prefix decided in
+    two places is two answers to "who said this", and the disagreement surfaces
+    on the screen, where nobody can tell which one is wrong.  Which channels
+    are the person's own is :func:`is_own_channel`, asked here rather than
+    spelled again.
 
     `tui` is this window, so its turns are the person's own and read `You> `.
     An absent channel is read the same way, because the only rows without one are
@@ -182,8 +182,8 @@ def channel_prefix(channel: str) -> str:
 
     Anything else is a name that already exists in the conversation — the key a
     plugin runs under, or a worker's — and it is shown as itself.  `wechat` keeps
-    v1's spelling of its bubble rather than the key's (`Wechat> `): a
-    conversation that reads the same in both builds is one less thing to relearn,
+    its own spelling of its bubble rather than the key's (`Wechat> `): a
+    conversation that reads the same everywhere is one less thing to relearn,
     and the footnote beside the message still carries the key it really came in
     on.
     """
@@ -208,7 +208,7 @@ def channel_prefix(channel: str) -> str:
         # The clock, and which task came due.  **There is no marker to take off
         # here** — unlike an agent task's answer, a trigger wears none, because
         # the marker vocabulary is for matching a result to what produced it and
-        # a trigger is not a result (DESIGN.md §6.5).  So what the channel
+        # a trigger is not a result (SDD §9.4).  So what the channel
         # carries is the *whole* of what the window can say about where this came
         # from, which is why every message this plugin hands over names a task —
         # including the reconciliation, which is sent per task for this reason.
@@ -251,7 +251,7 @@ def channel_prefix(channel: str) -> str:
         return f"{LOCAL_AGENT.bubble}({channel.split(':', 1)[1]})> "
     # Every other channel is a name that already exists in the conversation, and
     # it is shown as it is rather than guessed at, since a guess here would be
-    # this window inventing a speaker (DESIGN.md §6.4).
+    # this window inventing a speaker (SDD §9.3).
     return f"{channel}> "
 
 
@@ -267,7 +267,7 @@ def _timestamp(when: datetime | str | None = None) -> str:
     `now` a caller gets for an *absent* moment is the live path's — a message
     that is arriving has no other moment to carry — and a damaged record was
     falling into it, so yesterday's turns wore the moment the window opened
-    (DESIGN.md §2.4: a window that stamped everything now "would render every
+    (SDD §5.5: a window that stamped everything now "would render every
     restored conversation as one undivided block stamped now").  A string that
     is not a moment answers `""`, which `add_user` draws as no stamp at all.
     """
@@ -531,9 +531,7 @@ class ChatView(VerticalScroll):
         own span rather than found in the text and restyled, which is what keeps
         this widget free of the escaping rules a marker needs: the text a person
         typed is one piece and the metadata is another, and neither has to be
-        parsed back out of a string.  v1 reaches the same picture from the other
-        side, wrapping the footnote in `[INFO: …]` for the model and unstyling it
-        again for the screen.
+        parsed back out of a string.
 
         `channel` is where the turn came in on, and it is asked for here rather
         than passed in as a prefix so that the two things the screen does with it
@@ -574,7 +572,7 @@ class ChatView(VerticalScroll):
         **Why this exists at all.**  A cut-in is written into the conversation as
         a harness tool pair, so a display with no vocabulary for it could only
         draw a tool panel (which it is not) or nothing (which is what the
-        transcript did while this was deferred, DESIGN.md §10).  The words are
+        transcript did while this was deferred, SDD §14.2).  The words are
         already in the record; this is the line that says so while they arrive.
         """
         self._close_block()
@@ -1022,8 +1020,8 @@ class AssistantMessage(Static):
             # each tool panel when reasoning or text resumes — so a signature
             # painted at construction leaves a bare `slife2>` row in the
             # transcript for every iteration that has only reasoning to show:
-            # one per tool call, on a reasoning model.  slife v1 signs the
-            # message, not the widget.
+            # one per tool call, on a reasoning model.  The message is signed,
+            # not the widget.
             if self._agent:
                 line.append(f"{self._agent}> ", f"bold {PALETTE['amber-bold']}")
             line.append(self._text, PALETTE["text"])
@@ -1139,8 +1137,8 @@ class ToolCallWidget(VerticalScroll):
         line.append("  ")
         line.append(word, colour)
         if self._iteration > 0:
-            # Which iteration of the turn asked for this, in v1's two
-            # spellings: a bare `(3)` while `max_iterations` is 0 — no cap, so
+            # Which iteration of the turn asked for this, in two spellings:
+            # a bare `(3)` while `max_iterations` is 0 — no cap, so
             # there is no denominator to write — and `(3/30)` under one.  Either
             # way a long turn is visibly advancing, which is the whole of what
             # the counter is for; a panel with no iteration to report (a rebuilt
@@ -1453,9 +1451,9 @@ class ModelChoice:
 class ModelPicker(Static):
     """The models this config defines, inline in the transcript.
 
-    slife v1's picker, ported as it was: `↑`/`↓` move a cursor, `Enter` picks,
-    `Esc` cancels, the row re-renders itself to a status line once decided, and
-    the caller mounts it, focuses it and awaits the future it was handed.  The
+    The interaction is fixed: `↑`/`↓` move a cursor, `Enter` picks, `Esc`
+    cancels, the row re-renders itself to a status line once decided, and the
+    caller mounts it, focuses it and awaits the future it was handed.  The
     cursor opens on the model the conversation is already on, so a bare `Enter`
     is a no-op rather than a surprise.  **A conversation on a model this list
     does not offer has no such row**, so the cursor starts under nothing, the row
@@ -1762,9 +1760,8 @@ class ApprovalPrompt(Static):
 
     The model asked to be checked before a call ran (`_approve`), the loop is
     parked on the answer, and this row is the question: which tool, what it would
-    be called with, and the keys that answer.  v1's row in v2's clothes — a row in
-    the transcript rather than a modal, so the question and the answer sit
-    together in the history.
+    be called with, and the keys that answer.  A row in the transcript rather
+    than a modal, so the question and the answer sit together in the history.
 
     **The bindings are `priority`, and the `TextArea` below is why** — the
     picker's reason, one keystroke further: without them `y` and `n` would be
@@ -1774,21 +1771,22 @@ class ApprovalPrompt(Static):
 
     **A decided row stays, as its status line.**  The panel for the tool itself
     is mounted *after* an approval and never for a refusal, so this line is the
-    only place a refused call is ever seen — which is v1's arrangement and the
-    reason the denial is drawn here rather than as a tool result.
+    only place a refused call is ever seen — which is why the denial is drawn
+    here rather than as a tool result.
 
     **Losing focus does not answer, and that is where this parts from the
     picker.**  A picker that loses focus is a question abandoned and resolves
     itself (see `ModelPicker`), but this row is blurred by the two things that
     take focus on purpose: every printable key, which `redirect_printable` lands
-    in the prompt, and `Ctrl+S`, which opens the picker over it.  v1's rule read
-    that blur as "no", so a person who merely began their next thought — an `a`,
-    a paste, the `s` of `Ctrl+S` — silently refused the call the model was parked
-    on, and then watched the picker `Ctrl+S` had opened cancel itself off the
-    refocus that answer set off.  So there is deliberately **no `on_blur`
-    override here**: the row stays up and `pending`, and the answers are the keys
-    (`y`, `n`, `Esc`) or a cancel of the turn, which denies the call it holds
-    (`slife2.tui.app._cancel_turn`) rather than leaving a future nobody will set.
+    in the prompt, and `Ctrl+S`, which opens the picker over it.  Reading that
+    blur as "no" means a person who merely began their next thought — an `a`,
+    a paste, the `s` of `Ctrl+S` — silently refuses the call the model was
+    parked on, and then watches the picker `Ctrl+S` had opened cancel itself
+    off the refocus that answer set off.  So there is deliberately **no
+    `on_blur` override here**: the row stays up and `pending`, and the answers
+    are the keys (`y`, `n`, `Esc`) or a cancel of the turn, which denies the
+    call it holds (`slife2.tui.app._cancel_turn`) rather than leaving a future
+    nobody will set.
     """
 
     can_focus = True
@@ -1816,7 +1814,7 @@ class ApprovalPrompt(Static):
         self._decide(True)
 
     def action_deny(self) -> None:
-        """Refuse it — `n` and `Esc` are the same answer, as they were in v1."""
+        """Refuse it — `n` and `Esc` are the same answer."""
         self._decide(False)
 
     @property
@@ -2001,8 +1999,8 @@ class StatusBar(Static):
         # **What is named here is what reaches the app in every terminal, and
         # that is the whole test.**  ctrl+c is the one control key nothing
         # intercepts, and it is what a person reaches for to leave; ctrl+s is
-        # v1's for the switch, "s" for switch, and it is not ctrl+g because VS
-        # Code keeps that one; ctrl+o is the picker, "o" for open, and no
+        # for the switch, "s" for switch, and it is not ctrl+g because VS Code
+        # keeps that one; ctrl+o is the picker, "o" for open, and no
         # terminal claims it.  Ctrl+Q would quit too — Textual binds it — and
         # it is deliberately not named: a terminal with flow control eats it as
         # XON, so the bar would be promising a key that arrives nowhere.  A bar

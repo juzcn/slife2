@@ -11,13 +11,13 @@ the other.
 The two indexes over these turns are `slife2.libs.store.index`'s, which is the same
 machinery the catalogue and the cabinet are searched by.
 
-The schema is slife v1's, minus one column.  This module originally had a `turns`
-table of its own invention — `(id, agent, created_at, prompt, messages, model,
-usage, steps)` — and it was the wrong shape in ways that only show up later: one
-column for two different token counts, one column for two different moments, and
-no place for the reasoning at all.  v1's design has answers to those, arrived at
-by use.  The exception is `user_message`, which v1 keeps beside the assistant's
-half and which is not a column here at all — see below.
+The schema separates the facts the first `turns` table conflated.  This module
+originally had a `turns` table of its own invention — `(id, agent, created_at,
+prompt, messages, model, usage, steps)` — and it was the wrong shape in ways that
+only show up later: one column for two different token counts, one column for two
+different moments, and no place for the reasoning at all.  The columns here
+answer those, arrived at by use.  There is no `user_message` column beside the
+assistant's half — see below.
 
 **One row is one turn**: what the user said, and everything the agent did about
 it.  Turns are independent — no session grouping, no lifecycle.  Nothing here
@@ -183,7 +183,7 @@ def database_path(agent: str, subagent: str = "") -> Path:
 
     **One file per id, not a column.**  Isolation as a property of the filesystem
     beats isolation as a `WHERE` clause somebody can forget to write — the same
-    argument DESIGN.md §5.1 makes for agents, applied one level down.
+    argument SDD §8.1 makes for agents, applied one level down.
 
     **A non-fork subagent's store is its own directory**,
     `agents/<agent>/subagents/<subagent>/`, because a subagent is an agent that
@@ -243,12 +243,11 @@ class TurnRecord:
     def to_listing(self, chars: int = PREVIEW_CHARS) -> dict[str, Any]:
         """One row of a browse: enough to choose from, and not the turn.
 
-        **The two halves of the exchange, which no column holds.**  v1 keeps the
-        user's message in a column of its own and lists the rows straight out of
-        SQL; slife2 stores the turn as the list of messages the model saw, so
-        what was asked is `messages[0]` and what was answered is the last
-        assistant message in it.  Reading them back is this module's job and not
-        the tool's, because this is the module that knows what a turn is.
+        **The two halves of the exchange, which no column holds.**  slife2 stores
+        the turn as the list of messages the model saw, so what was asked is
+        `messages[0]` and what was answered is the last assistant message in it.
+        Reading them back is this module's job and not the tool's, because this
+        is the module that knows what a turn is.
 
         The cut is **announced** (`…`), for the reason the tool-result digest
         announces itself: a message that reads as short is a message the caller
@@ -388,9 +387,8 @@ CREATE TABLE IF NOT EXISTS index_meta (
 );
 
 -- The **live context**: which of this file's turns the conversation is
--- currently made of, in order.  v1 kept the same list in `turn_meta` under
--- `context_turns`, and it is the same idea — a selection over the turn log, not
--- a property of any turn, which is why it is a second table and not a column.
+-- currently made of, in order.  It is a selection over the turn log, not a
+-- property of any turn, which is why it is a second table and not a column.
 --
 -- **`id` is pinned to 1, and that is the schema saying what a file is.**  There
 -- is one conversation per file (the client id *is* the filename), so there is
@@ -902,10 +900,9 @@ class TurnStore:
         transaction held across a call to a model holds SQLite's write lock for
         as long as the model takes and blocks every other writer, so "atomic"
         covers the three writes and not the call.  What it buys is the property
-        worth having: a save that raises stored nothing.  v1 moved embedding off
-        the save path because a slow embed raised an alarm about a row that had
-        in fact been stored — the complaint was the ambiguity, and there is none
-        here.
+        worth having: a save that raises stored nothing.  A slow embed on the
+        save path would raise an alarm about a row that had in fact been stored —
+        the complaint is the ambiguity, and there is none here.
         """
         stored = strip_images(messages)
         record = _Stored(
@@ -979,10 +976,10 @@ class TurnStore:
             )
             _write_vectors(connection, turn_id, vectors)
             # **The live-context list is appended here, in this transaction.**
-            # v1's rule, and the reason is the one the three writes above already
-            # answer to: a turn that is stored but not in the list is a turn the
-            # next restore silently drops, and the window in which that is true
-            # is exactly the window between two transactions.  One transaction
+            # The reason is the one the three writes above already answer to: a
+            # turn that is stored but not in the list is a turn the next restore
+            # silently drops, and the window in which that is true is exactly the
+            # window between two transactions.  One transaction
             # means there is no such window — a process that dies mid-save
             # leaves either both or neither.
             append_context(connection, turn_id)
@@ -1108,7 +1105,7 @@ class TurnStore:
 
         The caller is the party that decided, and `[]` is one of the things it
         may decide — see `write_context` for why this store does not refuse an
-        empty list the way v1's does.
+        empty list.
         """
         with self._connect() as connection:
             return write_context(connection, turn_ids)
@@ -1264,7 +1261,8 @@ class TurnStore:
         **What is returned is ranked pairs, not a selection.**  The count, the
         similarity floor and the token budget are the *caller's* — they depend on
         a model's window and on what the decision kept, neither of which this
-        store knows — and the split is v1's: the store ranks, the policy caps.
+        store knows — and the split is deliberate: the store ranks, the policy
+        caps.
 
         The similarity is `None` for a turn only the keyword leg found, and that
         it is `None` rather than `0.0` is load-bearing: a fused score is a
@@ -1822,7 +1820,7 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     difference is not academic: `append_context` reads this list and appends to
     it, so a damaged list read as `[]` becomes a **one-turn context** on the
     next save, permanently and without a word.  `_structural` is the refusal,
-    and DESIGN.md §11.1 is the rule it follows.
+    and SDD Appendix C is the rule it follows.
     """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
@@ -1833,19 +1831,18 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
 def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:
     """Replace the live-context list, and answer with what was written.
 
-    **One operation, not four.**  v1 has `set`, `drop`, `clear` and a read-modify
-    -write on the save path because its list is edited from four places that each
-    know one thing; here every editor already holds the whole list it wants next
-    (a rebuild has the selection, a trim has the survivors, a reset has nothing),
-    so the operation they all want is "this is the list now" and the other three
-    would be spellings of it.  The save's *append* is the one exception, and it
-    lives in `append_context` where the transaction is.
+    **One operation, not four.**  Every editor already holds the whole list it
+    wants next (a rebuild has the selection, a trim has the survivors, a reset
+    has nothing), so the operation they all want is "this is the list now";
+    `set`, `drop`, `clear` and a read-modify-write on the save path would be four
+    spellings of it.  The save's *append* is the one exception, and it lives in
+    `append_context` where the transaction is.
 
-    **An empty list is a legitimate list**, which is the half v1's `set` refuses:
-    there, a guard protects a *partial* selection from being mistaken for a
-    deliberate one.  Here the caller has already made the decision — "none of
-    them" is one of the three things `context` can say — and a store that
-    second-guessed it would turn the one explicit clear into an error.
+    **An empty list is a legitimate list.**  A guard protecting a *partial*
+    selection from being mistaken for a deliberate one has nothing to protect
+    against here: the caller has already made the decision — "none of them" is
+    one of the three things `context` can say — and a store that second-guessed
+    it would turn the one explicit clear into an error.
     """
     written = normalise_ids(turn_ids)
     connection.execute(
@@ -1923,7 +1920,7 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     the question that tells them apart is what the empty value *means*: here it
     means "this one turn's body is unreadable", which is a smaller claim than
     the damaged value made.  There it means something the damage did not
-    (DESIGN.md §11.1).
+    (SDD Appendix C).
 
     **The *shape* is damage too, and it is the half that was missing.**  A
     stored value that parses to a string, a number, or a list of strings is

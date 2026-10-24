@@ -170,7 +170,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         """The model listing, and nothing else.
 
         Not decoration: the embeddings server *refuses* a model whose endpoint
-        reports no input limit rather than guessing one (DESIGN.md §11.1), and
+        reports no input limit rather than guessing one (SDD Appendix C), and
         the limit is one field of this listing.  A stub that 404s here makes the
         context daemon fail at startup — which is exactly what it did, and the
         refusal named this route.

@@ -114,9 +114,9 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
 
     **Two forms and neither one is fetched here.**  A `data:` URL becomes a
     base64 source; a remote `http(s)` URL becomes a `url` source, which Anthropic
-    downloads on its own side — v1 did exactly this, and it is why the capability
-    does not belong to this process: no request leaves this one, and there is no
-    address a prompt could aim at this machine.
+    downloads on its own side — and that is why the capability does not belong
+    to this process: no request leaves this one, and there is no address a
+    prompt could aim at this machine.
 
     (This function used to refuse a remote URL, on the argument that fetching one
     was a capability this plugin should not have.  The premise was wrong for this
@@ -128,7 +128,7 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     bytes to read.  Both are *named* when they are dropped — one by its scheme,
     the other by the type it claimed — for the reason the unrecognised part type
     one function up is named: an attachment that vanishes without a word is the
-    failure this module cannot see from inside (DESIGN.md §11.1).
+    failure this module cannot see from inside (SDD Appendix C).
     """
     url = (raw or {}).get("url") if isinstance(raw, dict) else None
     if not isinstance(url, str) or not url:
@@ -192,7 +192,7 @@ def to_anthropic_messages(
             # **Taken, and not dropped**: reading only `str` content meant a
             # system turn carrying blocks contributed nothing at all, with no
             # word anywhere — a prompt the caller wrote left the request
-            # (DESIGN.md §11.1).  The blocks are built by the same converter the
+            # (SDD Appendix C).  The blocks are built by the same converter the
             # other roles use, so a `str` is one text block and a list is what
             # it says it is; a block that is not text is dropped with a warning,
             # because the API has no field to put it in.
@@ -286,7 +286,7 @@ def thinking_parameter(
     model the config says reasons, with a `max_tokens` that cannot leave a
     legal `budget_tokens`, is a configuration that cannot be satisfied — turning
     thinking off with a warning is a weaker path standing in for the capability
-    that was asked for (DESIGN.md §11.1), and the caller is told nothing either way.  So
+    that was asked for (SDD Appendix C), and the caller is told nothing either way.  So
     it raises, naming the model and the two numbers.
     """
     if not settings.reasoning or settings.thinking in ("omit", "disabled"):

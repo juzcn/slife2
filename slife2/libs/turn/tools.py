@@ -20,8 +20,8 @@ One kind of tool, and four questions
 that varies about it, which is who calls it:
 
 * a **model tool** is one the model chooses: it reads the spec and calls it;
-* a **harness tool** is LLM-visible and **auto-invoked** — v1's definition, and
-  both halves are load-bearing.  *Auto-invoked* is what makes it one: the
+* a **harness tool** is LLM-visible and **auto-invoked** — both halves are
+  load-bearing.  *Auto-invoked* is what makes it one: the
   machinery calls it on the model's behalf, at a moment the machinery decides,
   and it would be called whether or not the model ever chose it.  *LLM-visible*
   is why there are so few: the call is written into the conversation as a pair,
@@ -180,8 +180,8 @@ CHECK_NEW_INPUT = "_check_new_input"
 #: short with it (`AgentLoop.run_turn`), and a rebuilt list repairs an orphaned
 #: call with it (`slife2.libs.turn.context.consistent`).  The model reads it as
 #: the call's answer, so the two must not describe one interruption two ways.
-#: v1's sentence, verbatim, because it is a sentence in a transcript a person
-#: also reads.
+#: It is written as a plain sentence, because a person reads this transcript
+#: too.
 INTERRUPTED = "(Tool execution interrupted)"
 
 
@@ -199,11 +199,9 @@ def is_harness(name: str) -> bool:
 #
 # **Every tool takes three arguments it does not declare.**  `_timeout` says how
 # long this one call may take, `_async` says to run it in the background, and
-# `_approve` says to ask the operator first.  They are a system-prompt contract
-# and not schema fields, which is v1's decision and its reason: re-describing
-# three parameters on every one of a hundred schemas is the largest per-request
-# context tax this system could pay, and every one of those descriptions would
-# be the same sentence.
+# `_approve` says to ask the operator first.  They are schema fields rather than
+# a system-prompt contract; the section below states why, and the three are
+# optional everywhere so nothing a tool declares has to change.
 #
 # **They are reserved names, and they are read off every call.**  A tool that
 # genuinely wanted an argument called `_timeout` cannot have one — the loop
@@ -236,16 +234,15 @@ META_PARAMS = (TIMEOUT_PARAM, BACKGROUND_PARAM, APPROVE_PARAM)
 
 #: What the three look like **on the schema of every tool the model is handed**.
 #:
-#: **Schema rather than prompt, and that is the opposite of v1's choice.**  v1
-#: declared them once in the system prompt, on the argument that re-describing
-#: three parameters on sixty schemas is the largest per-request context tax the
-#: system could pay.  v2 pays it, for what the other arrangement costs: the
-#: prompt is the *operator's file* (`config.agents[x].system_prompt`), so a block
-#: the harness appended there would be one more thing an operator's own prompt has
-#: to be kept in step with — and a tool's contract belongs next to the tool, where
-#: a model reading *that* tool's arguments finds it.  The three are optional
-#: everywhere, so nothing a tool declares has to change, and the loop strips all
-#: three before dispatch (`split_meta`).
+#: **Schema rather than prompt.**  The tax is real — re-describing three
+#: parameters on sixty schemas is the largest per-request context cost the system
+#: pays — and it is paid for what the alternative would cost: the prompt is the
+#: *operator's file* (`config.agents[x].system_prompt`), so a block the harness
+#: appended there would be one more thing an operator's own prompt has to be kept
+#: in step with — and a tool's contract belongs next to the tool, where a model
+#: reading *that* tool's arguments finds it.  The three are optional everywhere,
+#: so nothing a tool declares has to change, and the loop strips all three before
+#: dispatch (`split_meta`).
 META_PROPERTIES: dict[str, Any] = {
     TIMEOUT_PARAM: {
         "type": "number",
@@ -312,9 +309,9 @@ class Meta:
     #: said", not "no bound" and not zero.  `bind_timeout` is what turns None
     #: into a decision, and the decision is the tool's own if it declares one.
     timeout: float | None
-    #: Run it in the background.  Truthiness, not a strict boolean: v1's rule,
-    #: and the safe direction — `"false"` is a string, and backgrounding a call
-    #: the model meant to wait for is recoverable where the reverse is not.
+    #: Run it in the background.  Truthiness, not a strict boolean, and the safe
+    #: direction — `"false"` is a string, and backgrounding a call the model
+    #: meant to wait for is recoverable where the reverse is not.
     background: bool
     #: Ask before running.  Truthiness for the same reason, and it fails the
     #: same safe way: anything the model wrote that is not empty asks.
@@ -346,8 +343,8 @@ def parse_timeout(value: Any) -> float | None:
 
     None means "nobody said" and covers every way of saying nothing: the
     argument absent, `None`, zero-or-negative, text that is not a number, and a
-    number with no end to it.  v1's rule, and the reason it is a rule rather
-    than a convenience: the tool reading `timeout=0` into `wait_for(..., timeout=0)`
+    number with no end to it.  The reason it is a rule rather than a
+    convenience: the tool reading `timeout=0` into `wait_for(..., timeout=0)`
     fires *instantly*, so a pass-through zero would be the exact opposite of the
     "0 = no bound" the prompt promises.
 
@@ -373,8 +370,8 @@ def parse_timeout(value: Any) -> float | None:
 def declares_timeout(spec: ToolSpec | None) -> bool:
     """Whether a tool takes its own `timeout` argument.
 
-    A property-name check on the schema, which is v1's test.  What it decides is
-    who enforces the deadline: a tool that declares one enforces it itself (it
+    A property-name check on the schema.  What it decides is who enforces the
+    deadline: a tool that declares one enforces it itself (it
     is the only party that knows what it is waiting for), and the loop must not
     wrap it — a second timer is a second answer to one question, and the shorter
     of the two would be the one that fired.
@@ -401,8 +398,8 @@ def bind_timeout(
     * **The tool does not** — a bare `timeout` the model appended anyway is read
       as the per-call bound and taken out of the arguments, because a tool
       server validates its parameters and would reject the whole call with
-      "Unexpected keyword argument" — v1 measured that, and a turn that dies
-      over one extra key is the worst possible price for a good intention.  The
+      "Unexpected keyword argument" — and a turn that dies over one extra key
+      is the worst possible price for a good intention.  The
       answer is the number the loop should enforce, or None when nobody asked.
 
     Either way `arguments` is what the tool will be dispatched with.
@@ -412,7 +409,7 @@ def bind_timeout(
             # int(), so a sub-second request truncates — and a request that
             # truncates to 0 is dropped rather than forwarded, because the
             # tools that read this argument document "0 = your default" and one
-            # of them would fire instantly on it (v1's B2/B3).
+            # of them would fire instantly on it.
             whole = int(asked)
             if whole > 0:
                 arguments["timeout"] = whole
@@ -424,7 +421,7 @@ def bind_timeout(
             # instead of a zero that means "instantly".  Text that is not a
             # number is left alone — it is schema-valid, the tool is the party
             # that will read it, and its own complaint is a better answer than
-            # this module's guess (v1's rule, kept).
+            # this module's guess.
             try:
                 bare = float(arguments["timeout"])
             except (TypeError, ValueError):

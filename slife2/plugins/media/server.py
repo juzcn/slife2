@@ -1,13 +1,13 @@
 """slife2-media — generation: an image, a video, speech, and a transcript.
 
-v1's `media` plugin, and the four capabilities are the whole of it:
+The `media` plugin, and the four capabilities are the whole of it:
 
     generate_image      draw a picture from a prompt
     generate_video      render a video, optionally from one
     text_to_speech      say something out loud
     transcribe_audio    write down what an audio file says
 
-**A plugin, by DESIGN.md §1.1's own table.**  It holds a provider's key and speaks to
+**A plugin, by SDD §2.4's test.**  It holds a provider's key and speaks to
 somebody else's endpoint, so it is a process rather than a library — the same
 row of that table as the model backends and the embeddings server, and for the
 same reason: a library would put the key in every importer.
@@ -74,7 +74,7 @@ INSTRUCTIONS = (
 # ── The one bound a caller can be wrong about ────────────────────────────────
 # An image size is the argument a model gets *plausibly* wrong — "2048x2048" for
 # a model whose floor is 768 — and the vendor's own refusal arrives after the
-# call has been paid for.  v1 checked it here, with its numbers.
+# call has been paid for.  So it is checked here, against the vendor's numbers.
 
 #: Smallest and largest total pixels the vendor accepts (about 768²..4096²).
 MIN_PIXELS = 589_824
@@ -177,10 +177,10 @@ def build_server(
     """Build the media server.
 
     `adapters` is the seam, and it is the one worth having: every test of the
-    four tools drives a fake adapter — v1's tests do the same — so what is under
-    test is the *tool* half (which provider, which model, which parameters,
-    which folder) with no HTTP anywhere.  The adapters' own shapes are tested
-    against a fake transport in `tests/test_media.py`, which is the other half.
+    four tools drives a fake adapter, so what is under test is the *tool* half
+    (which provider, which model, which parameters, which folder) with no HTTP
+    anywhere.  The adapters' own shapes are tested against a fake transport in
+    `tests/test_media.py`, which is the other half.
     """
     media = Media(config, adapters=adapters)
 
@@ -396,16 +396,15 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
     this function ran the resolution *outside* the guard below.  A config with
     `api: typo` loads cleanly — the loader only requires the key to be present —
     and then failed at the first call as a raw exception instead of the
-    `[failed] …` sentence DESIGN.md §8.2 promises.  A zero-argument factory is what moves
+    `[failed] …` sentence SDD §12.2 promises.  A zero-argument factory is what moves
     the resolution inside the `try`.
 
     **The three failures are told apart**, because a person does three different
     things about them: an adapter that cannot do this at all is a config choice
     to revisit, a provider that answered badly is worth retrying, and a missing
     file is the caller's own typo.  All three reach the model as a `ToolError`,
-    which is this system's word for a tool that failed — v1 returned `"Error: …"`
-    as text, and a refusal the transcript reads as a success is the failure mode
-    that convention has.
+    which is this system's word for a tool that failed: a refusal the transcript
+    reads as a success is the failure mode that convention exists to avoid.
     """
     try:
         return await call()

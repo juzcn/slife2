@@ -1,11 +1,11 @@
 """`slife2-restapi-tools`' five tools: the model editing `rest-api:`.
 
-The same set as the MCP family, over the other section — v1's split, and what
-these tests are about is the part that is *not* the same: an API is written as a
-spec and a base URL and expanded by the config layer into a proxy command, so
-what the model writes and what the file holds are the declarative pair, and what
-follows from that is a listing that shows a spec rather than `uvx`, a credential
-stored as a reference rather than a secret, and one URL check before anything is
+The same set as the MCP family, applied to the other section.  What these tests
+are about is the part that is *not* the same: an API is written as a spec and a
+base URL and expanded by the config layer into a proxy command, so what the
+model writes and what the file holds are the declarative pair, and what follows
+from that is a listing that shows a spec rather than `uvx`, a credential stored
+as a reference rather than a secret, and one URL check before anything is
 fetched.
 """
 
@@ -91,11 +91,10 @@ def section(isolated_runtime: Path) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_an_api_is_written_as_the_spec_it_is(isolated_runtime) -> None:
-    """**The difference from v1, and from the MCP family next door.**
+    """**The difference from the MCP family next door.**
 
-    v1 wrote the expanded `uvx mcp-openapi-proxy` entry, because its config held
-    what it ran.  Here the section is declarative and the config layer expands
-    it (`_rest_api`), so the entry a model writes is the pair a person would
+    The section is declarative: the config layer expands it (`_rest_api`) into
+    the proxy command, so the entry a model writes is the pair a person would
     write — which is also the only form that survives the proxy being swapped
     for something else.
     """
@@ -124,9 +123,9 @@ async def test_the_credential_is_stored_as_a_name_and_never_as_a_value(
 ) -> None:
     """**The one place a model could put a secret into a file that gets shared.**
 
-    `api_key` is the *variable name*, as in v1 — the file keeps `${GITHUB_TOKEN}`
-    and the value stays in the credential store.  A caller that already knows
-    the syntax is not second-guessed.
+    `api_key` is the *variable name*: the file keeps `${GITHUB_TOKEN}` and the
+    value stays in the credential store.  A caller that already knows the syntax
+    is not second-guessed.
     """
     async with Client(family(isolated_runtime)) as client:
         await ask(
@@ -243,7 +242,7 @@ async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
     A `keyring:NAME` written as an API key is the shape `resolve_secret` leaves
     verbatim when `credstore` cannot be imported — its declared degrade — and the
     value then travels to somebody else's API *as the credential*
-    (DESIGN.md §11.1).  The note above is what turns that into a sentence at the
+    (SDD Appendix C).  The note above is what turns that into a sentence at the
     moment it is written, and it did not: the `keyring:` shape returned early
     with nothing to say, so the two halves of one rule disagreed and the leaking
     half was the silent one.  The rule is
@@ -279,10 +278,9 @@ async def test_a_url_that_is_not_http_is_refused_before_anything_is_fetched(
 ) -> None:
     """**The proxy child fetches the spec, so this URL is a request it makes.**
 
-    v1's check, kept for v1's reason: a `file://` URL or a scheme-less string
-    handed to `spec` is a way to make a slife2 process read something nobody
-    pointed it at — and the child does the reading, in a process nobody is
-    watching.
+    The check has a reason: a `file://` URL or a scheme-less string handed to
+    `spec` is a way to make a slife2 process read something nobody pointed it
+    at — and the child does the reading, in a process nobody is watching.
     """
     write_config(isolated_runtime)
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")
@@ -316,7 +314,7 @@ async def test_a_url_that_is_not_http_is_refused_before_anything_is_fetched(
 async def test_a_private_address_is_not_refused(isolated_runtime) -> None:
     """**The half of that check that is a decision rather than a guard.**
 
-    v1 allows private addresses on purpose — a local API is a legitimate thing
+    Private addresses are allowed on purpose — a local API is a legitimate thing
     to configure — so this pins the allowance rather than leaving it to be
     "hardened" into a block by whoever reads the check next.  A local spec is a
     spec; what is refused is a URL that is not http(s) at all.

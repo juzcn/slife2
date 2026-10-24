@@ -329,7 +329,7 @@ async def test_a_failure_in_readiness_is_not_turned_into_a_note_line(
     It reads `os.environ`, the skill's `skills:` entry and `shutil.which`, so an
     `except OSError` around the call could only ever fire for a failure nobody
     anticipated — and it turned that into a "cannot be read" line beside the
-    skill (DESIGN.md §11.1).  The guard belongs where the read is,
+    skill (SDD Appendix C).  The guard belongs where the read is,
     `skills.document`, so a failure raised from the *check* is one the caller
     sees rather than a note.
     """

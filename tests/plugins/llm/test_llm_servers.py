@@ -527,7 +527,7 @@ def test_a_system_turn_carrying_blocks_is_still_a_prompt(caplog) -> None:
     The system prompt is a string parameter here, so a system turn carrying
     content parts has to have its text taken out of them — and reading only
     `str` content meant such a turn contributed nothing at all, with no word
-    anywhere: a prompt the caller wrote left the request (DESIGN.md §11.1).  A
+    anywhere: a prompt the caller wrote left the request (SDD Appendix C).  A
     block the API has no field for is left out, and said.
     """
     system, _ = to_anthropic_messages(
@@ -1041,7 +1041,7 @@ def test_responses_a_system_turn_of_parts_contributes_its_text() -> None:
     failure.  This adapter read only `str` content, so a system turn carrying
     blocks contributed nothing at all, with no word anywhere: a prompt the caller
     wrote left the request and the model answered a question nobody had asked
-    (DESIGN.md §11.1).
+    (SDD Appendix C).
     """
     instructions, items = to_responses_input(
         [
@@ -1128,7 +1128,7 @@ def test_responses_a_remote_image_url_is_passed_on_and_not_fetched() -> None:
     A remote `http(s)` URL is a valid `input_image.image_url`, and the Responses
     API downloads it on its own side — so passing it through is exactly what
     "not fetching" looks like, and it is the third kind of attachment the file
-    tunnel exists to make work (DESIGN.md §8.1).  This used to be dropped, on the
+    tunnel exists to make work (SDD §12.1).  This used to be dropped, on the
     same wrong premise the Anthropic adapter once had: dropping it silently lost
     the image the caller sent, with nothing anywhere reporting the loss — an
     attached picture reached the model on two backends and vanished on this one.
@@ -1381,7 +1381,7 @@ def test_accumulator_refuses_arguments_that_never_parsed() -> None:
     The provider cuts the JSON short or mangles it; an empty argument dict then
     reaches the tool, which reports a validation error about a call the model
     got right — and the model retries the call it never got wrong.  So the turn
-    fails, naming the call (DESIGN.md §11.1: a value that cannot be read is not a value
+    fails, naming the call (SDD Appendix C: a value that cannot be read is not a value
     that is absent).
     """
     accumulator = ToolCallAccumulator()
@@ -1397,7 +1397,7 @@ def test_accumulator_refuses_arguments_that_are_not_an_object() -> None:
     parsed.  `[]`, `"x"` and `null` all parse, and a call's arguments are an
     object by the protocol — so coercing one to `{}` hands the tool an empty
     argument dict the model never sent, the very substitution the unparseable
-    case refuses (DESIGN.md §11.1: a value that cannot be read is not a value that is
+    case refuses (SDD Appendix C: a value that cannot be read is not a value that is
     absent)."""
     for raw in ("[]", '"x"', "null"):
         accumulator = ToolCallAccumulator()
@@ -1770,7 +1770,7 @@ def test_thinking_enabled_without_a_cap_is_refused() -> None:
     module inventing an output budget for somebody else's model — and the
     thinking budget is half of it, so the invented number decided how long the
     model could think.  `thinking: enabled` with no cap is a configuration that
-    cannot be satisfied, and DESIGN.md §11.1's rule is to name it where it is used.
+    cannot be satisfied, and SDD Appendix C's rule is to name it where it is used.
     """
     asked = ModelSettings(model="m", reasoning=True, thinking="enabled")
 
@@ -1786,7 +1786,7 @@ def test_an_unrecognised_thinking_value_is_refused_not_ignored() -> None:
     The field has a closed set of spellings, so an unrecognised value fell
     through the adapter's match to `case _` and read as "omit" — the operator's
     intent to ask for thinking dropped with no word while the request went out
-    unchanged, the deformation DESIGN.md §11.1 names.  The value is refused now, naming it
+    unchanged, the deformation SDD Appendix C names.  The value is refused now, naming it
     and the spellings this adapter knows.
     """
     settings = ModelSettings(model="m", reasoning=True, thinking="enabledd")
@@ -1885,7 +1885,7 @@ def test_openai_renames_reasoning_for_a_model_that_reasons() -> None:
 
 
 def test_the_filler_is_only_for_models_that_reason() -> None:
-    """Two rules, drawn the way v1 draws them.
+    """Two rules, each drawn by what the endpoint knows.
 
     A message that *has* reasoning is renamed wherever it turns up — an endpoint
     that produced it is an endpoint that knows the name.  The empty filler is
@@ -1908,10 +1908,10 @@ def test_the_other_two_protocols_drop_reasoning_altogether() -> None:
     """Not sent, and not quietly carried either.
 
     The Anthropic and Responses shapes have nowhere to put a model's own earlier
-    reasoning, so it is simply not built into their requests — v1's behaviour
-    for both, and the reason the rename lives in one adapter rather than in
-    `to_wire`.  Asserted by asking what keys reached the request, because a
-    field that leaked would be present and unnoticed rather than wrong.
+    reasoning, so it is simply not built into their requests, and that is why
+    the rename lives in one adapter rather than in `to_wire`.  Asserted by
+    asking what keys reached the request, because a field that leaked would be
+    present and unnoticed rather than wrong.
     """
     assistant = Message(role="assistant", content="42", thinking="sevens")
 
@@ -2040,7 +2040,7 @@ def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     **A cap that cannot hold a budget is a configuration fault, and is refused.**
     It used to turn thinking off with a warning, so `reasoning: true` was
     quietly not honoured and the caller was told nothing — a weaker path standing
-    in for the capability that was asked for (DESIGN.md §11.1).  The refusal names the two
+    in for the capability that was asked for (SDD Appendix C).  The refusal names the two
     numbers.
     """
     request = anthropic_build_request(
@@ -2270,8 +2270,7 @@ def test_a_remote_image_url_is_passed_on_and_not_fetched_here() -> None:
     its own side, so passing it on is exactly what "not fetching" looks like —
     and dropping it silently was the one outcome worse than either.
 
-    v1 did this (`llm_backends/anthropic.py`), and it is what makes the third
-    kind of attachment — a URL — work at all.
+    It is what makes the third kind of attachment — a URL — work at all.
     """
     blocks = to_anthropic_blocks(
         [{"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]

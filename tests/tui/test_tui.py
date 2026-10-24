@@ -547,10 +547,10 @@ async def test_a_tool_call_is_a_panel_showing_what_it_ran() -> None:
 
 
 async def test_a_tool_panel_says_which_step_of_the_turn_it_is() -> None:
-    """**v1's counter**, on the row a reader already has in front of them.
+    """**The turn's counter**, on the row a reader already has in front of them.
 
     Three spellings, and each is a different answer to "how far into this turn
-    are we": `(2/30)` while the turn is capped — which is the number v1 wrote —
+    are we": `(2/30)` while the turn is capped — the iteration over the cap —
     a bare `(3)` when it is not (`max_iterations` of 0 means no cap, so there is no
     denominator to write), and nothing at all for a call that arrived without a
     iteration: a rebuilt transcript keeps no such column, and `(0)` would be an iteration
@@ -775,7 +775,7 @@ async def test_home_and_end_jump_to_the_ends() -> None:
     runs *before* the focused widget, and the focused widget is the prompt,
     whose `TextArea` binds both keys to the ends of the line the cursor is on.
     What the draft keeps is the Emacs spelling of each, which is the bargain
-    slife v1 struck.
+    this window makes.
     """
     app = make_app(answering(SCROLLABLE))
     async with app.run_test(size=SIZE) as pilot:
@@ -1176,8 +1176,8 @@ async def test_a_stored_moment_that_will_not_parse_is_no_moment_at_all() -> None
     `_timestamp` accepts the ISO string a turn records so a rebuilt line can
     carry when it was sent; a value that would not parse fell through to "now",
     so yesterday's turns wore the moment the window opened — the transcript
-    making a claim about the record that the record contradicts (DESIGN.md
-    DESIGN.md §2.4).  The line is drawn with no stamp rather than a false one — and the
+    making a claim about the record that the record contradicts (SDD
+    SDD §5.5).  The line is drawn with no stamp rather than a false one — and the
     live path still stamps, because an *absent* moment is this one.
     """
     client = answering_with(
@@ -1208,8 +1208,8 @@ async def test_a_restored_message_from_another_channel_wears_it() -> None:
     thread — and it is *stored*, so a rebuild reads it back out of the row.  On
     the screen both halves of that belong to the channel: the bubble says
     `Wechat> ` and the marker comes off, because the two ids in it are of no use
-    to somebody reading over the model's shoulder.  v1's split, kept: the channel
-    picks the prefix, and the widget unwraps the text.
+    to somebody reading over the model's shoulder.  The split is deliberate: the
+    channel picks the prefix, and the widget unwraps the text.
     """
     client = answering_with(
         stored(
@@ -1366,8 +1366,8 @@ async def test_every_restored_turn_says_which_one_it_was() -> None:
 async def test_a_live_message_carries_no_turn_footnote() -> None:
     """A turn has no id until it is stored, and the bubble is drawn before that.
 
-    v1's arrangement, kept: the footnote is metadata about a *stored* turn, so
-    it appears in a rebuilt transcript and never beside something being typed.
+    The footnote is metadata about a *stored* turn, so it appears in a rebuilt
+    transcript and never beside something being typed.
     """
     app = make_app(answering("hi"))
     async with app.run_test(size=SIZE) as pilot:
@@ -2526,7 +2526,7 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
 
 
 async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
-    """The re-entry guard, which v1 had for the same reason.
+    """The re-entry guard, and the reason for it.
 
     A second picker would leave the first one's future unresolved, and the
     window would then be waiting on a decision nobody can make — every later

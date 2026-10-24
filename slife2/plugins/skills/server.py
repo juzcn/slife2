@@ -281,7 +281,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         return text
 
     # ── The management tools ─────────────────────────────────────────────
-    # v1's `skill_*` set, and the half DESIGN.md §10 named as next: a skill is a
+    # The `skill_*` set, and the half SDD §14.2 named as next: a skill is a
     # directory, so installing one is writing files — which is the only thing in
     # this system that writes anywhere but the config, and the only one whose
     # paths a model chooses.
@@ -346,7 +346,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             # **No `except OSError` here.**  `readiness` opens nothing: it reads
             # `os.environ`, the skill's `skills:` entry and `shutil.which`, so an
             # `OSError` arm could only fire for a failure nobody anticipated —
-            # and it turned that into a note line (DESIGN.md §11.1).  The guard
+            # and it turned that into a note line (SDD Appendix C).  The guard
             # belongs where the read is, `skills.document` in `catalogue` below.
             note = skills.readiness(
                 skill, dict(settings.env) if settings is not None else None

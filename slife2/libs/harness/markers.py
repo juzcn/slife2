@@ -3,7 +3,7 @@ how a screen takes one back off.
 
 A marker is **content**: it goes into the turn's row along with the message and
 comes back out of it verbatim, which is what its word-shaped spelling says and
-`[TURN:…]`'s capitals do not (DESIGN.md §2.4).  Its reader is the model — for
+`[TURN:…]`'s capitals do not (SDD §5.5).  Its reader is the model — for
 WeChat it carries the two ids a reply needs, and for an agent task it says which
 task an answer came from — and a screen has the channel already, as the bubble's
 own prefix, so it removes one before drawing.
@@ -18,7 +18,7 @@ the raw marker at somebody.
 
 Nothing here parses a marker, compares two of them, or reads the case — the
 case is a convention about *where* a marker lives and no code has ever read it
-(DESIGN.md §2.4).  This is a prefix and a function for removing one.
+(SDD §5.5).  This is a prefix and a function for removing one.
 
 **Where a marker ends is a shape question, and it is asked as one.**  The end is
 the `]` that closes the payload's own braces, found by a scan of quoting and

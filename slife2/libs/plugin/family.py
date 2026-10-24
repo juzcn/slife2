@@ -70,10 +70,10 @@ from slife2.libs.plugin.protocol import (
 
 logger = logging.getLogger(__name__)
 
-#: How many of one server's tools a `*_list_tools` hands over in one page.  v1's
-#: number and v1's reason: a published server can carry four figures of tools
-#: (github: 1239), and handing them all over spends the model's context on names
-#: it never asked for.  The read is uncapped — the catalogue needs every tool.
+#: How many of one server's tools a `*_list_tools` hands over in one page.  The
+#: cap follows from what a published server can carry — four figures of tools
+#: (github: 1239) — because handing them all over spends the model's context on
+#: names it never asked for.  The read is uncapped — the catalogue needs every tool.
 TOOL_LIST_LIMIT = 20
 
 #: How many entries one `*_list` hands over in one page.
@@ -605,9 +605,9 @@ class Family:
         a caller can repeat: tearing the link down and rebuilding it would cost a
         fresh `npx` start and a new handshake for a call that changed nothing.
         The comparison is on the settings, and both sides came from the config
-        layer, so a `${VAR}` reference is compared resolved-against-resolved —
-        v1 compared the raw argument against the resolved pool and therefore
-        never matched, reconnecting on every identical `mcp_set`.
+        layer, so a `${VAR}` reference is compared resolved-against-resolved.
+        Comparing the raw argument against the resolved pool would never match,
+        reconnecting on every identical `mcp_set`.
         """
         previous = self._held.get(settings.name)
         if previous is not None and previous.settings == settings:
@@ -1198,7 +1198,7 @@ async def list_entry_tools(
 class Documents:
     """A family whose rows are documents: one config section, no connection.
 
-    `skills:` and `cli:` are the two (DESIGN.md §4.1 is the argument for giving
+    `skills:` and `cli:` are the two (SDD §7.1 is the argument for giving
     them servers at all).  What they share is not a *mechanism* — one writes
     files into a folder and the other validates a command line against `PATH` —
     but a shape, and the shape was written out twice:
@@ -1429,7 +1429,7 @@ def build_family_server(
     model, and neither should be — the model is given the tools of the *entries*,
     merged by the hub, and never these.  What the model gets from this process is
     what `management` registers, which is a different surface with a different
-    reader (see `slife2.libs.plugin.family`'s own note on `refusal`, and DESIGN.md §4.5).
+    reader (see `slife2.libs.plugin.family`'s own note on `refusal`, and SDD §7.6).
 
     `transports` and `client_factory` are the same two seams the hub has and for
     the same reason: a test drives the whole thing over in-memory servers, with

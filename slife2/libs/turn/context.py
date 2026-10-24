@@ -7,7 +7,7 @@ half around it — the store, the embedder, the model call and the wire — and 
 split is `slife2.libs.store.db`'s, for `slife2.libs.store.db`'s reason: the part that can be tested
 without a process is the part worth stating on its own.
 
-Two ideas, both v1's, and the port is deliberately faithful to them because each
+Two ideas, and the implementation is deliberately faithful to them because each
 one is load-bearing:
 
 **The context is chosen, not accumulated.**  Before every turn the agent says
@@ -100,14 +100,11 @@ KEEP_NONE = "clear"
 #:
 #: **One of this build's two markers**, and the other is
 #: `slife2.plugins.wechat.server.marker`'s `[Wechat:{…}]` on a turn somebody sent over WeChat.
-#: The name is what the port changed: v1 spelled this envelope `[INFO: …]` and
-#: put two things in it — this footnote, on the user message a turn opened with,
-#: and a trim note saying how many old turns had just been cut, which went on the
-#: **last assistant message**.  That note was runtime-only (stripped before the
-#: turn was saved, so no stored row ever held one) and the trim is deferred here
-#: (DESIGN.md §10), which is what leaves this envelope with one occupant — and an envelope
-#: with one occupant can say what it holds.  `TURN` is what it holds: the turn
-#: this message opened.
+#: This envelope holds one thing — the footnote, on the user message a turn
+#: opened with.  A trim note saying how many old turns had just been cut would be
+#: a second occupant, but the trim is deferred here (SDD §14.2), which leaves
+#: this envelope with one occupant — and an envelope with one occupant can say
+#: what it holds.  `TURN` is what it holds: the turn this message opened.
 #:
 #: **A name in capitals, a colon, and the payload hard against it.**  Both
 #: markers have this shape, so the case is what tells them apart — by convention,
@@ -165,7 +162,7 @@ class Decision:
 def normalise_ids(values: Iterable[Any]) -> list[int]:
     """An id list with duplicates collapsed to their **first** position.
 
-    First and not last, which is the choice v1 made and the only one that keeps
+    First and not last, which is the only choice that keeps
     the list's meaning: the order *is* the content, so a later mention of an id
     already in the list is a repeat rather than a correction — nothing in a
     second mention says where in time it belongs.
@@ -614,10 +611,10 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     **The one history state every provider rejects** is an assistant message
     whose tool calls are only partly answered, and a rebuild is a place it can
     appear from nothing: a selection is a subset of turns, and a subset's last
-    turn is only well formed by accident.  v1 runs the same repair at its save,
-    its restore and a subagent's clone, and calls it idempotent — running it on a
-    list that is already correct changes nothing, which is what makes it safe to
-    run unconditionally here rather than only where a problem is suspected.
+    turn is only well formed by accident.  The repair is idempotent — running it
+    on a list that is already correct changes nothing — which is what makes it
+    safe to run unconditionally here rather than only where a problem is
+    suspected.
 
     The placeholder is `INTERRUPTED`, and it has two producers: this function,
     and the loop completing a batch an interruption cut short
@@ -626,9 +623,9 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     conversation, and a model reading one must not see two descriptions of one
     interruption.
 
-    **What is deliberately not ported is v1's second invariant** — a history
-    ending on `user` or `tool` gets a closing assistant line.  That exists for a
-    history that is *sent* as it stands; here a rebuilt list is handed straight
+    **The one invariant deliberately absent** is a history ending on `user` or
+    `tool` getting a closing assistant line.  That would exist for a history
+    that is *sent* as it stands; here a rebuilt list is handed straight
     to a loop that appends the user's message to it before anything is sent, so a
     closing line would be an assistant turn the user's message interrupts.
     """

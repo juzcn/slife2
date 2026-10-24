@@ -12,9 +12,9 @@ turns that context was built from and drives the transcript with them.
 order makes a restored conversation and a live one the same thing rather than
 two renderings that happen to agree today: the signature that is painted only
 over text, and the fold that an iteration ending in a tool call gets, both come
-along without being restated here.  v1 drew its rebuild from a rendering plan
-for the same reason; the plan is gone and what replaced it is the transcript's
-own vocabulary.
+along without being restated here.  A rendering plan would be a second
+vocabulary to keep in step with the transcript's own; driving the rebuild with
+the live calls is what replaces it.
 
 **A tool's failure is the one thing a rebuild cannot show.**  It is a fact the
 loop knows only while it is running (`ToolCallFinished.ok`); what a turn stores
@@ -128,7 +128,7 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # Passed through as stored, an empty or damaged value included: `or None`
     # here turned one into "now" at the last iteration, which is the stamp
     # `_timestamp`
-    # refuses to invent (DESIGN.md §2.4).  A row that says nothing about when it
+    # refuses to invent (SDD §5.5).  A row that says nothing about when it
     # ran draws no moment at all.
     asked = turn.get("created_at") or ""
     # The turn's id, channel and span, shown beside the words that opened it.  It
@@ -138,7 +138,7 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # watching, instead of being a number only the model ever sees.
     #
     # No `[TURN:]` envelope here: that is the machine's marker, and a screen
-    # renders the payload (`turn_footnote`), the way v1's does.
+    # renders the payload (`turn_footnote`).
     footnote = turn_footnote(
         int(turn.get("turn_id") or 0),
         str(turn.get("created_at") or ""),

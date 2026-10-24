@@ -10,17 +10,17 @@ in for it.
 What no measurement can answer is how large a turn *would* be: a candidate a
 recall is considering, or a turn a selection is about to spend its budget on.
 That is the whole of this module's job, and the reason it is one module rather
-than three functions in three places is v1's: counting, the trim's stop
-condition and the recall's token budget were the same function there, so the
-three could not come to disagree about how big something is.
+than three functions in three places is that counting, the trim's stop
+condition and the recall's token budget are the same question, so the three
+must not come to disagree about how big something is.
 
 **The base measure is OpenAI's own tokenizer**, `tiktoken`'s `o200k_base` — the
-vocabulary GPT-4o and later are trained on, and v1's choice.  It replaces a
-script-aware character measure that was the fallback and is now only the
-fallback, because counting by hand was wrong by a *direction* that mattered: the
-old rule charged 4 characters per token for Latin text and 1 token per CJK
-character, so an English sentence came out about 25% high and a Chinese one
-about 60% high — both in the direction that spends a window it did not need to.
+vocabulary GPT-4o and later are trained on.  It replaces a script-aware
+character measure that is now only the fallback, because counting by hand was
+wrong by a *direction* that mattered: the old rule charged 4 characters per
+token for Latin text and 1 token per CJK character, so an English sentence came
+out about 25% high and a Chinese one about 60% high — both in the direction that
+spends a window it did not need to.
 
 **And the fallback is load-bearing rather than polite.**  `tiktoken` fetches a
 few megabytes of vocabulary over the network the first time it is asked for one,
@@ -94,8 +94,8 @@ def _openai_encoding() -> Any:
 
 
 #: Characters per token for text that is not CJK, in the fallback measure.  Four
-#: is the long-standing figure for English prose under BPE, and the one v1's own
-#: docstring names as the fallback rationale.
+#: is the long-standing figure for English prose under BPE, and the rationale
+#: the fallback runs on.
 _CHARS_PER_TOKEN = 4
 
 #: And a CJK character is close to a token of its own — which is why one ratio
@@ -104,11 +104,11 @@ _CHARS_PER_TOKEN = 4
 _WIDE_TOKENS = 1
 
 #: What one attached image is charged.  It is not text and cannot be counted as
-#: any; the figure is v1's, and what it is for is keeping an image-bearing turn
-#: from looking free to a budget.  In practice the bytes never reach the db (an
-#: attachment is stored as a note), so this is reached only by the live message
-#: list.  **This is the one thing the real tokenizer cannot answer**, so it is
-#: charged the same way whichever measure is in force.
+#: any; the figure is a fixed charge, and what it is for is keeping an
+#: image-bearing turn from looking free to a budget.  In practice the bytes never
+#: reach the db (an attachment is stored as a note), so this is reached only by
+#: the live message list.  **This is the one thing the real tokenizer cannot
+#: answer**, so it is charged the same way whichever measure is in force.
 _IMAGE_TOKENS = 200
 
 
@@ -250,7 +250,7 @@ def estimate_message_tokens(message: Mapping[str, Any]) -> int:
 def estimate_turn_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     """About how many tokens one turn costs, floored at one.
 
-    The floor is v1's and it is load-bearing in the direction people get wrong:
+    The floor is load-bearing in the direction people get wrong:
     a turn that weighs nothing is a turn every budget can afford, so a recall
     would fill its window with empty turns and report success.  One is a lie, but
     it is a lie that bounds the count.

@@ -87,11 +87,11 @@ def for_the_model(meta: Mapping[str, Any] | None) -> bool:
     return MODEL in (declared or ())
 
 
-#: The `_meta` key a *call* carries to say whose behalf it is on.  V1's db
-#: server had no such key and needed none: it ran one process per agent, so the
-#: connection **was** the identity.  slife2's db server is shared — one
-#: process serves every client id, the way one model server serves every
-#: provider — so the identity has to be said, and this is where.
+#: The `_meta` key a *call* carries to say whose behalf it is on.  The db
+#: server is shared — one process serves every client id, the way one model
+#: server serves every provider — so the identity has to be said, and this is
+#: where.  A process per agent would let the connection be the identity; this
+#: server cannot.
 CLIENT = "slife2/client"
 
 #: The key inside that mapping naming the *home* the call is for: the data

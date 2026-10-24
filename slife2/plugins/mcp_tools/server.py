@@ -100,12 +100,12 @@ WORDS = FamilyWords(
 
 
 # ── The management tools ────────────────────────────────────────────────
-# v1's `mcp_*` set, ported — the model may add, remove and switch a server, and
-# what it writes is the same `mcp:` section the operator writes by hand.  The
-# difference from v1 is where the write goes: v1's gateway mutated a live pool of
-# its own, so every one of these had to reconcile "the file" against "the pool",
-# while here the family *is* the pool — the same object the file was read into —
-# so a change is written once and held once.
+# The `mcp_*` set — the model may add, remove and switch a server, and what it
+# writes is the same `mcp:` section the operator writes by hand.  Where the write
+# goes is what shapes these: a gateway that mutated a live pool of its own would
+# have to reconcile "the file" against "the pool" on every one, while here the
+# family *is* the pool — the same object the file was read into — so a change is
+# written once and held once.
 
 
 def _prepare(config: Config, name: str, entry: dict[str, Any]) -> ToolServerSettings:

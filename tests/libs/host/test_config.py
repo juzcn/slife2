@@ -1,8 +1,8 @@
 """Config loading: providers, models, and the resolution chain for secrets.
 
-The shape is slife v1's, so the tests are about the parts that shape has to get
-right — several models per provider, a `provider/model` reference that is
-unambiguous, and parameters that are absent rather than defaulted.
+These tests cover the parts the config shape has to get right — several models
+per provider, a `provider/model` reference that is unambiguous, and parameters
+that are absent rather than defaulted.
 """
 
 from __future__ import annotations
@@ -1261,8 +1261,8 @@ def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
 def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
     """Not resolved by a precedence rule nobody would remember.
 
-    This is not hypothetical: v1's own config grew a `url` on an entry that
-    still had a `command`, and its rule was that the URL won.
+    Two transports in one entry is a mistake to report, not a contest to
+    referee.
     """
     text = "mcp:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
     with pytest.raises(ConfigError, match="both"):
@@ -1309,7 +1309,7 @@ def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:
 #
 # The third source of tools, and the only one with no connection in it: a
 # `cli:` entry names a program that is already installed.  Nothing serves these
-# yet (DESIGN.md §10) — what these tests hold is the shape the tools will read.
+# yet (SDD §14.2) — what these tests hold is the shape the tools will read.
 
 CLI = """
 cli:
@@ -1337,8 +1337,8 @@ def test_a_cli_entry_is_a_command_and_what_it_is_for(tmp_path) -> None:
 
 
 def test_a_cli_command_may_be_more_than_one_word(tmp_path) -> None:
-    """v1 allowed `python -m mytool`, and a port that narrowed it to a single
-    binary would refuse an entry the file it was copied from accepted."""
+    """A command may be `python -m mytool`; narrowing it to a single binary
+    would refuse a legitimate entry."""
     assert load(write(tmp_path, CLI)).cli["harness"].command == "python -m harness"
 
 
@@ -1578,10 +1578,11 @@ media:
 def test_a_stale_media_default_falls_through_to_the_first_of_the_kind(
     tmp_path,
 ) -> None:
-    """The one registered step past v1's four: a `defaults[kind]` that no longer
-    resolves is a *weaker* statement than the caller's, so the first model of the
-    kind answers rather than the call stopping — and the answer's own
-    `provider/model` is what makes the substitution visible (SDD Appendix C).
+    """The one registered step past the four resolution steps: a `defaults[kind]`
+    that no longer resolves is a *weaker* statement than the caller's, so the
+    first model of the kind answers rather than the call stopping — and the
+    answer's own `provider/model` is what makes the substitution visible (SDD
+    Appendix C).
     """
     provider, model = load(write(tmp_path, MEDIA_STALE_DEFAULT)).media.resolve("image")
     assert (provider.name, model.model) == ("test", "img")

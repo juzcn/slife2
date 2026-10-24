@@ -71,9 +71,9 @@ RULES_VERSION = "1"
 #: itself again.
 FTS_TOKENIZE = "tokenize='unicode61 remove_diacritics 2'"
 
-#: CJK Unified Ideographs and its Extension A — the two ranges v1 split on —
-#: widened to the scripts that are also written without spaces between words,
-#: which would otherwise become one token each.  Deliberately a fixed table
+#: CJK Unified Ideographs and its Extension A, widened to the scripts that are
+#: also written without spaces between words, which would otherwise become one
+#: token each.  Deliberately a fixed table
 #: rather than a Unicode property lookup: this decides where spaces go in a
 #: string an index is built from, so it may not change with the runtime's
 #: Unicode data.

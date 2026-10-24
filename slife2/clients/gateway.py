@@ -17,7 +17,7 @@ answering through `on_failed`, and keeps no copy of either.  A gateway that
 merged, or that named a tool, would be the toolhub's second half instead of a
 piece both halves share.
 
-**Health is a tool list, not a connection** — v1's rule, and most of what the
+**Health is a tool list, not a connection**, and that is most of what the
 class does.  A server is either usable, meaning its tool list is in hand, or it
 is not, and in the second case the useful fact is what it said the last time we
 asked.  There is no connection state machine: the source stops counting as
@@ -54,8 +54,7 @@ a connection with no client to ask with, where nothing was asked because there
 was nothing to ask with — and it is rebuilt *before* the attempt rather than
 after it.  FastMCP makes the refusal/transport split visible for free —
 `call_tool(..., raise_on_error=False)` returns `is_error` where the raising form
-throws — which is one of the reasons this port is a few hundred lines where v1's
-gateway was three thousand.
+throws — which is one of the reasons this gateway is a few hundred lines.
 
 **And how failure is answered is all this module decides.**  It holds no clock of
 its own: how long a tool may take is the *caller's* to say — the loop's
@@ -266,7 +265,7 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
 
     What bounds a call now is the caller's own: the loop wraps the dispatch in
     the `_timeout` the model stated or the tool declared (and, with neither, in
-    nothing, which is what `DESIGN.md` §9.2 says a foreground call gets).  The
+    nothing, which is what `SDD` §12.4 says a foreground call gets).  The
     two awaits here that *no* caller bounds — a listing, and the hub's ask for a
     plugin's sources — carry their own, at the call site.
 
@@ -723,8 +722,8 @@ class Connection:
         left alone for the next call to use; a link that is down is let go here,
         so the *next* ask reconnects rather than every call finding the same dead
         client.  The branch is narrow rather than an `except Exception` because
-        v1 measured what the wide version costs: rebuilding on a peer's refusal
-        asks the same question again and is told the same thing.
+        the wide version costs a rebuild: on a peer's refusal it asks the same
+        question again and is told the same thing.
         """
         client = self._client
         if client is None:

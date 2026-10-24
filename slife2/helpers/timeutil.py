@@ -6,12 +6,11 @@ is the single place that grammar is implemented — one function, one error, and
 one sentence describing what it takes, which is what the tool's argument
 documentation repeats.
 
-It is v1's (`slife.timeutil`), ported because `clock.py` writes v1's timestamp
-format for exactly this reason: the two systems write the same strings into the
-same schema, so a window has to mean the same thing on both sides.  Two things
-changed in the port and nothing else did — `relativedelta` is gone (see
-`_shift_months`) and the `granularity` argument is gone with it, because slife2
-has one kind of time column and it is a timestamp.
+`clock.py` writes the same timestamp format for the same reason: the same
+strings go into the same schema, so a window has to mean the same thing wherever
+it is read.  Two things are deliberately absent — `relativedelta` (see
+`_shift_months`) and the `granularity` argument that went with it, because
+slife2 has one kind of time column and it is a timestamp.
 
 **A period word anchors to the period's edge, not to today.**
 `since=last month` is the first of last month and `until=last month` is its last
@@ -69,7 +68,7 @@ def _shift_months(day: date, months: int) -> date:
     """A date shifted by whole months, clamped to a shorter month's end.
 
     `timedelta` has no month or year unit, because a month is not a fixed number
-    of days — v1 reaches for `dateutil.relativedelta` to say so, and this is the
+    of days — the usual answer is `dateutil.relativedelta`, and this is the
     same arithmetic in six lines rather than a dependency slife2 would carry for
     one function.  The clamp is the part that matters and the part that is easy
     to get wrong: `2026-03-31` minus a month is `2026-02-28`, not an exception
@@ -249,7 +248,7 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # — but it raises rather than returning the bound un-normalised:
             # skipping the local-offset rewrite is the one thing this module
             # guarantees, so a value that reached here unparseable is a bound it
-            # cannot place (DESIGN.md §11.1).
+            # cannot place (SDD Appendix C).
             raise InvalidTimeBound(_bound_error(role, value)) from None
         resolved = at(moment)
 

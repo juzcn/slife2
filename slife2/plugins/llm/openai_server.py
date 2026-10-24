@@ -19,7 +19,7 @@ looking — but the chat-completions wire has no such field.  `reasoning_content
 is DeepSeek's name for it, and `to_provider_messages` is where it is renamed:
 that function is the whole of the difference between what we carry and what a
 provider is sent.  The other two protocols build their requests field by field
-and so drop it, which is the arrangement v1 arrives at from the other side.
+and so drop it, which reaches the same result from the other side.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
     **A value outside those spellings is refused, not read as "send nothing".**
     The field has a closed set, and a typo (`enabledd`) used to fall through the
     match to `case _` — so the operator's intent was dropped with no word while
-    the request went out unchanged, the deformation DESIGN.md §11.1 names: a weaker path
+    the request went out unchanged, the deformation SDD Appendix C names: a weaker path
     silently standing in for the one that was asked for.  The refusal names the
     value and the spellings this adapter knows.
     """
@@ -80,7 +80,7 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
             # adapter inventing an output budget for somebody else's model — and
             # the thinking budget is half of it, so the invented number decided
             # how long the model could think.  `thinking: enabled` without a cap
-            # is a configuration that cannot be satisfied, and DESIGN.md §11.1's rule for
+            # is a configuration that cannot be satisfied, and SDD Appendix C's rule for
             # that is to say so where it is used.
             if not settings.max_tokens:
                 raise ValueError(
@@ -113,7 +113,7 @@ def to_provider_messages(
     for the same thing is `reasoning_content` — so here it is renamed, and this
     function is the whole of the difference between what we carry and what a
     provider is sent.  The other two adapters build their requests field by
-    field and so drop it, which is v1's arrangement exactly.
+    field and so drop it, which reaches the same result from the other side.
 
     **The empty string is the load-bearing part.**  When its reasoners are asked
     to think, the DeepSeek API requires `reasoning_content` on *every* assistant
@@ -122,11 +122,11 @@ def to_provider_messages(
     a message.  So "no reasoning" and "no field" have to be spelled differently,
     and only one of the two is accepted.
 
-    `reasoning` is the model's own `reasoning: true`, which is v1's rule: the
-    flag that says a model thinks is the flag that says its thinking comes back
-    to it.  A model without it gets neither the field nor the empty filler,
-    because an endpoint that never reports reasoning is an endpoint whose
-    acceptance of the key is unknown.
+    `reasoning` is the model's own `reasoning: true`: the flag that says a model
+    thinks is the flag that says its thinking comes back to it.  A model without
+    it gets neither the field nor the empty filler, because an endpoint that
+    never reports reasoning is an endpoint whose acceptance of the key is
+    unknown.
     """
     converted: list[dict[str, Any]] = []
     for message in messages:
@@ -308,7 +308,7 @@ def _reasoning(delta: Any) -> str:
     one streams reasoning that reaches the transcript never — invisibly, because
     nothing errors and the answer is still correct.  Logging the unrecognised
     names once makes that gateway findable from the log instead of from a reader
-    noticing the missing line (DESIGN.md §11.1: an unreadable value must not be a silent
+    noticing the missing line (SDD Appendix C: an unreadable value must not be a silent
     absence).
     """
     for field in _REASONING_FIELDS:

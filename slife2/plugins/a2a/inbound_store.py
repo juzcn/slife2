@@ -18,7 +18,7 @@ who can act on it is: its own `task_list` names the task it sent and never heard
 back about, and it can cancel or re-send.  A notice here would not settle
 anything — the only reply an orphaned task can still get is a plain message, and
 a plain message does not complete the peer's task either — so it would be the
-harness speaking for a conversation it cannot finish (DESIGN.md §6.6).
+harness speaking for a conversation it cannot finish (SDD §4.5).
 
 The store is per mesh, which is per `(agent, subagent)` and per network: bridges
 are held by one mesh's responder, and two meshes must never share the map.

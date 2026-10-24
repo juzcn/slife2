@@ -132,7 +132,7 @@ async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
         "images": ["data:image/png;base64,AA"],
         # And that this caller can be asked a question mid-turn: a window draws
         # the `_approve` prompt and answers it, so its turns wait for a person
-        # rather than running unasked (`slife2.tui.app`, DESIGN.md §4.6).
+        # rather than running unasked (`slife2.tui.app`, SDD §7.7).
         "watched": True,
     }
     assert client.client_id == ("jack", "")
@@ -260,8 +260,8 @@ async def test_an_answer_without_text_is_refused_rather_than_drawn_empty(
 
     `send_message`'s answer is a contract — the window draws `text` as the
     answer — and a payload without it was read as `""`: a question with no answer
-    and no error, which the window presents as a completed turn (DESIGN.md
-    DESIGN.md §11.1: a value that cannot be read is not a value that is absent).  The
+    and no error, which the window presents as a completed turn (SDD
+    SDD Appendix C: a value that cannot be read is not a value that is absent).  The
     shape fails loudly, quoting what did come back, and the connection stays
     because the server answered.
     """
@@ -291,7 +291,7 @@ async def test_a_transcript_without_turns_is_not_an_empty_history(monkeypatch) -
     A name with no history is answered with a real, empty `turns`; a reply whose
     `turns` cannot be read is damage, and reading it as `[]` left the window
     blank with `_restore` marked done for the rest of the session.  It raises
-    instead, so the retry path runs (DESIGN.md §11.1: a failure is not a
+    instead, so the retry path runs (SDD Appendix C: a failure is not a
     verdict).
     """
     transport = FakeTransport()
@@ -323,7 +323,7 @@ async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
     refusal prefix — so an unreadable answer read as `""` read as a *successful*
     switch: the client moved its ref and the bar described a model that is not
     the one answering.  The unknown shape fails, and the model in hand is kept
-    (DESIGN.md §11.1: a failure is not a verdict).
+    (SDD Appendix C: a failure is not a verdict).
     """
     transport = FakeTransport()
     install(monkeypatch, transport)
@@ -457,7 +457,7 @@ async def test_a_subagent_list_without_names_is_not_an_empty_list(monkeypatch) -
 
     An agent with no subagents is a real, empty list; a payload whose rows have
     no names is damage, and reading it as empty is a picker that offers nothing
-    and says nothing (DESIGN.md §11.1).
+    and says nothing (SDD Appendix C).
     """
     transport = FakeTransport()
     install(monkeypatch, transport)

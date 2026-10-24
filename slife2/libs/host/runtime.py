@@ -153,7 +153,7 @@ def tail_log(url: str, *, lines: int = 20) -> str:
     **A log that cannot be read is not a log that is empty.**  The caller pastes
     this into a `StartFailed` text, so answering "" would say the server printed
     nothing — a confident negative read off a file that could not be opened,
-    which is the deformation DESIGN.md §11.1 names.  The failure is named in the
+    which is the deformation SDD Appendix C names.  The failure is named in the
     text instead, so "it printed nothing" and "the log could not be read" do not
     arrive as one message.
     """
@@ -475,7 +475,7 @@ def live_clients() -> list[ClientRecord]:
     **A record that cannot be parsed is not a client that is gone.**  Deleting
     one makes a live client uncounted, and the count is what "the last one out
     stops the shared servers" rests on, so a file whose body is damaged is kept
-    and counted whenever the pid in its *name* is alive (DESIGN.md §11.1).  Only
+    and counted whenever the pid in its *name* is alive (SDD Appendix C).  Only
     a dead pid is a crash to clean up, and only then is the file removed — by
     `_remove`, so a sweep whose delete failed is logged rather than silent.
     """
@@ -550,7 +550,7 @@ def _zombie_ps(pid: int) -> bool:
 
     **A `ps` that could not say is not a zombie** — no output, no `ps`, a
     deadline — which is the direction that leaves a daemon reported as running
-    rather than talked about as gone (DESIGN.md §11.1).
+    rather than talked about as gone (SDD Appendix C).
     """
     try:
         result = subprocess.run(
@@ -764,7 +764,7 @@ def tcp_listening(host: str, port: int, *, timeout: float | None = None) -> bool
     **A probe that could not be made is not a port that is closed.**  A name
     that does not resolve means the probe never asked the question it was meant
     to ask, and that is `None`; `open_server` names it rather than stating as
-    fact "nothing is listening" for a check it did not make (DESIGN.md §11.1).
+    fact "nothing is listening" for a check it did not make (SDD Appendix C).
     Every *other* failure — a refusal, a timeout, a socket that could not be
     created — means a connection was attempted and nothing answered within the
     budget, which is precisely what this gate exists to ask, so it is `False`
@@ -991,7 +991,7 @@ def truncate_if_huge(path: Path) -> None:
     past the ceiling with nothing said.  A log that is already gone is fine — the
     rename is best-effort — but a failure is logged naming the file, because the
     ceiling this function exists to hold is otherwise quietly exceeded
-    (DESIGN.md §11.1).
+    (SDD Appendix C).
     """
     try:
         if path.exists() and path.stat().st_size > _LOG_KEEP_BYTES:

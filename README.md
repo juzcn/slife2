@@ -8,13 +8,11 @@ reaches the outside world through local plugin processes. The terminal window is
 only a client: the agent loop, the tool hub, the model backends, memory, and
 every capability are MCP servers that slife2 starts and shares.
 
-This file is the user manual. The system design is described in
-[SDD.md](SDD.md); the decisions and measurements behind it are recorded in
-[DESIGN.md](DESIGN.md).
+This file is the user manual. The design — architecture, plugin contract,
+decisions, and the measurements behind them — is in [SDD.md](SDD.md).
 
 **Contents**
 
-- [Overview](#overview)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
@@ -23,37 +21,9 @@ This file is the user manual. The system design is described in
 - [Configuration](#configuration)
 - [Capabilities](#capabilities)
 - [Data locations](#data-locations)
-- [Architecture](#architecture)
 - [Development](#development)
 - [Known limitations](#known-limitations)
 - [License](#license)
-
-## Overview
-
-slife2 is built around four rules.
-
-1. **A plugin is one of slife2's own MCP servers.** It speaks MCP over
-   Streamable HTTP and implements a small additional contract: state is keyed by
-   a client id rather than by a session, every model-facing tool declares its
-   audience, a client can verify the server's identity, and the plugin has one
-   row in the central registry. A plugin is required: if one cannot be reached,
-   the turn fails. An external MCP server under `mcp:` is optional; if it cannot
-   be reached, the model simply has fewer tools.
-
-2. **Credentials stay in the process that uses them.** A provider key lives in
-   the model server that calls the provider. A tool server's key lives in the
-   plugin that owns the connection (`slife2-mcp-tools` for `mcp:`,
-   `slife2-restapi-tools` for `rest-api:`). The agent loop imports no provider
-   SDK and holds no key.
-
-3. **Servers are shared machine-wide.** The launcher starts the servers a
-   configuration needs and attaches to any that are already running. Servers are
-   daemons, so closing one window does not interrupt another. The last client to
-   exit stops the running servers, unless `--keep-servers` is used.
-
-4. **`slife2.yaml` is the single description of what exists.** Providers,
-   servers, tool sources, embeddings, media backends, tunnels, and network
-   settings are read from that file. There is no second configuration store.
 
 ### Terminology
 
@@ -644,66 +614,36 @@ particular, `mcp_set` with a `command:` records a program slife2 will start.
 
 ### Conversation and memory
 
-A conversation does not accumulate an unbounded context. `slife2-context` stores
-the turn log and, before each turn, makes one model call that decides:
+A conversation does not accumulate an unbounded context. Before each turn,
+`slife2-context` makes one model call that decides which turns to keep and which
+to recall from the turn log; the turn runs on the two selections in time order.
+If a recall matches more than fits, only what fits is returned. A failed decision
+keeps the context in hand; a missing turn store fails the turn.
 
-- which turns already in the conversation to keep;
-- which turns to recall from the log.
+The model browses its history with `turn_list`, searches it by what a turn was
+about with `turn_search`, reads one whole with `turn_read`, and writes a summary
+and tags with `turn_summarize`. `turn_list` is newest first, one line per turn,
+with `since`/`until` accepting an ISO date or a phrase such as `yesterday`,
+`last month`, or `3 days ago`, and `limit`/`offset` paging against `total`.
+`turn_search` takes the same time window and returns the same line plus a
+`similarity` score; its `query` words rank exact matches first but are not a
+filter. None of the tools takes an agent argument: the call carries the
+conversation, so a model reads its own history only.
 
-The turn runs on the two selections together, in time order. The call reads the
-whole conversation in hand rather than only the new message, because a follow-up
-usually names its subject through the turns above it. The answer is a
-selection, never a dump; if a recall matches more than fits, only what fits is
-returned.
+Each turn in a rebuilt context carries a `[TURN:{…}]` footnote naming its id,
+channel, and span. Capitalized markers are harness annotations; a marker that
+reads as a word, such as `[Wechat:{…}]`, was written by a sender and is stored
+with the message.
 
-Each turn read by the decision carries a `[TURN:{…}]` footnote naming its id,
-channel, and span. The newest turns carry one too, so they are as addressable as
-restored ones. Capitalized markers are annotations added by the harness and are
-not part of the stored record. A marker that reads as a word, such as
-`[Wechat:{…}]`, was written by a sender and is stored with the message.
-
-The model can browse its history with `turn_list`, search it by what a turn was
-about with `turn_search`, and read one whole with `turn_read`. `turn_list` is
-newest first, one line per turn, with `since`/`until` accepting an ISO date or a
-phrase such as `yesterday`, `last month`, or `3 days ago`, and `limit`/`offset`
-paging against `total`. `turn_search` takes the same time window, returns the
-same line plus a `similarity` score, and has no `offset` — it answers with the
-best matches, not a page of everything. Its `query` words rank exact matches
-first but are not a filter: with no sentence they are also read by meaning, so a
-hit may not contain them and a low `similarity` says so. None of the three takes
-an agent argument: the call itself carries the conversation, so a model reads
-its own history and nothing else.
-
-`turn_summarize` writes a summary and tags onto a turn — the one being run, or
-an earlier one by id — so the keyword search can find it. They join the text
-the words leg reads; the meaning leg does not use them.
-
-Every turn is indexed twice when stored: a keyword index over the text by which
-a turn is found, and a vector index over what it is about. Both indexes are
-derived from the turns and can be rebuilt from them. Changing the embedding
-model under `embeddings:` re-embeds the whole history on the next start.
-
-Two harness decisions are not tools:
-
-- `restore` replays the stored context when a conversation starts.
-- `rebuild` runs the context decision before a turn.
-
-A rebuild that decides to keep exactly what is in hand rebuilds nothing. A
-discriminator that times out, a provider that errors, or an unreadable answer
-keeps the existing context and runs the turn. A missing turn store fails the
-turn, like any missing plugin.
-
-The recall used by the context decision belongs to the store; `turn_search` is
-the model's own way into the same index. Its result is a tool output, not a
-change to the selected context.
+The status bar reports the context size left by the last model call and its
+fraction of the model's window. Before each turn, a note names what the context
+decision kept and what it recalled.
 
 ### Tools
 
-`slife2-toolhub` is the only process that decides which tools the model may see.
-It does not reach external servers itself. `slife2-mcp-tools` holds the `mcp:`
-connections and `slife2-restapi-tools` holds the `rest-api:` connections; each
-declares its sources and the tools they offer, and the hub merges the
-declarations, names the tools, gates them, and routes calls back.
+`slife2-toolhub` owns the model's tool list. `slife2-mcp-tools` holds the `mcp:`
+connections and `slife2-restapi-tools` the `rest-api:` connections; the hub
+merges what they declare, names the tools, gates them, and routes calls back.
 
 The hub serves three set-level tools:
 
@@ -714,45 +654,30 @@ The hub serves three set-level tools:
 - `_func_tool_unload` removes tools from that list. The harness also calls it
   at a turn boundary to enforce the budget.
 
-A model can call a name returned by `tool_search` without loading it, but loading
-is what keeps it in the list sent with every request. The model's list is
-re-read from the hub before every model call, so a tool loaded during a turn is
-available from the next iteration.
-
-`tool_load.autoload` names the tools that start in the list sent with every
-request, by the name the model calls them — a plugin's bare name (`turn_read`)
-or an external server's `{server}__{tool}`. Everything else, a plugin's tools
-included, is discovered with `tool_search` and loaded with `func_tool_load`.
-The list is per tool and not per server: one server may offer ninety tools of
-which two are wanted every turn. The five names the system works by are
-required and a configuration that leaves one out fails the start.
+A model can call a name returned by `tool_search` without loading it, but
+loading is what keeps it in the list sent with every request.
+`tool_load.autoload` names the tools that start loaded, by the name the model
+calls them — a plugin's bare name (`turn_read`) or an external server's
+`{server}__{tool}`. Everything else is discovered with `tool_search` and loaded
+with `func_tool_load`.
 
 The loaded list is bounded by `tool_load.threshold` (default 100). Over the
-limit, the least recently called tools are unloaded; nothing named in
-`tool_load.autoload` is ever evicted. A tool that has never been called is
-ordered by when it was loaded. The trim happens at a turn boundary; the names
-removed are written into the conversation as a tool call and its result, so the
-model learns that the list shrank. Eviction costs a search and a load, not a
-capability.
+limit, the least recently called tools are unloaded; nothing in
+`tool_load.autoload` is ever evicted. The trim happens at a turn boundary and is
+written into the conversation as a tool call and its result, so the model learns
+that the list shrank.
 
 Tool names:
 
 - A tool from an `mcp:` entry is `{server}__{tool}`, for example
   `arxiv__arxiv_search_papers`.
-- A plugin's own tools use bare names, for example `turn_read`. The plugin
-  serving a tool is a fact about the system, not something the model needs in
-  the name.
+- A plugin's own tools use bare names, for example `turn_read`.
 
-Every tool result is a JSON object. A listing answers:
-
-```json
-{"<noun>": [], "total": 0, "limit": 20, "offset": 0}
-```
-
-`total` is what says whether another page exists. A read answers the row's own
-fields. A refusal or a miss raises a `ToolError`, which the harness reports to
-the model as a failed call with the reason. `_check_new_input` is the one
-exception: it returns a person's message verbatim.
+Every tool result is a JSON object. A listing answers
+`{"<noun>": [], "total": 0, "limit": 20, "offset": 0}`; `total` says whether
+another page exists. A read answers the row's own fields. A refusal or a miss
+raises a `ToolError`, which the harness reports as a failed call with the reason.
+`_check_new_input` returns a person's message verbatim.
 
 No answer is intended to exceed `tool_result.tokens`. Listings that can grow use
 `limit`/`offset`; an output that cannot be bounded is stored as a dump (see
@@ -886,47 +811,33 @@ dumps, and images.
 
 Notes, files and images are documents: the second write is their content, which
 is why only notes and files have remove tools. A diary and a report are logs:
-two entries under one date or title are two facts, and nothing in the later text
-says which part of the earlier one it replaces.
+two entries under one date or title are two facts.
 
 A dump is a tool output too large for the conversation. The output is stored
 whole, keyed by the tool call id, and the conversation carries a selection of the
-output's own lines within `tool_result.tokens`. Nothing is paraphrased. The
-selection is made by a discriminator call that is given the output, the
-conversation in hand, and the current input, and answers with line ranges. The
-model reads any part of the dump back with `dump_read`, a searching reader:
-`pattern` finds lines and `context` adds their neighbours, `offset` reads from a
-line (negative counts from the end), and `limit` reads fewer lines. Every answer
-stays within the same token budget. A search does not see dumps unless `kind` is
-`dump`.
+output's own lines within `tool_result.tokens`; nothing is paraphrased. The
+model reads any part back with `dump_read`, a searching reader: `pattern` finds
+lines, `context` adds their neighbours, `offset` reads from a line (negative
+counts from the end), and `limit` reads fewer lines. A search does not see dumps
+unless `kind` is `dump`.
 
-An image is a picture a turn carried. It is stored whole under `pictures/`,
-keyed by its content digest, and the turn row carries an `[Image:…]` reference
-instead of the pixels. `image_source` resolves that reference and `attach_image`
-is how the model sees the picture again. An `http(s)` image is never fetched
-here: the row keeps the URL and the provider fetches it. A no-kind search sees
-images; they are content a person attached, unlike dumps.
+An image is stored whole under `pictures/`, keyed by its content digest, and the
+turn row carries an `[Image:…]` reference instead of the pixels. `image_source`
+resolves the reference and `attach_image` is how the model sees the picture
+again; an `http(s)` image is fetched by the provider, not here. A no-kind search
+sees images.
 
 Every document is written twice: a row in the cabinet index and a Markdown file
 under `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`), which can be
-opened, edited, or deleted without slife2. A subject that is not already
-lowercase carries a short digest in its filename (`notes/Python~6e3604888c.md`)
-because Windows and macOS treat `Python.md` and `python.md` as one file. A saved
-file's bytes live under the cabinet as well and are not indexed; `file_read`
-returns a file's text and refuses a PDF, image, or archive by saying what it is.
-Text in another encoding is decoded and the encoding is named in the answer.
+opened, edited, or deleted without slife2. A saved file's bytes live under the
+cabinet and are not indexed; `file_read` returns a file's text and refuses a PDF,
+image, or archive by saying what it is. Text in another encoding is decoded and
+the encoding is named in the answer.
 
-`cabinet_search` accepts the same two inputs as `tool_search`: `keywords` are
-words to look for, and `sentences` are questions matched by meaning. The words
-are not a filter: a keywords-only call routes them to both legs, so a hit may
-come from meaning without containing them, and `matched_in` says when they were
-found. Several sentences are several questions, and each can only add results.
+`cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
 `cabinet_summarize` writes a description for a document; writing one for a file
-or an image re-embeds it, because the description is part of what its vector is
-built from.
-
-`file_save` copies files already on the machine. It does not fetch URLs. The
-cabinet has no `grep` search leg.
+or an image re-embeds it. `file_save` copies files already on the machine and
+does not fetch URLs. The cabinet has no `grep` search leg.
 
 ### WeChat
 
@@ -977,10 +888,8 @@ description and answered later by a message in the same conversation.
 | `agent_task_cancel` | Stop a task and report its state after the call. |
 
 A task runs as the agent, with the same system prompt, model, tools, and
-context decision. It does not have the turn that started it: `restore` reads the
-stored turn list, and a turn is written only when it ends, so the description
-must restate the relevant context. The task's turns are not written to the
-agent's conversation. Its answer is delivered as a message with an
+context decision. It does not have the turn that started it, so the description
+must restate the relevant context. Its answer arrives as a message with an
 `[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
 `AsyncTask(<name>)>`. If no window is showing the conversation, the answer is
 reported as `undelivered` and the log says so.
@@ -1056,31 +965,29 @@ retry ladder runs out. There is nothing to poll. `task_response` completes a
 task this agent was sent, using the `task_id` from the marker. The direction is
 carried by `from`; `agent_name` is the agent's own identity.
 
-There is one mesh per agent, because the agent name is the MQTT client id and the
-last segment of the request topic. Two agents on one machine are two peers. An
-agent reached from two places is refused by the name-collision check before it
-joins. A subagent is not on this network: it has no external identity and is
-reached only through its maker's local subagent network.
+There is one mesh per agent: the agent name is its MQTT identity, so two agents
+on one machine are two peers, and a second live instance under one name is
+refused before it joins. A subagent is not on this network; it is reached only
+through its maker's local subagent network.
 
 Presence is drawn as a harness line, not a turn: `[⚡ jill online]`. The roster is
 available through `peer_agent_list`. An agent is on the mesh while a window holds
-its `join` call; `--headless` holds the same call without a window. No inbound
-record is persisted: in-flight tasks are held in memory, and a restart starts
-with none.
+its `join` call; `--headless` holds the same call without a window. In-flight
+tasks are held in memory, so a restart starts with none.
 
 A group is a named roster with an owner, created by `peer_agent_group_set`; no
-invitation or acceptance is involved. Group messages are delivered as
-fire-and-forget events to every other member — never back to the sender — and
-arrive with a `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker on
-the `peer_agent_group:<group>:<sender>` channel.  Viewing the members is a
-separate read — `peer_agent_group_member_list` — as it is in a chat app, so a
-large group is not repeated in every message.  **A group chat is casual**: no
-member owes an answer, and silence is not `pending` or `undelivered`; `sent` is
-only a publish count. Use the direct send tool when you need an answer. Each member keeps what it has
-learned in `agents/<agent>/groups.yaml`, so groups survive a restart. A member
-that is offline when a group message is sent misses it; `peer_agent_group_list`
-is the local truth, not a live check. Only the owner can change the roster or
-disband the group; a member's way out is `peer_agent_group_leave`.
+invitation or acceptance is involved. Group messages are fire-and-forget events
+to every other member — never back to the sender — and arrive with a
+`[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker on the
+`peer_agent_group:<group>:<sender>` channel. Viewing the members is a separate
+read (`peer_agent_group_member_list`). **A group chat is casual**: no member owes
+an answer, and silence is not `pending` or `undelivered`; `sent` is only a
+publish count. Use the direct send tool when you need an answer. Each member
+keeps what it has learned in
+`agents/<agent>/groups.yaml`, so groups survive a restart. A member that is
+offline when a message is sent misses it; `peer_agent_group_list` is the local
+truth, not a live check. Only the owner can change the roster or disband the
+group; a member's way out is `peer_agent_group_leave`.
 
 The broker is started automatically when the configured one is local and absent,
 and stopped with the stack only if slife2 started it. A system broker or one
@@ -1137,19 +1044,16 @@ own `groups.yaml`.
 
 A non-fork subagent lives in `agents/<maker>/subagents/<name>/` with its own
 `turns.db`, `subagent.yaml`, cabinet, and media directory. A fork has only the
-`subagent.yaml` record there: it stores no turns, keeps its conversation in
-memory as a copy of the maker's, and reads the maker's turn log for context. It
-writes nothing there, and it also shares the maker's cabinet and media. A fork
-is session-lived — a temporary stand-in for the maker — and when the agent
-server next starts it removes every fork record left by the previous session,
-so the name is free again. **A fork cannot be pulled into a group**: it is
-temporary, so a roster naming it would keep addressing a name nobody answers;
+`subagent.yaml` record: it stores no turns, keeps its conversation in memory as
+a copy of the maker's, reads the maker's turn log for context, and shares the
+maker's cabinet and media. A fork is session-lived; when the agent server next
+starts it removes every fork record left by the previous session, so the name is
+free again. **A fork cannot be pulled into a group**: it is temporary, so a
+roster naming it would keep addressing a name nobody answers;
 `subagent_group_set` refuses one, and group traffic for a fork is dropped.
-WeChat and the peer-agent network belong to the
-agent, not the subagent; scheduling also stays with the agent. The tree stops at
-one level: a subagent cannot create or remove a subagent, because the local
-network holds a place for the maker's own subagents and nothing holds a place
-for a level below them.
+Scheduling stays with the agent. The tree stops at one level: a subagent cannot
+create or remove a subagent, because the local network holds a place for the
+maker's own subagents and nothing holds a place for a level below them.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be
@@ -1241,76 +1145,18 @@ from. An external `mcp:` entry is one server per name regardless of how many
 homes configure it; if two homes give the same name different commands, the log
 reports the disagreement and the running server is used.
 
-## Architecture
-
-### Layers
-
-The package is divided by what a module is, not by its size:
-
-| Directory | What it contains |
-|---|---|
-| `slife2/plugins/` | One process per plugin. Each plugin has a module with a `main` and a `SERVER_NAME`. |
-| `slife2/clients/` | The client half of an MCP hop. |
-| `slife2/libs/` | Libraries imported by more than one component. |
-| `slife2/helpers/` | Small stateless helpers. |
-| `slife2/tui/` | The terminal window. It is a client and serves nothing. |
-
-A plugin directory may keep its own private library, such as
-`plugins/cabinet/store.py` or `plugins/schedule/expressions.py`; `libs/` is for
-code that more than one component imports.
-
-The dependency direction is one-way:
-
-```text
-tui/ -> MCP -> plugins/agent/ -> libs/turn/loop.py
-     -> {libs/model/base.py, libs/turn/tools.py, libs/turn/events.py,
-         libs/turn/messages.py} -> libs/host/config.py
-```
-
-The loop imports neither the agent server nor the terminal. It is handed a
-backend and a coroutine that returns a tool registry; where that registry comes
-from is the agent server's business.
-
-### Plugin registry
-
-`libs/host/config.py` contains one row per plugin in `PLUGINS`. A row records:
-
-- the key used in `servers:`;
-- the module that serves it;
-- the MCP name it answers to;
-- the probe tool used to identify it;
-- the default port;
-- whether it is a model API backend.
-
-Start order, default addresses, server-name constants, and launcher specs are
-derived from this table. Adding a plugin means writing the module and adding a
-row; removing one means deleting both.
-
-`libs/plugin/protocol.py` provides the shared server scaffold
-(`serve_plugin`). A server supplies three hooks: what to build, what to say about
-its start, and what it requires. All servers use this path, including the model
-backends, which reach it through a wrapper.
-
 ## Development
 
-### Tests
+From a checkout:
 
 ```bash
 uv run pytest                  # fast lane: unit and integration, parallel
 uv run pytest -m unit          # unit tests only
 uv run pytest -m integration   # tests that bind a socket or spawn a process
-uv run pytest -m e2e           # full stack as processes (about 70 seconds)
+uv run pytest -m e2e           # full stack as processes
 uv run ruff check . && ruff format --check .
 uv run pyright
 ```
-
-The default run executes across all cores (`-n auto` from `addopts`) and excludes
-the `e2e` marker.
-
-The fast lane needs no API key and no running server. Models are faked, and
-servers are driven over FastMCP's in-memory transport: real MCP messages and
-progress notifications, with no port bound. Integration tests bind ephemeral
-ports, so the suite can run beside a live stack.
 
 On Windows, `uv run pytest` cannot run beside a live stack: `uv` rewrites the
 entry points in `.venv\Scripts\` on every run, and a running instance holds
@@ -1320,25 +1166,8 @@ entry points in `.venv\Scripts\` on every run, and a running instance holds
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The end-to-end lane starts the real stack as processes: the launcher, eighteen
-daemons, a configuration on disk, and a stub OpenAI-compatible provider. It
-exercises the launch order, cross-process turns, tool routing, progress
-notifications, large-output handling, and conversation restore.
-
-Shared test doubles live in `tests/fakes.py`: a stub model, a stub embedder, fake
-window and mesh clients, and factories used by more than one test module.
-
-### CI
-
-CI runs on Ubuntu, macOS, and Windows with Python 3.13. It performs:
-
-1. a read-only `install --dry-run` on every operating system;
-2. a wheel build;
-3. an assertion that the interpreter can load SQLite extensions;
-4. `ruff check` and `ruff format --check`;
-5. `pyright`;
-6. the default test lane;
-7. the end-to-end lane.
+The test lanes, CI matrix, project structure, and the plugin registry are in
+[SDD.md](SDD.md) §13 and Appendix B.
 
 ## Known limitations
 

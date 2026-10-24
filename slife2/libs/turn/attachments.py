@@ -18,10 +18,9 @@ a model does the one thing a person cannot do for it.
 * a **`data:` URI** — already what a provider wants, passed on.
 
 **A source that cannot be read is a refusal, not a failure of the batch.**  One
-missing file among five must not cost the other four — v1 learned that the hard
-way — so `resolve` answers with what it attached and what it did not, and the
-tool's answer says both.  A refusal that nobody is told about is the outcome
-worse than either.
+missing file among five must not cost the other four, so `resolve` answers with
+what it attached and what it did not, and the tool's answer says both.  A
+refusal that nobody is told about is the outcome worse than either.
 
 **Where the pixels go, and how long they live.**  They are content parts on the
 **user message** — the only place a wire here can carry an image, since a tool
@@ -70,20 +69,19 @@ MEDIA_TYPES: dict[str, str] = {
 
 #: How large a local file may be.  Base64 inflates by a third and the whole thing
 #: travels in one JSON-RPC message, so a ceiling is required; this one is above
-#: any screenshot and below anything that makes a request unreasonable — v1's
-#: number, arrived at against the same two bounds.
+#: any screenshot and below anything that makes a request unreasonable; those
+#: two bounds are what set the number.
 MAX_BYTES = 20 * 1024 * 1024
 
 
 def _encode(source: str) -> tuple[str, str]:
     """One source as `(url, refusal)` — exactly one of the two is filled in.
 
-    **A `data:` URI and an `http(s)` URL pass straight through**, which is v1's
-    rule and worth stating because it looks like a capability this process does
-    not have: a remote URL is not fetched *here*.  It goes on the wire and the
-    **provider** fetches it — OpenAI's `image_url` takes one, and Anthropic's
-    `image` block has a `url` source — so nothing in this system makes a request
-    anybody did not ask for.  (v1 did exactly this.)
+    **A `data:` URI and an `http(s)` URL pass straight through**, worth stating
+    because it looks like a capability this process does not have: a remote URL
+    is not fetched *here*.  It goes on the wire and the **provider** fetches it
+    — OpenAI's `image_url` takes one, and Anthropic's `image` block has a `url`
+    source — so nothing in this system makes a request anybody did not ask for.
 
     Anything else is a path on this machine: read, capped, and base64-encoded —
     with the media type its suffix names, or refused when the suffix names none
@@ -96,8 +94,8 @@ def _encode(source: str) -> tuple[str, str]:
     a second `is_file` and a second `stat` — two policies about one file, and the
     one that produced the URL was not the one that explained it.  A failure is
     still a value rather than an exception, because one unreadable source among
-    five must not cost the other four: v1 learned that by dropping a whole batch
-    on the first missing file.
+    five must not cost the other four — dropping a whole batch on the first
+    missing file is the outcome this shape rules out.
     """
     if source.startswith(("data:", "http://", "https://")):
         return source, ""
@@ -144,9 +142,8 @@ def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
 
     **The one place a source becomes bytes**, so the model's tool call and a
     caller passing sources cannot come to different conclusions about the same
-    file.  v1 learned the batch rule the hard way: its first version dropped the
-    whole list on one unreadable source, so four good images went with the
-    missing fifth.
+    file.  The batch rule is why: dropping the whole list on one unreadable
+    source would send four good images away with the missing fifth.
     """
     pairs: list[tuple[str, str]] = []
     refusals: list[str] = []
@@ -172,8 +169,8 @@ def inject(messages: MutableSequence[Any], images: Sequence[str]) -> bool:
     The last user message and not the newest message: by the time this runs the
     loop has appended the person's message and nothing else, but on a later turn
     it may have appended a whole exchange — and what is being attached is always
-    what somebody said, never a tool result.  v1's `inject_images_to_last_user`,
-    and the search backwards is the same one and for the same reason.
+    what somebody said, never a tool result.  The search goes backwards from the
+    end to the last user message, and it skips every tool result on the way.
 
     A message whose content is already parts is extended; a string becomes text
     parts first.  **Idempotent by construction**: a second call with the same
@@ -236,7 +233,7 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
 
 #: The marker a **kept** image's part becomes in the turn log.  Capitals, like
 #: `[TURN:…]` and `[DUMP:…]`: this is what the process knows about the picture,
-#: not something anybody said (`DESIGN.md` §2.4).  The payload is the address
+#: not something anybody said (`SDD` §5.5).  The payload is the address
 #: the model attaches again from — `key` for bytes the cabinet holds, `source`
 #: for a URL the provider fetches — and the fields a reader acts on, nothing
 #: else.  The image note is what a picture that was **not** kept leaves.
@@ -283,7 +280,7 @@ def image_note(part: dict[str, Any]) -> str:
     media type in the header, and a remote URL is named by itself; a part whose
     source is neither — one the record kept without an address, or a `data:` URL
     with no type — was rendered as a bare `image`, a claim about a picture this
-    function never had, in the one place a restored turn reads back (DESIGN.md §11.1).  It
+    function never had, in the one place a restored turn reads back (SDD Appendix C).  It
     says the source is unnamed instead.
     """
     url = part.get("image_url")

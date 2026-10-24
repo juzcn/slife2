@@ -58,8 +58,9 @@ def test_a_url_and_a_data_uri_are_passed_through_untouched(tmp_path) -> None:
 
 
 def test_one_unreadable_source_does_not_cost_the_others(tmp_path) -> None:
-    """v1's batch rule, learned the hard way: four good images went with the
-    missing fifth because the first version dropped the whole list."""
+    """The batch rule, learned the hard way: one unreadable source must not cost
+    the others, because dropping the whole list would lose four good images with
+    the missing fifth."""
     present = image(tmp_path)
     pairs, refusals = attachments.resolve(
         [present.as_posix(), str(tmp_path / "gone.png"), "https://x.test/b.png"]
@@ -119,8 +120,8 @@ def test_the_images_go_on_the_last_user_message() -> None:
     """Content parts on the user message: text first, then the images.
 
     **The only place a wire here can carry one.**  A tool result is text on every
-    backend this system speaks, which is why v1's `attach_image` injected into
-    the user message too rather than answering with the picture.
+    backend this system speaks, which is why the image is injected into the user
+    message too rather than answering with the picture.
     """
     messages: list[Message] = [
         Message(role="user", content="earlier"),
@@ -221,7 +222,7 @@ def test_the_note_names_the_source_it_knows() -> None:
     A `data:` URL names its type in the header and a remote URL is named by
     itself, but a part with no readable source was rendered as a bare `image` —
     a claim about a picture this function never saw, in the one sentence a
-    restored turn reads back (DESIGN.md §11.1).  What it knows, it names.
+    restored turn reads back (SDD Appendix C).  What it knows, it names.
     """
     typed = attachments.image_note(
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}

@@ -172,24 +172,22 @@ def a2a_message_type(text: str, net: Net) -> str | None:
 
 
 def test_the_marker_carries_from_and_not_agent_name() -> None:
-    """`from`, not `agent_name` — v1 measured the confusion that caused.
+    """`from`, not `agent_name`: the latter is the receiver's *own* identity,
+    so a marker carrying it had receivers misreading the sender as themselves.
+    The *keys* are unchanged for the reason `[Wechat:{…}]`'s are: a habit is a
+    thing that does not have to be relearned.
 
-    "agent_name" is the receiver's *own* identity, so a marker carrying it had
-    receivers misreading the sender as themselves.  The *keys* survive the port
-    for the reason `[Wechat:{…}]`'s do: a habit is a thing that does not have to
-    be relearned.
-
-    **The spelling does not.**  v1 wrote `[A2A:`, and capitals are this build's
-    convention for the other kind of bracket — the one that says "this is what
-    the process knows, not what was said" (`[TURN:{…}]`).  This marker is
-    content, so it is word-shaped like every other one a row carries, and the
-    case now says the same thing the marker's life does.
+    **The spelling does not.**  Capitals are this build's convention for the
+    other kind of bracket — the one that says "this is what the process knows,
+    not what was said" (`[TURN:{…}]`).  This marker is content, so it is
+    word-shaped like every other one a row carries, and the case now says the
+    same thing the marker's life does.
 
     **And it says `Peer`, not `Agent`.**  The name is read on the line that says
     who spoke, and "an agent" is the one thing it must not leave open: the
-    receiver is an agent too, and v1's measured failure was a receiver taking the
-    sender for itself — which the `from` key prevents inside the payload and the
-    prefix must not undo in front of it.
+    receiver is an agent too, and the failure to design against is a receiver
+    taking the sender for itself — which the `from` key prevents inside the
+    payload and the prefix must not undo in front of it.
     """
     assert (
         marker(REMOTE, PEER) == '[PeerAgent:{"from": "jill", "type": "task_request"}] '
@@ -264,13 +262,12 @@ def test_a_peer_cannot_write_a_newline_into_a_message() -> None:
     assert len(safe_name("x" * 500)) == 128
 
 
-def test_a_presence_line_is_v1s_and_only_for_real_transitions() -> None:
-    """v1's words, without v1's trailing `[status]`.
+def test_a_presence_line_is_only_for_real_transitions() -> None:
+    """The line reads `⚡ jill online`, without a trailing `[status]`.
 
-    v1 wrote `⚡ jill online [online]` because that line was also read by a model,
-    which was handed the wire's status verbatim.  The one reader now is a window
-    (`slife2.plugins.tui.server`'s `note`), and `online` twice in one line is a fact the
-    first word carries.
+    The one reader is a window (`slife2.plugins.tui.server`'s `note`), not a
+    model handed the wire's status verbatim, and `online` twice in one line is
+    a fact the first word carries.
     """
     online = AgentCard(agent_name=AgentName(PEER), status="online")
     assert format_presence_line(online, "online") == "⚡ jill online"
@@ -410,7 +407,7 @@ def test_the_retry_ladder_is_the_profiles_own_numbers() -> None:
 
 
 def test_a_fifo_cache_forgets_the_oldest_past_its_cap() -> None:
-    """v1 got this from `cachetools`; a dict and a cut-off is a dict and a cut-off."""
+    """A dict and a cut-off is a dict and a cut-off — no `cachetools` needed."""
     cache = FIFOCache(maxsize=2)
     cache["a"], cache["b"], cache["c"] = 1, 2, 3
     assert dict(cache) == {"b": 2, "c": 3}
@@ -600,8 +597,8 @@ def test_a_broker_that_is_already_there_is_left_alone() -> None:
 
 
 def test_a_missing_broker_on_this_machine_is_started() -> None:
-    """The one place this port contradicts v1: it spawns mosquitto rather than
-    leaving it to the operator, because a config that says `peer_agent:` has said it
+    """The one liberty this build takes: it spawns mosquitto rather than leaving
+    it to the operator, because a config that says `peer_agent:` has said it
     wants the mesh."""
     answers = iter([False, True])
     started: list[dict[str, Any]] = []
@@ -1235,7 +1232,7 @@ async def test_a_send_the_requester_ladder_gave_up_on_tells_the_conversation(
     takes, wearing the failure's own words and marked `failed` so the envelope
     does not call it an answer.  The record is left `pending` on purpose: no
     reply arrived, so the peer's real ending is unknown, and a late terminal
-    still routes and records `completed` over it (DESIGN.md §11.1).
+    still routes and records `completed` over it (SDD Appendix C).
     """
     session = wired(window=window)
     # An id of this test's own: the store is the process's singleton, and a row
@@ -1358,7 +1355,7 @@ async def test_a_name_probe_that_failed_is_not_a_free_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """**A probe that could not run is not a probe that found nothing**
-    (DESIGN.md §11.1).
+    (SDD Appendix C).
 
     `_probe_own_name` answers the one verdict nothing else on the wire can:
     whether another agent already holds this name.  Answering `None` when its
@@ -1782,7 +1779,7 @@ async def test_an_empty_result_pushes_nothing(window: Window) -> None:
 
 @pytest.mark.asyncio
 async def test_a_message_is_handed_to_the_window(window: Window) -> None:
-    """DESIGN.md §6.1's policy, and there is one road in it: the window is where a message
+    """SDD §5.4's policy, and there is one road in it: the window is where a message
     becomes a turn somebody sees, and a conversation with no window is not a
     conversation with fewer readers — it is one nobody is running."""
     session = wired(window=window)
@@ -1940,9 +1937,10 @@ def build(**overrides: Any) -> FastMCP:
 
 @pytest.mark.asyncio
 async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
-    """v1's four, the one that reads what they left behind, and the group five.
-    `__check` has no port — v2 has no system_health and what it reported is
-    `peer_agent_list`' answer.
+    """The eleven model-facing tools: five on the mesh, six for groups.
+
+    There is no `system_health` tool: `peer_agent_list` reports the mesh's
+    state.
 
     `join` is here and is deliberately not one of them: it crosses a process
     boundary for a *window* (it is held open, and holding it is what keeps the
@@ -2166,8 +2164,8 @@ async def test_a_task_response_settles_the_task_in_the_same_call(
 @pytest.mark.asyncio
 async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     """The state a bare "offline" cannot tell apart from another agent holding
-    this one's name — which is the whole of what v1's `__check` error field was
-    for, and it is here rather than in a tool of its own."""
+    this one's name — reported in the roster's `error`, here rather than in a
+    tool of its own."""
     async with Client(build(on_the_mesh=True)) as client:
         answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
     data = answer.data
@@ -2175,8 +2173,7 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     assert data["broker"] == "localhost:1883"
     assert data["status"] == "offline"
     assert "not connected to the broker" in data["error"]
-    # Its own card is always first — v1's roster, from the cache and never by
-    # dialling.
+    # Its own card is always first, from the cache and never by dialling.
     assert data["agents"] == [{"agent_name": AGENT, "status": "offline"}]
 
 
@@ -2286,7 +2283,7 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
 
     A responder that advertised before the outbound connect timed out is still
     on the broker, so the teardown after a failed `connect` is what retires it
-    (DESIGN.md §6.3).  `suppress(Exception)` made a teardown that raised
+    (SDD §9.2).  `suppress(Exception)` made a teardown that raised
     indistinguishable from one that worked: the agent stayed advertised with
     nobody to retire it, and nothing said why.
     """
@@ -2323,7 +2320,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
     """**A teardown that carries a protocol fact is not silent.**
 
     The offline card is how a peer that watched an agent arrive watches it leave
-    (DESIGN.md §6.3), so a `disconnect` that raises as the window closes leaves
+    (SDD §9.2), so a `disconnect` that raises as the window closes leaves
     the agent advertised with nobody to retire it.  `suppress(Exception)` made
     that failure indistinguishable from success — the roster said `online` and
     nothing said why.

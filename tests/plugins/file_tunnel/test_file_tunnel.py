@@ -4,13 +4,13 @@ Three halves, each driven where it can be reached without a tunnel.
 
 The *tools* run over the in-memory transport with a fake tunnel injected, so
 what is under test is which file, which token and what the far end is told —
-v1's tests patched a module global to do this; an injected provider says the
-same thing as a contract.  The *route* is driven through the real ASGI app
+an injected provider makes that a contract rather than a patched module global.
+The *route* is driven through the real ASGI app
 (`FastMCP.http_app()`), which is the half worth being hardest about: it is the
 one thing about this plugin that is new to slife2, and a URL handed to a vision
 model is worthless if `/share/<token>` does not answer.  The *guards* — the
-credential denylist, the stat pin, the RFC 5987 filename — are v1's, and each
-one was a bug before it was a test.
+credential denylist, the stat pin, the RFC 5987 filename — each one was a bug
+before it was a test.
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """The tunnels — "expose this local port as a public HTTPS URL".
 
-v1's `sharefile/providers.py`, ported.  The plugin owns exactly ONE provider
-instance, chosen by the `file-tunnel:` section's `active:` (see
-:mod:`slife2.libs.host.config`).  Providers are the only thing that differs between
-tunnels: ``server.py`` talks to the :class:`TunnelProvider` surface and never to
-a concrete implementation, so switching tunnels is a config change rather than a
-code change — which is why `active:` is a name the operator writes and not a
-branch anybody edits.
+The plugin owns exactly ONE provider instance, chosen by the `file-tunnel:`
+section's `active:` (see :mod:`slife2.libs.host.config`).  Providers are the only
+thing that differs between tunnels: ``server.py`` talks to the
+:class:`TunnelProvider` surface and never to a concrete implementation, so
+switching tunnels is a config change rather than a code change — which is why
+`active:` is a name the operator writes and not a branch anybody edits.
 
 Every provider shares one lifecycle (:class:`_TunnelProviderBase`) and supplies
 only the three things that actually differ — how to establish the tunnel once,
@@ -21,9 +20,8 @@ how to tear it down, and how to tell whether it is still up:
 Contract the base guarantees, and which ``server.py`` relies on:
 
 * ``start(port)`` is **synchronous and blocking**.  It is always reached through
-  ``asyncio.to_thread`` — v1's ``run_daemon``, which is the same hop under
-  another name — never on the event loop, so it must be callable from an
-  arbitrary thread with no running loop: hence ``subprocess`` and not
+  ``asyncio.to_thread`` — never on the event loop — so it must be callable from
+  an arbitrary thread with no running loop: hence ``subprocess`` and not
   ``asyncio.create_subprocess_exec``.
 * ``start()`` is single-flight and idempotent, and ``stop()`` never raises —
   it is called at shutdown while a start may still be in flight.
@@ -38,12 +36,11 @@ Contract the base guarantees, and which ``server.py`` relies on:
 
 **The timings live in `slife2.helpers.timeouts`**, and every consumer reads them there
 at call time (``_T.timeouts.<role>.<key>``) rather than capturing them — the
-rule that module's own docstring states.  It is v1's shared ``slife.timeouts``
-table reborn as the build's single source of truth, so the one invariant v1
-checked here still holds and is still checked: a published tunnel gets at least
-the patience a fresh start gets before the monitor respawns it, now asserted by
-``slife2.helpers.timeouts.validate`` rather than by a hand-rolled check at the bottom of
-this module.
+rule that module's own docstring states.  It is the build's single source of
+truth, and the one invariant that matters here is checked there: a published
+tunnel gets at least the patience a fresh start gets before the monitor respawns
+it, asserted by ``slife2.helpers.timeouts.validate`` rather than by a
+hand-rolled check at the bottom of this module.
 """
 
 from __future__ import annotations
@@ -79,9 +76,8 @@ DEFAULT_PROVIDER = "ngrok"
 KNOWN_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
 
 #: Environment variable the active tunnel publishes its URL through.  Set on
-#: success, cleared on loss/stop.  v1's name with this project's prefix: the
-#: variable is read by another *process* only in v1's home (a subagent reusing
-#: the parent's tunnel), and here it is what keeps the fact visible to a
+#: success, cleared on loss/stop.  Read by another *process* — a subagent
+#: reusing the parent's tunnel — and it is what keeps the fact visible to a
 #: `slife2 status`-style reader without a second call.
 _TUNNEL_URL_ENV = "SLIFE2_FILE_TUNNEL_URL"
 
@@ -104,9 +100,9 @@ _resolver_fakes: bool | None = None
 def is_public_address(address: object) -> bool:
     """Whether *address* is globally routable — a real destination.
 
-    v1's ``slife.net.is_public_address``, which this is the only caller of now,
-    so it lives here rather than in a module of its own: v1's ``net.py`` was
-    shared with an SSRF guard that v2 does not have.
+    This module is the only caller of ``is_public_address``, so the function
+    lives here rather than in a module of its own: there is no shared
+    ``net.py``, because this build has no SSRF guard that would share it.
 
     Anything unparseable — a hostname, a malformed value, the ``""`` that means
     "never observed" — answers False: a caller asking about something that is
@@ -150,9 +146,9 @@ def _resolver_uses_fake_ip() -> bool:
 def _is_fake_ip_answer(address: object) -> bool:
     """Whether a lying resolver answered *address* for a name.
 
-    An **accusation, not a permission** — v1's distinction, kept because it is
-    the whole reason this is allowed to be coarse.  It is read by the tunnel's
-    health report to name the proxy behind a flapping tunnel, and a false
+    An **accusation, not a permission** — the distinction is the whole reason
+    this is allowed to be coarse.  It is read by the tunnel's health report to
+    name the proxy behind a flapping tunnel, and a false
     positive adds a hint that is still true of the machine ("a fake-ip proxy is
     in the path") while a false negative leaves the tunnel flapping with no
     cause named.  Nothing is granted through this.
@@ -178,10 +174,9 @@ def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
     """Resolve a CLI binary — PATH first, then any *extra* well-known absolute
     locations, in order.
 
-    ``shutil.which`` and nothing else, where v1 called its own Windows-aware
-    ``resolve_command`` first: Python's resolver already honours ``PATHEXT``, so
-    it finds ``cloudflared.exe`` and ``ssh.exe`` on its own and the wrapper had
-    nothing left to do.
+    ``shutil.which`` and nothing else: Python's resolver already honours
+    ``PATHEXT``, so it finds ``cloudflared.exe`` and ``ssh.exe`` on its own, and
+    a wrapper around it would have nothing left to do.
 
     **The guessed install locations are a fallback a reader should be able to
     see.**  OpenSSH and cloudflared are not on PATH in every shell on Windows,
@@ -257,8 +252,8 @@ def _auth_token(options: dict) -> str | None:
     The option is the operator's (`token: "${NGROK_AUTHTOKEN}"`, which
     `resolve_secret` reads through the shell env and then credstore).  The
     process's own ``NGROK_AUTHTOKEN`` is the fallback, so that a bare
-    ``ngrok: {}`` still works on a machine that exports one — which is how v1
-    read it, and the two agree whenever the config names the same variable.
+    ``ngrok: {}`` still works on a machine that exports one; it is the same
+    variable the config names, so the two agree when both are present.
     """
     token = str(options.get("token") or "").strip()
     if token:
@@ -278,8 +273,8 @@ def _ngrok_tunnel_alive(public_url: str) -> bool:
     The embedded SDK does NOT report a server-side teardown (free-tier sessions
     get recycled by ngrok), so the monitor asks the SDK what it is still
     forwarding.  ``get_listeners`` is the API this SDK version actually
-    exposes — v1's earlier probe called ``get_tunnels``, which does not exist
-    in ngrok 1.x, so it returned True for every input and detected nothing.
+    exposes — ``get_tunnels`` does not exist in ngrok 1.x, and a probe naming
+    it returns True for every input and detects nothing.
 
     TWO conservative rules, because a wrong "dead" costs more than a wrong
     "alive" here: the monitor answers a false negative by tearing the tunnel
@@ -1009,10 +1004,10 @@ class _CliTunnelProvider(_TunnelProviderBase):
         """Whether the child has said enough for its URL to be publishable.
 
         Readiness is deliberately the EDGE's view — a registered connector —
-        and not a local fetch of the published URL.  Measured in v1 on a fresh
-        Quick Tunnel: a public resolver answers for the hostname the moment
-        the URL is printable, while this machine's own resolver is still
-        negative-caching it and the local fetch fails for seconds after.
+        and not a local fetch of the published URL.  On a fresh Quick Tunnel a
+        public resolver answers for the hostname the moment the URL is
+        printable, while this machine's own resolver is still negative-caching
+        it and the local fetch fails for seconds after.
         Self-probing would therefore gate publication on the local resolver's
         lag rather than on whether anyone else can reach the tunnel, and
         would refuse URLs that work.
@@ -1321,12 +1316,12 @@ class LocalhostRunTunnel(_CliTunnelProvider):
         self._host: str = str(opts.get("host") or "localhost.run")
         self._user: str = str(opts.get("user") or "nokey")
         # An absent `remote_port` is the default; a *present but malformed* one
-        # is refused rather than read as 80.  DESIGN.md §8.1 declares exactly one
+        # is refused rather than read as 80.  SDD §12.1 declares exactly one
         # warn-instead-of-refuse in this section (an unknown provider *name*),
         # and says a malformed *shape* is refused like every other section — a
         # bad value in a known option is that same mistake, and silently
         # forwarding a different remote port than the config wrote is the kind
-        # of deformation nobody can find (DESIGN.md §11.1).
+        # of deformation nobody can find (SDD Appendix C).
         raw_port = opts.get("remote_port")
         if raw_port is None or raw_port == "":
             self._remote_port: int = 80
@@ -1427,13 +1422,12 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
     #: UDP.  Set ``protocol: "quic"`` (or ``"auto"``) in the section to switch
     #: back.
     #:
-    #: **This does NOT rescue a fake-ip proxy**, and v1's earlier claim that it
-    #: did was wrong — measured, not theorised: with a Clash/Mihomo TUN in
-    #: fake-ip mode the edge hostname resolves to an address of the proxy's
-    #: choosing, so the TCP dial itself lands on one and times out
-    #: (``dial tcp 198.18.0.32:7844: i/o timeout``).  The transport choice
-    #: never comes into play, and the flap continues unchanged on http2.  The
-    #: honest remedy is on the proxy config (make the edge resolve real and
+    #: **This does NOT rescue a fake-ip proxy** — measured, not theorised: with
+    #: a Clash/Mihomo TUN in fake-ip mode the edge hostname resolves to an
+    #: address of the proxy's choosing, so the TCP dial itself lands on one and
+    #: times out (``dial tcp 198.18.0.32:7844: i/o timeout``).  The transport
+    #: choice never comes into play, and the flap continues unchanged on http2.
+    #: The honest remedy is on the proxy config (make the edge resolve real and
     #: route direct — see :attr:`_TunnelProviderBase.edge_via_proxy`, which
     #: reports exactly this case).
     DEFAULT_PROTOCOL = "http2"
@@ -1466,7 +1460,7 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
         stays non-empty straight through an outage that answers every
         published link with HTTP 530, and the monitor watching it never sees
         anything wrong.  **The scraped set is read only when the child announced
-        no metrics server at all** (DESIGN.md §8.1's boundary): a metrics server that was
+        no metrics server at all** (SDD §12.1's boundary): a metrics server that was
         announced and could not be asked leaves `_metrics_ready` answering
         ``None`` while `_metrics_base` is set, and that is *unknown* — not
         alive, because there is no probe answer for it and the scrape is

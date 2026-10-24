@@ -1,9 +1,9 @@
 """slife2-file-tunnel — a public HTTPS URL for a local file.
 
-v1's `sharefile` plugin.  Its job is the one thing a local path cannot do: a
-vision model asked about `D:\\pictures\\cat.png`, or a chat API that takes a URL
-and nothing else, cannot read this machine's disk.  So the plugin does three
-things and they are the whole of it:
+The plugin's job is the one thing a local path cannot do: a vision model asked
+about `D:\\pictures\\cat.png`, or a chat API that takes a URL and nothing else,
+cannot read this machine's disk.  So the plugin does three things and they are
+the whole of it:
 
 * it holds a **tunnel** — this machine's port, published as an HTTPS URL
   (`providers.py`, and the `file-tunnel:` section says which one),
@@ -12,7 +12,7 @@ things and they are the whole of it:
 * it serves the bytes at ``GET /share/{token}``, on the same port, because the
   far end fetches that path *through the tunnel*.
 
-**A plugin, by DESIGN.md §1.1's own table.**  It holds somebody else's connection — a
+**A plugin, by SDD §2.4's test.**  It holds somebody else's connection — a
 tunnel process, or an SDK holding an account — so it is a process rather than a
 library, for the same reason the model backends are: a library would put the
 tunnel in every importer.
@@ -78,7 +78,7 @@ _CHUNK = 65536
 
 # ── What will not be published ───────────────────────────────────────────────
 # A share URL is public for as long as the tunnel is up, so a leaked key is a
-# home-readable key.  The list is v1's: private-key names, dotenv, and the
+# home-readable key.  The list covers private-key names, dotenv, and the
 # cloud/package credential files that carry a token in plain text.
 
 _CREDENTIAL_NAMES = frozenset(
@@ -198,13 +198,12 @@ class Exposure:
 class Exposed:
     """The tokens this process has handed out, and the files behind them.
 
-    **One map for the whole process, not one per agent**, and that is the
-    difference from v1 rather than an oversight.  There, one child process
-    served one agent, so a module global *was* that agent's.  Here one process
-    serves every agent — but the thing being addressed is `GET /share/{token}`,
-    and a third party fetching that URL says nothing about who they are.  The
-    token *is* the capability, so the map is keyed by it and cannot be
-    partitioned by a caller that the route never sees.
+    **One map for the whole process, not one per agent**, and that is
+    deliberate rather than an oversight.  One process serves every agent — but
+    the thing being addressed is `GET /share/{token}`, and a third party
+    fetching that URL says nothing about who they are.  The token *is* the
+    capability, so the map is keyed by it and cannot be partitioned by a caller
+    that the route never sees.
 
     What is held per agent is the *owner*, which is what lets one conversation
     refuse to revoke another's link (see :meth:`revoke`) — the one place the
@@ -372,14 +371,12 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     """Build the file-tunnel server.
 
     `provider` is the seam, and it is the one worth having: every test of the
-    two tools drives a fake tunnel — v1's do the same by patching a module
-    global, which this replaces — so what is under test is the *tool* half
+    two tools drives a fake tunnel, so what is under test is the *tool* half
     (which file, which token, what the far end is told) with no tunnel, no
     credential and no network anywhere.  The providers' own shapes are tested
     against fake subprocesses in `tests/test_file_tunnel_providers.py`.
 
-    **The port comes from the config, not from a bound socket.**  v1 bound a
-    free port for itself so the tunnel could be pointed at it; here
+    **The port comes from the config, not from a bound socket.**
     `serve_plugin` already knows the address, and the tunnel is pointed at the
     port it says.  What that costs is the `--port` override on *this* plugin:
     it moves the MCP server and leaves the tunnel forwarding to the configured

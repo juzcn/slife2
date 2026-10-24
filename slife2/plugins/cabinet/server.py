@@ -1,11 +1,12 @@
 """slife2-cabinet — the private cabinet: notes, a diary, saved files, reports,
 dumps and images.
 
-v1 called this plugin `memfiles` and described it as four typed knowledge stores
-dual-written to a markdown file and a SQLite index.  This is that, built the way
-a plugin here is built: one process, `house_server` plus `serve_plugin`, the
-*store* as a library (`slife2.plugins.cabinet.store`), the embedder opened once against
-the embeddings server, and state keyed by the client id every call carries.
+The cabinet is typed knowledge stores — a note, a day, a saved file, a report, a
+dump and an image — dual-written to a markdown file and a SQLite index.  It is
+built the way a plugin here is built: one process, `house_server` plus
+`serve_plugin`, the *store* as a library (`slife2.plugins.cabinet.store`), the
+embedder opened once against the embeddings server, and state keyed by the
+client id every call carries.
 
 **The store's calls hop off the event loop where the hop pays**: opening a
 cabinet, a single read, and any listing, which are the calls that run while
@@ -18,7 +19,7 @@ wait nobody is making.
 an image are rows of one table with a `kind` column, so a search ranks them
 against each other rather than against their own kind — a rank only means
 something inside the corpus that produced it, and one index per kind would be
-one corpus per kind (DESIGN.md §5.3).  What differs per kind is what a
+one corpus per kind (SDD §8.3).  What differs per kind is what a
 *document* is, and that is `SPECS` in the store: its key, its time axis, whether
 a second write appends, and where its markdown goes.
 
@@ -41,21 +42,21 @@ provider fetches it.
 
 What this cut does **not** do, each named rather than half-built:
 
-* **A URL is not fetched.**  `file_save` takes local paths; v1 also downloaded
-  public `http(s)` URLs behind an SSRF guard of its own (`slife/net.py`), and
-  that guard is a change of its own — it is a library with a threat model, a
-  config switch and its own tests, and porting it half-way would be a guard that
-  looks like one.
-* **There is no `grep` leg.**  v1's cabinet had three search legs and this has
-  the two slife2 has; the third is deferred in DESIGN.md §10 by name, and the
-  cabinet inherits the deferral rather than inventing a second regex engine.
-* **There is no schedule half.**  v1's `memfiles` also owned the scheduled-task
-  tables and sixteen tools over them, and reports bound to a task.  There is no
-  scheduler here, so a report is keyed by its **title** instead of by a task — a
-  report is still a log, and repeated saves under one title still accumulate.
-* **`USER.md` is not served.**  v1's profile was a file this plugin owned *and* a
-  builtin that wrote it, with the system prompt rendering it.  Wiring a file into
-  a prompt is a change to the prompt, and this plugin does not make it.
+* **A URL is not fetched.**  `file_save` takes local paths, and a public
+  `http(s)` URL is not a second input: an SSRF guard is a change of its own — a
+  library with a threat model, a config switch and its own tests — and building
+  it half-way would be a guard that looks like one.
+* **There is no `grep` leg.**  The cabinet has two search legs; the third is
+  deferred in SDD §14.2 by name, and the cabinet inherits the deferral rather
+  than inventing a second regex engine.
+* **There is no schedule half.**  The cabinet owns no scheduled-task tables and
+  no tools over them; there is no scheduler here, so a report is keyed by its
+  **title** instead of by a task — a report is still a log, and repeated saves
+  under one title still accumulate.
+* **`USER.md` is not served.**  This plugin owns no profile file and no builtin
+  that writes one, and nothing here is rendered into the system prompt.  Wiring
+  a file into a prompt is a change to the prompt, and this plugin does not make
+  it.
 """
 
 from __future__ import annotations
@@ -121,17 +122,16 @@ INSTRUCTIONS = (
 
 #: The most of a file `file_read` will read.  A cap rather than a preference: a
 #: tool that returns a gigabyte of text to a model has spent a context window to
-#: say "this is not a document".  (It used to read "and the most of a URL it
-#: would fetch" — nothing here fetches a URL, which the instructions above say
-#: and which was v1's `file_save` half that was deliberately not ported.)
+#: say "this is not a document".  A URL has no share of this cap, because
+#: nothing here fetches a URL — the instructions above say so.
 MAX_READ_BYTES = 2 * 1024 * 1024
 
 #: How much of a file is sniffed for the two things that settle its encoding
 #: before anything is decoded: a BOM, and a NUL byte.
 SNIFF_BYTES = 8192
 
-#: Where a saved file goes, by what it is.  v1 auto-filed by extension and this
-#: keeps that: the cabinet is browsed by a person, and `images/` is a
+#: Where a saved file goes, by what it is.  Auto-filing by extension is
+#: deliberate: the cabinet is browsed by a person, and `images/` is a
 #: directory they can find something in.  An extension nobody here knows lands in
 #: `files/other/`, which is a name that says exactly that rather than guessing.
 CATEGORIES: dict[str, tuple[str, ...]] = {
@@ -213,7 +213,7 @@ def unique_path(directory: Path, name: str) -> Path:
 
     A file is never overwritten, and never overwritten *silently*: two documents
     called `report.pdf` are two documents, and a cabinet that keeps one of them
-    is a cabinet that lost the other.  v1's rule, and the reason a saved file's
+    is a cabinet that lost the other.  That rule is the reason a saved file's
     key is its path rather than its name.
 
     **The name is claimed by creating it**, and that is the difference between a
@@ -1257,9 +1257,9 @@ def _window_of(
     agent shares — and the code-reading tools that take a regex take it because
     their engines cannot backtrack, which Python's can.  A literal substring,
     ignoring case, is also what the common case wants: a symbol, a path, a
-    spelling remembered approximately (DESIGN.md §10's own three examples for the grep leg
-    v1 had).  A model that needs a real regex has the file — `where` names it,
-    and the operator's own tools read it.
+    spelling remembered approximately (SDD §14.2's own three examples for the
+    grep leg).  A model that needs a real regex has the file — `where` names
+    it, and the operator's own tools read it.
 
     **The numbers are the ones the harness's shortening shows a model**, on
     purpose: a line named in a discriminator's reply and a line read back here
@@ -1449,7 +1449,7 @@ def _hits(found: dict[str, Any]) -> dict[str, Any]:
     **A search answer that cannot be read is not a search that found nothing.**
     An answer with no `results` list used to render as the same "nothing
     matched" a real miss produces, which is a verdict a model acts on rather
-    than a failure it retries (DESIGN.md §11.1, "a failure is not a verdict"); only a
+    than a failure it retries (SDD Appendix C, "a failure is not a verdict"); only a
     *readable* empty list may say the search found nothing, and anything else
     fails the call.  The raise is this plugin's to make — the store's shape is
     the thing that is wrong — and the far end reads it as a failed call rather

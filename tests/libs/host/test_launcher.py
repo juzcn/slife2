@@ -469,7 +469,7 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     the reasons are written down beside it, one entry at a time, so this is the
     place they are held to the code: an entry that outlives the call it
     described fails here, which is what `wechat`'s did — it was the agent server
-    for a release after the delivery became the window's (DESIGN.md §6.2).
+    for a release after the delivery became the window's (SDD §9.1).
     """
     names = [spec.name for spec in launcher.specs(default_config())]
     assert names[-5:] == [
@@ -486,12 +486,12 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     # conversation, and the store the task's own conversation is restored from.
     assert set(launcher.NEEDS["agent-task"]) == {"toolhub", "tui", "agent", "context"}
     # The clock reaches three peers, and asks the hub for nothing: it makes no
-    # model call (DESIGN.md §6.5), so the terminal and the agent server behind it
+    # model call (SDD §9.4), so the terminal and the agent server behind it
     # are where a trigger goes, and `agent-task` is where a run's work is started
     # and asked after — the third edge is the one that lets a run close itself.
     assert set(launcher.NEEDS["schedule"]) == {"tui", "agent", "agent-task"}
     # The mesh reaches two, and it is the same pair for the same reason
-    # (DESIGN.md §6.3): what arrives from a peer is a message handed to a
+    # (SDD §9.2): what arrives from a peer is a message handed to a
     # conversation, wherever the conversation can be reached.
     assert set(launcher.NEEDS["peer-agent"]) == {"tui", "agent"}
     # And the local network is the same pair: it is the same module serving

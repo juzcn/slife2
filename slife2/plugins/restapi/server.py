@@ -94,7 +94,7 @@ WORDS = FamilyWords(
 
 
 # ── The management tools ────────────────────────────────────────────────
-# The same five names as the MCP family, over this section — v1's split, kept
+# The same five names as the MCP family, over this section — the split is kept
 # because a REST API and an MCP server are different things to a person even
 # when one is served by the other.  What differs is only the entry: an API is
 # written as a spec and a base URL, and the config layer expands it into the
@@ -106,9 +106,10 @@ def _reference(value: str) -> str:
     """A credential written the way the config writes one: `${VAR}`.
 
     **The name, not the secret**, which is the whole of what makes this tool
-    safe to hand a model.  v1's `api_key` is a *variable name* for the same
-    reason; a value that is already a reference (or a `keyring:` URI) is left
-    exactly as given, so a caller that knows the syntax is not second-guessed.
+    safe to hand a model.  The stored credential is a *variable name* for the
+    same reason; a value that is already a reference (or a `keyring:` URI) is
+    left exactly as given, so a caller that knows the syntax is not
+    second-guessed.
     """
     credential = value.strip()
     if credential.startswith("${") or credential.startswith("keyring:"):
@@ -117,9 +118,8 @@ def _reference(value: str) -> str:
 
 
 def _validate_http_url(url: str, what: str) -> str:
-    """Require an `http(s)` URL with a host — v1's check, and v1's reason.
-
-    **The proxy child fetches the spec**, so a `file://` or an internal-host URL
+    """Require an `http(s)` URL with a host.  **The proxy child fetches the
+    spec**, so a `file://` or an internal-host URL
     handed to `spec` is a way to make a slife2 process read something it was
     never pointed at.  Private addresses are deliberately still allowed: a local
     API is a legitimate thing to configure, and blocking it would be this check

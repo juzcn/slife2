@@ -5,10 +5,10 @@ mechanism: three names the loop reads off every call and strips before dispatch
 (`slife2.libs.turn.tools`), and the behaviours they select — who enforces a deadline, where
 a result goes, who is asked before a call runs.
 
-The assertions are v1's, ported where the rule is v1's: garbage `_timeout` must
-not kill a turn, `0` never means "no bound" and never reaches a tool as an
-instant kill, a tool that declares its own `timeout` is never wrapped, and a
-denied call runs nothing and mounts nothing.
+The assertions are the mechanism's own rules: garbage `_timeout` must not kill a
+turn, `0` never means "no bound" and never reaches a tool as an instant kill, a
+tool that declares its own `timeout` is never wrapped, and a denied call runs
+nothing and mounts nothing.
 """
 
 from __future__ import annotations
@@ -188,8 +188,8 @@ async def test_a_bare_timeout_on_a_tool_without_one_is_read_and_stripped() -> No
     """The model's habit of appending `timeout` is answered, not forwarded.
 
     A tool server validates its parameters, and an argument its schema does not
-    declare makes it refuse the WHOLE call — v1 measured that.  So a bare
-    `timeout` becomes this call's bound and never reaches the tool.
+    declare makes it refuse the WHOLE call.  So a bare `timeout` becomes this
+    call's bound and never reaches the tool.
     """
     never = asyncio.Event()
     seen: list[dict[str, Any]] = []
@@ -255,7 +255,8 @@ async def test_the_meta_parameters_reach_the_history_but_not_the_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_a_background_call_answers_a_marker_naming_the_call() -> None:
-    """The reply is the marker v1's sentence hangs under, naming all four things."""
+    """The reply is the marker naming all four things, under the sentence that
+    says the task started."""
 
     async def slow(_arguments: dict[str, Any]) -> str:
         return "the answer"
@@ -449,7 +450,7 @@ async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
 async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
     """No `deliver` means the mode is refused, in a sentence that can be acted on.
 
-    An agent task's loop is that case (DESIGN.md §10): it runs one turn and has no
+    An agent task's loop is that case (SDD §14.2): it runs one turn and has no
     second one for a result to arrive in, so a task id would be a promise nothing
     could keep.  The refusal says which one line fixes it.
     """
@@ -561,9 +562,8 @@ async def test_cancelling_a_background_call_hands_back_that_it_was_cancelled() -
 async def test_a_denied_call_runs_nothing_and_mounts_nothing() -> None:
     """The refusal is the whole of what the model and the screen get.
 
-    No `ToolCallStarted`, and so no panel: v1's rule, and the reason is the
-    display — one that appeared and then said "denied" would have told a reader
-    the tool ran.
+    No `ToolCallStarted`, and so no panel: the reason is the display — one that
+    appeared and then said "denied" would have told a reader the tool ran.
     """
     seen: list[str] = []
 
@@ -638,7 +638,7 @@ async def test_no_approve_means_the_gate_is_never_asked() -> None:
 
 @pytest.mark.asyncio
 async def test_a_loop_with_nobody_to_ask_runs_the_call() -> None:
-    """v1's rule for a worker: the decision belongs to whoever is watching, and
+    """The rule for a worker: the decision belongs to whoever is watching, and
     nobody is — so the call runs rather than becoming one the model can never use.
     """
 

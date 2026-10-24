@@ -16,9 +16,9 @@ zones write to the same store.  Seconds, because nothing here needs more, and
 coarser precision makes two events in the same second compare equal rather than
 merely close — which is what a reader assumes anyway.
 
-This is v1's convention (`slife.timeutil.now_local_seconds`), kept because the
-databases are v1's schema and a future port of its time-window queries should
-compare correctly against rows written here.
+The convention is kept because the stored databases already use this schema,
+and the time-window queries should compare correctly against the rows written
+here.
 """
 
 from __future__ import annotations

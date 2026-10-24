@@ -6,7 +6,7 @@ runner of anything, and not a filter over the config — because a switched-off
 entry that vanished would make "the operator turned it off" and "nobody ever
 wrote it down" the same silence.
 
-The tools half is the four `cli_*` tools v1 had, and what makes this family's
+The tools half is the four `cli_*` tools, and what makes this family's
 version of them unlike the other three: **there is nothing to connect to.**  So
 none of them rebuild a link or report a tool count; what they change is the
 section, and what follows is the row — which is also why the one check worth
@@ -200,8 +200,9 @@ async def test_a_command_that_is_not_installed_says_so(isolated_runtime: Path) -
     """**The one failure this family is certain to meet, said while somebody is looking.**
 
     A model writing a command down from a documentation page has no way to know
-    whether it is on this machine, and v1 only answers after the fact — `install`
-    is shown when the command turns out to be missing.  The entry is still
+    whether it is on this machine, so the check is made as the entry is written
+    rather than later, when `install` would be shown because the command turned
+    out to be missing.  The entry is still
     written: it is a fact about what the operator wants recorded, and the
     `missing_program` field is a fact about the machine.
     """
@@ -249,7 +250,7 @@ async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
     `str.split()` makes the first word `"C:\\Program` — a program that cannot
     exist — so the note claims a program is missing that is not, and `shutil.which`
     is never asked about the one that is.  The line is split the way the argv
-    runner will (`DESIGN.md` §10: an argv rather than a shell), so quotes group a
+    runner will (`SDD` §14.2: an argv rather than a shell), so quotes group a
     word and come off, and a Windows path's backslashes stay literal.
     """
     asked: list[str] = []
@@ -388,7 +389,7 @@ async def test_a_command_line_that_cannot_be_split_is_refused_before_the_write(
 
     `_on_path` used to meet the unbalanced quote *after* the entry was written
     and answer `""` — the same silence as "the program is on PATH" — so `cli_set`
-    reported a success over a row nothing can run (DESIGN.md §10: an argv rather
+    reported a success over a row nothing can run (SDD §14.2: an argv rather
     than a shell).  The split is checked before the write, and the refusal names
     the line.
     """

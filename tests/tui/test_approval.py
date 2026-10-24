@@ -6,14 +6,15 @@ things to pin — that the row resolves that future **once** and in the right
 direction for each key, and that the window sends the answer back on the call
 that exists for it (`answer_approval`) rather than dropping it.
 
-v1's tests, ported: `y` approves, `n` and `Esc` deny, and a second keypress is
+The tests pin: `y` approves, `n` and `Esc` deny, and a second keypress is
 ignored.
 
-**The fourth one is no longer v1's.** v1 denied on losing focus, on the argument
-that the loop is waiting and a row nobody answers holds the turn open — and that
-argument is wrong here, because three things take focus away on purpose: every
-printable key other than `y`/`n` focuses the row (`redirect_printable`), `Ctrl+S`
-opens the model picker, and a click anywhere does it.  So a person starting their
+**The fourth rule is the opposite.** Denying on losing focus would follow the
+argument that the loop is waiting and a row nobody answers holds the turn open —
+and that argument is wrong here, because three things take focus away on
+purpose: every printable key other than `y`/`n` focuses the row
+(`redirect_printable`), `Ctrl+S` opens the model picker, and a click anywhere
+does it.  So a person starting their
 next thought refused the call the model was parked on, silently, and the row's
 own docstring could not be told from a deliberate `n`.  What is pinned now is the
 opposite: a blur leaves the row up and the answer owed, and only a decision
@@ -192,7 +193,7 @@ async def test_a_keypress_reaches_the_server_as_an_answer() -> None:
 
 
 async def test_a_cancelled_turn_denies_the_prompt_it_was_holding() -> None:
-    """`Esc` refuses the call and then stops the turn — v1's order, and its
+    """`Esc` refuses the call and then stops the turn — the order follows the
     reason: a row left undecided is an answer nobody will ever give.
     """
     app, client = make_app(asking())

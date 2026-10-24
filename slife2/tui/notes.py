@@ -4,8 +4,7 @@ A transcript holds three kinds of line — what the person said, what the model
 said, and what the *harness* did — and the third is the one nothing in the
 conversation itself accounts for: history came back when the window opened, the
 discriminator kept some turns and went to the log for others, a turn was
-cancelled, a peer came online or went away.  v1 drew these from several places
-and called the collection its activity feed; this is the one place their words
+cancelled, a peer came online or went away.  This is the one place their words
 are written, so a reader who has learned `[restored 3 turns]` meets the same
 shape everywhere and a producer cannot quietly invent a fourth spelling.
 
@@ -26,7 +25,7 @@ here goes through `t()` (`slife2.tui.i18n`), which is why a Chinese window reads
 arrival lines are written by *daemons* rather than by the window is a wrinkle
 worth knowing: a plugin composes its note in its own process, so `--lang` — a
 flag on the window's own command line — does not reach it, and a daemon follows
-the OS locale where a window follows the flag (`DESIGN.md` §7.5).
+the OS locale where a window follows the flag (`SDD` §10.4).
 """
 
 from __future__ import annotations

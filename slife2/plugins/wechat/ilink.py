@@ -7,11 +7,10 @@ behind them, the QR handshake that turns a phone into a token, the long poll
 that token buys, and the envelopes that mean something other than what their
 status code says.
 
-**A library, and not a plugin**, by the test DESIGN.md §1.1 states: what holds a
+**A library, and not a plugin**, by the test SDD §2.4 states: what holds a
 credential is a plugin, and this holds none — a token is handed to it by
-`slife2-wechat`, which is the process that owns the session file.  The split is
-v1's (`slife/plugins/wechat/client.py`) and it is kept for the reason that split
-always earns: the protocol can be driven end to end with no server anywhere,
+`slife2-wechat`, which is the process that owns the session file.  The split
+earns its keep: the protocol can be driven end to end with no server anywhere,
 because :class:`Http` is the seam and the real implementation is four lines.
 
 Adapted from SiverKing/weixin-ClawBot-API (MIT License).
@@ -21,9 +20,9 @@ Adapted from SiverKing/weixin-ClawBot-API (MIT License).
 iLink answers a **revoked or rejected token** with `200 OK` and a body carrying
 `errno` / `error` / `retcode` instead of `msgs`.  A client that reads `msgs` and
 defaults to "no messages" spins forever against a dead token while every status
-question answers `logged_in` — which is what v1 did until the envelope was read,
-and why :func:`error_envelope` exists as a thing named rather than a check
-inlined at each of the three places it is needed.
+question answers `logged_in` — which is why :func:`error_envelope` exists as a
+thing named rather than a check inlined at each of the three places it is
+needed.
 
 **And the same "no" comes in a second spelling**, which is how this defect came
 back after being fixed once.  iLink keeps **one live session per WeChat
@@ -65,17 +64,17 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://ilinkai.weixin.qq.com"
 
-#: The client the far end is told it is talking to.  `2.4.3` is v1's value and
-#: is not this project's version: it is the *bridge's* protocol revision, and
-#: the far end is entitled to answer differently to a different one.
+#: The client the far end is told it is talking to.  `2.4.3` is not this
+#: project's version: it is the *bridge's* protocol revision, and the far end is
+#: entitled to answer differently to a different one.
 CHANNEL_VERSION = "2.4.3"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = str((2 << 16) | (4 << 8) | 3)
 BOT_AGENT = "slife2-wechat/1.0.0 (python)"
 
 #: How long one call may take.  Generous, because the poll is a *long* poll —
-#: the far end holds the request open until it has something to say — and v1's
-#: number is kept: it is the far end's cadence, not ours to shorten.
+#: the far end holds the request open until it has something to say — and the
+#: number is the far end's cadence, not ours to shorten.
 
 
 @dataclass(frozen=True)
@@ -124,16 +123,15 @@ async def request(
     """The real :class:`Http`: one `httpx2` request, and its body as text.
 
     **A client per call, and deliberately.**  One pooled client would be fewer
-    handshakes, and it is what v1 could not do: an `aiohttp` session binds to
-    the event loop that made it, and v1's own notes are a record of sessions
-    outliving their loops across a restart.  A context manager per call cannot
-    be bound to a loop that is gone, and the cost is one TCP handshake per poll
-    — against a poll that is a long-poll by design.
+    handshakes, but an `aiohttp` session binds to the event loop that made it,
+    and a session that outlives its loop across a restart is a known failure.
+    A context manager per call cannot be bound to a loop that is gone, and the
+    cost is one TCP handshake per poll — against a poll that is a long-poll by
+    design.
 
     Nothing here logs the body.  `get_qrcode_status` answers with the **live
     bot token** in it, so a debug line with the body in it is a credential in a
-    plaintext file — v1 masked the text with a helper it had to remember to
-    call at both sites; this does not have the text to leak.
+    plaintext file; this does not have the text to leak.
     """
     kwargs: dict[str, Any] = {} if body is None else {"json": dict(body)}
     async with httpx2.AsyncClient(timeout=httpx2.Timeout(timeout)) as session:
@@ -147,8 +145,7 @@ def headers(token: str | None = None) -> dict[str, str]:
 
     `X-WECHAT-UIN` is a random number, base64'd, regenerated per call — it is
     what the bridge counts a *device* by, and a constant one is a device that
-    never reconnects.  v1's implementation and v1's comment; the randomness is
-    load-bearing rather than decorative.
+    never reconnects.  The randomness is load-bearing rather than decorative.
     """
     uin = str(random.randint(0, 0xFFFFFFFF))
     made = {
@@ -266,7 +263,7 @@ class IlinkClient:
         self._typing_tickets: dict[str, str] = {}
         #: The bot's own iLink identity, from the login.  Not the peer's: the
         #: `getconfig` endpoint that mints a typing ticket is a *bot*-level
-        #: call, which is the distinction v1 lost once and wrote down.
+        #: call, so the two ids must not be confused.
         self._ilink_user_id: str = ""
         self._ilink_bot_id: str = ""
         #: Who last messaged, so the model can be told who a reply goes to.
@@ -286,12 +283,12 @@ class IlinkClient:
         """A fresh login QR, as the bridge describes it.
 
         POST first and GET as a fallback: the documented call is the POST, and
-        the GET is what v1 found answering when the POST came back without a
-        `qrcode` — kept because a login that cannot start is a login that
-        cannot be retried.  **What reaches the GET is a POST that answered and
-        had no `qrcode`**: one whose body could not be read raises
-        (`UnreadableAnswer`), because taking a second run at a link that just
-        answered something unintelligible is how it gets to look healthy.
+        the GET answers when the POST comes back without a `qrcode` — kept
+        because a login that cannot start is a login that cannot be retried.
+        **What reaches the GET is a POST that answered and had no `qrcode`**:
+        one whose body could not be read raises (`UnreadableAnswer`), because
+        taking a second run at a link that just answered something
+        unintelligible is how it gets to look healthy.
         """
         data = await self._post(
             "ilink/bot/get_bot_qrcode?bot_type=3",
@@ -314,10 +311,10 @@ class IlinkClient:
         six words for what is a four-state loop, and the loop that acts on them
         is the plugin's.
 
-        `redirect_base` is the one that matters and the one v1 shipped without:
-        a code scanned on the wrong node answers `scaned_but_redirect`, and a
-        loop that keeps polling the original host waits forever for a
-        confirmation that went somewhere else.
+        `redirect_base` is the one that matters: a code scanned on the wrong
+        node answers `scaned_but_redirect`, and a loop that keeps polling the
+        original host waits forever for a confirmation that went somewhere
+        else.
         """
         endpoint = f"ilink/bot/get_qrcode_status?qrcode={quote(qrcode, safe='')}"
         if verify_code:
@@ -377,8 +374,8 @@ class IlinkClient:
         why :meth:`validate_session` exists and why the caller runs them in
         that order.  `max_age` is the caller's, because the lifetime of a
         session is a policy about *this login* and not a fact about the
-        protocol; v1 kept it in a global timeouts registry, which is how a
-        number about WeChat came to be read out of a module about everything.
+        protocol — a number about WeChat has no business living in a module
+        about everything.
         """
         if not saved:
             return False
@@ -581,7 +578,7 @@ class IlinkClient:
         `getconfig` is a **bot-level** endpoint: it wants the bot's own iLink
         id, which the login returned, and not the id of whoever is being
         answered — that one goes to `sendtyping` as the target.  Passing the
-        sender's id here is the mistake v1 made and wrote down.
+        sender's id here would be the mistake.
         """
         cached = self._typing_tickets.get(user_id)
         if cached:
