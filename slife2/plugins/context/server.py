@@ -94,7 +94,7 @@ from slife2.libs.store.index import Embedder, page_limit
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
-from slife2.libs.turn.messages import StreamChatResult
+from slife2.libs.turn.messages import StreamChatResult, Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
@@ -304,6 +304,7 @@ def build_server(
         subagent: str = "",
         token_count: int = 0,
         context_tokens: int = 0,
+        usage: dict[str, int] | None = None,
         who_helped: str = "",
         what_model: str = "",
         channel: str = "",
@@ -339,6 +340,10 @@ def build_server(
                 large the conversation had become, which is what the next
                 request resends.  A different question from `token_count`: one
                 is a bill, the other is what the context window has to hold.
+            usage: The bill's breakdown — `prompt_tokens`, `completion_tokens`,
+                `cache_read`, `cache_creation` — as `Usage.to_wire()` spells it.
+                `token_count` is its total; this is what a cache-hit ratio is
+                computed from.  Omitted when the caller measured none.
             who_helped: The agent that answered.
             what_model: Which model answered, as `provider/model`.
             channel: Where the turn came in from — `tui`, or a client id.
@@ -359,6 +364,7 @@ def build_server(
             embedder=await embedding.get(),
             token_count=token_count,
             context_tokens=context_tokens,
+            usage=Usage.from_wire(usage) if usage is not None else None,
             who_helped=who_helped,
             what_model=what_model,
             channel=channel,
@@ -473,6 +479,10 @@ def build_server(
         assistant message, the tool calls and their answers. Your own history,
         like `turn_list` — an id resolves inside it and nowhere else.
         `token_count` is how large this turn is, estimated from its messages.
+        `usage` is what the turn actually spent when it ran — `prompt_tokens`,
+        `completion_tokens`, `cache_read`, `cache_creation` — or null for a
+        turn stored before that was measured. It is a bill from the past, not
+        the size of the conversation you are reading.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.

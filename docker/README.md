@@ -67,8 +67,8 @@ Useful environment variables:
 | `DEEPSEEK_API_KEY` | none | The shipped config's provider key; required for a turn. |
 | `SLIFE2_PROMPT` | none | One-shot prompt. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
-| `SLIFE2_BENCH_TUI_URL` | `http://127.0.0.1:24005/mcp` | The TUI plugin's endpoint; the prompt is handed to the window there. |
-| `SLIFE2_BENCH_TOOLHUB_URL` | `http://127.0.0.1:24020/mcp` | The toolhub's endpoint; the readiness gate asks `servers` there. |
+| `SLIFE2_BENCH_TUI_URL` | the config's `servers.tui.url` | The TUI plugin's endpoint; the prompt is handed to the window there. |
+| `SLIFE2_BENCH_TOOLHUB_URL` | the config's `servers.toolhub.url` | The toolhub's endpoint; the readiness gate asks `servers` there. |
 | `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
 | `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
@@ -103,9 +103,11 @@ the container.
   image one. Starting the server and listing its tools do not need a browser.
 - Docker Desktop's kernel reports as WSL in `/proc/version`, so credstore would
   pick its WSL backend and look for `powershell.exe`. `sitecustomize.py` makes
-  it treat the container as native Linux. Missing `${VAR}` references then stay
-  unresolved, which is slife2's documented lenient behavior; pass real values
-  through the environment.
+  it treat the container as native Linux. It is installed **into the venv's
+  site-packages**, so it travels with a filesystem copy of this image (a task
+  container carries no `ENV`) and needs no `PYTHONPATH`. Missing `${VAR}`
+  references then stay unresolved, which is slife2's documented lenient
+  behavior; pass real values through the environment.
 - This is the image the benchmark should run **inside** the task container
   (or build its task image from). The host-side bare adapter in
   `slife2-bench` is not this path.

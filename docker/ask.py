@@ -18,8 +18,6 @@ from slife2.libs.store.db import message_text
 from slife2.plugins.tui import server as control
 from slife2.plugins.tui.server import NOTE
 
-DEFAULT_TUI_URL = "http://127.0.0.1:24005/mcp"
-DEFAULT_TOOLHUB_URL = "http://127.0.0.1:24020/mcp"
 TURN_TIMEOUT = float(os.environ.get("SLIFE2_BENCH_TURN_TIMEOUT", "3600"))
 #: How long the window may take to open.  `slife2 run` opens it only after
 #: every server is ensured and the catalogue is built; the launcher's own
@@ -177,6 +175,24 @@ async def wait_for_tools(url: str, expected: dict[str, str], deadline: float) ->
         await asyncio.sleep(5)
 
 
+def endpoints() -> tuple[str, str]:
+    """The TUI and toolhub addresses the stack is actually serving on.
+
+    **The config's, not this file's.**  Both ports are configurable
+    (`servers.tui`, `servers.toolhub`) and `wsl_port_offset` shifts every one of
+    them on a mirrored network — a default compiled in here would dial an
+    address nothing bound, and the failure would read as a stack that never
+    became ready.  The environment variables stay as an override for a caller
+    that mapped the ports somewhere else, and are read first because that is
+    what an override is.
+    """
+    config = load_cached()
+    return (
+        os.environ.get("SLIFE2_BENCH_TUI_URL") or config.server("tui").url,
+        os.environ.get("SLIFE2_BENCH_TOOLHUB_URL") or config.server("toolhub").url,
+    )
+
+
 def external_sources() -> dict[str, str]:
     """The enabled `mcp:` and `rest-api:` entries, by name, with their kind."""
     config = load_cached()
@@ -243,8 +259,7 @@ async def main() -> int:
         return 2
 
     agent = os.environ.get("SLIFE2_AGENT", "slife2")
-    url = os.environ.get("SLIFE2_BENCH_TUI_URL", DEFAULT_TUI_URL)
-    hub_url = os.environ.get("SLIFE2_BENCH_TOOLHUB_URL", DEFAULT_TOOLHUB_URL)
+    url, hub_url = endpoints()
     path = database_of(agent)
     before = await asyncio.to_thread(last_turn, path)
     try:

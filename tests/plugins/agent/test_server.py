@@ -111,6 +111,7 @@ def answering(text: str) -> FakeBackend:
 def asks_for_a_tool(
     *,
     delay: float = 0.0,  # timeouts: the value this test is built around, not a budget
+    usage: Usage | None = None,
 ) -> ScriptedTurn:  # timeouts: the value this test is built around, not a budget
     """The iteration that calls a tool — and so gives the turn a second boundary.
 
@@ -125,6 +126,7 @@ def asks_for_a_tool(
             text="checking",
             tool_calls=(ToolCall(id="c1", name="skill_list", arguments={}),),
             stop_reason="tool_calls",
+            usage=usage or Usage(),
         ),
         chunks=[Chunk(text="checking")],
         delay=delay,
@@ -1370,6 +1372,64 @@ async def test_an_interrupted_turn_is_still_recorded(
     assert stored[0]["content"] == "one"
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_records_the_calls_that_completed(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cancellation is not a refund.
+
+    The turn's first model call answered and its tool ran before the second
+    call was cut off.  Those tokens are on the bill, so the row and the
+    `turn_done` line carry them — reporting zero was the one path where a
+    timeout-cancelled turn cost nothing on paper while costing the provider
+    everything it had answered.
+    """
+    from slife2.libs.host.paths import agent_dir
+
+    spent = Usage(
+        prompt_tokens=90, completion_tokens=10, cache_read=70, cache_creation=5
+    )
+    backend = FakeBackend(
+        asks_for_a_tool(usage=spent),
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+        interrupted = asyncio.create_task(send(server, "one"))
+        # The first call answered and its tool ran; the cut lands in the second
+        # call's stream.
+        await wait_for_streams(backend, 2)
+        interrupted.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await interrupted
+        # The row is written by a detached task; give it a moment to land.
+        await asyncio.sleep(0.5)
+
+    record = TurnStore(agent_dir(DEFAULT_AGENT) / "turns.db").turn(1)
+    assert record is not None
+    assert record.token_count == spent.total_tokens
+    assert record.context_tokens == spent.total_tokens
+    assert record.usage == spent
+
+    lines = [
+        record_.getMessage()
+        for record_ in caplog.records
+        if record_.getMessage().startswith("turn_done ")
+    ]
+    assert any(
+        "stop=cancelled" in line
+        and f"cache_read={spent.cache_read}" in line
+        and f"cache_creation={spent.cache_creation}" in line
+        for line in lines
+    ), caplog.text
+
+
 @pytest.mark.asyncio(loop_scope="function")
 async def test_a_turn_whose_model_call_failed_is_still_recorded(
     hub, tmp_path, monkeypatch
@@ -2492,6 +2552,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
         subagent: str = "",
         token_count: int = 0,
         context_tokens: int = 0,
+        usage: dict[str, int] | None = None,
         who_helped: str = "",
         what_model: str = "",
         channel: str = "",

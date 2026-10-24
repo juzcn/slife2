@@ -31,6 +31,7 @@ from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
+from slife2.libs.turn.messages import Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
@@ -104,6 +105,12 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
                 "messages": messages,
                 "token_count": 245,
                 "context_tokens": 135,
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 45,
+                    "cache_read": 150,
+                    "cache_creation": 20,
+                },
                 "who_helped": "jack",
                 "what_model": "deepseek/deepseek-flash",
             },
@@ -123,12 +130,24 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
     assert "context_tokens" not in record
     assert "who_helped" not in record
     assert record["created_at"] and record["completed_at"]
+    # The bill's split is a fact about the turn that ran, so a detached read
+    # keeps it — unlike the context size, which belongs to a context this read
+    # does not return.
+    assert record["usage"] == {
+        "prompt_tokens": 200,
+        "completion_tokens": 45,
+        "cache_read": 150,
+        "cache_creation": 20,
+    }
     stored_row = TurnStore(agent_dir("jack") / "turns.db").turn(1)
     assert (
         stored_row.who_helped,
         stored_row.token_count,
         stored_row.context_tokens,
     ) == ("jack", 245, 135)
+    assert stored_row.usage == Usage(
+        prompt_tokens=200, completion_tokens=45, cache_read=150, cache_creation=20
+    )
 
 
 @pytest.mark.asyncio

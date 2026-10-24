@@ -10,6 +10,12 @@ The container is not WSL. Treat it as native Linux: credstore then falls back
 to its Linux keyring backend, and where that is unavailable (the usual case
 under Docker's seccomp policy) get_credential() returns None, which is the
 documented "leave the reference verbatim" behavior.
+
+**Installed into the venv's site-packages** (see `Dockerfile`), not placed on
+`PYTHONPATH`.  A task container is built from the image's filesystem, which
+carries no environment, so a shim reached only by an `ENV` line would vanish
+with it; a `sitecustomize` beside the packages is loaded by every interpreter
+that uses the venv.
 """
 
 from __future__ import annotations

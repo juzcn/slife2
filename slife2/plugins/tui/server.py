@@ -414,9 +414,18 @@ def build_server(_config: Config | None = None) -> FastMCP:
         """
         session = windows.showing(agent)
         if session is None:
+            # **A refusal is a state, not a server error.**  FastMCP logs every
+            # `ToolError` at its `log_level` before answering the caller, and
+            # the default is ERROR — so a readiness probe that asks "is a window
+            # there yet?" wrote an ERROR traceback-shaped line every two
+            # seconds until one was, turning a normal cold start's log into
+            # something that reads like a fault.  The caller is told exactly
+            # what it was told before; only the server's own copy is demoted,
+            # and the caller's INFO line is where this fact is recorded.
             raise ToolError(
                 f"{NO_WINDOW} {agent}'s conversation; "
-                f"start `slife2 --agent {agent}` and hand it over again"
+                f"start `slife2 --agent {agent}` and hand it over again",
+                log_level=logging.DEBUG,
             )
 
         handover, waiter = session.post(text, channel, kind)

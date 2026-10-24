@@ -705,6 +705,65 @@ def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
     assert CapturingMCP.options["show_banner"] is False
 
 
+def _asgi_record(
+    exception: BaseException,
+    *,
+    logger: str = "uvicorn.error",
+    message: str = "Exception in ASGI application\n",
+) -> logging.LogRecord:
+    return logging.LogRecord(
+        logger,
+        logging.ERROR,
+        __file__,
+        1,
+        message,
+        None,
+        (type(exception), exception, exception.__traceback__),
+    )
+
+
+def test_a_cancelled_asgi_stream_is_not_logged_as_a_crash() -> None:
+    """**The one uvicorn error a normal stop writes.**
+
+    A stream held open by design (`attach`, `watch`) has no completion to wait
+    for, so uvicorn ends it by cancelling the task at the graceful limit and
+    then logs `Exception in ASGI application` with the `CancelledError` as if
+    the app had crashed.  Every `slife2 down` ended with that traceback.  The
+    filter drops exactly that record — a real exception keeps its traceback,
+    and so does a cancellation uvicorn did not write.
+    """
+    filter_ = protocol_module.ASGICancellationFilter()
+
+    assert filter_.filter(_asgi_record(asyncio.CancelledError())) is False
+    assert filter_.filter(_asgi_record(ValueError("boom"))) is True
+    assert (
+        filter_.filter(_asgi_record(asyncio.CancelledError(), logger="uvicorn.access"))
+        is True
+    )
+    assert (
+        filter_.filter(_asgi_record(asyncio.CancelledError(), message="something else"))
+        is True
+    )
+
+
+def test_the_root_handler_carries_the_shutdown_filter() -> None:
+    """The filter is only a decision until it is on the handler.
+
+    Uvicorn's records travel to this handler because `serve` passes
+    `log_config=None`, so a filter attached here sees every one of them.  The
+    wiring is asserted because losing it is silent: the logs would simply fill
+    with shutdown tracebacks again.
+    """
+    handler = protocol_module._root_handler()
+    try:
+        assert any(
+            isinstance(one, protocol_module.ASGICancellationFilter)
+            for one in handler.filters
+        )
+    finally:
+        handler.close()
+
+
 def test_a_server_that_never_served_takes_its_own_record_back() -> None:
     """**The other half, so this does not become "never delete anything".**
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import socket
 import time
 from collections.abc import AsyncGenerator
@@ -336,6 +337,31 @@ async def test_a_note_reaches_the_window_as_a_note_and_is_acknowledged() -> None
 
         with pytest.raises(ToolError, match=control.NO_WINDOW):
             await client.call_tool(control.NOTE, {"agent": "nobody", "text": "hi"})
+
+
+async def test_a_refusal_is_not_written_to_the_server_log_as_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Waiting for a window is a state, not a fault in the plugin.
+
+    FastMCP logs every `ToolError` at its own level before answering, and the
+    default is ERROR — so the readiness probe (a `note` until one is accepted)
+    wrote `Error calling tool 'note'` every two seconds of every cold start.
+    The caller is still refused in exactly the words it matches on; only the
+    server's own copy of the same fact is demoted.
+    """
+    server = control.build_server()
+    with caplog.at_level(logging.ERROR):
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match=control.NO_WINDOW):
+                await client.call_tool(control.NOTE, {"agent": "nobody", "text": "hi"})
+
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+    ]
+    assert not any("Error calling tool" in message for message in errors), errors
 
 
 @pytest.mark.integration

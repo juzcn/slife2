@@ -29,6 +29,7 @@ from slife2.libs.store.db import (
 )
 from slife2.libs.store.index import _rowid
 from slife2.libs.turn import attachments
+from slife2.libs.turn.messages import Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
 from tests.fakes import StubEmbedder
 
@@ -68,8 +69,10 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
 
     Adding a table later is what `CREATE TABLE IF NOT EXISTS` is for; adding a
     *column* to a table that already has rows is the thing this module has no
-    mechanism for.  So `summary` and `tags` exist now, empty, rather than
-    arriving with the feature that fills them.
+    mechanism for, which is why an older file is reported rather than altered
+    (`test_a_file_from_before_the_usage_breakdown_is_reported`).  So `summary`
+    and `tags` existed empty before the feature that fills them, and `usage`
+    joins them for the same reason: the shape is decided here, once.
 
     One divergence from v1: there is no `user_message`.  v1 keeps the user's
     half beside the assistant's; here the turn is one list and the user's
@@ -90,6 +93,7 @@ def test_the_table_is_v1s_schema(tmp_path) -> None:
         "what_model",
         "token_count",
         "context_tokens",
+        "usage",
     ]
 
 
@@ -102,14 +106,18 @@ async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
         {"role": "assistant", "content": "It is 42."},
     ]
 
+    usage = Usage(
+        prompt_tokens=200, completion_tokens=45, cache_read=150, cache_creation=20
+    )
     turn_id = await store.save_turn(
         embedder=EMBEDDER,
         messages=messages,
         channel="tui",
         who_helped="jack",
         what_model="deepseek/deepseek-flash",
-        token_count=245,
+        token_count=usage.total_tokens,
         context_tokens=135,
+        usage=usage,
         created_at="2026-10-07T08:00:00+08:00",
         completed_at="2026-10-07T08:00:02+08:00",
     )
@@ -125,6 +133,10 @@ async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
     # The bill for the turn and the size it had grown to are different numbers,
     # which is the whole reason there are two columns.
     assert (record.token_count, record.context_tokens) == (245, 135)
+    # And the bill's split came back whole, cache fields included: a ratio
+    # cannot be reconstructed from the total.
+    assert record.usage == usage
+    assert record.to_wire()["usage"] == usage.to_wire()
     assert record.created_at == "2026-10-07T08:00:00+08:00"
     assert record.completed_at == "2026-10-07T08:00:02+08:00"
     assert (record.summary, record.tags) == ("", "")
@@ -257,6 +269,33 @@ def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
     # The count is what makes the report necessary: it is not an error, it is a
     # truthful zero.
     assert first.count() == 0
+
+
+def test_a_file_from_before_the_usage_breakdown_is_reported(tmp_path, caplog) -> None:
+    """A column is the one addition `CREATE TABLE IF NOT EXISTS` cannot make.
+
+    The `turn` table is already there, so the only thing that could add `usage`
+    is an `ALTER` — the migration this module does not have.  Left unsaid, the
+    failure is SQLite's "table turn has no column named usage" on the next save:
+    it names neither the file to delete nor the reason it is the answer.
+    """
+    path = tmp_path / "jack.turn.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE turn ("
+            " messages TEXT NOT NULL DEFAULT '[]',"
+            " created_at TEXT NOT NULL,"
+            " token_count INTEGER NOT NULL DEFAULT 0,"
+            " context_tokens INTEGER NOT NULL DEFAULT 0)"
+        )
+
+    with caplog.at_level(logging.ERROR, logger="slife2.libs.store.db"):
+        TurnStore(path)
+        TurnStore(path)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, errors
+    assert str(path) in errors[0] and "usage" in errors[0]
 
 
 @pytest.mark.asyncio
@@ -761,6 +800,11 @@ def test_a_store_closes_its_connection_when_the_call_ends(tmp_path, monkeypatch)
 
         def execute(self, *args, **kwargs):
             return self
+
+        def __iter__(self):
+            # `_report_old_schema` asks `PRAGMA table_info` for the column list;
+            # this fake has none, which is a state the report can read.
+            return iter(())
 
         def fetchone(self):
             return (0,)

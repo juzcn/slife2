@@ -250,6 +250,16 @@ class AgentLoop:
         #: exists when the number is positive — and where one exists it produces
         #: an ordinary result, not an exception.
         self._max_iterations = max_iterations
+        #: The bill for the turn in flight, and the last completed call's own.
+        #: Kept on the loop because **a cancellation has no return value to
+        #: carry them**: `run_turn` updates these after each model call and
+        #: resets them when a turn begins, so the owner of a cancelled turn can
+        #: still say what it spent (`slife2.plugins.agent.server.Outcome.usage`).
+        #: On the loop rather than in a callback because the loop is the party
+        #: that saw the calls, and a second accounting path would be a second
+        #: place to forget one.
+        self.usage = Usage()
+        self.last_usage = Usage()
 
     async def _retool(self) -> None:
         """Ask where the tools come from, before a model call.
@@ -334,6 +344,11 @@ class AgentLoop:
           call simply runs: refusing would be answering a request for a check
           with a tool the model can never use.
         """
+        # **A new bill, before anything can be spent on it.**  Left over from
+        # the previous turn, these would bill this one for a cancellation that
+        # lands before its first call returns — the exact case they exist for.
+        self.usage = Usage()
+        self.last_usage = Usage()
         messages.append(Message(role="user", content=user))
 
         total_usage = Usage()
@@ -407,6 +422,10 @@ class AgentLoop:
 
             result = await stream.result
             total_usage = total_usage + result.usage
+            # Published before the batch below can be interrupted, so a
+            # cancellation after this call still reports what the call cost.
+            self.usage = total_usage
+            self.last_usage = result.usage
             last_text = result.text
             last_usage = result.usage
             answer = Message(

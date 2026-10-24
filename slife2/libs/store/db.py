@@ -117,6 +117,7 @@ from slife2.libs.store.index import (
 )
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import normalise_ids
+from slife2.libs.turn.messages import Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,13 @@ class TurnRecord:
     #: other is what the context window has to hold.
     token_count: int = 0
     context_tokens: int = 0
+    #: The bill's breakdown — prompt, completion, cache read and cache
+    #: creation — as the loop measured it.  `token_count` is that bill's total,
+    #: which is what a reader asks for first; the breakdown is what a cache-hit
+    #: ratio is computed from, and no sum can reconstruct it.  None for a row
+    #: written before this was recorded: the totals it has are kept, and the
+    #: absence says the split was never measured rather than that it was zero.
+    usage: Usage | None = None
 
     def to_listing(self, chars: int = PREVIEW_CHARS) -> dict[str, Any]:
         """One row of a browse: enough to choose from, and not the turn.
@@ -275,6 +283,9 @@ class TurnRecord:
             "what_model": self.what_model,
             "token_count": self.token_count,
             "context_tokens": self.context_tokens,
+            # Null rather than a zeroed breakdown: a reader can tell a turn
+            # nobody measured from one that measured nothing.
+            "usage": self.usage.to_wire() if self.usage is not None else None,
         }
 
 
@@ -300,6 +311,9 @@ class _Stored:
     what_model: str
     token_count: int
     context_tokens: int
+    #: The usage breakdown as JSON, or None for a writer that did not measure
+    #: one — the totals above are then all the row can say.
+    usage: str | None
 
 
 _SCHEMA = f"""
@@ -327,7 +341,14 @@ CREATE TABLE IF NOT EXISTS turn (
     what_model     TEXT             DEFAULT '',
 
     token_count    INTEGER NOT NULL DEFAULT 0,
-    context_tokens INTEGER NOT NULL DEFAULT 0
+    context_tokens INTEGER NOT NULL DEFAULT 0,
+
+    -- The bill's breakdown, as `Usage.to_wire()` wrote it.  `token_count` is
+    -- this bill's total and `context_tokens` the last call's; the split is
+    -- here because a cache-hit ratio cannot be reconstructed from sums.
+    -- NULL for a row written before it was recorded — the totals it has are
+    -- kept, and NULL says the split was never measured.
+    usage          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_turn_created ON turn(created_at);
@@ -780,17 +801,26 @@ class TurnStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
-            self._report_legacy_file(connection)
+            self._report_old_schema(connection)
 
-    def _report_legacy_file(self, connection: sqlite3.Connection) -> None:
-        """Say so when this file predates the `turn` table.
+    def _report_old_schema(self, connection: sqlite3.Connection) -> None:
+        """Say so when this file's schema is older than this build's.
 
         There is no migration layer, and the doctrine above says an old database
-        is deleted rather than upgraded — but nothing said *which* one, and the
-        failure it produces is the confusing kind: the file keeps its `turns`
-        table, gains an empty `turn` beside it, and every read thereafter
-        honestly reports no history.  Turns that are on disk and invisible are
-        worse than turns that are gone, because nothing looks wrong.
+        is deleted rather than upgraded — but nothing said *which* one, and both
+        failures it produces are the confusing kind.
+
+        A file from before the `turn` table keeps its `turns` table and gains an
+        empty `turn` beside it, so every read thereafter honestly reports no
+        history: turns on disk and invisible, which is worse than turns that are
+        gone because nothing looks wrong.
+
+        A file from before the `usage` column is a case `CREATE TABLE IF NOT
+        EXISTS` cannot cover at all — the table is there, so the only thing that
+        could add the column is an `ALTER`, which is the migration this module
+        does not have.  Left unsaid, the failure is SQLite's "table turn has no
+        column named usage" on the next save, naming neither the file nor the
+        answer.
 
         Reported once per process per file.  The store is built on every call,
         so the alternative is the same complaint on every turn, which is the
@@ -798,18 +828,26 @@ class TurnStore:
         """
         if self.path in _legacy_reported:
             return
+        _legacy_reported.add(self.path)
         legacy = connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turns'"
         ).fetchone()[0]
-        if not legacy:
-            return
-        _legacy_reported.add(self.path)
-        logger.error(
-            "%s holds the previous schema's `turns` table, which this version "
-            "does not read; there is no migration — delete the file and its "
-            "turns are recorded afresh",
-            self.path,
-        )
+        if legacy:
+            logger.error(
+                "%s holds the previous schema's `turns` table, which this version "
+                "does not read; there is no migration — delete the file and its "
+                "turns are recorded afresh",
+                self.path,
+            )
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(turn)")
+        }
+        if "usage" not in columns:
+            logger.error(
+                "%s predates this build's `turn` columns (no `usage`); there is "
+                "no migration — delete the file and its turns are recorded afresh",
+                self.path,
+            )
 
     async def save_turn(
         self,
@@ -823,6 +861,7 @@ class TurnStore:
         what_model: str = "",
         token_count: int = 0,
         context_tokens: int = 0,
+        usage: Usage | None = None,
         created_at: str | None = None,
         completed_at: str | None = None,
     ) -> int:
@@ -881,6 +920,7 @@ class TurnStore:
             what_model=what_model,
             token_count=int(token_count),
             context_tokens=int(context_tokens),
+            usage=json.dumps(usage.to_wire()) if usage is not None else None,
         )
         chunks = embed_chunks(embed_text(stored), limit=embedder.max_chars)
         # Awaited on the loop, because it is a call to a model and not a call to
@@ -916,8 +956,8 @@ class TurnStore:
             cursor = connection.execute(
                 "INSERT INTO turn (messages, summary, tags, created_at,"
                 " completed_at, channel, who_helped, what_model,"
-                " token_count, context_tokens)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " token_count, context_tokens, usage)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.document,
                     record.summary,
@@ -929,6 +969,7 @@ class TurnStore:
                     record.what_model,
                     record.token_count,
                     record.context_tokens,
+                    record.usage,
                 ),
             )
             turn_id = _rowid(cursor, what="a turn")
@@ -1848,7 +1889,28 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
         what_model=str(row["what_model"] or ""),
         token_count=int(row["token_count"]),
         context_tokens=int(row["context_tokens"]),
+        usage=_usage(row["usage"], what=f"turn {int(row['turn_id'])}"),
     )
+
+
+def _usage(raw: Any, *, what: str) -> Usage | None:
+    """The stored breakdown, or None when this row carries none.
+
+    None is the honest answer twice over: a row written before the column
+    existed, and a value that will not read as one.  The totals beside it are
+    still the row's own, so a damaged breakdown costs the split and not the
+    bill — the same field-not-structure rule `_messages` follows.
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("usage is not a JSON object")
+        return Usage.from_wire(parsed)
+    except (TypeError, ValueError) as exc:
+        logger.warning("%s: %s; the totals are kept", what, exc)
+        return None
 
 
 def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:

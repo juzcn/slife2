@@ -997,6 +997,38 @@ def serve(
             clear_record(url)
 
 
+class ASGICancellationFilter(logging.Filter):
+    """Drop uvicorn's traceback for a request cancelled on the way down.
+
+    **A shutdown is not a crash.**  uvicorn treats anything escaping an ASGI
+    application as an error and writes `Exception in ASGI application` with a
+    traceback — `CancelledError` included.  A long-lived stream (the TUI's
+    `attach`, an agent's `watch`) has no completion to wait for, so uvicorn ends
+    it by cancelling the task at FastMCP's two-second graceful limit; every
+    `slife2 down` therefore closed with a stack trace naming a normal stop as a
+    fault.  The cancellation is the mechanism, and this is the one record it
+    makes that is not worth a line.
+
+    **Only that record.**  Another logger, another message, or a genuine
+    exception escaping a handler still reaches the log with its traceback —
+    this filter is a name, a message and an exception type, not a level.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.error":
+            return True
+        if not record.getMessage().startswith("Exception in ASGI application"):
+            return True
+        info = record.exc_info
+        if not info:
+            return True
+        kind, value = info[0], info[1]
+        cancelled = isinstance(value, asyncio.CancelledError) or (
+            isinstance(kind, type) and issubclass(kind, asyncio.CancelledError)
+        )
+        return not cancelled
+
+
 class _MaskingFormatter(logging.Formatter):
     """A formatter that shows resolved credentials in their masked form."""
 
@@ -1024,6 +1056,25 @@ def _log_level() -> tuple[int, str]:
     if isinstance(level, int):
         return level, ""
     return logging.INFO, asked
+
+
+def _root_handler() -> logging.Handler:
+    """The one handler every server writes through: mask, trace, and filter.
+
+    A named function rather than three lines inside `configure_logging` because
+    the filters are the part worth pinning, and a test that checked them by
+    calling `configure_logging` would install a logging configuration over the
+    process it runs in.  Here it builds the handler and touches no global.
+    """
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        _MaskingFormatter(
+            "%(asctime)s %(levelname)s %(name)s:%(slife_trace)s %(message)s"
+        )
+    )
+    handler.addFilter(logcontext.TraceFilter())
+    handler.addFilter(ASGICancellationFilter())
+    return handler
 
 
 def configure_logging() -> None:
@@ -1054,16 +1105,15 @@ def configure_logging() -> None:
     a DEBUG fact; `uvicorn.error` stays at INFO because "Started server
     process"/"Application startup complete" are the run boundaries a reader
     uses.
+
+    **And the one error uvicorn writes for a normal stop is dropped.**  A stream
+    that is held open by design cannot complete on request, so uvicorn cancels
+    it at the graceful limit and logs `CancelledError` as an application
+    exception; `ASGICancellationFilter` removes that record and nothing else,
+    which is what makes `slife2 down` end without a stack trace.
     """
     level, bad = _log_level()
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        _MaskingFormatter(
-            "%(asctime)s %(levelname)s %(name)s:%(slife_trace)s %(message)s"
-        )
-    )
-    handler.addFilter(logcontext.TraceFilter())
-    logging.basicConfig(level=level, handlers=[handler], force=True)
+    logging.basicConfig(level=level, handlers=[_root_handler()], force=True)
     for noisy in (
         "httpx",
         "httpx2",

@@ -166,7 +166,7 @@ from slife2.libs.turn.events import (
     encode,
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
-from slife2.libs.turn.messages import Message, ToolCall
+from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import render as render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolRegistry
@@ -633,6 +633,15 @@ class Outcome:
 
     messages: list[Message] = field(default_factory=list)
     result: TurnResult | None = None
+    #: What the turn spent, filled in however it ended — including the
+    #: cancellation path, where a result is never produced.  The loop keeps the
+    #: running total while it runs (`AgentLoop.usage`), so a turn cut off after
+    #: two completed model calls reports those two rather than zero; a turn
+    #: interrupted inside a call reports the calls that came back before it.
+    #: `last_usage` is the last completed call's own, which is what
+    #: `context_tokens` has always meant.
+    usage: Usage = field(default_factory=Usage)
+    last_usage: Usage = field(default_factory=Usage)
     #: Sources this turn was handed that could not be attached, in the caller's
     #: words.  On the outcome rather than on the loop, because it is a fact about
     #: *this* turn — the next one attaches nothing of the sort — and it is what
@@ -680,6 +689,13 @@ def log_turn(
     reaches that point; the context plugin logs the id when the row does land,
     and the conversation and times are what join the two.
 
+    **The whole bill, on one line.**  Prompt and completion are the two halves,
+    and `cache_read`/`cache_creation` are their breakdown — the numbers a
+    cache-hit ratio needs, which used to be recoverable only by joining this
+    line to every per-call `stream_chat` line of the same conversation.  A
+    cancelled turn reports the calls that completed before the cut; zero means
+    no call came back, not that the turn was free.
+
     **No prompt or answer text.**  The transcript is where words live; this line
     is the operator's index into it, so it carries counts and times, never the
     material — the same rule `slife2.helpers.logcontext` applies to the prefix.
@@ -696,19 +712,25 @@ def log_turn(
         ending = "cancelled"
     else:
         ending = "failed"
-    prompt_tokens = result.usage.prompt_tokens if result is not None else 0
-    completion_tokens = result.usage.completion_tokens if result is not None else 0
+    # **From the outcome, not the result.**  A cancelled turn has no result but
+    # did spend the model calls that completed before it was cut off, and the
+    # loop keeps that total (`Outcome.usage`).  Reporting zero here was the one
+    # place a cancellation's cost vanished from both the log and the row.
+    usage = outcome.usage
     logger.info(
         "turn_done agent=%s subagent=%s turn=%s model=%s stop=%s iterations=%d "
-        "prompt_tokens=%d completion_tokens=%d messages=%d elapsed=%.1fs%s",
+        "prompt_tokens=%d completion_tokens=%d cache_read=%d cache_creation=%d "
+        "messages=%d elapsed=%.1fs%s",
         loop.agent,
         loop.subagent or "-",
         turn_id if turn_id is not None else "-",
         outcome.model or loop.model or "-",
         ending,
         result.iterations if result is not None else 0,
-        prompt_tokens,
-        completion_tokens,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.cache_read,
+        usage.cache_creation,
         len(outcome.messages),
         outcome.elapsed,
         f" error={type(failure).__name__}: {failure}" if failure is not None else "",
@@ -1472,7 +1494,8 @@ def build_server(
         agent: str,
         subagent: str,
         messages: list[dict],
-        result: TurnResult | None,
+        usage: Usage,
+        last_usage: Usage,
         *,
         model: str,
         channel: str,
@@ -1482,8 +1505,9 @@ def build_server(
         """Persist a turn, and answer with the id it was given.
 
         **This is called for every turn of every conversation**, cancelled ones
-        included — an agent's own and each of its subagents' — and `result` is
-        None exactly when the turn did not finish.  The rule is deliberately not
+        included — an agent's own and each of its subagents'.  The `usage` pair
+        is taken from the loop rather than from a result, so a turn that did not
+        finish still reports the model calls that did.  The rule is deliberately not
         "remember to record the cancel path": a write that is conditional on how
         a turn ended is a write somebody can forget to make, and the failure it
         produces is a conversation in the transcript that the database has never
@@ -1499,10 +1523,13 @@ def build_server(
         can address.
 
         Two token counts go over, and they are not interchangeable.  `usage` is
-        the turn's total across however many model calls it took — the bill.
-        `last_usage` is the final call's own, which is how much conversation
-        existed when the turn ended: the number the *next* request would resend.
-        A cancelled turn has neither, and reports zero rather than a guess.
+        the turn's total across however many model calls it took — the bill —
+        and its breakdown goes with it, because a cache-hit ratio cannot be
+        reconstructed from the total.  `last_usage` is the last *completed*
+        call's own, which is how much conversation existed when the turn
+        reached it: the number the next request would resend.  A cancelled
+        turn reports both from the calls that came back — zero only when none
+        did.
         """
         summary, tags = turn_annotation(messages)
         client = await memory()
@@ -1514,8 +1541,9 @@ def build_server(
                     "agent": agent,
                     "subagent": subagent,
                     "messages": messages,
-                    "token_count": result.usage.total_tokens if result else 0,
-                    "context_tokens": result.last_usage.total_tokens if result else 0,
+                    "token_count": usage.total_tokens,
+                    "context_tokens": last_usage.total_tokens,
+                    "usage": usage.to_wire(),
                     "who_helped": agent,
                     # What the loop was opened on, not the reference as typed:
                     # a caller may name a bare provider or nothing at all, and
@@ -1962,7 +1990,8 @@ def build_server(
             loop.agent,
             loop.subagent,
             messages,
-            outcome.result,
+            outcome.usage,
+            outcome.last_usage,
             model=recorded_model(loop, outcome),
             channel=item.channel,
             created_at=outcome.started_at or outcome.completed_at,
@@ -2753,6 +2782,15 @@ def build_server(
                 outcome.messages = list(loop.messages[snapshot:])
                 outcome.completed_at = now()
                 outcome.elapsed = time.monotonic() - started_mono
+                # **The bill is taken from the loop, not from the result.**
+                # `run_turn` returns its usage, but a cancellation has no
+                # return — and the tokens a cancelled turn spent are as real as
+                # any other's.  The loop updates these after each completed
+                # model call and resets them when a turn begins
+                # (`AgentLoop.usage`), so this reads *this* turn even on the
+                # path where no result exists.
+                outcome.usage = agent_loop.usage
+                outcome.last_usage = agent_loop.last_usage
 
     def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
         """What a turn that died at the provider leaves behind, and what it says.

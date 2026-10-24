@@ -462,6 +462,64 @@ async def test_cancellation_leaves_the_history_well_formed() -> None:
     assert [m.role for m in messages] == ["user"]
 
 
+async def test_a_cancelled_turn_keeps_the_usage_of_the_calls_that_completed() -> None:
+    """A cancellation has no result, so the bill is read off the loop.
+
+    The turn makes one model call that answers and asks for a tool, then is cut
+    off inside the second call.  The first call's tokens were spent — the whole
+    reason `AgentLoop.usage` is published after each result rather than only
+    returned at the end — and the next turn starts from zero rather than
+    inheriting the cancelled one's bill.
+    """
+    started = asyncio.Event()
+
+    async def answered(_arguments: dict[str, Any]) -> str:
+        started.set()
+        return "done"
+
+    spent = Usage(prompt_tokens=11, completion_tokens=7, cache_read=5, cache_creation=2)
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                usage=spent,
+                tool_calls=(ToolCall(id="c1", name="now", arguments={}),),
+                stop_reason="tool_calls",
+            )
+        ),
+        text_turn(
+            "never finished",
+            delay=0.05,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "third",
+            delay=0.05,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+    )
+    loop = AgentLoop(backend, ToolRegistry([a_tool("now", answered)]))
+    messages: list[Message] = []
+
+    interrupted = asyncio.create_task(loop.run_turn(messages, "one"))
+    # The first call has answered and its tool has run; the cancellation lands
+    # inside the second call's stream.
+    await started.wait()
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+
+    assert loop.usage == spent
+    assert loop.last_usage == spent
+
+    interrupted = asyncio.create_task(loop.run_turn(messages, "two"))
+    await asyncio.sleep(0.01)
+    interrupted.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await interrupted
+
+    assert loop.usage == Usage(), "a new turn starts its own bill"
+    assert loop.last_usage == Usage()
+
+
 async def test_an_interrupted_batch_keeps_the_answers_it_already_had() -> None:
     """A batch cut short is completed, not dropped.
 

@@ -2161,8 +2161,15 @@ One line is written per turn on every ending — success, failure or cancellatio
 
 ```text
 turn_done agent=… subagent=… turn=… model=… stop=… iterations=… \
-prompt_tokens=… completion_tokens=… messages=… elapsed=…
+prompt_tokens=… completion_tokens=… cache_read=… cache_creation=… \
+messages=… elapsed=…
 ```
+
+`prompt_tokens` and `completion_tokens` are the bill's two halves;
+`cache_read` and `cache_creation` are its breakdown, so a cache-hit ratio is
+read from this one line rather than reconstructed by joining the turn to every
+`stream_chat` line it made. A cancelled turn reports the model calls that
+completed before the cut — zero only when none did.
 
 One line is written per **foreground** tool call:
 `tool_call name=… ok=… elapsed_ms=… result_chars=…`. Arguments and result text

@@ -32,17 +32,23 @@ RUN chown -R slife2:slife2 /opt/slife2
 USER slife2
 ENV HOME=/home/slife2 \
     PATH=/home/slife2/.local/bin:/opt/slife2/.venv/bin:/usr/local/bin:/usr/bin:/bin \
-    SLIFE2_RUNTIME_DIR=/home/slife2/.slife2/runtime \
-    PYTHONPATH=/opt/slife2-bench/py
-
-# Docker Desktop's kernel looks like WSL to credstore; this shim makes it use
-# the native Linux backend instead of trying powershell.exe. See the file.
-COPY --chown=slife2:slife2 docker/sitecustomize.py /opt/slife2-bench/py/sitecustomize.py
+    SLIFE2_RUNTIME_DIR=/home/slife2/.slife2/runtime
 
 # The project's installer: Python 3.13, the venv, the external programs the
 # shipped configuration names, and the credential hints. Running it is the
 # point; a hand-built venv would be a different distribution.
 RUN bash scripts/install.sh
+
+# Docker Desktop's kernel looks like WSL to credstore; this shim makes it use
+# the native Linux backend instead of trying powershell.exe. See the file.
+# **Inside the venv, not on `PYTHONPATH`.**  A task container is built from this
+# image's filesystem, and a filesystem snapshot carries no `ENV` — so a shim
+# reached only through an environment variable disappeared with it, and the
+# first credential lookup in that container died on `powershell.exe`.  A
+# `sitecustomize` in the venv's own site-packages is inherited by every
+# interpreter that uses the venv, with nothing to export.
+RUN site="$(/opt/slife2/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+ && cp /opt/slife2/docker/sitecustomize.py "$site/sitecustomize.py"
 
 # Install **every** external source's package, and the browsers.  The bench's
 # task containers unpack this image and its tool gate waits for each source to
