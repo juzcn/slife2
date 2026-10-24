@@ -48,6 +48,11 @@ again, and a migration path is a permanent cost paid to avoid a one-off
 annoyance.  `CREATE TABLE IF NOT EXISTS` covers *additions* — a new table, a new
 index — which is most of what tends to arrive.
 
+A file that is missing one of the columns this build declares is **refused at
+open** (`StaleSchema`), naming the column and the file.  Reported and served
+anyway — which is what this did — the failure lands later and per row as
+SQLite's `No item with that key`: a message that names neither.
+
 **The search indexes are derived, not migrated.**  Finding a turn by what it was
 about needs a keyword index over its text and a vector index over what it was
 about, and both are built from rows that are already here — so neither is a
@@ -127,8 +132,10 @@ logger = logging.getLogger(__name__)
 #: and a path is not something a command line should be able to reach.
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
-#: Database files already reported as belonging to the previous schema.  See
-#: `TurnStore._report_legacy_file`, which is why this is not simply computed.
+#: Database files whose old schema has already been named — a missing column
+#: (`_refuse_old_schema`) or the previous `turns` table (`_report_legacy_file`).
+#: The report is once per process per file, which is why this is not simply
+#: computed.
 _legacy_reported: set[Path] = set()
 
 #: How much of each message a listing shows.  The browse is for *choosing* a turn
@@ -409,6 +416,44 @@ CREATE TABLE IF NOT EXISTS context (
     turn_ids TEXT    NOT NULL DEFAULT '[]'
 );
 """
+
+
+#: The columns this build's `turn` table declares, and so the ones any file it
+#: serves must already have.  `CREATE TABLE IF NOT EXISTS` cannot add a column
+#: to a table that exists, so a file from before one of these can neither be
+#: read to its end nor written at all.
+#:
+#: Spelled out rather than parsed from `_SCHEMA`, for the reason
+#: `slife2.libs.store.catalogue._TOOL_COLUMNS` gives; the two are kept in step
+#: by `test_the_table_is_the_agreed_schema`, which asserts this set and a fresh
+#: file's `PRAGMA` agree.
+_TURN_COLUMNS = frozenset(
+    {
+        "messages",
+        "summary",
+        "tags",
+        "created_at",
+        "completed_at",
+        "channel",
+        "who_helped",
+        "what_model",
+        "token_count",
+        "context_tokens",
+        "usage",
+    }
+)
+
+
+class StaleSchema(RuntimeError):
+    """A file whose `turn` table is missing a column this build declares.
+
+    **A refusal, not a report.**  There is no migration layer (SDD §8.1), so a
+    file this build cannot write is a file it must not serve.  Served anyway, it
+    fails per row at the first lookup of the absent column, as SQLite's `No item
+    with that key` — an `IndexError` from a row, naming neither the file nor the
+    remedy.  The caller gets the sentence instead, and the operator deletes the
+    file, whose turns are then recorded afresh.
+    """
 
 
 def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -798,27 +843,63 @@ class TurnStore:
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
+            self._refuse_old_schema(connection)
             connection.executescript(_SCHEMA)
-            self._report_old_schema(connection)
+            self._report_legacy_file(connection)
 
-    def _report_old_schema(self, connection: sqlite3.Connection) -> None:
-        """Say so when this file's schema is older than this build's.
+    def _refuse_old_schema(self, connection: sqlite3.Connection) -> None:
+        """Refuse a file whose `turn` table is older than this build's columns.
 
-        There is no migration layer, and the doctrine above says an old database
-        is deleted rather than upgraded — but nothing said *which* one, and both
-        failures it produces are the confusing kind.
+        **Checked before the DDL, so a file this build will not serve is not
+        touched.**  `executescript` would otherwise write every table the file
+        is missing into a file that is about to be refused; the check costs one
+        `PRAGMA` and leaves the file as it was found.
+
+        **Every column this build declares, not the one that arrived last.**
+        `usage` is what made the gap reachable, but the rule is the table's:
+        `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
+        exists, so the next addition is the same case, and a file missing any of
+        them can neither be read to its end nor written at all.
+
+        **Reported once per process per file, and raised every time.**  The
+        report is the operator's — the store is built on every call, so a
+        complaint per turn would be a log nobody reads — while the raise is the
+        caller's.  Reporting and then serving is what produced the failure this
+        exists to prevent: `_row_to_record` reading `row["usage"]` raised
+        SQLite's `No item with that key` for every turn in the file, naming
+        neither the file nor the remedy.
+        """
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(turn)")
+        }
+        if not columns:  # no `turn` table yet: the schema creates it complete
+            return
+        missing = sorted(_TURN_COLUMNS - columns)
+        if not missing:
+            return
+        message = (
+            f"{self.path} predates this build's `turn` columns (no "
+            f"{', '.join(missing)}); there is no migration — delete the file and "
+            f"its turns are recorded afresh"
+        )
+        if self.path not in _legacy_reported:
+            _legacy_reported.add(self.path)
+            logger.error("%s", message)
+        raise StaleSchema(message)
+
+    def _report_legacy_file(self, connection: sqlite3.Connection) -> None:
+        """Say so when this file keeps the previous schema's `turns` table.
 
         A file from before the `turn` table keeps its `turns` table and gains an
         empty `turn` beside it, so every read thereafter honestly reports no
         history: turns on disk and invisible, which is worse than turns that are
         gone because nothing looks wrong.
 
-        A file from before the `usage` column is a case `CREATE TABLE IF NOT
-        EXISTS` cannot cover at all — the table is there, so the only thing that
-        could add the column is an `ALTER`, which is the migration this module
-        does not have.  Left unsaid, the failure is SQLite's "table turn has no
-        column named usage" on the next save, naming neither the file nor the
-        answer.
+        This one is **reported rather than refused**, which is the one way it
+        differs from a file missing a column (`_refuse_old_schema`): the file
+        answers every call it is given — with a history of zero — so it is
+        usable, just not the history the person remembers.  A missing column is
+        not usable at all.
 
         Reported once per process per file.  The store is built on every call,
         so the alternative is the same complaint on every turn, which is the
@@ -835,15 +916,6 @@ class TurnStore:
                 "%s holds the previous schema's `turns` table, which this version "
                 "does not read; there is no migration — delete the file and its "
                 "turns are recorded afresh",
-                self.path,
-            )
-        columns = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(turn)")
-        }
-        if "usage" not in columns:
-            logger.error(
-                "%s predates this build's `turn` columns (no `usage`); there is "
-                "no migration — delete the file and its turns are recorded afresh",
                 self.path,
             )
 

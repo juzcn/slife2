@@ -1562,6 +1562,11 @@ are read from that list rather than from separate columns:
 There is no migration layer. The tables are created on a file that is not this
 build's. A file this build cannot read is reported and rebuilt, not upgraded in
 place, because an upgrade path is a permanent second way to build the tables.
+A file whose `turn` table lacks a column this build declares is refused at open,
+with the file and the column named; served anyway, it fails later and per row as
+an error that names neither. The startup pass over every known home carries on
+past a file it refuses — the refusal is that file's, and the conversations that
+can be read are not its to take down.
 
 The live-context list is a row, not a file. It is written in the same transaction
 as the turn that changed it.

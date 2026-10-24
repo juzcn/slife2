@@ -20,6 +20,8 @@ from slife2.helpers.timeutil import InvalidTimeBound
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
+    _TURN_COLUMNS,
+    StaleSchema,
     TurnStore,
     database_path,
     message_text,
@@ -95,6 +97,10 @@ def test_the_table_is_the_agreed_schema(tmp_path) -> None:
         "context_tokens",
         "usage",
     ]
+    # And the check an old file is held to is this same list, so a column added
+    # to `_SCHEMA` without `_TURN_COLUMNS` (or the other way round) fails here
+    # rather than as a missing column nobody declared.
+    assert frozenset(columns) == _TURN_COLUMNS
 
 
 @pytest.mark.asyncio
@@ -271,13 +277,17 @@ def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
     assert first.count() == 0
 
 
-def test_a_file_from_before_the_usage_breakdown_is_reported(tmp_path, caplog) -> None:
+def test_a_file_from_before_the_usage_breakdown_is_refused(tmp_path, caplog) -> None:
     """A column is the one addition `CREATE TABLE IF NOT EXISTS` cannot make.
 
     The `turn` table is already there, so the only thing that could add `usage`
-    is an `ALTER` — the migration this module does not have.  Left unsaid, the
-    failure is SQLite's "table turn has no column named usage" on the next save:
-    it names neither the file to delete nor the reason it is the answer.
+    is an `ALTER` — the migration this module does not have.  **Refused, not
+    merely reported**: serving the file used to fail later, per row, as
+    `IndexError: No item with that key` from `_row_to_record` — the message a
+    restarted window showed, naming neither the file nor the remedy.
+
+    Every column this build declares is checked, not `usage` by name, so the
+    next addition is the same case rather than a second check.
     """
     path = tmp_path / "jack.turn.db"
     with sqlite3.connect(path) as connection:
@@ -290,12 +300,44 @@ def test_a_file_from_before_the_usage_breakdown_is_reported(tmp_path, caplog) ->
         )
 
     with caplog.at_level(logging.ERROR, logger="slife2.libs.store.db"):
-        TurnStore(path)
-        TurnStore(path)
+        with pytest.raises(StaleSchema) as refusal:
+            TurnStore(path)
+        with pytest.raises(StaleSchema):
+            TurnStore(path)
 
+    message = str(refusal.value)
+    assert str(path) in message
+    # `usage` is the column that arrived last; `summary` did not, and the
+    # refusal names it all the same.
+    assert "usage" in message and "summary" in message
+
+    # Reported once per process per file — the store is built on every call.
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, errors
-    assert str(path) in errors[0] and "usage" in errors[0]
+
+
+def test_a_refused_file_is_left_as_it_was_found(tmp_path) -> None:
+    """The check runs before the DDL, so a file that is refused is not written.
+
+    `executescript` would otherwise add the tables this build owns — `context`,
+    the indexes — to a file it then refuses to serve; the schema of a file
+    nobody can use is not this store's to extend while nobody is looking.
+    """
+    path = tmp_path / "jack.turn.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE turn (messages TEXT NOT NULL DEFAULT '[]')")
+
+    with pytest.raises(StaleSchema):
+        TurnStore(path)
+
+    with sqlite3.connect(path) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert tables == {"turn"}
 
 
 @pytest.mark.asyncio

@@ -1334,6 +1334,37 @@ async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
     assert recorded.startswith(f"{EMBED_TEXT_VERSION}|1|stub:two|"), recorded
 
 
+@pytest.mark.asyncio
+async def test_startup_survives_a_conversation_from_an_old_schema() -> None:
+    """One unreadable conversation does not take the readable ones down.
+
+    The startup pass scans **every known home** (`turn_dbs`), so letting a file
+    from an older build stop it would refuse the whole plugin — every
+    conversation, in every home — over one nobody may be using.  The pass names
+    the file and carries on; what still fails is a call that actually uses it,
+    and it fails with that same sentence.
+
+    Served instead, this is the failure that was seen: `restore` died per row
+    as SQLite's `No item with that key`, naming neither the file nor the
+    remedy.
+    """
+    stale = agent_dir("jack") / "turns.db"
+    with sqlite3.connect(stale) as connection:
+        connection.execute("CREATE TABLE turn (messages TEXT NOT NULL DEFAULT '[]')")
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        # A conversation whose file is current is served normally.
+        await client.call_tool(
+            "remember",
+            {"agent": "someone", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool("restore", {"agent": "jack", "messages": []})
+
+    assert str(stale) in str(refused.value)
+    assert "summary" in str(refused.value)
+
+
 def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:
     """**The strip was for the empty case and reached the person's text.**
 

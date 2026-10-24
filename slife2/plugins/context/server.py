@@ -88,7 +88,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     unreadable,
 )
-from slife2.libs.store.db import TurnStore, store_for
+from slife2.libs.store.db import StaleSchema, TurnStore, store_for
 from slife2.libs.store.index import Embedder, page_limit
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
@@ -276,7 +276,18 @@ def build_server(
         # beside each `turns.db` and matched it — so this pass would open the
         # scheduler's ledger as a `TurnStore` and write the turn schema into it.
         for path in turn_dbs():
-            await indexed(await off_loop(TurnStore, path), model)
+            try:
+                await indexed(await off_loop(TurnStore, path), model)
+            except StaleSchema:
+                # The store has named the file and the column, which is the
+                # report this pass exists to make.  **The pass continues**, and
+                # that is not a lenient reading of "nothing is served until this
+                # has finished": a scan of every known home is not one
+                # conversation, and a file from an older build — possibly in a
+                # home nobody is using — must not take every readable
+                # conversation down with it.  Calls that do use the file still
+                # fail, with the same sentence, at `store_of`.
+                continue
         try:
             yield {}
         finally:
