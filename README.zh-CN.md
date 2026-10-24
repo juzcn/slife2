@@ -228,6 +228,13 @@ docker run --rm -it -e DEEPSEEK_API_KEY=... slife2:local
 `/opt/slife2/slife2.yaml`；要让会话和日志在容器退出后保留，挂载
 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。
 
+**宿主机的 `credstore` 不会随镜像进入容器。** `${VAR}` 通过操作系统 keyring
+解析，而 `~/.credstore/credentials.crypt` 只是这个 keyring 的加密*备份*，需要
+`credstore reset` 用主密码恢复进一个可用的 keyring。Linux 容器的 keyring 在
+Docker 的 seccomp 策略下通常不可用，而且即使存在也是空的，所以只挂载这个
+seed 文件不会让 `${DEEPSEEK_API_KEY}` 解析成功。请像上面的命令一样用环境变量
+传入 key（也可以使用 `--env-file` 或 Docker secret）。
+
 一次性提示、环境变量和容器相关说明见 [docker/README.md](docker/README.md)。
 
 ## 快速开始

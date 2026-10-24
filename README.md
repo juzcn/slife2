@@ -245,6 +245,14 @@ missing key fails at the call. Mount a different configuration over
 `/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
 `/home/slife2/.slife2` if conversations and logs should outlive the container.
 
+**The host's `credstore` does not follow the image.** `${VAR}` resolves through
+the OS keyring, and `~/.credstore/credentials.crypt` is only that keyring's
+encrypted *backup* — restored by `credstore reset`, which needs the master
+password and a working keyring. A Linux container's keyring is usually
+unavailable under Docker's seccomp policy and would start empty anyway, so
+mounting the seed does not make `${DEEPSEEK_API_KEY}` resolve. Pass the key in
+the environment (as above, or through `--env-file` or a Docker secret).
+
 See [docker/README.md](docker/README.md) for the one-shot prompt, the
 environment variables, and the container-specific notes.
 

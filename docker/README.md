@@ -84,6 +84,13 @@ the container.
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
   lazily: the stack starts, and a tool that needs a key fails at the call. Only
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
+- **The host's credential store does not come with the image.** `${VAR}` is
+  resolved through the OS keyring; `~/.credstore/credentials.crypt` (or
+  `CREDSTORE_FILE`) is that keyring's encrypted *backup*, restored by
+  `credstore reset` with the master password. A Linux container's keyring is
+  usually unavailable under Docker's seccomp policy and starts empty even where
+  it works, so mounting the seed does not fill `${DEEPSEEK_API_KEY}` — pass the
+  key through `-e`, `--env-file`, or a Docker secret.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by
