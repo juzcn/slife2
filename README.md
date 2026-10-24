@@ -245,16 +245,27 @@ missing key fails at the call. Mount a different configuration over
 `/opt/slife2/slife2.yaml`, and mount `/opt/slife2/agents` and
 `/home/slife2/.slife2` if conversations and logs should outlive the container.
 
-**The host's `credstore` does not follow the image.** `${VAR}` resolves through
-the OS keyring, and `~/.credstore/credentials.crypt` is only that keyring's
-encrypted *backup* — restored by `credstore reset`, which needs the master
-password and a working keyring. A Linux container's keyring is usually
-unavailable under Docker's seccomp policy and would start empty anyway, so
-mounting the seed does not make `${DEEPSEEK_API_KEY}` resolve. `credstore set`
-inside the container is not a substitute either: with no system keyring it writes
-only the encrypted backup (after `credstore set-password`), and the `${VAR}`
-lookup reads the keyring, never the backup. Pass the key in the environment (as
-above, or through `--env-file` or a Docker secret).
+**The host's keyring does not follow the image, but its encrypted seed can.**
+`${VAR}` resolves through the OS keyring and then through credstore's encrypted
+backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) when the keyring
+does not answer — which is the container's case, because Docker blocks
+`keyctl`. The backup is encrypted, so the container also needs its master
+password in `CREDSTORE_MASTER_PASSWORD`. Mount the seed read-only:
+
+```bash
+docker run --rm -it \
+  -v "$HOME/.credstore/credentials.crypt:/tmp/credentials.crypt:ro" \
+  -e CREDSTORE_FILE=/tmp/credentials.crypt \
+  -e CREDSTORE_MASTER_PASSWORD=... \
+  slife2:local
+```
+
+Like any other secret, the master password is masked in slife2's output.
+Without it the backup stays locked and `${DEEPSEEK_API_KEY}` remains literal;
+pass individual keys in the environment instead (as above, or through
+`--env-file` or a Docker secret). `credstore set-password` creates a new seed,
+or changes an existing one — changing it asks for the old password first — so a
+seed whose password is unknown cannot be opened, only replaced.
 
 See [docker/README.md](docker/README.md) for the one-shot prompt, the
 environment variables, and the container-specific notes.

@@ -72,6 +72,8 @@ Useful environment variables:
 | `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
 | `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
+| `CREDSTORE_FILE` | `~/.credstore/credentials.crypt` | Where the container looks for credstore's encrypted seed. |
+| `CREDSTORE_MASTER_PASSWORD` | none | The seed's master password; used only when the container's keyring answers nothing (which is the normal Docker case). |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the
 data directory) is `/opt/slife2`; the runtime directory is
@@ -84,16 +86,15 @@ the container.
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
   lazily: the stack starts, and a tool that needs a key fails at the call. Only
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
-- **The host's credential store does not come with the image.** `${VAR}` is
-  resolved through the OS keyring; `~/.credstore/credentials.crypt` (or
-  `CREDSTORE_FILE`) is that keyring's encrypted *backup*, restored by
-  `credstore reset` with the master password. A Linux container's keyring is
-  usually unavailable under Docker's seccomp policy and starts empty even where
-  it works, so mounting the seed does not fill `${DEEPSEEK_API_KEY}`. `credstore
-  set` in the container is not a substitute for the same reason: without a
-  keyring it writes only the backup (after `set-password`), and the `${VAR}`
-  lookup reads the keyring. Pass the key through `-e`, `--env-file`, or a Docker
-  secret.
+- **The host's keyring does not come with the image; its encrypted seed can.**
+  `${VAR}` is resolved through the OS keyring and, when that answers nothing,
+  through credstore's encrypted backup (`~/.credstore/credentials.crypt`, or
+  `CREDSTORE_FILE`). Docker blocks `keyctl`, so the container is exactly the
+  keyring-less host that fallback exists for; it needs the backup's master
+  password in `CREDSTORE_MASTER_PASSWORD`. Mount the seed read-only and point
+  `CREDSTORE_FILE` at the mounted path (see the variable table). Without the
+  password the seed stays locked, and the key has to arrive through `-e`,
+  `--env-file`, or a Docker secret.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by

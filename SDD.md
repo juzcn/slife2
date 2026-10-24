@@ -2008,9 +2008,23 @@ a watcher or a lock.
 A value may be:
 
 - a literal;
-- `${VAR}`, resolved through the shell environment and then the OS keyring;
+- `${VAR}`, resolved through the shell environment, then the OS keyring, then
+  credstore's encrypted backup;
 - `${VAR:-default}`, with a literal default;
-- `keyring:<service>/<key>`, resolved directly against the OS keyring.
+- `keyring:<service>/<key>`, resolved against the OS keyring and then the
+  encrypted backup.
+
+**The encrypted backup is the keyring-less half of the store.** credstore's
+Python API reads the OS keyring only and answers `None` in cryptfile-only mode,
+which is what a container is: Docker blocks `keyctl`, so the Linux backend is
+unavailable. When `CREDSTORE_MASTER_PASSWORD` supplies the master password the
+CLI would prompt for, slife2 reads the backup directly (`CREDSTORE_FILE`, else
+`~/.credstore/credentials.crypt`), so a mounted seed resolves `${VAR}` and
+`keyring:` references without a keyring. No password is no fallback: the backup
+stays locked and the chain steps past it. A password that does not decrypt the
+file is a refusal and raises where the secret is resolved, like a keyring that
+refused; it is not read as an absent credential. The password is registered for
+the same output masking as the values it unlocks.
 
 **Output protection covers credstore's values, and only those.** A credential
 resolved from credstore — a `keyring:` URI, or a `${VAR}` the store answers — is
