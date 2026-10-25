@@ -2124,16 +2124,22 @@ async def test_a_refusal_is_text_with_ok_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_name_says_what_is_available() -> None:
-    """The error path is a feedback channel: it names the alternatives."""
+async def test_an_unknown_name_names_the_way_back() -> None:
+    """The error path is a feedback channel: it says how to find the name.
+
+    Not what else is loaded — that list is bounded by the budget and the model
+    already carries it — but the two tools that turn a name into one it can
+    call.
+    """
     async with Client(hub_for()) as hub:
         result = await call(hub, "weather")
 
     assert result["ok"] is False
     # Not `"weather" in result["text"]`: `unknown_tool` interpolates the name it
     # was asked for into every answer, so that line passed whatever the answer
-    # said.  Naming an alternative is the claim, and it is the check below.
+    # said.  Naming the way back is the claim, and it is the check below.
     assert "tool_search" in result["text"], result["text"]
+    assert "func_tool_load" in result["text"], result["text"]
 
 
 @pytest.mark.asyncio
@@ -2311,7 +2317,7 @@ async def test_a_turns_list_waits_for_a_plugin_that_has_just_come_up() -> None:
 @pytest.mark.asyncio
 async def test_a_tool_from_a_server_that_never_started_is_unknown() -> None:
     """It was never advertised, so there is nothing to call — and the answer
-    names what there is, which is what the model needs to try something else."""
+    names the way to find one that does exist."""
 
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("gone")

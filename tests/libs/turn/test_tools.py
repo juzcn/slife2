@@ -57,11 +57,19 @@ async def test_execute_returns_the_result_and_ok() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_tool_is_a_result_not_an_exception() -> None:
-    """The error is a message the model can act on, not a dead turn."""
+    """The error is a message the model can act on, not a dead turn.
+
+    The way back is `tool_search` and `func_tool_load`, not a list of every
+    loaded name: the list is bounded by the budget and travels in the
+    conversation, and a name that is missing is usually one the budget unloaded
+    rather than one that does not exist.
+    """
     text, ok = await registry().execute(ToolCall(id="c1", name="wether"))
     assert ok is False
     assert "wether" in text
-    assert "ok" in text  # names the alternatives
+    assert "tool_search" in text
+    assert "func_tool_load" in text
+    assert "raises" not in text, "the alternatives are found, not enumerated"
 
 
 @pytest.mark.asyncio

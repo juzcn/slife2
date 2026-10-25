@@ -513,8 +513,19 @@ class ToolRegistry:
         """
         tool = self._tools.get(call.name)
         if tool is None:
-            known = ", ".join(sorted(self._tools)) or "(none)"
-            return f"Error: unknown tool {call.name!r}. Available tools: {known}", False
+            # **The way back, not the whole list.**  A name that is not in this
+            # request's list is usually one the budget unloaded — the model
+            # still knows it from an earlier request or from a description that
+            # names it — and the two tools that answer that are always loaded
+            # (`REQUIRED_AUTOLOAD`).  Enumerating the loaded set put up to a
+            # hundred names into a result the model then carried for the rest
+            # of the conversation; `tool_search` finds the name by meaning, and
+            # `func_tool_load` puts it back.
+            return (
+                f"Error: unknown tool {call.name!r} — not in your tool list. "
+                f"Find it with tool_search, then load it with func_tool_load.",
+                False,
+            )
 
         try:
             return as_tool_text(await tool.run(call.arguments)), True

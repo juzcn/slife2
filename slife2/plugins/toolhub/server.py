@@ -3195,7 +3195,7 @@ def build_server(
             await refresh()
             row = await catalogue.route(name)
         if row is None:
-            return {"text": await unknown_tool(name), "ok": False}
+            return {"text": unknown_tool(name), "ok": False}
 
         if str(row.get("category") or "") in (SKILL, CLI):
             # A row a search can find and a call cannot reach, which is the
@@ -3283,18 +3283,20 @@ def build_server(
         await catalogue.touch(name)
         return {"text": text, "ok": ok}
 
-    async def unknown_tool(name: str) -> str:
-        """Why a name resolves to nothing, naming what does.
+    def unknown_tool(name: str) -> str:
+        """Why a name resolves to nothing, and the two tools that answer it.
 
-        The error path is a feedback channel, so it lists the alternatives — and
-        they are the *loaded* ones, because those are what the caller could have
-        been given.  A name from somewhere else is a name for `tool_search`.
+        **The way back, not the whole list.**  The error path is a feedback
+        channel, and what the model can act on is how to find the name it meant:
+        `tool_search` searches the catalogue by what a tool does, and
+        `func_tool_load` puts the found tool in the list sent with the next
+        request.  The loaded set used to be enumerated here — up to the budget's
+        hundred names, carried in the conversation for the rest of the turn —
+        which answered a question no model asked.
         """
-        found = await catalogue.injectable(live_sources())
-        known = ", ".join(sorted(tool.name for tool in advertised(found)))
         return (
-            f"unknown tool {name!r}. In your list: {known or '(none)'} — for "
-            f"anything else, search the catalogue with tool_search"
+            f"unknown tool {name!r} — not in your tool list. Find it with "
+            f"tool_search, then load it with func_tool_load."
         )
 
     @mcp.tool
