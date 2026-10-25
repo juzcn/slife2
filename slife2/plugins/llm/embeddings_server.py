@@ -36,6 +36,7 @@ import logging
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
@@ -281,6 +282,40 @@ class EmbeddingClient:
         return [list(item.embedding) for item in response.data]
 
 
+def provider_refusal(exc: Any) -> str:
+    """One sentence for a provider that refused the call.
+
+    **A refusal is not a fault.**  The SDK raises `APIStatusError` for a 4xx/5xx
+    answer, and its `str()` carries the whole body — a person starting the stack
+    needs the provider's own sentence and the setting that changes it, not a
+    traceback.  The caller catches the SDK type; this reads its fields.
+
+    The statuses with an action get one, and they are different actions.  A 402
+    is the bill — and a free model does not exempt the account from it; a 401 is
+    the credential; a 403 is the permission (the provider's usual answer when a
+    model needs real-name verification).  Everything else keeps the provider's
+    words and says nothing it cannot know.
+    """
+    status = int(getattr(exc, "status_code", 0) or 0)
+    body = getattr(exc, "body", None)
+    detail = str(body.get("message") or "") if isinstance(body, dict) else ""
+    detail = detail or str(exc)
+    if status == 402:
+        hint = (
+            "the account is in arrears — free models are gated too; top up or "
+            "switch `embeddings.active_model`"
+        )
+    elif status == 401:
+        hint = "check the provider's `api_key`"
+    elif status == 403:
+        hint = "check real-name verification and the key's permissions"
+    else:
+        hint = ""
+    if hint:
+        detail = f"{detail} — {hint}"
+    return f"the embedding provider refused the call ({status}): {detail}"
+
+
 def build_server(config: Config, *, client: EmbeddingClient | None = None) -> FastMCP:
     """Build the embeddings MCP server.  `client` is injectable for tests."""
     embedder = (
@@ -306,7 +341,12 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
         fixes its width in its DDL and cannot be altered after the fact.  The db
         asks this once per process, before it builds or rebuilds anything.
         """
-        return await embedder.describe()
+        from openai import APIStatusError
+
+        try:
+            return await embedder.describe()
+        except APIStatusError as exc:
+            raise ToolError(provider_refusal(exc)) from exc
 
     @mcp.tool
     async def embed(texts: list[str]) -> dict[str, Any]:
@@ -316,7 +356,12 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
             texts: The chunks to embed.  One call is one request to the model, so
                 the caller decides how much goes in it.
         """
-        return {"vectors": await embedder.embed(texts)}
+        from openai import APIStatusError
+
+        try:
+            return {"vectors": await embedder.embed(texts)}
+        except APIStatusError as exc:
+            raise ToolError(provider_refusal(exc)) from exc
 
     return mcp
 

@@ -301,3 +301,70 @@ async def test_embed_answers_with_the_vectors_over_the_wire() -> None:
         result = await client.call_tool("embed", {"texts": ["a", "b"]})
 
     assert tool_payload(result)["vectors"] == [[1.0, 0.0], [2.0, 0.0]]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_refusal_is_a_sentence_not_a_traceback() -> None:
+    """A 402 is operational news, and the sentence names the setting that moves it.
+
+    The SDK's own `str()` is the whole response body; a person starting the
+    stack needs the provider's message and the one config line to change, and
+    the tool boundary is where that is turned into a `ToolError` — a refusal,
+    not a traceback.
+    """
+    import httpx2
+    from fastmcp.exceptions import ToolError
+    from openai import APIStatusError
+
+    refused = APIStatusError(
+        "Error code: 402",
+        response=httpx2.Response(
+            402,
+            request=httpx2.Request("POST", "http://example.invalid/v1/embeddings"),
+        ),
+        body={
+            "code": 30001,
+            "message": "Sorry, your account balance is insufficient",
+        },
+    )
+
+    class Refusing(_FakeOpenAI):
+        async def _create(self, *, model: str, input: list[str]) -> Any:
+            raise refused
+
+    server = build_server(default_config(), client=_client("mystery", Refusing()))
+    async with Client(server) as client:
+        with pytest.raises(
+            ToolError, match="account balance is insufficient"
+        ) as caught:
+            await client.call_tool("embed", {"texts": ["a"]})
+
+    assert "402" in str(caught.value)
+    assert "embeddings.active_model" in str(caught.value)
+
+
+def test_each_refusal_status_gets_its_own_action() -> None:
+    """402 is the bill, 401 the key, 403 the permission.
+
+    A free model does not make 402 a rate-limit answer — a free model is still
+    gated on the account not being in arrears — and 403 is the provider's usual
+    answer to a model that needs real-name verification.
+    """
+    import httpx2
+    from openai import APIStatusError
+
+    from slife2.plugins.llm.embeddings_server import provider_refusal
+
+    def refusal(status: int) -> APIStatusError:
+        return APIStatusError(
+            f"Error code: {status}",
+            response=httpx2.Response(
+                status,
+                request=httpx2.Request("POST", "http://example.invalid/v1/embeddings"),
+            ),
+            body={"message": "the provider's sentence"},
+        )
+
+    assert "in arrears" in provider_refusal(refusal(402))
+    assert "api_key" in provider_refusal(refusal(401))
+    assert "real-name" in provider_refusal(refusal(403))
