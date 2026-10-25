@@ -256,6 +256,7 @@ slife2 [COMMAND] [OPTIONS]
   status    报告配置所命名的每个 server 的状态。
   down      停掉配置所命名的 server。
   logs      读取某个 server 的日志，或列出已有日志。
+  probe     通过 peer 网络向一个正在运行的 agent 提一个任务。
 ```
 
 `down` 只停共享 server 和 broker，不会关闭已经打开的窗口。遗留窗口在下一次输入
@@ -269,7 +270,7 @@ client 正在进行的轮次。
 | 选项 | 含义 |
 |---|---|
 | `--data-dir DIR` | 使用 `DIR` 作为数据目录。覆盖 `SLIFE2_DATA_DIR`。 |
-| `--agent NAME` | 以 `NAME` 身份运行。默认值：`slife2`。同一台机器上一个名字只能有一个活着的实例。 |
+| `--agent NAME` | 以 `NAME` 身份运行，或用 `probe` 向 `NAME` 提问。默认值：`slife2`。同一台机器上一个名字只能有一个活着的实例。 |
 | `--model PROVIDER/MODEL` | 以此模型启动。只写 provider 时选择它的第一个模型。默认值：配置中的 `default`。 |
 | `--url URL` | 将窗口连接到 `URL` 上的 agent server，而不是配置中的地址。 |
 | `--a2a-broker HOST:PORT` | 本次运行让 peer agent 网络使用该 broker。它只覆盖 `peer_agent.broker`，从不覆盖 subagent 网络的 broker。它不能启用一个没有 `peer_agent:` 节的网络；如果 A2A server 已在另一个 broker 上运行，它会被拒绝，此时先停止整套服务。 |
@@ -278,6 +279,9 @@ client 正在进行的轮次。
 | `--lang {en,zh}` | 设置窗口语言。不指定时从操作系统检测。 |
 | `--json` | 以 JSON 打印 `status`。对象包含 `ok`、`servers` 和 `broker`；每个 server 行带有日志路径。 |
 | `--force` | 即使有其他 client 在使用共享 server 也停掉它们。仅用于 `down`。 |
+| `--prompt TEXT` | 向正在运行的 agent 提出的任务。仅用于 `probe`。 |
+| `--timeout SECONDS` | `probe` 等待任务完成回复的秒数。默认 3600。仅用于 `probe`。 |
+| `--channel {a2a,tui}` | `probe` 走哪条路：A2A peer 网络（默认），或 agent task 的交付答案。仅用于 `probe`。 |
 | `--lines N`、`-n N` | `logs` 显示多少行；`0` 表示整个日志。默认 50。 |
 | `--all` | 与 `logs` 连用，按各自的标题打印每个已配置 server 的日志。 |
 | `--version` | 打印版本并退出。 |
@@ -293,6 +297,14 @@ client 正在进行的轮次。
 
 `--headless` 不是另一种 agent。它运行的是没有屏幕的同一个窗口；系统提示词会
 被告知没有人在看着，以便模型调整行为。
+
+`slife2 probe --agent NAME --prompt '……'` 向一个正在运行的 agent（headless
+窗口，或打开的 TUI 窗口）提一个任务。`--channel a2a`（默认）模拟 peer：在 peer
+网络上发 `task_request`，目标窗口跑 turn，模型的 `task_response` 就是答案；需要
+`peer_agent:` 节。`--channel tui` 通过 agent task 提问：任务跑一段 agent 自己的
+loop（没有 inbox、不会被 cut-in），任务交付的 `agent-task:<name>` 消息就是答案——
+不是窗口那一轮的 assistant 文本。TUI 路需要窗口来交付。两种模式：完成退出 0，
+用法错误退出 2，没有完成答案退出 3。容器的 one-shot 模式跑默认的 A2A 路。
 
 `--lang` 只影响窗口：标签、harness 自己的行、面板、模型选择器、批准行和状态栏。
 系统提示词、工具 schema 和日志行始终是英文。外部文本（例如工具结果和 peer
@@ -874,7 +886,8 @@ agent 是两个 peer，同一个名字的第二个活实例会在加入前被拒
 在线状态作为 harness 行绘制，而不是轮次：`[⚡ jill online]`。花名册可通过
 `peer_agent_list` 获取。窗口持有 `join` 调用期间，agent 就在 mesh 上；
 `--headless` 在没有窗口的情况下持有同一个调用。进行中的任务保存在内存中，重启
-后从零开始。
+后从零开始。`slife2 probe --agent NAME --prompt '……'` 就是从 shell 走这条路：
+发一条 `task_request`，把模型的 `task_response` 打到 stdout。
 
 群是一个带群主的有名成员名单，通过 `peer_agent_group_set` 创建，不需要邀请或
 接受。群消息作为即发即忘事件投递给其他所有成员——绝不会回送给发送者——以

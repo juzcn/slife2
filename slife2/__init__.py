@@ -16,6 +16,7 @@ name is passed through to the agent server for exactly that reason.
     slife2 status [OPTIONS]   what is running, and where
     slife2 down [OPTIONS]     stop the servers this config names
     slife2 logs [SERVER]      read a server's log, or list the logs there are
+    slife2 probe [OPTIONS]    ask a running agent one task, and print its answer
 
 Starting in a data directory **makes that home** (`slife2._open_home`,
 `slife2._open_catalogue`): the directory is recorded, its `agents/` and `skills/`
@@ -33,6 +34,11 @@ process is up, so a peer can task it and be answered.  **Nothing else about the
 agent changes**: an unattended agent is the same agent, and the only thing that
 tells a *model* otherwise is its system prompt (`headless` in the template),
 which is the lever for how it behaves.  `Ctrl+C` is the way out.
+
+`slife2 probe --prompt …` is that peer's half in a command: it asks a running
+agent one task over the peer network and prints the model's `task_response` —
+the one-shot path, without a window of its own. `--channel tui` asks through an
+agent task instead, and the task's delivered message is the answer.
 
 `--help` lists the options, and the flags may be written before or after the
 command.  `--data-dir` is the one worth knowing about on its own: it decides
@@ -68,6 +74,7 @@ from typing import Any
 
 import truststore
 
+from slife2.helpers import timeouts as _T
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     DEFAULT_AGENT,
@@ -99,7 +106,7 @@ truststore.inject_into_ssl()
 
 #: The subcommands, and what happens when none is named.
 _RUN = "run"
-_COMMANDS = (_RUN, "status", "down", "logs")
+_COMMANDS = (_RUN, "status", "down", "logs", "probe")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -171,7 +178,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
-        help=f"the name this instance runs under (default: {DEFAULT_AGENT})",
+        help=(
+            "the name this instance runs under, or the agent a probe asks "
+            f"(default: {DEFAULT_AGENT})"
+        ),
     )
     parser.add_argument(
         "--url", default=None, help="override the agent server's endpoint"
@@ -202,6 +212,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--force",
         action="store_true",
         help="stop the shared servers even when another client is using them (down only)",
+    )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="the task to ask a running agent (probe only)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how long to wait for the task's answer "
+            f"(probe only; default: {_T.timeouts.deliver.probe:.0f})"
+        ),
+    )
+    parser.add_argument(
+        "--channel",
+        choices=("a2a", "tui"),
+        default=None,
+        help=(
+            "which road a probe asks on: the A2A peer network, or an agent "
+            "task's delivered answer (probe only; default: a2a)"
+        ),
     )
     parser.add_argument(
         "--lines",
@@ -243,6 +277,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--model only applies to `run`")
     if args.force and args.command != "down":
         parser.error("--force only applies to `down`")
+    if args.prompt is not None and args.command != "probe":
+        parser.error("--prompt only applies to `probe`")
+    if args.timeout is not None and args.command != "probe":
+        parser.error("--timeout only applies to `probe`")
+    if args.timeout is not None and args.timeout <= 0:
+        parser.error("--timeout must be positive")
+    if args.channel is not None and args.command != "probe":
+        parser.error("--channel only applies to `probe`")
     if args.server and args.command != "logs":
         parser.error("a server name only applies to `logs`")
     if args.lines is not None and args.command != "logs":
@@ -840,6 +882,47 @@ def _logs(config: Config, server: str, lines: int, every: bool) -> int:
     return 0
 
 
+def _probe(
+    config: Config,
+    prompt: str | None,
+    agent: str,
+    timeout: float | None,
+    channel: str | None,
+) -> int:
+    """Ask a running agent one task, and print its terminal reply.
+
+    **Two roads, one answer contract.**  `a2a` (the default) is a mock peer: a
+    `task_request` on the peer network, answered by the model's own
+    `task_response`.  `tui` is an agent task: the task runs one loop of the
+    agent's own and its delivered `agent-task:<name>` message is the answer —
+    never the window's assistant text, which answers everything folded into the
+    turn.
+    """
+    import asyncio
+
+    from slife2.clients.a2a import ProbeError
+
+    text = (prompt or "").strip()
+    if not text:
+        print("slife2: probe needs a prompt (`--prompt`)", file=sys.stderr)
+        return 2
+    try:
+        if channel == "tui":
+            from slife2.clients.tui import probe_tui
+
+            result = asyncio.run(probe_tui(config, agent, text, timeout=timeout))
+        else:
+            from slife2.clients.a2a import probe
+
+            result = asyncio.run(probe(config, agent, text, timeout=timeout))
+    except ProbeError as exc:
+        print(f"slife2: probe failed: {exc}", file=sys.stderr)
+        return 3
+    print(result.text)
+    print(f"agent={agent} task={result.task_id}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `slife2` console script."""
     args = _parse_args(argv)
@@ -869,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
             return _down(config, force=args.force)
         if args.command == "logs":
             return _logs(config, args.server, args.lines, args.all)
+        if args.command == "probe":
+            return _probe(config, args.prompt, args.agent, args.timeout, args.channel)
 
         # The provider itself is not needed here: the TUI talks to the *agent*
         # server, which is the one that knows which model server to use.  What

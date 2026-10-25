@@ -1949,6 +1949,10 @@ A task id is a `uuid4` hex string. The in-memory task store is shared by every
 mesh in the process; a record carries the agent it belongs to, so sharing cannot
 confuse two agents' tasks. The store is pruned with a soft cap.
 
+**The requester half is also a command.** `slife2 probe` sends one `task_request`
+and prints the terminal artifact; it is a peer, not a channel, and it reads no
+turn store. §10.5 has the one-shot argument.
+
 ### 9.3 Agent tasks
 
 `plugins/agent_task/` runs one loop of the agent's own on a description, and the
@@ -1975,6 +1979,11 @@ A task runs one turn, so it makes one rebuild. Zero would make it the one turn
 in the system whose context nobody decided.
 
 A task runs with the agent's system prompt, model, tools, and context decision.
+Its opening message is the shipped `agent_task.j2` (the server's
+`OPENING_TEMPLATE`): it says nobody is waiting, nobody can answer a question,
+the message sent when the task stops is the whole of what comes back, and
+background work or a nested task is refused. The agent's own system prompt is
+unchanged; the template is what the task adds.
 It does not have the turn that started it, because `restore` reads the stored
 turn list and a turn is written only when it ends. The description must restate
 the last exchange; everything older is in the log.
@@ -1987,6 +1996,12 @@ The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. If no window is showing the conversation, the
 result is `undelivered` and the log records that rather than running a turn for
 nobody.
+
+**A probe may start one too.** `slife2 probe --channel tui` starts a task as the
+target agent (`client_meta`), waits for its state, and reads the delivered
+`agent-task:<name>` message; `agent_task_status` reports state and never the
+result. The task's own loop is why this is the TUI road: no inbox means no other
+channel's message is folded into the answer.
 
 ### 9.4 Scheduled tasks
 
@@ -2182,13 +2197,35 @@ the flag; it is a mode, not a second kind of agent.
 
 The model is told that nobody is there. The flag is written into the agent-name
 claim, which the agent server already reads to render the system prompt, and the
-template receives it as `headless`. No instance at all renders the same way: a
-peer tasking an agent nobody is running is the same situation.
+template receives it as `headless`. The same sentence names the tools a reply
+leaves by — the peer network's, or a channel's own — because prose reaches
+nobody. No instance at all renders the same way: a peer tasking an agent nobody
+is running is the same situation.
 
 The output is deliberately nothing. Turns are recorded, so a window opened later
 restores the conversation, and presence is on the mesh where peers see it.
 Ctrl+C stops a headless run; a kill is honest too, because the broker's last
 will publishes the offline card.
+
+`slife2 probe` has two roads and one answer contract. `--channel a2a` (the
+default) is an A2A requester: one `task_request` to whichever window holds the
+agent's name — a headless one or an attended TUI window — and the model's
+`task_response` is the answer. The target's mode changes its prompt and approval
+handling, not the probe; its retry ladder is the readiness wait for a window that
+has not joined yet, and §9.2's wire is the whole of its contract. `--channel tui`
+asks through an agent task (§9.3): the task runs one loop of the agent's own — no
+inbox, so no other channel's message is folded in — and its delivered
+`agent-task:<name>` message is the answer. The task's opening template says
+nobody is waiting and the stop message is the whole answer. `deliver.probe` is
+both roads' budget. The container's one-shot entrypoint runs the default A2A
+road, and there is no second one-shot driver.
+
+**A raw TUI submit is not the answer contract.** A channel's answer is the
+turn's answer to everything folded into that turn — the same text every folded
+caller gets — so no assistant text can be attributed to one injected prompt. The
+TUI road therefore asks through a task's named delivered message, not the
+window's assistant text; the A2A road's `task_response` is the per-request
+completion.
 
 ## 11. Configuration and environment
 

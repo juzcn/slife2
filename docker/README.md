@@ -44,22 +44,24 @@ docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
   slife2:local 'Use the shell tool to run `pwd; echo CONTAINER-OK` and report the output.'
 ```
 
-The one-shot mode starts the whole stack, hands the prompt to the headless
-window through `slife2-tui`'s `submit` (the same road a WeChat message or an
-agent task takes), prints the answer from the turn the window recorded, and
-stops the stack. A `submit` refused because no window is attached yet is
-retried: that retry is the readiness wait, because `slife2 run` opens the window
-only after every server is ensured and the catalogue is built. The answer is on
-stdout; the turn id is on stderr. The window is the only client of the
-conversation: the one-shot driver does not call `send_message` itself.
+The one-shot mode starts the whole stack, then acts as an A2A peer: it sends
+the prompt to the headless window as a `task_request`, waits for the model's
+own `task_response`, prints that terminal reply, and stops the stack. The probe
+is `slife2.clients.a2a`; the entrypoint's one-shot calls `slife2 probe --prompt
+'…'`, and so can a shell in the image. Nothing reads the turn store: the answer
+is the task's terminal frame, and the window's progress frames are its own
+business. The answer is on stdout; the agent and task id are on stderr.
 
-**And the external sources are awaited before the prompt.** A user's home is
-warm — the `mcp:`/`rest-api:` servers were connected on the previous run — but a
-fresh container starts all of them from cold, and a prompt sent while they are
-still `connecting` runs its first turn against a partial tool set. So the
-driver asks the toolhub's `servers` until every enabled `mcp:`/`rest-api:` entry
-reports `ready`; a source that never gets there fails the run rather than
-sending the prompt anyway.
+`slife2 probe --channel tui` is the other road: it asks through an agent task,
+whose delivered `agent-task:<name>` message is the answer. The one-shot above
+runs the default A2A road.
+
+**The retry ladder is the readiness wait.** A window joins the mesh a moment
+after `slife2 run` opens it (which is after every server is ensured and the
+catalogue is built); a request published before then finds no responder and is
+repeated by the requester. The first attempt that lands after the window is
+online is the one that runs. A task that is never completed — no window, or a
+model that never sends `task_response` — fails the run.
 
 ## Credentials
 
@@ -94,12 +96,8 @@ Useful environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `SLIFE2_PROMPT` | none | One-shot prompt for a launcher that cannot pass it as the command argument. Omit to keep the stack running. |
-| `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim). |
-| `SLIFE2_BENCH_TUI_URL` | the config's `servers.tui.url` | The TUI plugin's endpoint; the prompt is handed to the window there. |
-| `SLIFE2_BENCH_TOOLHUB_URL` | the config's `servers.toolhub.url` | The toolhub's endpoint; the readiness gate asks `servers` there. |
-| `SLIFE2_BENCH_READY_TIMEOUT` | `900` | Seconds to wait for the window to open (the launcher's own budgets are 300 s per server and 360 s for the catalogue, because a fresh container's cold start is slower than a warm one). |
-| `SLIFE2_BENCH_TOOL_READY_TIMEOUT` | `900` | Seconds to wait for every enabled `mcp:`/`rest-api:` source to report `ready`. |
-| `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds to wait for the window to record the turn. |
+| `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim and the probe's target). |
+| `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds the probe waits for the task's terminal reply. |
 | `CREDSTORE_MASTER_PASSWORD` | none | For a launcher with no terminal: the master password for the cred file in the volume. The interactive entrypoint asks for it instead. |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the

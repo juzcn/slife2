@@ -229,13 +229,20 @@ class Stream:
 class Deliver:
     """Handing something to a peer over a channel that can drop it."""
 
-    #: The a2a mesh: connecting to the broker, and the three pieces of its own
-    #: wire contract — a peer's card is read in this long, a first reply is
-    #: waited for this long, and silence past this long means the link is dead.
+    #: The a2a mesh: connecting to the broker, and the pieces of its own wire
+    #: contract — a peer's card is read in this long, a first reply is waited
+    #: for this long, and silence past this long means the link is dead.
     mqtt_connect: float = 15.0
     name_probe: float = 1.0
     reply_first: float = 15.0
     keepalive: float = 25.0
+    #: The gap allowed between two frames of one task reply.  The responder's
+    #: keepalive is `keepalive`, so this has to outlast it or a long task looks
+    #: dead between two pings.
+    stream_idle: float = 60.0
+    #: One probe's whole task budget: a headless window may run the task for as
+    #: long as its turns take, and the probe waits for its `task_response`.
+    probe: float = 3600.0
 
 
 @dataclass
@@ -246,6 +253,9 @@ class Pacing:
     backoff step) or a lifetime after which a cached thing is stale.
     """
 
+    #: The probe's poll of an agent task's state, and then of the conversation
+    #: the task's answer is delivered to.
+    probe_poll: float = 0.5
     #: Between polls of the WeChat backend, and how far that poll's backoff
     #: grows when the backend keeps failing.
     wechat_poll: float = 3.0

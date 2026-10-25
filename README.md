@@ -275,6 +275,7 @@ Commands:
   status    Report what each server named by the configuration is doing.
   down      Stop the servers named by the configuration.
   logs      Read a server's log, or list the logs that exist.
+  probe     Ask a running agent one task over the peer network.
 ```
 
 `down` stops the shared servers and the broker; it does not close windows that
@@ -290,7 +291,7 @@ Options:
 | Option | Meaning |
 |---|---|
 | `--data-dir DIR` | Use `DIR` as the data directory. Overrides `SLIFE2_DATA_DIR`. |
-| `--agent NAME` | Run as `NAME`. Default: `slife2`. One live instance per name per machine. |
+| `--agent NAME` | Run as `NAME`, or ask `NAME` with `probe`. Default: `slife2`. One live instance per name per machine. |
 | `--model PROVIDER/MODEL` | Start on this model. A bare provider selects its first model. Default: the configuration's `default`. `run` only. |
 | `--url URL` | Connect the window to an agent server at `URL` instead of the configured one. |
 | `--a2a-broker HOST:PORT` | Use this broker for the peer-agent network for this run. It overrides `peer_agent.broker` only, never the subagent network's broker. It cannot enable a network that has no `peer_agent:` section, and it is refused when the A2A server is already running on another broker; stop the stack first. |
@@ -299,6 +300,9 @@ Options:
 | `--lang {en,zh}` | Set the window's language. Without the flag, the language is detected from the operating system. |
 | `--json` | Print `status` as JSON. The object carries `ok`, `servers`, and `broker`; each server row has its log path. |
 | `--force` | Stop the shared servers even when another client is using them. `down` only. |
+| `--prompt TEXT` | The task to ask a running agent. `probe` only. |
+| `--timeout SECONDS` | How long `probe` waits for the task's completed reply. Default: 3600. `probe` only. |
+| `--channel {a2a,tui}` | Which road a `probe` asks on: the A2A peer network (default), or an agent task's delivered answer. `probe` only. |
 | `--lines N`, `-n N` | How many log lines `logs` shows; `0` reads the whole log. Default: 50. |
 | `--all` | With `logs`, print every configured server's log under its own header. |
 | `--version` | Print the version and exit. |
@@ -316,6 +320,18 @@ because another client is live. `run` returns 2 when a server cannot start.
 `--headless` does not create a different kind of agent. It runs the same window
 with no display, and the system prompt is told that nobody is watching so the
 model can adjust its behavior.
+
+`slife2 probe --agent NAME --prompt '…'` asks a running agent — a headless one or
+an open TUI window — one task. `--channel a2a` (the default) is a mock peer: it
+sends a `task_request` on the peer network, the target window runs the turn, and
+the model's `task_response` is the answer; it requires a `peer_agent:` section.
+`--channel tui` asks through an agent task: the task runs one loop of the
+agent's own (no inbox, no cut-ins), and the task's delivered
+`agent-task:<name>` message is the answer — not the window's assistant text,
+which answers everything folded into its turn. The TUI road needs a window for
+the delivery. Both modes exit 0 on a completed answer, 2 on a usage error, and
+3 when no completed answer comes back. The container's one-shot mode runs the
+default A2A road.
 
 `--lang` affects the window only: labels, harness lines, panels, the model
 picker, the approval row, and the status bar. System prompts, tool schemas, and
@@ -973,7 +989,9 @@ through its maker's local subagent network.
 Presence is drawn as a harness line, not a turn: `[⚡ jill online]`. The roster is
 available through `peer_agent_list`. An agent is on the mesh while a window holds
 its `join` call; `--headless` holds the same call without a window. In-flight
-tasks are held in memory, so a restart starts with none.
+tasks are held in memory, so a restart starts with none. `slife2 probe --agent
+NAME --prompt '…'` is that road from a shell: one `task_request`, and the
+model's `task_response` on stdout.
 
 A group is a named roster with an owner, created by `peer_agent_group_set`; no
 invitation or acceptance is involved. Group messages are fire-and-forget events

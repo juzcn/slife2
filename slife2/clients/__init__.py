@@ -3,5 +3,6 @@
 `slife2` is one client of many servers, and every hop it makes has two
 halves.  The server halves are under `plugins/`; these are the others —
 `toolclient` for the hub, `model` for a model server, `embedder` for the
-embeddings endpoint, and `gateway` for a server somebody else runs.
+embeddings endpoint, `gateway` for a server somebody else runs, `a2a` for a
+peer agent, and `tui` for a window's agent task.
 """

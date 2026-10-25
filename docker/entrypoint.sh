@@ -47,4 +47,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-/opt/slife2/.venv/bin/python /opt/slife2-bench/ask.py "${PROMPT}"
+# **The one-shot is the CLI's probe.**  The stack above is what it asks; the
+# task and its terminal reply are `slife2 probe`'s, so the driver is the same
+# one a shell in the image runs and the bench calls.
+probe=(--agent "${AGENT}" --prompt "${PROMPT}")
+if [[ -n "${SLIFE2_BENCH_TURN_TIMEOUT:-}" ]]; then
+    probe=(--timeout "${SLIFE2_BENCH_TURN_TIMEOUT}" "${probe[@]}")
+fi
+"${SLIFE2}" probe "${probe[@]}"

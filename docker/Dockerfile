@@ -80,7 +80,6 @@ RUN HOME=/root npm_config_cache=/tmp/root-npm \
 USER slife2
 
 COPY --chown=slife2:slife2 docker/entrypoint.sh /usr/local/bin/slife2-entrypoint
-COPY --chown=slife2:slife2 docker/ask.py /opt/slife2-bench/
 RUN chmod +x /usr/local/bin/slife2-entrypoint
 
 EXPOSE 24000

@@ -125,6 +125,44 @@ def test_a_recovery_command_does_not_resolve_the_default_model(
     assert ran == [command]
 
 
+def test_probe_prints_the_task_reply_and_names_the_task(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.clients import a2a
+
+    async def fake_probe(config, agent, prompt, *, timeout):
+        assert (agent, prompt, timeout) == ("tb-1", "do it", 30.0)
+        return a2a.ProbeResult(text="42", task_id="task-1")
+
+    monkeypatch.setattr(a2a, "probe", fake_probe)
+
+    assert slife2._probe(default_config(), "do it", "tb-1", 30.0, None) == 0
+    out, err = capsys.readouterr()
+    assert out == "42\n"
+    assert "agent=tb-1 task=task-1" in err
+
+
+def test_probe_dispatches_the_tui_channel(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from slife2.clients import tui
+
+    async def fake_probe(config, agent, prompt, *, timeout):
+        assert (agent, prompt, timeout) == ("tb-1", "do it", 30.0)
+        return tui.ProbeResult(text="tui answer", task_id="agent-task:probe-1")
+
+    monkeypatch.setattr(tui, "probe_tui", fake_probe)
+
+    assert slife2._probe(default_config(), "do it", "tb-1", 30.0, "tui") == 0
+    out, err = capsys.readouterr()
+    assert out == "tui answer\n"
+    assert "agent=tb-1 task=agent-task:probe-1" in err
+
+
+def test_a_probe_with_no_prompt_is_a_usage_error() -> None:
+    assert slife2._probe(default_config(), None, "slife2", None, None) == 2
+
+
 def test_a_flag_for_another_command_is_a_usage_error() -> None:
     """A flag that would do nothing is refused, not carried along."""
     with pytest.raises(SystemExit) as exit_info:
@@ -135,6 +173,17 @@ def test_a_flag_for_another_command_is_a_usage_error() -> None:
     # operator read a successful `status` as "the model reference was accepted".
     with pytest.raises(SystemExit) as exit_info:
         _parse_args(["status", "--model", "nosuch/model"])
+    assert exit_info.value.code == 2
+    # The probe's two flags are the probe's: carried along by another command
+    # they would read as an instruction it does not carry out.
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_args(["status", "--prompt", "hi"])
+    assert exit_info.value.code == 2
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_args(["run", "--timeout", "5"])
+    assert exit_info.value.code == 2
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_args(["status", "--channel", "tui"])
     assert exit_info.value.code == 2
 
 
@@ -592,6 +641,11 @@ def test_a_subcommand_is_recognised_wherever_it_is_written() -> None:
     assert _parse_args(["status", "--data-dir", "x"]).command == "status"
     assert _parse_args(["--data-dir", "x", "status"]).command == "status"
     assert _parse_args(["--data-dir", "x"]).command == "run"
+    assert _parse_args(["probe", "--prompt", "hi"]).command == "probe"
+    assert _parse_args(["probe", "--prompt", "hi"]).prompt == "hi"
+    assert _parse_args(["probe", "--prompt", "hi", "--timeout", "5"]).timeout == 5.0
+    assert _parse_args(["probe", "--prompt", "hi", "--channel", "tui"]).channel == "tui"
+    assert _parse_args(["probe", "--prompt", "hi"]).channel is None
 
 
 def test_headless_is_off_unless_it_is_asked_for() -> None:
