@@ -2868,6 +2868,41 @@ async def test_the_prompt_knows_whether_anybody_is_watching(
 
 
 @pytest.mark.asyncio
+async def test_a_headless_prompt_names_its_reply_tools_not_their_schema(
+    context, hub
+) -> None:
+    """The unattended sentence points a reply at the sender's tool.
+
+    **A headless window has nobody to read prose** (`slife2 --headless`,
+    SDD §10.5): what reaches it came from a peer, a channel or a schedule, so
+    the answer has to leave the way the sender can receive it.  The prompt names
+    the tools; the arguments — `task_response`, `message_type` — stay in the
+    tool descriptions, exactly as they do for a subagent
+    (`test_a_subagents_prompt_names_its_reply_tools_not_their_schema`).
+    """
+    from slife2.libs.host.runtime import AgentClaim, clear_claim, write_claim
+
+    clear_claim(DEFAULT_AGENT)
+    write_claim(AgentClaim.now(DEFAULT_AGENT, headless=True))
+    try:
+        backend = answering("ok")
+        server = build_server(
+            config(), context_client=context, hub_client=hub, backend=backend
+        )
+        await send(server, "hi")
+        prompt = backend.calls[0][0][0].content
+    finally:
+        clear_claim(DEFAULT_AGENT)
+
+    assert "peer_agent_send_message" in prompt
+    assert "peer_agent_broadcast" in prompt
+    assert "peer_agent_group_send_message" in prompt
+    assert "channel's own send tool" in prompt
+    assert "task_response" not in prompt
+    assert "message_type" not in prompt
+
+
+@pytest.mark.asyncio
 async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
     """A prompt that will not render is a config mistake worth naming once."""
     from slife2.libs.host.config import ConfigError, load

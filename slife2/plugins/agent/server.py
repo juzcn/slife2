@@ -1691,12 +1691,11 @@ def build_server(
         a headless one, so what reaches it comes from another member rather than
         from a person at its own keyboard.
 
-        **And it is not told how to answer, and that is the schema's half.**
-        What a reply is — the send call, with the task's id for a
-        `task_response` — is what the tool's own description says; a prompt that
-        repeated the arguments would be a second schema kept in step by hand.
-        The prompt's job is the part no tool can state: what this conversation
-        is.
+        **It is told which tools carry a reply, not their schema.**  What the
+        call takes — `task_response`, `message_type`, the task's id — is what
+        the tool's own description says; a prompt that repeated the arguments
+        would be a second schema kept in step by hand.  The prompt's job is the
+        part no tool can state: what this conversation is.
 
         **And it is told what it is, from its own file** (`subagent_spec`): the
         `role` the agent named it with is the one thing from that file the prompt
@@ -1710,7 +1709,10 @@ def build_server(
         (`AgentClaim.headless`).  A prompt is where a model is told who it is
         talking to, and an unattended agent has nobody: a tool call put up for
         approval is granted without being read, so a model that asks is spending
-        the turn it was given.  Two ways for nobody to be there, and they are one
+        the turn it was given.  **The unattended sentence names the tools a
+        reply leaves by** — the peer network's and the channel's own send tool —
+        because nobody is there to read prose.  Two ways for nobody to be there,
+        and they are one
         answer: the instance holding the name has no terminal (`slife2
         --headless`), or **no instance is holding it at all** — a peer that asks
         something of an agent nobody is running is told so rather than served
