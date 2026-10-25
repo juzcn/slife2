@@ -516,7 +516,7 @@ wheels = [
 
 [[package]]
 name = "credstore"
-version = "0.10.7"
+version = "0.10.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jaraco-classes" },
@@ -524,9 +524,9 @@ dependencies = [
     { name = "keyrings-cryptfile" },
     { name = "pywin32-ctypes", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0d/6c/2a8a903b8b1340d6a9b3e55b7c5c42297658f8970720eba98e31fa1a17a2/credstore-0.10.7.tar.gz", hash = "sha256:8a461fff7315bbf9f5f706d0728779e8ba1cb04b77c9c291665986abc72d729d", size = 123032, upload-time = "2026-10-17T00:11:51.293Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/ae/d063e4e4f16145fb934a35d68dd2d95a42d2e372bc07cc08b9a3f1c60773/credstore-0.10.8.tar.gz", hash = "sha256:2f2dff23398c20cc74f3aab2ff3b03f809a08b3597a5f2a32c2414c372f2c7e2", size = 123564, upload-time = "2026-10-25T13:43:15.582Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/0a/905ac5bd0d63b4a84f8423ebc030269d3de9b9ab916972a53a4e222f4515/credstore-0.10.7-py3-none-any.whl", hash = "sha256:2b631c0b6586805a4701795967d95fc980a93a038b17f2569ce697e73a264142", size = 52399, upload-time = "2026-10-17T00:11:50.066Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/ff/6b6587c08dd386280d6be85d40c0f2ffc2940e3d3619ae4de826052de25a/credstore-0.10.8-py3-none-any.whl", hash = "sha256:75d91d70e08c296ad336e930ee74552a4f9e00d2d9a865c8e5e48d464b75fc4c", size = 52584, upload-time = "2026-10-25T13:43:14.183Z" },
 ]
 
 [[package]]
