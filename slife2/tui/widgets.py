@@ -1927,13 +1927,20 @@ class StatusBar(Static):
         vision: bool = False,
         tools: int = 0,
         connected: bool = True,
+        connecting: bool = False,
     ) -> None:
         parts: list[str] = []
         if agent:
             # `[` is escaped so a name from a config cannot inject markup.
             parts.append(f"[{PALETTE['muted']}]{agent.replace('[', '[[')}[/]")
         if not connected:
-            parts.append(f"[{PALETTE['red']}]{connection}[/]")
+            # **A pending connection is not an error.**  Both states have no
+            # connection, so both words are the bar's, but only the one that
+            # was tried and failed wears red — a normal start used to flash
+            # `connecting` in the error colour, which read as a startup
+            # failure nobody could find in a log.
+            colour = PALETTE["dim"] if connecting else PALETTE["red"]
+            parts.append(f"[{colour}]{connection}[/]")
         elif busy:
             parts.append(
                 f"[{PALETTE['amber']}]{t('status_working')}{GLYPHS['ellipsis']}[/]"

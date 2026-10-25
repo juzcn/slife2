@@ -1804,8 +1804,44 @@ async def test_a_dead_server_does_not_kill_the_app() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         assert "disconnected" in status(app)
+        assert PALETTE["red"] in status(app), "a failed connection is the error colour"
         await submit(pilot, "hi")
         assert "not connected" in shown(app)
+
+
+class PendingConnect(FakeAgentClient):
+    """A client whose first connection stays pending until the test opens the gate."""
+
+    def __init__(self, respond) -> None:
+        super().__init__(respond)
+        self.release = asyncio.Event()
+
+    async def connect(self) -> None:
+        await self.release.wait()
+        await super().connect()
+
+
+async def test_a_pending_connection_is_not_painted_as_an_error() -> None:
+    """The first frame is a start, not a failure.
+
+    `connected` is false while the window is opening, exactly as it is after
+    the server refuses, and the bar used to paint both red — a normal start
+    flashed `connecting` in the error colour, which reads as a failure and
+    leaves nothing behind in a log to confirm it.  Red stays for the attempt
+    that came back with nothing.
+    """
+    client = PendingConnect(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        text = status(app)
+        assert "connecting" in text
+        assert PALETTE["red"] not in text, text
+        assert PALETTE["dim"] in text, text
+
+        client.release.set()
+        assert await settled(pilot, lambda: "connecting" not in status(app))
+        assert PALETTE["red"] not in status(app)
 
 
 async def test_a_dropped_connection_is_retried_by_the_next_prompt() -> None:

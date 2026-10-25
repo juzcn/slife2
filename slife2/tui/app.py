@@ -362,6 +362,11 @@ class SlifeApp(App[None]):
         self._window: WindowClient | None = None
         self._mesh: MeshClient | None = None
         self._connected = False
+        #: Whether the connection word is a pending attempt rather than a
+        #: failure.  `_connected` is false in both, and the bar's colour is the
+        #: difference a person reads: a window that is still opening must not
+        #: wear the red a lost server wears.
+        self._connecting = True
         #: What the status bar says when there is no connection.  **Resolved in
         #: the interface's language where it is set**, rather than stored as a
         #: state and translated at render time: the language is decided once
@@ -656,14 +661,23 @@ class SlifeApp(App[None]):
         again.
         """
         assert self._client is not None
+        # **A retry is a pending connection again, not the failure it started
+        # from.**  The words and the colour both belong to the attempt in
+        # flight: a bar that kept the previous error while retrying would say
+        # the retry had already failed.
+        self._connecting = True
+        self._connection_text = t("connection_connecting")
+        self._refresh_status()
         try:
             await self._client.connect()
         except Exception as exc:  # noqa: BLE001 - a dead server is operational, not fatal
             self._connected = False
+            self._connecting = False
             self._connection_text = t("connection_disconnected", err=exc)
             logger.warning("agent server connection failed: %s", exc)
         else:
             self._connected = True
+            self._connecting = False
             # Deliberately not through `t()`: the bar draws `connection` only
             # when there is none, so this is a state this window is in rather
             # than a word anybody reads.
@@ -759,6 +773,7 @@ class SlifeApp(App[None]):
                 # continues either way.
                 logger.warning("the previous conversation could not be read: %s", exc)
                 self._connected = False
+                self._connecting = False
                 self._connection_text = t("connection_disconnected", err=exc)
                 self._refresh_status()
                 return
@@ -1353,6 +1368,7 @@ class SlifeApp(App[None]):
         self.query_one(StatusBar).update_status(
             connection=self._connection_text,
             connected=self._connected,
+            connecting=self._connecting,
             agent=self._agent,
             model=self._model_label,
             busy=self._turn is not None or bool(self._submissions),
