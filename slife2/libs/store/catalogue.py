@@ -1179,7 +1179,13 @@ class ToolStore:
                     f"UPDATE tool SET load_status = ?, last_loaded = ?"
                     f" WHERE name IN ({_marks(chunk)}) AND load_status = ?"
                     f" AND category IN ({_in_list(FUNCTION_CATEGORIES)})",
-                    (LOADED, stamp, UNLOADED, *chunk),
+                    # **The names before the `load_status` filter.**  The
+                    # placeholders are the two SET values, the `name IN` list,
+                    # and then the WHERE's state; binding `UNLOADED` third put
+                    # it into the name list and the last name into the state,
+                    # so the update matched nothing and a name the model
+                    # unloaded was never loaded back at the next start.
+                    (LOADED, stamp, *chunk, UNLOADED),
                 )
                 loaded += int(cursor.rowcount)
             held = [

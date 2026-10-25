@@ -763,6 +763,39 @@ def test_a_new_list_is_applied_to_rows_that_already_exist(tmp_path) -> None:
     }, "the list is the plugin baseline; a model's own load is not a plugin's"
 
 
+def test_a_name_on_the_list_is_loaded_again_at_the_next_start(tmp_path) -> None:
+    """The boot pass is a baseline, not only a victim pass.
+
+    **A name the model unloaded in an earlier session must come back.**  That
+    is the first move `seed_autoload` exists for, and it is the half no test
+    covered: the test above starts with every name already loaded, so it only
+    proves that names *off* the list are unloaded.  A parameter order that put
+    `UNLOADED` among the name placeholders turned the load pass into a silent
+    no-op — the restart left the name unloaded and the next `list_tools`
+    simply did not have it.
+    """
+    path = tmp_path / "tools.db"
+    first = ToolStore(
+        path,
+        threshold=100,
+        autoload=("turn_list",),
+        known={"context"},
+    )
+    merge(first, "context", "plugin", [tool("turn_list"), tool("turn_search")])
+    first.set_load("turn_list", UNLOADED)
+
+    second = ToolStore(
+        path,
+        threshold=100,
+        autoload=("turn_list",),
+        known={"context"},
+    )
+
+    loaded = {name: state for name, _, state in rows_in(second)}
+    assert loaded["turn_list"] == LOADED, "the list is the baseline every start"
+    assert loaded["turn_search"] == UNLOADED
+
+
 def test_a_reconnect_never_touches_what_the_model_decided(tmp_path) -> None:
     """The one column in this file that is not derived from anything.
 
