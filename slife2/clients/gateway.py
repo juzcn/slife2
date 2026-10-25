@@ -357,10 +357,11 @@ class Connection:
     tool call take seconds.
 
     **State is a snapshot plus an error, not a state machine.**  A server is
-    either usable — meaning its tool list is in hand — or it is not, and in the
-    second case the useful fact is what it said the last time we asked.  The
-    snapshot carries its age as well (`_listed_at`), and that is not a third
-    state: an old listing is usable, it is simply due to be read again.
+    either usable — meaning its tool list is in hand and recorded — or it is
+    not, and in the second case the useful fact is what it said the last time
+    we asked.  The snapshot carries its age as well (`_listed_at`), and that is
+    not a third state: an old listing is usable, it is simply due to be read
+    again.
 
     Everything here is safe to call concurrently: a caller asks for a tool list
     while a turn that is already running is calling a tool.
@@ -391,6 +392,11 @@ class Connection:
         self._on_failed = on_failed
         self._client: Client | None = None
         self._error = ""
+        #: How many times this link has been reported failing.  Read across the
+        #: listing handover: the last failure is what a report shows until the
+        #: new listing is *recorded*, and this is how the handover knows whether
+        #: the error it finds afterwards is one the callback just set.
+        self._failures = 0
         self._ready = False
         #: When the listing in hand was read, on the monotonic clock — the one
         #: clock that cannot go backwards, since a wall clock that jumps is how a
@@ -408,7 +414,10 @@ class Connection:
     def usable(self) -> bool:
         """Whether its tool list is in hand — asked without waiting for one.
 
-        The synchronous half of :meth:`ready`, and the one a caller assembling a
+        **In hand means recorded**, not merely answered: a listing is handed to
+        `on_listed` to be written, and a source whose rows are still being
+        merged, or were refused, has nothing a caller may serve.  The
+        synchronous half of :meth:`ready`, and the one a caller assembling a
         list uses: it must not block on a server that has been failing, and must
         not be told a source that is down is fine.
         """
@@ -541,10 +550,16 @@ class Connection:
 
         **The listing is handed on and not kept.**  What came back is the whole
         truth about this source, and it is the caller's to record — see the
-        module docstring.  The order matters: this link counts as usable as soon
-        as the server answered, *before* the handover, so that a caller which
-        decides the list cannot be recorded can take it back down (by calling
-        `disconnect` or `fail`) and have the last word.
+        module docstring.
+
+        **And a source is usable only once the handover has recorded it.**  A
+        link that has answered but whose rows are still being merged is not a
+        source anything may rely on: the merge is exactly where a name another
+        source owns is refused, and a reader arriving during it would count
+        this source as fine while its rows are absent — the invisible short
+        list the hub's required-plugin gate exists to prevent.  A callback that
+        takes the link down still has the last word, because `fail` and
+        `disconnect` leave their mark and the flag below reads it.
 
         **The clock starts when the answer lands, not when it was asked for**,
         and that is the same rule as the flag above: what ages is the listing, so
@@ -568,11 +583,20 @@ class Connection:
             await self.disconnect()
             self.fail(exc)
             return
-        self._error = ""
-        self._ready = True
+        failures = self._failures
         self._listed_at = time.monotonic()
         if self._on_listed is not None:
             await self._on_listed(listed)
+        # **The handover decides whether there is a list to serve.**  A callback
+        # that refused the rows has called `fail` (the error is set), or dropped
+        # the link (`disconnect`, so there is no client); one that recorded them
+        # leaves both alone, and only then does the old failure stop being the
+        # last thing this source said.  For a re-list the old listing stayed
+        # usable throughout, which is the point: it was already recorded, and
+        # only a refusal may take it away.
+        if self._failures == failures and self._client is not None:
+            self._error = ""
+        self._ready = not self._error and self._client is not None
 
     def invalidate(self) -> None:
         """Forget the tool list, keeping the connection.
@@ -612,6 +636,7 @@ class Connection:
         deliberately leaves out, available where somebody has asked for detail.
         """
         self._ready = False
+        self._failures += 1
         self._error = f"{type(exc).__name__}: {exc}".strip()
         target = self.settings.url or self.settings.command
         if self._on_failed is None:

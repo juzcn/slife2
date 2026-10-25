@@ -10,6 +10,7 @@ lives.
 
 from __future__ import annotations
 
+import asyncio
 import types
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,144 @@ async def test_a_listing_is_handed_over_and_not_kept() -> None:
     assert link.error == ""
     assert not hasattr(link, "tools"), "the listing is the caller's, not ours"
 
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_listing_is_usable_only_once_the_handover_has_recorded_it() -> None:
+    """An answer is not a usable tool list — the handover is where it becomes one.
+
+    The callback is the caller recording the rows, and it is also where a list
+    the caller cannot record is refused.  A source counted usable before that
+    returns is one a required-plugin gate can pass while its rows are still
+    absent or refused: the silently short list the hub refuses to serve.  So
+    the flag goes up after the callback, never before it.
+    """
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    during: list[bool] = []
+
+    link: Connection
+
+    async def recording(tools: list[Any]) -> None:
+        during.append(link.usable)
+        started.set()
+        await finish.wait()
+
+    link = Connection(
+        settings(),
+        transport=lambda _settings: server(),
+        on_listed=recording,
+    )
+    reading = asyncio.create_task(link.ready())
+    await started.wait()
+
+    assert during == [False], "the callback already saw it as usable"
+    assert link.usable is False, "the rows are still being recorded"
+    assert link.state == "connecting"
+
+    finish.set()
+    assert await reading is True
+    assert link.usable is True
+    assert link.state == "ready"
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_listing_the_handover_refuses_never_counts_as_usable() -> None:
+    """The callback's last word is kept, not overwritten by the frame that called it.
+
+    `fail` inside `on_listed` is how a caller says the rows cannot be recorded —
+    the hub's two sources claiming one name.  The link must be unusable after
+    that, and say why, rather than be marked usable by the handover returning.
+    """
+    link: Connection
+
+    async def refusing(_tools: list[Any]) -> None:
+        link.fail(ValueError("'echo' is already another source's tool"))
+
+    link = Connection(
+        settings(),
+        transport=lambda _settings: server(),
+        on_listed=refusing,
+    )
+
+    assert await link.ready() is False
+    assert link.usable is False
+    assert link.state == "failed"
+    assert "already another source's tool" in link.error
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failure_is_reported_until_the_new_listing_is_recorded() -> None:
+    """`error` answers "what it said the last time it failed".
+
+    A source that is answering again has not stopped failing until its new rows
+    are recorded — and the handover is where they are, with a refusal still
+    possible.  Clearing the error when the answer arrived left a window where a
+    report said "connecting" and nothing else, which is the moment somebody is
+    reading it.  Only a recorded listing makes the old failure stop being the
+    last thing this source said.
+    """
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    calls = 0
+
+    link: Connection
+
+    async def listing(_tools: list[Any]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            link.fail(ValueError("the first refusal"))
+            return
+        started.set()
+        await finish.wait()
+
+    link = Connection(
+        settings(),
+        transport=lambda _settings: server(),
+        on_listed=listing,
+    )
+    assert await link.ready() is False
+    assert link.error == "ValueError: the first refusal"
+
+    reading = asyncio.create_task(link.ready())
+    await started.wait()
+    assert link.error == "ValueError: the first refusal", (
+        "the answer that has not been recorded does not erase the last failure"
+    )
+    assert link.usable is False, "and it is not a listing anybody may serve"
+
+    finish.set()
+    assert await reading is True
+    assert link.error == "", "the recorded listing is now the last thing it said"
+    await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_handover_that_drops_the_link_leaves_it_unusable() -> None:
+    """The other way a refused recording takes the link down.
+
+    A catalogue that could not be written is not the source's failure, so the
+    callback disconnects without an error (`Upstream._listed`).  Usable must
+    still be false: there is no live client, whatever the empty error says.
+    """
+    link: Connection
+
+    async def dropping(_tools: list[Any]) -> None:
+        await link.disconnect()
+
+    link = Connection(
+        settings(),
+        transport=lambda _settings: server(),
+        on_listed=dropping,
+    )
+
+    assert await link.ready() is False
+    assert link.usable is False
+    assert link.state == "idle", "no error, and no attempt left running"
     await link.close()
 
 

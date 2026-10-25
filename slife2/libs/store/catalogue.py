@@ -423,6 +423,23 @@ def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _name_taken(name: str, owner: str) -> ValueError:
+    """The refusal for a tool name another source already owns.
+
+    **One sentence, because the two places that can discover the collision are
+    the same fact.**  `_plan` sees it when one merge lists a name a stored row
+    owns; `_apply` sees it as the insert's primary key when another merge
+    claimed the name between the plan and the write.  Both are a naming
+    refusal — this source's list cannot be recorded — and neither is the
+    catalogue being broken, so both raise this rather than letting
+    `sqlite3.IntegrityError` be read as a catalogue failure.
+    """
+    return ValueError(
+        f"{name!r} is already {owner}'s tool; a name is a row's identity, so two "
+        f"sources cannot offer one (rename the server or the tool)"
+    )
+
+
 def _search_dict(
     row: sqlite3.Row,
     similarity: float | None = None,
@@ -752,11 +769,7 @@ class ToolStore:
                     skipped += 1
                     continue
                 if name in owned_elsewhere:
-                    raise ValueError(
-                        f"{name!r} is already {owned_elsewhere[name]}'s tool; a name "
-                        f"is a row's identity, so two sources cannot offer one "
-                        f"(rename the server or the tool)"
-                    )
+                    raise _name_taken(name, owned_elsewhere[name])
                 if name in incoming:  # one list naming one tool twice
                     logger.warning(
                         "%s listed %s twice in one list; keeping the first",
@@ -855,25 +868,43 @@ class ToolStore:
         updated: list[str] = []
         with self._connect() as connection:
             for entry in plan["inserts"]:
-                cursor = connection.execute(
-                    "INSERT INTO tool(name, description, category, source_id,"
-                    " remote_name, schema, returns, status, load_status,"
-                    " last_loaded, last_used)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        entry["name"],
-                        entry["description"],
-                        entry["category"],
-                        entry["source_id"],
-                        entry["remote_name"],
-                        entry["schema"],
-                        entry["returns"],
-                        entry["status"],
-                        entry["load_status"],
-                        entry["last_loaded"],
-                        entry["last_used"],
-                    ),
-                )
+                try:
+                    cursor = connection.execute(
+                        "INSERT INTO tool(name, description, category, source_id,"
+                        " remote_name, schema, returns, status, load_status,"
+                        " last_loaded, last_used)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            entry["name"],
+                            entry["description"],
+                            entry["category"],
+                            entry["source_id"],
+                            entry["remote_name"],
+                            entry["schema"],
+                            entry["returns"],
+                            entry["status"],
+                            entry["load_status"],
+                            entry["last_loaded"],
+                            entry["last_used"],
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # **The plan and the insert are two halves, and this is the
+                    # seam between them.**  Another merge claimed the name after
+                    # `_plan` read the owners, so the primary key says no.  That
+                    # is the same refusal `_plan` raises, not a catalogue that
+                    # stopped working — read as the latter, it would fail every
+                    # turn's list and name the wrong culprit while the winner's
+                    # rows sit fine.  The write is a transaction, so raising
+                    # here rolls back this merge and leaves the winner whole.
+                    owner = connection.execute(
+                        "SELECT source_id FROM tool WHERE name = ?", (entry["name"],)
+                    ).fetchone()
+                    if owner is None:  # not the name collision: a real fault
+                        raise
+                    raise _name_taken(
+                        str(entry["name"]), str(owner["source_id"])
+                    ) from exc
                 rowid = _rowid(cursor, what=f"the tool {entry['name']!r}")
                 self._index(connection, rowid, entry)
                 _write_tool_vectors(

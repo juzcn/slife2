@@ -166,6 +166,31 @@ def test_a_name_belonging_to_another_source_is_refused(tmp_path) -> None:
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"]
 
 
+def test_a_name_claimed_between_the_plan_and_the_write_is_the_same_refusal(
+    tmp_path,
+) -> None:
+    """**The collision the plan could not see is still a refusal, not a fault.**
+
+    A merge is planned, embedded, then applied, so two sources listing one name
+    at once can both plan: the winner writes, and the loser's insert trips the
+    primary key.  Read as a catalogue failure that would fail every turn's list
+    and name the file rather than the source — but it is the same naming fact
+    `_plan` refuses, and the loser's whole transaction rolls back with it.
+
+    The collision is forced at the seam rather than raced: plan source B, let A
+    write, then apply B's stale plan.
+    """
+    store = store_at(tmp_path)
+    plan = store._plan("other", "mcp", [tool("other__one"), tool("arxiv__search")])
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+
+    with pytest.raises(ValueError, match="already arxiv's tool"):
+        store._apply(plan, {})
+    assert [row[0] for row in rows_in(store)] == ["arxiv__search"], (
+        "the loser's transaction rolled back whole"
+    )
+
+
 def test_a_tool_whose_name_is_whitespace_is_no_name_either(tmp_path) -> None:
     """**A blank name is skipped, and the index sync stays finite.**
 
