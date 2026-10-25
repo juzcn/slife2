@@ -146,7 +146,7 @@ curl -fsSL https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.s
 powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/juzcn/slife2/main/scripts/install.ps1))) uninstall"
 ```
 
-`uninstall` 会移除安装器添加的组件，已有组件保持原样。
+`uninstall` 会移除安装器添加的组件，已有组件保持原样。无法移除的组件会保留记录，之后的 `uninstall` 会重试。
 
 ### 手动安装
 
@@ -271,7 +271,7 @@ client 正在进行的轮次。
 |---|---|
 | `--data-dir DIR` | 使用 `DIR` 作为数据目录。覆盖 `SLIFE2_DATA_DIR`。 |
 | `--agent NAME` | 以 `NAME` 身份运行，或用 `probe` 向 `NAME` 提问。默认值：`slife2`。同一台机器上一个名字只能有一个活着的实例。 |
-| `--model PROVIDER/MODEL` | 以此模型启动。只写 provider 时选择它的第一个模型。默认值：配置中的 `default`。 |
+| `--model PROVIDER/MODEL` | 以此模型启动。只写 provider 时选择它的第一个模型。默认值：配置中的 `default`。仅用于 `run`。 |
 | `--url URL` | 将窗口连接到 `URL` 上的 agent server，而不是配置中的地址。 |
 | `--a2a-broker HOST:PORT` | 本次运行让 peer agent 网络使用该 broker。它只覆盖 `peer_agent.broker`，从不覆盖 subagent 网络的 broker。它不能启用一个没有 `peer_agent:` 节的网络；如果 A2A server 已在另一个 broker 上运行，它会被拒绝，此时先停止整套服务。 |
 | `--keep-servers` | 本实例退出后保留共享 server。 |
@@ -454,7 +454,7 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 | `agent:` | 迭代上限与系统提示词模板。 |
 | `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
 | `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
-| `embeddings:` | 记忆索引使用的 embedding provider。 |
+| `embeddings:` | 轮次、工具目录与文件柜索引使用的 embedding provider。 |
 | `context:` | 上下文决策的限制。 |
 | `tool_load:` | 已加载工具的上限，以及一开始就加载且不会被卸载的工具。 |
 | `tool_result:` | 单个工具结果的 token 预算。 |
@@ -482,7 +482,9 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 **只有 credstore 管理的 secret 会被保护。** slife2 从 credstore 解析出的凭据——
 `keyring:` 引用，或由 credential store 回答的 `${VAR}`——会在工具结果、工具列表
 和日志行中以 masked 形式出现（至少同样多的字符仍被隐藏时显示前四位和后四位，
-否则显示 `***`）。环境变量或字面值属于操作者自己，slife2 不会尝试识别它们。
+否则显示 `***`）。少于八个字符的值完全不会被登记：遮蔽它会把每一行都弄乱，而
+没有 provider key 会这么短。环境变量或字面值属于操作者自己，slife2 不会尝试
+识别它们。
 请用 credstore 管理所有 secret：只有它的值，slife2 能在任何可能泄露的位置将其遮蔽。
 
 解析是惰性且宽松的。无法解析的引用会原样保留，因此缺失的 key 会在 API 调用处
@@ -621,10 +623,11 @@ hub 提供三个集合级工具：
   `arxiv__arxiv_search_papers`。
 - plugin 自己的工具使用裸名，例如 `turn_read`。
 
-每个工具结果都是一个 JSON 对象。列表回答
-`{"<noun>": [], "total": 0, "limit": 20, "offset": 0}`；`total` 说明是否还有
-下一页。读取回答该行自己的字段。拒绝或未找到会抛出 `ToolError`，harness 将其
-作为失败调用连同原因交给模型。`_check_new_input` 原样返回一个人的消息。
+工具结果是一个 JSON 对象，只有两个答案例外，因为它们的文本本身就是内容：
+`_check_new_input` 原样返回一个人的消息，`skill_use` 返回 playbook 文本。列表回答
+`{"<noun>": [], "total": N, "limit": L, "offset": O}`；`total` 说明是否还有
+下一页，`L` 是回答实际采用的页大小。读取回答该行自己的字段。拒绝或未找到会抛出
+`ToolError`，harness 将其作为失败调用连同原因交给模型。
 
 任何回答都不应超过 `tool_result.tokens`。可能增长的列表使用 `limit`/`offset`；
 无法设界的输出会保存为 dump（见[文件柜](#文件柜)）。
@@ -757,11 +760,11 @@ dump 是对对话而言过大的工具输出。输出会完整保存，以工具
 路径；`http(s)` 图片由 provider 去取，不在这里获取。不指定 kind 的搜索会看到
 图片。
 
-每个文档都会写两遍：文件柜索引中的一行，以及 `agents/<agent>/cabinet/` 下的
-Markdown 文件（`notes/`、`diary/`、`reports/`），无需 slife2 即可打开、编辑或
-删除。保存文件的字节放在文件柜下，但不进入索引；`file_read` 返回文件文本，
-遇到 PDF、图片或压缩包会说出它是什么而拒绝。其他编码的文本会被解码，并在回答
-中说明编码。
+每个文本文档——笔记、日记、报告或 dump——都会写两遍：文件柜索引中的一行，以及
+`agents/<agent>/cabinet/` 下的 Markdown 文件（`notes/`、`diary/`、`reports/`、
+`dumps/`），无需 slife2 即可打开、编辑或删除。保存文件的字节放在文件柜下，但不
+进入索引，也没有 Markdown 镜像。`file_read` 返回文件文本，遇到 PDF、图片或压缩
+包会说出它是什么而拒绝。其他编码的文本会被解码，并在回答中说明编码。
 
 `cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
 `cabinet_summarize` 为文档写描述；为文件或图片写描述会重新嵌入它。`file_save`

@@ -1,7 +1,8 @@
 """slife2-toolhub — the model's tools, and the one process that decides them.
 
 Every other plugin in this system is a place a capability comes from: a model
-backend speaks one wire protocol, the db keeps turns, the agent loop runs turns.
+backend speaks one wire protocol, the context plugin keeps turns, the agent loop
+runs turns.
 This one is where **the tools come from**, and it exists because tools are the
 one capability that has to reach *outside* the machine — to somebody else's MCP
 server, to a REST API, to a program that wants an API key in its environment.
@@ -28,12 +29,14 @@ that holds it is the plugin that owns the config section, not this one.
 `slife2.clients.gateway` is the link itself; `slife2.libs.plugin.family` is the half that the two
 "hold somebody else's servers" plugins share.
 
-**The set is decided here and remembered there.**  Which tools exist, what they
-are called and who may call one is this process's to say; the rows, the load
-state, the two search indexes and the budget are the db plugin's to keep, and
-every operation on them is a call over MCP (`Catalogue`).  Nothing in this
-module opens a database, and nothing in that one knows what a proxy name is —
-which is the same line the two plugins draw everywhere else, and the reason
+**The set is decided here and remembered in the catalogue.**  Which tools exist,
+what they are called and who may call one is this process's to say; the rows,
+the load state, the two search indexes and the budget are the catalogue's to
+keep.  The catalogue is a library (`slife2.libs.store.catalogue.ToolStore`), not a
+process: this module opens one file per home on first use and is its only
+writer, and every operation on it is a method on `Catalogue`.  Nothing outside
+this process opens that file, and nothing in the store knows what a proxy name
+is — which is the same line the plugins draw everywhere else, and the reason
 the next thing that needs the catalogue can have it.
 
 Two ways in, and they are not the same kind of claim
@@ -75,8 +78,8 @@ reads a skill, and everything else arrives on demand: a server with ninety tools
 is a catalogue entry until one of them is wanted, and so is a plugin's tool the
 operator did not put in `tool_load.autoload` — the list of names that are wanted
 every turn, and the only tools the budget may never take back.  The catalogue is
-where that state lives and the db is where it is kept, so a tool loaded in one
-conversation is loaded for the next, and a tool loaded yesterday is still loaded
+where that state lives, in the home's own `agents/tools.db`, so a tool loaded in
+one conversation is loaded for the next, and a tool loaded yesterday is still loaded
 after a restart — the two things a snapshot in this process could never do.
 
 The budget that bounds it is enforced by the *harness*, not by the gate:
@@ -157,8 +160,9 @@ The failure rules, all four
   exists and its owner is not answering — and it is left out of the list.  The
   next ask tries again: no timer, no backoff loop.
 * **The catalogue missing is a broken system too.**  Every answer this process
-  gives about the tool set is a call to the db, so a db that is not there is a
-  turn that fails with that said out loud.  It is deliberately *not* reported as
+  gives about the tool set is read from the catalogue, so one that cannot be
+  opened is a turn that fails with that said out loud.  It is deliberately
+  *not* reported as
   "that tool server is broken": the next ask would then look in the wrong place.
 * **An upstream refusing a call is data.**  It comes back as text with `ok`
   false, which the model reads and acts on.  The loop's error path is a feedback
@@ -1165,8 +1169,8 @@ class Upstream:
 
         **This is the whole of what "live" means for the catalogue too.**  The
         gate is asked for the tools of the sources whose lists are in hand, so a
-        server that is down contributes nothing without the db having to know
-        anything about connections — see `Catalogue.injectable`.
+        server that is down contributes nothing without the catalogue having to
+        know anything about connections — see `Catalogue.injectable`.
         """
         return self._connection.usable
 
@@ -1391,9 +1395,9 @@ class Upstream:
         already knew a name could find.
 
         **The hub merges; the plugin does not write.**  That is the whole reason
-        this is a call and not a connection from the plugin to the db: one writer
-        of the tool table, one place where two sources' claim on a name is
-        settled, and one process holding a catalogue connection.
+        this is a call and not a connection from the plugin to the catalogue: one
+        writer of the tool table, one place where two sources' claim on a name is
+        settled, and one process holding the catalogue open.
 
         **Asked only of a plugin that is already usable, and only of one of
         ours.**  Usable is what keeps it off the session path — `start()` runs
@@ -1483,7 +1487,7 @@ class Upstream:
         # that is *there* and cannot be reached; this one is not there at all, and
         # a row left behind would be a search hit saying "not answering" about a
         # server nobody is asking.  The other moment an entry can be removed is
-        # while slife2 is not running, which is the db's boot pass
+        # while slife2 is not running, which is the catalogue's boot pass
         # (`ToolStore.reset`); the two agree, so a removal does not depend on
         # whether a process happened to be up when it was made.
         #
@@ -1796,10 +1800,10 @@ def local_tools(
     and the remainder is the reason `LocalTool` still exists at all.
 
     **Find a tool** — `tool_search`, the hybrid search over the catalogue.  What
-    it *does* is the db's: the two legs, the fusion and the filters all happen
+    it *does* is the store's: the two legs, the fusion and the filters all happen
     there, and this half turns rows into text a model reads.
 
-    **Load one** — `func_tool_load`, whose answer is likewise the db's verdict
+    **Load one** — `func_tool_load`, whose answer is likewise the store's verdict
     phrased for a model.
 
     **Trim the list** — `_func_tool_unload`, the one of the three with a second
@@ -2277,7 +2281,7 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
 def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
     """Why one load did not end up in the model's list, or `""` when it did.
 
-    **One sentence per outcome, and the outcome is a fact the db gave us** —
+    **One sentence per outcome, and the outcome is a fact the catalogue gave us** —
     `ok` used to be the second half of this function's answer, which is what made
     a name that was *already* loaded a success and a name that could not be loaded
     a failure.  Here the two are the same kind of thing: a name that landed says
@@ -2593,7 +2597,7 @@ def build_server(
         # asked anything**, and it is the difference between a file with this
         # home's declarations in it and a *catalogue*: without it the home opens
         # with the `mcp:` entries of its own section and none of the tools the
-        # plugins offer — the hub's own four among them, which are what finds and
+        # plugins offer — the hub's own three among them, which are what finds and
         # loads all the others.  See `Catalogue.remember`.
         #
         # The key is this process's ambient home, which is the one `store()`
@@ -2712,7 +2716,7 @@ def build_server(
         **Liveness is the hub's to know** — it is the process holding the
         connections — and this is the same fact `usable` already is, handed to
         the catalogue so that a server which is down contributes nothing without
-        the db having to know anything about connections.
+        the catalogue having to know anything about connections.
 
         A *declared* source is live when the plugin that holds it says it is up,
         which is the one part of this that now arrives over a wire rather than

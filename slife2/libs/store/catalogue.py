@@ -180,7 +180,7 @@ _TOOL_COLUMNS = frozenset(
 #: and the whole set of values this build writes into each.  Read at open: a file
 #: whose DDL accepts fewer values than this build uses passes a column check and
 #: then raises `IntegrityError` at the first write — inside a tool call, where
-#: the hub reads it as the db refusing one caller's data and carries on.
+#: the hub reads it as the catalogue refusing one caller's data and carries on.
 _CHECKED_DOMAINS: dict[str, frozenset[str] | set[str]] = {
     "category": CATEGORIES,
     "status": STATUSES,
@@ -1321,14 +1321,15 @@ class ToolStore:
         **`sources` is the caller's, because liveness is the one thing this file
         cannot know.**  Which servers are connected is a fact about the hub's
         connections — its rule is that a source is usable when its tool list is
-        in hand — and the db has no way to ask.  So the caller says which sources
-        it is holding a list from, and this answers with those.
+        in hand — and this file has no way to ask.  So the caller says which
+        sources it is holding a list from, and this answers with those.
 
         **The row's `status` deliberately does not gate this.**  It is the
         record of the last verdict, which is what `tool_search` reports and what
         a person reads when something is missing; the *gate* is the live-source
-        list, and the two disagreeing — a db restarted under a running hub —
-        must not be able to empty the model's tool list.
+        list, and the two disagreeing — a source that has just answered while
+        its rows still carry the last `error` verdict — must not be able to
+        empty the model's tool list.
 
         The budget is **not** enforced here.  It is a turn-boundary decision —
         the harness trims the list before it saves the turn (`evict`) — and a

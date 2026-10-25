@@ -503,7 +503,7 @@ a `${VAR}` or `keyring:` reference resolved at runtime.
 | `agent:` | The iteration cap and the system-prompt template. |
 | `agent-task:` | `max_running`, the number of background tasks per agent. |
 | `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
-| `embeddings:` | Embedding providers used by the memory index. |
+| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes. |
 | `context:` | Limits for the context decision. |
 | `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
 | `tool_result:` | Token budget for a single tool result. |
@@ -535,7 +535,9 @@ A value may be:
 slife2 resolves from credstore — a `keyring:` reference, or a `${VAR}` the
 credential store answers — is shown in its masked form (the first four and last
 four characters when at least as many stay hidden, otherwise `***`) in tool
-results, tool listings, and log lines. An environment variable or a literal
+results, tool listings, and log lines. A value shorter than eight characters is
+not registered at all: masking it would mangle every line it appeared in, and no
+real provider key is that short. An environment variable or a literal
 value is the operator's own, and slife2 does not try to recognise it. Keep every secret in credstore: it is the one store
 whose values slife2 masks everywhere they would otherwise appear.
 
@@ -689,11 +691,13 @@ Tool names:
   `arxiv__arxiv_search_papers`.
 - A plugin's own tools use bare names, for example `turn_read`.
 
-Every tool result is a JSON object. A listing answers
-`{"<noun>": [], "total": 0, "limit": 20, "offset": 0}`; `total` says whether
-another page exists. A read answers the row's own fields. A refusal or a miss
-raises a `ToolError`, which the harness reports as a failed call with the reason.
-`_check_new_input` returns a person's message verbatim.
+A tool result is a JSON object, except for the two answers whose text is the
+thing itself: `_check_new_input` returns a person's message verbatim, and
+`skill_use` returns the playbook text. A listing answers
+`{"<noun>": [], "total": N, "limit": L, "offset": O}`; `total` says whether
+another page exists, and `L` is the page size the answer applied. A read answers
+the row's own fields. A refusal or a miss raises a `ToolError`, which the harness
+reports as a failed call with the reason.
 
 No answer is intended to exceed `tool_result.tokens`. Listings that can grow use
 `limit`/`offset`; an output that cannot be bounded is stored as a dump (see
@@ -843,12 +847,13 @@ resolves the reference and `attach_image` is how the model sees the picture
 again; an `http(s)` image is fetched by the provider, not here. A no-kind search
 sees images.
 
-Every document is written twice: a row in the cabinet index and a Markdown file
-under `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`), which can be
-opened, edited, or deleted without slife2. A saved file's bytes live under the
-cabinet and are not indexed; `file_read` returns a file's text and refuses a PDF,
-image, or archive by saying what it is. Text in another encoding is decoded and
-the encoding is named in the answer.
+Every text document — a note, diary entry, report, or dump — is written twice: a
+row in the cabinet index and a Markdown file under `agents/<agent>/cabinet/`
+(`notes/`, `diary/`, `reports/`, `dumps/`), which can be opened, edited, or
+deleted without slife2. A saved file's bytes live under the cabinet and are not
+indexed, and it has no Markdown mirror. `file_read` returns a file's text and
+refuses a PDF, image, or archive by saying what it is. Text in another encoding
+is decoded and the encoding is named in the answer.
 
 `cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
 `cabinet_summarize` writes a description for a document; writing one for a file

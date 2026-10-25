@@ -59,7 +59,7 @@ SERVER_NAME = MCP_TOOLS_SERVER_NAME
 #: connection behind them.
 CONFIG_KEY = "mcp-tools"
 
-#: The catalogue category its sources are filed under — the db's word for
+#: The catalogue category its sources are filed under — the catalogue's word for
 #: "somebody else's MCP server", and the one thing that decides a row is
 #: callable and the model may be given it.
 CATEGORY = "mcp"

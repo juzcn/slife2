@@ -1,8 +1,8 @@
 """slife2-llm-embeddings — the one process that calls an embeddings endpoint.
 
 **A process of its own, like every other backend here, and for the same
-reason**: the provider SDK is imported only inside a server process, so the db,
-the agent loop and the TUI stay free of `openai`.  It is not one of the chat
+reason**: the provider SDK is imported only inside a server process, so the
+stores, the agent loop and the TUI stay free of `openai`.  It is not one of the chat
 backends because it has nothing to do with them — an embedding endpoint is
 reached at `{base_url}/embeddings`, speaks no chat protocol, and is configured
 under its own `embeddings:` section rather than under `providers:`.  A chat
@@ -10,9 +10,9 @@ server built from the chat providers has no chat provider to attach it to.
 
 **Two tools, neither of them the model's.**  `embed` and `describe` carry no
 `meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the same
-standing as the db's `remember`.  They are the db plugin's plumbing: the
-index needs vectors and needs to know how wide they are, and this is where both
-questions are answered.
+standing as the context plugin's `remember`.  They are the stores' plumbing:
+every index needs vectors and needs to know how wide they are, and this is where
+both questions are answered.
 
 **The width is discovered and never configured.**  `vec0` fixes a table's width
 in its DDL and cannot be altered afterwards, so the number has to be right
@@ -116,7 +116,7 @@ class EmbeddingClient:
         return self._client
 
     async def describe(self) -> dict[str, Any]:
-        """What the db needs to know before it can build an index.
+        """What a store needs to know before it can build an index.
 
         Both numbers are established once per process and remembered by the
         caller: the width by the three-step ladder in `_dimension_of`, and the
@@ -327,7 +327,7 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
     mcp: FastMCP = house_server(
         SERVER_NAME,
         instructions=(
-            "Embeddings for the db plugin's vector index. `describe` reports "
+            "Embeddings for the system's vector indexes. `describe` reports "
             "the width and input limit of the configured model; `embed` turns "
             "text into vectors. Neither is offered to the model."
         ),
@@ -338,8 +338,8 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
         """The configured embedding model, and how wide its vectors are.
 
         The width is discovered rather than configured, because a vector table
-        fixes its width in its DDL and cannot be altered after the fact.  The db
-        asks this once per process, before it builds or rebuilds anything.
+        fixes its width in its DDL and cannot be altered after the fact.  Each
+        store asks this once per process, before it builds or rebuilds anything.
         """
         from openai import APIStatusError
 

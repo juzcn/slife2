@@ -569,7 +569,7 @@ PLUGINS: tuple[Plugin, ...] = (
     # from `openai-completions`: that process is built from the chat providers,
     # and there is no chat provider here to attach an embedding model to.  It is
     # a plugin (rather than a library) for SDD §2.4's reason — it holds a key — and
-    # it identifies itself by `describe`, the tool the db calls before it can
+    # it identifies itself by `describe`, the tool a store calls before it can
     # build an index.  See `slife2.plugins.llm.embeddings_server`.
     Plugin(
         key="embeddings",
@@ -1343,8 +1343,8 @@ class EmbeddingsSettings:
     **No `enabled` switch, on purpose.**  One would cost a misconfiguration
     that looked exactly like a working system with nothing to recall: semantic
     search quietly off, every keyword search still answering.
-    The db plugin cannot be run without an embedding model, so the switch had
-    one useful setting, and a setting with one useful value is a way to be wrong.
+    A store cannot be built without an embedding model, so the switch had one
+    useful setting, and a setting with one useful value is a way to be wrong.
     """
 
     #: name -> endpoint.  Never empty in a config that loaded; see `_embeddings`.
@@ -3328,8 +3328,8 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     embeddings existed still loads, and a fresh checkout runs — the alternative
     would be a migration in a different coat, which is the thing this project
     does not have.  The requirement is enforced where it is real: a section that
-    *is* there may not be empty, because there is no configuration in which the
-    db plugin runs without an embedding model.
+    *is* there may not be empty, because there is no configuration in which a
+    store runs without an embedding model.
 
     **An `active_model` this config does not define is refused, naming the
     providers that do exist.**  It used to fall back to the first provider, so

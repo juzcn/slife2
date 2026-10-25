@@ -814,14 +814,16 @@ A turn is:
 `libs/turn/loop.py` implements the algorithm. `plugins/agent/server.py` owns the
 conversations it runs in.
 
-`AgentLoop.run_turn(messages, prompt)` receives:
+`AgentLoop` is built with a **backend** with one streaming method and a
+**registry** of tools, refreshed by a callback before every model call.
+`AgentLoop.run_turn(messages, user, observer, auto=…)` receives:
 
 - the messages to run on;
-- the incoming prompt;
-- a **backend** with one streaming method;
-- a **registry** of tools, refreshed by a callback before every model call;
+- the incoming user message;
 - an **observer** that may drop, delay, or coalesce display events without
-  affecting the conversation.
+  affecting the conversation;
+- optionally the harness's `auto` callback, which names a tool the harness wants
+  called mid-turn.
 
 The loop is a pure function over a message list. It owns no conversation, socket,
 or clock.
@@ -832,8 +834,10 @@ number nobody wrote is a bound nobody chose. A turn that reaches a stated cap
 ends normally with `stop_reason: "max_iterations"`, not with an exception.
 
 A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
-`(text, ok)`. `ok=False` is text the model can act on. An exception is a failure
-that is not the tool's, such as a dead transport, and it ends the turn.
+`(text, ok)` and never raises: a peer's refusal, a dead transport and a tool that
+threw all come back as `ok=False` with text the model can act on. What ends the
+turn is a failure outside that contract — a tool list that cannot be refreshed
+before a model call, or a model call that failed.
 
 ### 5.2 Harness additions
 
@@ -1214,7 +1218,7 @@ increment crosses a process boundary as a progress notification.
 
 ### 6.3 Streaming
 
-`plugins/llm/server_common.py` implements one pattern, used by all four model
+`plugins/llm/server_common.py` implements one pattern, used by the three chat
 servers:
 
 1. one `stream_chat` tool;
@@ -1277,13 +1281,15 @@ A model entry declares its capabilities in its own configuration row:
 | `input` | Modalities the model accepts; `text` and `image`. |
 | `context_window` | The model's window, used for context fractions and status display. |
 | `reasoning` | Whether the model exposes reasoning. |
-| `thinking` | Provider-specific thinking setting. |
-| `store` | Provider-specific persistence setting. |
+| `compat.thinking` | Provider-specific thinking setting. |
+| `compat.store` | Provider-specific persistence setting. |
 | `max_tokens`, `temperature`, `top_p` | Generation parameters. |
-| `stream_usage` | Whether the provider reports usage in the stream. |
+| `compat.stream_usage` | Whether the provider reports usage in the stream. |
 
-The terminal reads the same entry for its status bar and image support. A model
-that does not declare `image` is not offered image attachment.
+The `compat.*` keys are written under the model's own `compat:` mapping; the
+others sit beside `model:` in the same entry. The terminal reads the same entry
+for its status bar and image support. A model that does not declare `image` is
+not offered image attachment.
 
 ### 6.5 Usage and cache accounting
 
@@ -1657,9 +1663,10 @@ The cabinet is per conversation. An agent's own conversation has
 a fork uses the maker's. A fork is a temporary copy of the maker's conversation,
 and its work products belong with it.
 
-A document's Markdown mirror is written in the same operation as its row. The
-path is stored rather than derived, so a change to the naming rule orphans
-nothing that already exists. Every caller-supplied path is resolved against the
+A text document's Markdown mirror is written in the same operation as its row;
+a file and an image have none, because their bytes are the document. The path is
+stored rather than derived, so a change to the naming rule orphans nothing that
+already exists. Every caller-supplied path is resolved against the
 cabinet root and refused if it leaves it.
 
 A subject that is not already lowercase carries a short digest in its filename.
@@ -1706,9 +1713,10 @@ keyword leg reads.
 ### 8.4 Embeddings
 
 One server (`plugins/llm/embeddings_server.py`) and one client
-(`clients/embedder.py`) serve both indexes. Sharing is required because the two
-indexes must rank against the same model. Two copies of "ask and check the shape
-of the answer" would let the indexes disagree about what an embedding is.
+(`clients/embedder.py`) serve all three indexes: the turn store, the tool
+catalogue, and the cabinet. Sharing is required because the three indexes must
+rank against the same model. Two copies of "ask and check the shape of the
+answer" would let the indexes disagree about what an embedding is.
 
 The server holds the provider key for the same reason the model servers do.
 Embeddings are a hard dependency: a turn is written with its vector in one
@@ -2017,10 +2025,12 @@ trivial and the corners are not: `day_or` makes restricted day-of-month and
 day-of-week a union, and `strict` cross-field validation rejects `0 9 31 2 *`
 before it is stored as an enabled task that can never fire.
 
-The data model has two tables:
+The data model is three SQL tables — `meta`, `scheduled_tasks`, and
+`scheduled_runs` — holding two kinds of record and one fact about the file:
 
 - a **task**: a name, a description, and a cron expression;
-- a **run**: one fire and its outcome.
+- a **run**: one fire and its outcome;
+- `meta` records the agent the ledger belongs to.
 
 Run states:
 
@@ -2081,7 +2091,7 @@ It maintains three connections:
 
 | Connection | Client | Direction |
 |---|---|---|
-| Agent server | `AgentClient` | The window asks: `run_turn`, `transcript`, `answer_approval`, `switch_model`. |
+| Agent server | `AgentClient` | The window asks: `run_turn`, `transcript`, `subagents`, `answer_approval`, `switch_model`. |
 | Terminal inbox plugin | `WindowClient` | The window is asked: `attach` is held open and messages are pushed down it. |
 | Mesh plugin | `MeshClient` | The window holds a place: `join` is held open while the agent is online. |
 
@@ -2239,47 +2249,70 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 
 | Section | Reader |
 |---|---|
-| `servers:` | The launcher |
+| `servers:` | The launcher, every plugin, the terminal, and the CLI |
 | `providers:` | The agent server (reference resolution), model backends, and terminal (for the picker) |
 | `default:` | The agent server |
 | `agent:` | The agent server and agent-task server |
 | `agent-task:` | The agent-task server |
 | `subagent:` | The agent server and the local network plugin |
-| `embeddings:` | The context store and cabinet |
+| `embeddings:` | The context store, the cabinet, and the tool hub |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
-| `tool_result:` | The harness and the cabinet's `dump_read` |
-| `mcp:` | `slife2-mcp-tools` |
-| `rest-api:` | `slife2-restapi-tools` |
+| `tool_result:` | The harness, the cabinet's `dump_read`, and the media server |
+| `mcp:` | `slife2-mcp-tools`, and the tool hub for its source names |
+| `rest-api:` | `slife2-restapi-tools`, and the tool hub for its source names |
 | `cli:` | `slife2-cli` |
 | `skills:` | `slife2-skills` |
 | `media:` | `slife2-media` |
 | `file-tunnel:` | `slife2-file-tunnel` |
-| `peer_agent:` | `slife2-a2a` |
+| `peer_agent:` | `slife2-a2a`, the terminal, and the CLI |
 
 Every section has one owner, and that owner reads the section in full. A few
-values are also read by another process that needs the same fact; the shared
-readings are stated rather than accidental:
+values are also read elsewhere because the fact is shared; these readings are
+stated rather than accidental:
 
-- `servers:` is owned by the launcher; each plugin also reads its own address.
+- `servers:` is owned by the launcher; each plugin reads its own address, and
+  the terminal and the CLI read the addresses they connect to.
+- `providers:` is read by the agent server to resolve a `provider/model`
+  reference, by the model backends, and by the terminal's model picker.
 - `agent:` is read by the agent server and by the agent-task server, because a
   task is the agent working.
 - `subagent:` is read by the agent server for `max_running` and by the local
   network plugin for the broker and `org`.
-- `embeddings:` is read by the two stores that build an index (the turn store and
-  the cabinet).
-- `tool_result:` is read by the harness that shortens an oversized result and by
-  `dump_read`, which caps its own answer with the same number.
-- `providers:` is read by the model backends and by the terminal's model picker.
+- `embeddings:` is read by the three stores that build an index (the turn store,
+  the cabinet, and the tool catalogue).
+- `tool_result:` is read by the harness that shortens an oversized result, by
+  `dump_read`, and by the media server's transcript paging — one token budget
+  spent at three readers.
+- `mcp:` and `rest-api:` are owned by their plugins; the tool hub reads the
+  entry names when it opens a catalogue, so its boot pass does not mistake a
+  configured source for one that has gone.
+- `peer_agent:` is owned by the A2A plugin; the terminal holds its own mesh
+  connection, and `probe`, `status`, `down`, and `logs` read the broker and the
+  probe's own client.
 
-No other section has two readers.
+No other section is read by a second process.
 
-An absent section is a capability that is off, not an error:
+`wsl_port_offset` is a top-level number rather than a section. It moves every
+configured server port, and only inside WSL's mirrored networking, where the
+Windows and WSL loopbacks are one address space and an unshifted second stack
+would be silently reused by the first. It defaults to 100 there and `0` disables
+it. The shift is applied by the config loader, so every process that reads the
+file resolves the same addresses; the MQTT broker is not shifted, because it is
+the mesh's rendezvous rather than an instance endpoint.
+
+An absent section takes its built-in default, not an error. For a capability
+whose default is empty that means *off*:
 
 - no `peer_agent:` means the machine is not on the peer network;
 - no `media:` providers means the four media tools are present but refuse, saying
   what to add;
 - no `wechat:` section exists at all; a login is created by scanning.
+
+`providers:` and `embeddings:` are not switches at all: leaving either out runs
+the built-in DeepSeek provider and the built-in local embedder respectively, and
+writing either section empty is refused, because an empty section is a statement
+and the default is not it.
 
 A present but invalid section is refused by name at load. Examples:
 
@@ -2325,7 +2358,9 @@ leaves that process: tool results, tool descriptions and other listing fields,
 refusals, and log lines, uvicorn's access log included. The mask shows the first
 four and last four characters when at least as many stay hidden, otherwise
 `***`; a value carrying a control character is masked whole, so the visible ends
-cannot forge a log line. An environment variable or a literal in the config is
+cannot forge a log line. A value shorter than eight characters is not registered
+at all — masking it would mangle every line it appeared in, and no provider key
+is that short. An environment variable or a literal in the config is
 the operator's; the system does not try to recognise it. Protecting every
 secret was attempted; the variety of shapes made it a maintenance burden, so
 protection is scoped to the one store the system owns. Operators are strongly
@@ -2631,8 +2666,9 @@ default, so a test can patch one. `validate()` asserts the relations that fail
 silently, such as an outer bound shorter than an inner one, and fails at import.
 
 A gate (`tests/test_no_magic_timeouts.py`) rejects a time-style literal anywhere
-in `slife2/` or `tests/` unless it is in the registry or carries a `# timeouts:`
-note. The gate also rejects a registry lookup in a signature, because that reads
+in `slife2/` unless it is in the registry or carries a `# timeouts:` note. In
+`tests/` only two rules apply: a module-level constant with a time-style name,
+and a registry lookup used as a function-argument default. The gate also rejects a registry lookup in a signature, because that reads
 the value once at import and is invisible to a patch.
 
 ### 12.5 Daemons outlive builds
@@ -2666,7 +2702,10 @@ virtual environment that spawned it, not through a script on `PATH`.
 
 `tests/libs/`, `tests/clients/`, `tests/plugins/`, `tests/helpers/`,
 `tests/tui/`, and `tests/e2e/` mirror the package. One directory per layer, one
-module per module. "Where is the test for this" has one answer.
+module per module. "Where is the test for this" has one answer. The files at the
+top level — `test_smoke.py`, `test_install_scripts.py`, and
+`test_no_magic_timeouts.py` — are the gates that span the tree rather than one
+layer.
 
 Shared doubles live in `tests/fakes.py`:
 
@@ -2814,7 +2853,8 @@ Each invariant is stated as an assertion. A change that violates one is a defect
 
 3. **Nothing under `plugins/` is a library or a helper.** Every directory there
    has a `main` and a `SERVER_NAME`; the name is read from its `PLUGINS` row, and
-   the `main` is a call to `serve_plugin`.
+   the `main` is a call to `serve_plugin` — directly, or through the model
+   backends' `serve_backend` wrapper, which is the same startup path.
 
 4. **The loop is a pure function over a message list.** It owns no conversation,
    no socket, and no clock of its own.
@@ -2855,10 +2895,10 @@ Each invariant is stated as an assertion. A change that violates one is a defect
 The registry is `PLUGINS` in `libs/host/config.py`: one authoritative row per
 plugin, holding its key, module, MCP name, probe, port, and whether it is a model
 API backend. It is not copied here, because a copy drifts. §2.6 states each
-plugin's job. The probe each client uses is derived from that row: the four
-model backends probe `stream_chat`, the peer and subagent networks probe
-`peer_agent_list` and `subagent_list`, and the other plugins probe their first
-stable, argument-free tool.
+plugin's job. The probe each client uses is derived from that row: the three
+chat backends probe `stream_chat`, the embeddings backend probes `describe`, the
+peer and subagent networks probe `peer_agent_list` and `subagent_list`, and the
+other plugins probe their first stable, argument-free tool.
 
 ## Appendix C. Fallback register
 
@@ -2900,7 +2940,7 @@ The four shapes an undeclared fallback takes:
 | Unknown `file-tunnel.active` | Degrade to ngrok with a warning | The operator's intent | A malformed shape (refused) | The warning and `tunnel_status` |
 | A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
-| A turn file from an older schema | Create an empty table and run | The turns on disk | A file this build wrote | One `logger.error` naming the file |
+| A turn file from the previous schema (only a `turns` table) | Create an empty `turn` table and run | The turns on disk | A file missing a declared `turn` column, which is refused | One `logger.error` naming the file |
 | A stored tool schema will not parse | Serve the tool with no arguments | The arguments | A schema that parses | The tool's own error |
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |

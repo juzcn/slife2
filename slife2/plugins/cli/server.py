@@ -25,10 +25,10 @@ row for is a command only a model that already knew its name could reach.
 
 **This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer — the arrangement `slife2.libs.plugin.protocol` describes — so
-that the hub remains the only writer of the tool table, the only process holding
-a connection to the db, and the only place two sources' claim on one name is
-settled.  What belongs here is the *section*: parsing it is `slife2.libs.host.config`'s
-business and turning it into rows is this file's.
+that the hub remains the only writer of the tool table and the only place two
+sources' claim on one name is settled.  What belongs here is the *section*:
+parsing it is `slife2.libs.host.config`'s business and turning it into rows is
+this file's.
 """
 
 from __future__ import annotations

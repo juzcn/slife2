@@ -10,8 +10,8 @@ readers are the caller's.
 Who a tool is for, said on the tool itself.
 
 Every server in this system offers tools to one of two callers, and they are not
-interchangeable.  A **plugin** — the db, the agent, a model backend — is called
-by our own code at a moment the code already knows: `remember` after a turn,
+interchangeable.  A **plugin** — the context store, the agent, a model backend —
+is called by our own code at a moment the code already knows: `remember` after a turn,
 `stream_chat` when the loop wants an answer.  A **tool server** offers tools to a
 language model, which picks one by reading its description and calls it with
 arguments it invented.

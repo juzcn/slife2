@@ -122,7 +122,7 @@ ClientId = tuple[str, str]
 #: connects to on the operator's behalf, and the ones that are not tools at all.
 #: The plugin answers with the whole of what it holds and the hub merges it,
 #: which is what keeps one writer of the tool table, one place where "a name is a
-#: row's identity" is decided, and one process holding a connection to the db.
+#: row's identity" is decided, and one process holding the catalogue open.
 #:
 #: **A source is a name, and everything about it that is not its rows**: which
 #: category it is, whether the operator switched it off, whether it is answering
@@ -754,8 +754,8 @@ def tool_payload(result: Any) -> dict[str, Any]:
 
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
-    plugins hop to a peer now — the toolhub and the db — and a second copy of
-    this is how the two would come to disagree about the shape of an answer.
+    plugins hop to a peer now — the toolhub and the context plugin — and a second
+    copy of this is how the two would come to disagree about the shape of an answer.
     """
     data = getattr(result, "data", None)
     if isinstance(data, dict):

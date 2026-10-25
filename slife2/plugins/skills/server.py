@@ -17,9 +17,9 @@ it then reads, and `skill_use`, the half that reads it — and a model-facing to
 needs a server to be served from.
 
 **This process does not write the catalogue.**  It answers `list_sources` and
-the hub merges the answer, so the hub stays the only writer of the tool table,
-the only process holding a connection to the db, and the only place where two
-sources' claim on one name is settled (`slife2.libs.plugin.protocol`).
+the hub merges the answer, so the hub stays the only writer of the tool table
+and the only place where two sources' claim on one name is settled
+(`slife2.libs.plugin.protocol`).
 
 **A credential is not a connection, and this server holds one.**  A skill whose
 header declares `requires.env` — as these skills do for other hosts — needs a
