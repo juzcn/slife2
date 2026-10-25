@@ -70,7 +70,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import truststore
 
@@ -94,6 +94,9 @@ from slife2.libs.host.paths import (
     register_home,
     skills_dir,
 )
+
+if TYPE_CHECKING:  # the client imports fastmcp; this module stays UI-free
+    from slife2.clients.toolclient import ToolCounts
 
 #: **The OS trust store, for every TLS client this package starts.**  The
 #: provider SDKs, the MCP client, media and the tunnels all verify against
@@ -443,8 +446,8 @@ def _ensure(config: Config, config_path) -> int:
     return 0
 
 
-def _open_catalogue(config: Config) -> int | None:
-    """Make this home's tool catalogue, report it, and answer how big it is.
+def _open_catalogue(config: Config) -> ToolCounts | None:
+    """Make this home's tool catalogue, report it, and answer both its counts.
 
     **A home is formed when an agent starts in it**, and `agents/tools.db` is the
     part of that this process cannot write itself: the hub is the file's one
@@ -455,12 +458,12 @@ def _open_catalogue(config: Config) -> int | None:
     an agent had been started in held its config, the `agents/` and `skills/`
     `_open_home` makes, and no tool set.
 
-    **The count is returned rather than only printed**, because the status bar
-    wants it before a turn exists: the window opens on the same number the
+    **Both counts are returned rather than only printed**, because the status
+    bar wants them before a turn exists: the window opens on the same pair the
     start-up line names, and `ToolsCounted` keeps it current afterwards.  `None`
     is the failure the return code used to be, and it is a distinct value rather
-    than `0`: a catalogue that could not be built is not a catalogue with no
-    tools, and a bar showing `0` would say the wrong one.
+    than a pair of zeros: a catalogue that could not be built is not a catalogue
+    with no tools, and a bar showing `0/0` would say the wrong one.
 
     Printed for `_ensure`'s reason: this is a step that takes a second, and a
     start-up report that goes quiet while it runs is a report that cannot say
@@ -483,7 +486,7 @@ def _open_catalogue(config: Config) -> int | None:
 
     started = time.monotonic()
     try:
-        count = open_catalogue(config)
+        counts = open_catalogue(config)
     except (ConnectionError, ToolError) as exc:
         # A `ConnectionError` is a hub that could not be reached or read; a
         # `ToolError` is the hub refusing the call — the home named by this
@@ -496,10 +499,10 @@ def _open_catalogue(config: Config) -> int | None:
         "",
         "catalogue",
         str(catalogue_db()),
-        f"{count} tool(s)",
+        f"{counts.loaded}/{counts.total} tool(s)",
         time.monotonic() - started,
     )
-    return count
+    return counts
 
 
 def _open_home() -> None:
@@ -997,10 +1000,10 @@ def main(argv: list[str] | None = None) -> int:
                 # documented ones.
                 print(f"  port offset: {offset}")
             # What the status bar starts on, from the ask that makes the
-            # catalogue.  `0` is "no answer yet" and is what the bar draws
-            # nothing for; the start-up path below always replaces it with a
-            # count before the window opens, and a turn keeps it current.
-            tool_count = 0
+            # catalogue.  `None` is "no answer yet" and is what the bar draws
+            # nothing for; the start-up path below always replaces it with the
+            # pair before the window opens, and a turn keeps it current.
+            tool_counts = None
             code = _ensure(config, config_path)
             if code == 0:
                 # **And the home is made whole before the window opens.**  One
@@ -1008,13 +1011,11 @@ def main(argv: list[str] | None = None) -> int:
                 # `agents/tools.db` is the hub's file, so asking is the only way
                 # to make it exist, and a `--data-dir` an agent is started in has
                 # its tool set from the first moment rather than from the first
-                # message.  See `_open_catalogue`, which answers the count the
+                # message.  See `_open_catalogue`, which answers the pair the
                 # bar shows as well as making the file.
-                found = _open_catalogue(config)
-                if found is None:
+                tool_counts = _open_catalogue(config)
+                if tool_counts is None:
                     code = 2
-                else:
-                    tool_count = found
             if code == 0:
                 app = SlifeApp(
                     tui_url(config, args.url),
@@ -1027,10 +1028,10 @@ def main(argv: list[str] | None = None) -> int:
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
-                    # How many tools the catalogue holds, from the ask that
-                    # made it — the bar's first number, replaced live by each
-                    # turn's refresh.
-                    tool_count=tool_count,
+                    # What the model holds against what the catalogue holds,
+                    # from the ask that made it — the bar's first pair, replaced
+                    # live by each turn's refresh.
+                    tool_counts=tool_counts,
                     # Every model the config defines, for the picker `Ctrl+S`
                     # opens.  Built here rather than by the window, because this
                     # read of the file is the one that already happened: the

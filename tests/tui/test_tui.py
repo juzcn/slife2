@@ -23,7 +23,7 @@ from fakes import (
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
-from slife2.clients.toolclient import FUNC_TOOL_UNLOAD
+from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
 from slife2.libs.turn.events import (
     ContextChosen,
     MessageCutIn,
@@ -1932,36 +1932,36 @@ async def test_status_bar_shows_the_agent_the_model_and_the_context() -> None:
     assert "%" not in bar
 
 
-async def test_the_status_bar_shows_the_catalogue_s_size_from_the_start() -> None:
-    """The number is the hub's, and it is there before the first turn.
+async def test_the_status_bar_shows_loaded_and_total_from_the_start() -> None:
+    """Both numbers are the hub's, and they are there before the first turn.
 
-    The start-up ask that makes the catalogue is what knows it
-    (`slife2._open_catalogue`), so a window opened the ordinary way has it
-    immediately rather than waiting for a model call to report one.
+    The start-up ask that makes the catalogue is what knows them
+    (`slife2._open_catalogue`), so a window opened the ordinary way has them
+    immediately rather than waiting for a model call to report one.  The loaded
+    half is the model's list; the total is everything the catalogue holds, so
+    the two are not the same question.
     """
     client = FakeAgentClient(answering("hello"))
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
-        tool_count=253,
+        tool_counts=ToolCounts(loaded=24, total=253),
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
-        assert "tools 253" in status(app)
+        assert "tools 24/253" in status(app)
 
 
 async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
-    """The bar follows the hub, and the number is not the model's list.
+    """The bar follows the hub, and both halves arrive on the same ask.
 
-    A count of 253 against a one-tool list is the whole point: skills and CLI
-    entries are rows the catalogue holds and no server offered, so a display
-    that showed the loaded list's length would be answering a different
-    question.
+    A loaded count of 24 against a catalogue of 253 is the whole point of
+    showing both: what the model's list holds, and how much there is to find.
     """
 
     def respond(prompt: str, on_event):
-        on_event(ToolsCounted(total=253))
+        on_event(ToolsCounted(loaded=24, total=253))
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
@@ -1977,9 +1977,29 @@ async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
     app = make_app(respond)
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        assert "tools 253" in status(app)
+        assert "tools 24/253" in status(app)
         # The count is the bar's fact, not a line in the transcript.
-        assert "tools 253" not in shown(app)
+        assert "tools 24/253" not in shown(app)
+
+
+async def test_a_count_without_the_loaded_half_shows_only_the_total() -> None:
+    """An older server reports one number, and the bar does not invent the other.
+
+    `loaded` absent is not zero loaded: the display keeps its one true number
+    and leaves the half it was not told out, rather than claiming a model list
+    of nothing.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolsCounted(total=253))
+        return "ok"
+
+    client = FakeAgentClient(respond)
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert "tools 253" in status(app)
+        assert "0/253" not in status(app)
 
 
 async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:

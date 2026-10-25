@@ -33,7 +33,7 @@ from pathlib import Path
 from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
-from slife2.clients.toolclient import LIST_TOOLS, remote_catalogue
+from slife2.clients.toolclient import LIST_TOOLS, ToolCounts, remote_catalogue
 from slife2.libs.host.config import (
     LOCAL,
     LOCAL_SERVERS,
@@ -273,7 +273,7 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
         return False
 
 
-async def _open_catalogue_async(url: str) -> int:
+async def _open_catalogue_async(url: str) -> ToolCounts:
     """Ask the hub for this home's tool list, which is what builds its catalogue.
 
     `remote_catalogue` reads the answer the way the agent server does —
@@ -282,30 +282,33 @@ async def _open_catalogue_async(url: str) -> int:
     dropped here: what this call is *for* is the hub opening the calling home's
     `agents/tools.db` and writing the machine's tool set into it.
 
-    **The number is the catalogue's, not the list's.**  The list is the loaded
-    set, which is a different (smaller) fact; the window's status bar shows the
-    catalogue's size, and this is the ask that can hand it one before a turn
-    exists — so the same answer serves both.
+    **Both numbers, and they are different questions.**  The loaded half is the
+    hub's loaded set and the total is the catalogue's size; the window's status
+    bar starts on `loaded/total`, and this is the ask that can hand it both
+    before a turn exists.  The first model call replaces the loaded half with
+    the request's own list, which also holds the agent process's mechanism
+    tools — not catalogue rows, and not something this ask can see.
     """
     client = await open_server(url, name=TOOLHUB_SERVER_NAME, fallback_tool=LIST_TOOLS)
     try:
         # The cold budget: this is the ask that builds the file, so it waits for
         # plugins that are still starting and for the rows to be embedded.  A
         # turn's ask stays `work.hub` (`slife2.clients.toolclient`).
-        return (
-            await remote_catalogue(client, timeout=_T.timeouts.work.catalogue)
-        ).total
+        listing = await remote_catalogue(client, timeout=_T.timeouts.work.catalogue)
+        return ToolCounts(loaded=len(listing.tools), total=listing.total)
     finally:
         await close_server(client)
 
 
-def open_catalogue(config: Config) -> int:
-    """Make this home's tool catalogue, and answer how many tools it holds.
+def open_catalogue(config: Config) -> ToolCounts:
+    """Make this home's tool catalogue, and answer what it holds and offers.
 
-    **Holds, not offers the model**: the answer counts every row the file has,
-    skills and CLI entries included and a source that is down among them
-    (`slife2.libs.store.catalogue.ToolStore.count`).  It is the number the
-    window puts in its status bar, so the start-up line and the bar agree.
+    **Both numbers**: `loaded` is the rows the hub has loaded and `total` counts
+    every row the file has, skills and CLI entries included and a source that is
+    down among them (`slife2.libs.store.catalogue.ToolStore.count`).  It is the
+    pair the window starts its status bar on; a turn's own report replaces the
+    loaded half with the request's list, which also carries the agent process's
+    two mechanism tools (not catalogue rows, so not in this ask).
 
     **A home is formed when an agent starts in it**, and the catalogue is the
     part of that this process cannot write itself: `agents/tools.db` belongs to

@@ -1438,16 +1438,21 @@ def build_server(
         loop re-reads the list before a model call it passes its own observer,
         so the bar follows the hub rather than a snapshot from boot.
 
-        **The count is the catalogue's and the registry's is not.**  `len` of
-        what is returned would include the two mechanism tools and exclude every
-        skill and CLI entry, so it is neither "the hub's tools" nor "the tools
-        that exist".  `ToolsCounted` carries the hub's own total, and the two
-        numbers are allowed to differ (events.py says why).
+        **The loaded count is the request's list, mechanism tools included.**
+        `check_async` and `cancel_async` are added here and are model tools like
+        every other, so the number a display shows is `len(tools)` — not only
+        the hub's loaded set.  `total` stays the catalogue's: those two are not
+        rows in it, so the pair is two facts about the request rather than a
+        fraction of one set (events.py says why).
         """
         found = await turn_tools(client_id)
+        tools = found.tools + async_tools()
         if observer is not None:
-            await AgentLoop._emit(observer, ToolsCounted(found.total))
-        return ToolRegistry(found.tools + async_tools())
+            await AgentLoop._emit(
+                observer,
+                ToolsCounted(total=found.total, loaded=len(tools)),
+            )
+        return ToolRegistry(tools)
 
     def turn_annotation(
         messages: list[dict[str, Any]],

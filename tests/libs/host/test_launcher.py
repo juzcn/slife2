@@ -31,6 +31,7 @@ import pytest
 from fastmcp import Context
 
 from slife2 import _ensure
+from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host import launcher, runtime
 from slife2.libs.host.config import (
     LOCAL_SERVERS,
@@ -638,8 +639,9 @@ def test_open_catalogue_asks_the_hub_for_this_homes_tools(
     monkeypatch.setattr(launcher, "open_server", dial)
     config = default_config()
 
-    # The total the hub answered, not the two tools that were in its list.
-    assert launcher.open_catalogue(config) == 17
+    # Both numbers the hub answered: the two tools in its list, and the
+    # catalogue they were chosen from.
+    assert launcher.open_catalogue(config) == ToolCounts(loaded=2, total=17)
     assert seen["url"] == config.server("toolhub").url
     assert home_of(seen["meta"]) == str(data_dir())
 

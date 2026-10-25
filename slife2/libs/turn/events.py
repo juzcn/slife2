@@ -66,24 +66,36 @@ class ContextChosen:
 
 @dataclass(frozen=True)
 class ToolsCounted:
-    """How many tools the catalogue holds, as the hub answered the last ask.
+    """The model's tool list against the catalogue it was chosen from.
 
-    **A fact about the set, not about the request.**  The list that goes out
-    with a model call is the *loaded* subset, so its length is not this: a tool
-    the model has not loaded, and a skill or a CLI entry — which have no load
-    state at all — are still tools that exist.  `total` is the size of the
-    catalogue the loaded set was chosen from, which is the number a display can
-    show without pretending it is the model's list.
+    **Two numbers because they answer two questions.**  `loaded` is the length
+    of the request's tool list — the catalogue rows the hub has loaded, plus the
+    mechanism's always-present tools, which are model tools like any other — and
+    `total` is every row the catalogue holds, skills and CLI entries included
+    and the rows of a server that is down among them.  A display that showed
+    only `total` could not say what on-demand loading is doing; one that showed
+    only `loaded` would hide how much there is to find.
+
+    **The two are not a subset pair, and that is deliberate.**  The mechanism's
+    two tools are not catalogue rows, so they are in `loaded` and not in
+    `total`; a skill or a CLI entry is a row, so it is in `total` and can never
+    be in `loaded`.  The pair states two facts about the same request rather
+    than pretending one is a fraction of the other.
+
+    `loaded` is `None` for a server that predates this half of the answer.  A
+    zero would be a claim about the list; the display leaves the loaded half out
+    instead of inventing it.
 
     **Emitted before every model call, not once per turn**, because that is when
     the list is asked for.  The hub's answer is as fresh as that ask and no
     fresher — there is no timer behind it, deliberately (`slife2.plugins.toolhub.server`:
     freshness is "the next ask tries again").  So an unchanged count arrives
-    again with each call; a display overwrites its own number and the wire cost
-    is an integer per call.
+    again with each call; a display overwrites its own numbers and the wire cost
+    is two integers per call.
     """
 
     total: int
+    loaded: int | None = None
 
 
 @dataclass(frozen=True)
@@ -276,11 +288,15 @@ def encode(event: TurnEvent) -> str:
     match event:
         case ContextChosen(kept=kept, recalled=recalled):
             payload = {"t": "context", "kept": kept, "recalled": recalled}
-        case ToolsCounted(total=total):
-            # One integer per model call; a short key like every other,
-            # because the volume this convention is for is per token and this
-            # is not, but a second spelling of "the count" would be.
+        case ToolsCounted(total=total, loaded=loaded):
+            # Two integers per model call; short keys like every other, because
+            # the volume this convention is for is per token and this is not,
+            # but a second spelling of either count would be.  `l` is omitted
+            # when there is no loaded half — an older server's answer, which a
+            # new display reads as unknown rather than as zero.
             payload = {"t": "tools", "n": total}
+            if loaded is not None:
+                payload["l"] = loaded
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -385,7 +401,15 @@ def decode(message: str) -> TurnEvent | None:
         case "tools" if isinstance(payload.get("n"), int) and not isinstance(
             payload.get("n"), bool
         ):
-            return ToolsCounted(total=payload["n"])
+            loaded = payload.get("l")
+            if loaded is not None and (
+                not isinstance(loaded, int) or isinstance(loaded, bool)
+            ):
+                # A loaded half that is present and not an integer is a shape
+                # this build cannot read — not a count of nothing (`events.py`
+                # says why a value that cannot be read is not an absent one).
+                return None
+            return ToolsCounted(total=payload["n"], loaded=loaded)
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):

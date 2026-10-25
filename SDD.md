@@ -2109,9 +2109,13 @@ the caller decides what to do about it.
 - **A connection has two states on screen**: online and offline. The reasons live
   in the status tool. A line that tried to state them would be a line about the
   plugin's internals.
-- **The status bar's `tools` count is the catalogue's size**, not the loaded
-  list's length. The hub reports it beside the list on the same ask; the window
-  replaces its number with the one the last model call was built from.
+- **The status bar's `tools` count is loaded/total**: the request's tool list
+  first — the hub's loaded tools plus the agent process's mechanism tools — then
+  the catalogue's size. A tool nobody has loaded is still a tool that exists,
+  and a display that showed only one of the two could not say what on-demand
+  loading is doing. The window replaces both with the pair the last model call
+  was built from; the start-up line names the catalogue's pair before the first
+  turn, and the two differ by the mechanism's tools.
 - **Model output is plain text.** Nothing a model produces is parsed as markup;
   a `[bold]` a model wrote is seven characters on screen, not a formatting
   instruction.

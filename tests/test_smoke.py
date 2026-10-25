@@ -16,6 +16,7 @@ import pytest
 
 import slife2
 from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
+from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     REMOTE,
@@ -704,7 +705,9 @@ def test_headless_reaches_the_driver_and_the_claim(
     # here, so no hub is up to answer it — and the conftest guard would refuse the
     # dial rather than let this reach a live one.  What it does, and where it sits,
     # is `test_the_home_is_made_before_the_window_opens`.
-    monkeypatch.setattr(slife2, "_open_catalogue", lambda config: 0)
+    monkeypatch.setattr(
+        slife2, "_open_catalogue", lambda config: ToolCounts(loaded=0, total=0)
+    )
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
     # `--keep-servers`, so the last-instance-out take-down does not run against
@@ -739,12 +742,12 @@ def test_the_home_is_made_before_the_window_opens(
 
     order: list[str] = []
 
-    def step(name: str, code: int = 0):
+    def step(name: str, result: object = 0):
         """One of the start-up steps, and a note that it ran."""
 
-        def run(*args: object, **kwargs: object) -> int:
+        def run(*args: object, **kwargs: object) -> object:
             order.append(name)
-            return code
+            return result
 
         return run
 
@@ -757,7 +760,9 @@ def test_the_home_is_made_before_the_window_opens(
 
     monkeypatch.setattr(slife2, "_open_home", step("home"))
     monkeypatch.setattr(slife2, "_ensure", step("servers"))
-    monkeypatch.setattr(slife2, "_open_catalogue", step("catalogue"))
+    monkeypatch.setattr(
+        slife2, "_open_catalogue", step("catalogue", ToolCounts(loaded=0, total=0))
+    )
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
     # `--keep-servers`, so the last-instance-out take-down does not run.

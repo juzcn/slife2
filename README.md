@@ -445,13 +445,12 @@ The status bar also reports the context size left by the last model call and
 its fraction of the model's window. Before each turn, a note names what the
 context decision kept and what it recalled from the turn log.
 
-It reports `tools N` as well: how many entries the catalogue holds, every
-category included, so skills and CLI entries are counted and so are the tools of
-a server that is down. This is the catalogue's size, not the length of the list
-the model is holding — a tool nobody has loaded is still a tool that exists. The
-number is read on the same ask that fetches the model's tool list, so it is as
-current as the last model call, and the start-up line names the same number
-before the window opens.
+It reports `tools 26/358` as well: what the model's list holds, then how many
+entries the catalogue has. The loaded half is the request's own list — the hub's
+loaded tools plus the agent process's two always-present tools — and the total
+includes every category, so skills and CLI entries are counted and so are the
+tools of a server that is down. The loaded half is replaced with each model
+call's list; the start-up line names the catalogue's pair before the first turn.
 
 ### Images
 

@@ -16,9 +16,10 @@ same sense:
 * **`TurnFinished`** carries the authoritative answer and the turn's bill.  The
   window reconciles the first with what it streamed and puts the second in the
   status bar; a watched screen closes its turn with the same text and has no bar.
-* **`ToolsCounted`** is the catalogue's size, which is the same kind of fact:
-  the window's status bar shows it, and a watched screen has no bar to put it
-  in.  Drawing it would put a line about the tool set in somebody's transcript.
+* **`ToolsCounted`** is the model's list against the catalogue's size, which is
+  the same kind of fact: the window's status bar shows it, and a watched screen
+  has no bar to put it in.  Drawing it would put a line about the tool set in
+  somebody's transcript.
 
 `False` is the whole of what says "this one is yours"; anything left unmatched
 is a vocabulary this build was not taught, and `assert_never` turns that into a

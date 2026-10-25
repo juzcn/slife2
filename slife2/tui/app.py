@@ -66,6 +66,7 @@ from textual.message import Message as TextualMessage
 from textual.worker import Worker
 
 import slife2.helpers.timeouts as _T
+from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import DEFAULT_AGENT, Config
 from slife2.libs.turn.events import (
     MessageCutIn,
@@ -262,7 +263,7 @@ class SlifeApp(App[None]):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
-        tool_count: int = 0,
+        tool_counts: ToolCounts | None = None,
         models: Sequence[ModelChoice] = (),
         control_url: str = "",
         mesh_url: str = "",
@@ -298,14 +299,14 @@ class SlifeApp(App[None]):
         #: a model cannot read.
         self._thinking = thinking
         self._vision = vision
-        #: How many tools the catalogue held when this window opened, from the
-        #: start-up ask that makes the catalogue (`slife2._open_catalogue`).
-        #: **`0` is "nobody has said yet"**, not an empty catalogue: the hub
-        #: always holds at least its own tools, so the bar shows nothing until
-        #: the first ask answers — and the start-up ask is that answer for a
-        #: window launched the ordinary way.  A turn's own refreshes replace it
-        #: live (`ToolsCounted`).
-        self._tool_count = tool_count
+        #: What the model held against what the catalogue held when this window
+        #: opened, from the start-up ask that makes the catalogue
+        #: (`slife2._open_catalogue`).  **`None` is "nobody has said yet"**, not
+        #: an empty catalogue: the hub always holds at least its own tools, so
+        #: the bar shows nothing until the first ask answers — and the start-up
+        #: ask is that answer for a window launched the ordinary way.  A turn's
+        #: own refreshes replace it live (`ToolsCounted`).
+        self._tool_counts = tool_counts
         #: The models the picker offers: the config's, as it was when this
         #: window opened.  Held rather than re-read at the key, because the
         #: window is not a reader of that file — and because a list that grew
@@ -1061,10 +1062,10 @@ class SlifeApp(App[None]):
         view rather than about the conversation.
         """
         if isinstance(event, ToolsCounted):
-            # The hub's answer to the ask this model call was built from; the
-            # loaded list's length is a different number and deliberately not
-            # what the bar shows (`slife2.libs.turn.events.ToolsCounted`).
-            self._tool_count = event.total
+            # The hub's answer to the ask this model call was built from: the
+            # pair the bar shows, both halves from the same ask
+            # (`slife2.libs.turn.events.ToolsCounted`).
+            self._tool_counts = ToolCounts(loaded=event.loaded, total=event.total)
             self._refresh_status()
             return
         if isinstance(event, ToolApprovalRequested):
@@ -1380,5 +1381,5 @@ class SlifeApp(App[None]):
             context_window=self._context_window,
             thinking=self._thinking,
             vision=self._vision,
-            tools=self._tool_count,
+            tools=self._tool_counts,
         )

@@ -52,6 +52,7 @@ from textual.message import Message as TextualMessage
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
+from slife2.clients.toolclient import ToolCounts
 from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
 from slife2.libs.harness.markers import strip as strip_marker
@@ -1925,7 +1926,7 @@ class StatusBar(Static):
         context_window: int = 0,
         thinking: bool = False,
         vision: bool = False,
-        tools: int = 0,
+        tools: ToolCounts | None = None,
         connected: bool = True,
         connecting: bool = False,
     ) -> None:
@@ -1954,15 +1955,22 @@ class StatusBar(Static):
         if model:
             parts.append(f"[{PALETTE['dim']}]{model.replace('[', '[[')}[/]")
 
-        # **The catalogue's size, not the model's loaded list.**  The number
-        # beside the model is what toolhub holds — every category, so skills and
-        # CLI entries are in it, and so are the rows of a server that is down —
-        # and it is the hub's own answer to the last ask, not a count this
-        # window keeps (`slife2.libs.turn.events.ToolsCounted`).  Zero is
-        # "nobody has said yet" rather than an empty catalogue: the hub always
-        # holds its own tools, so the bar says nothing until it knows.
-        if tools:
-            parts.append(f"[{PALETTE['dim']}]{t('status_tools', n=tools)}[/]")
+        # **Loaded against the catalogue, on one ask.**  The first number is
+        # what the model's list holds; the second is every row the catalogue
+        # has — skills and CLI entries included, and the rows of a server that
+        # is down — and both are the hub's own answer to the last ask, not a
+        # count this window keeps (`slife2.libs.turn.events.ToolsCounted`).
+        # `total` of zero is "nobody has said yet" rather than an empty
+        # catalogue: the hub always holds its own tools, so the bar says nothing
+        # until it knows.  A pair without the loaded half is an older server's
+        # answer, and the bar shows just the total rather than inventing a zero.
+        if tools is not None and tools.total:
+            label = (
+                t("status_tools", n=tools.total)
+                if tools.loaded is None
+                else t("status_tools_loaded", loaded=tools.loaded, total=tools.total)
+            )
+            parts.append(f"[{PALETTE['dim']}]{label}[/]")
 
         # What the model *is*, as opposed to what it is doing — which is why
         # these are dim words beside its name rather than coloured states:

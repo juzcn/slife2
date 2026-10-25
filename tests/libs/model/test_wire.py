@@ -42,8 +42,10 @@ EVENTS = [
     # The discriminator's answer, which arrives before any of the rest and is
     # the only event a turn has that is about the context rather than the work.
     ContextChosen(kept=12, recalled=3),
-    # The catalogue's size, which is not the model's list: skills and CLI
-    # entries are rows and are counted, loaded or not.
+    # The model's list against the catalogue: both halves on one ask, and a
+    # second shape from a server that predates the loaded half — the absent
+    # key must round trip as unknown rather than as zero.
+    ToolsCounted(loaded=24, total=253),
     ToolsCounted(total=253),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),

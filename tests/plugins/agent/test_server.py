@@ -2988,6 +2988,13 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     counted = [event for event in seen if isinstance(event, ToolsCounted)]
     catalogued = await hub.call_tool("list_tools", {})
     assert [event.total for event in counted] == [catalogued.data["total"]] * 2
+    # The request's list, not only the hub's loaded set: the agent process adds
+    # its own two mechanism tools, and they are model tools like any other.
+    from slife2.libs.harness.async_tasks import async_tools
+
+    assert [event.loaded for event in counted] == [
+        len(catalogued.data["tools"]) + len(async_tools())
+    ] * 2
 
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]

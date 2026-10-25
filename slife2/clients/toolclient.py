@@ -138,14 +138,41 @@ class UpstreamTool:
 
 
 @dataclass(frozen=True)
+class ToolCounts:
+    """The model's tool list against the catalogue it was chosen from.
+
+    **The two numbers a display shows**, and they are different questions:
+    `loaded` is the count from the source that answered — a turn's report is the
+    request's whole tool list, while the start-up ask knows only the hub's
+    loaded set — and `total` is every row the catalogue holds: skills and CLI
+    entries included, and the rows of a server that is down.  One without the
+    other cannot say what on-demand loading is doing: `26/358` is a working
+    budget, `26/26` is everything.
+
+    **The two universes are not nested.**  The agent process's two mechanism
+    tools are in a turn's `loaded` and are not catalogue rows, so they are not
+    in `total`; the catalogue's skills and CLI entries are rows, so they are in
+    `total` and can never be in `loaded`.  The display shows the two facts side
+    by side rather than pretending they are a fraction of one set.
+
+    `loaded` is `None` for one case and not zero: a server that predates the
+    loaded half of the answer.  A zero would be a claim about the list, and a
+    display would show `0/358` for a conversation that had simply not said.
+    """
+
+    loaded: int | None
+    total: int
+
+
+@dataclass(frozen=True)
 class ToolListing:
     """What `list_tools` answered: the model's tools, and the catalogue's size.
 
     **Two numbers because they answer two questions.**  `tools` is the loaded
-    set — what the next request carries — and `total` is every row the catalogue
-    holds, which is what a status display shows.  A tool nobody has loaded is
-    still a tool that exists, and a skill or a CLI entry is neither loadable nor
-    callable through `call_tool` and is still a row.
+    set — what the hub offers the next request — and `total` is every row the
+    catalogue holds, which is what a status display shows.  A tool nobody has
+    loaded is still a tool that exists, and a skill or a CLI entry is neither
+    loadable nor callable through `call_tool` and is still a row.
 
     A value rather than a tuple so the two halves are named where they are read:
     the agent server hands the list to the loop and the count to a display, and
@@ -367,6 +394,7 @@ __all__ = [
     "FUNC_TOOL_UNLOAD",
     "LIST_TOOLS",
     "SEPARATOR",
+    "ToolCounts",
     "ToolListing",
     "UpstreamTool",
     "remote_catalogue",
