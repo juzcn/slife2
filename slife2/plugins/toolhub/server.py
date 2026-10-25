@@ -324,6 +324,9 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 #: serves are how a tool list is managed at all — a budget that could take them
 #: away would leave the model holding a set it cannot change — and the fourth is
 #: `skill_use`, which reads the playbooks every session is meant to reach for.
+#: The rest are the agent process's: `_check_new_input`, the pair a mid-turn
+#: delivery is written under, and the two background-call tools, which are the
+#: only way to use the task id an `_async` call returns.
 #:
 #: **It lives in a plugin and is still on this list.**  It is also in
 #: `tool_load.autoload` by construction (`slife2.libs.host.config.REQUIRED_AUTOLOAD`), so the
@@ -360,6 +363,11 @@ ALWAYS_LOADED = frozenset(
         # reason this module spells `SKILL_USE`: the hub is the model's tool
         # list, and it must not be importable from an agent.
         "_check_new_input",
+        # The agent process's two background-call tools.  They are ordinary
+        # catalogue rows (the agent plugin declares them), and they are here so
+        # a model cannot unload the only way back to a task id it was handed.
+        "check_async",
+        "cancel_async",
     }
 )
 

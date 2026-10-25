@@ -1405,8 +1405,9 @@ Initial state:
 - The tools named in `tool_load.autoload` are loaded, by the name the model
   calls them — a plugin's bare name or an external server's `{server}__{tool}`.
 - The names the system itself refers to (the two list tools, the two harness
-  pairs and `skill_use`) are required in that list; a configuration that omits
-  one fails the start rather than serving a model that cannot manage its list.
+  pairs, `skill_use`, and the two background-call tools) are required in that
+  list; a configuration that omits one fails the start rather than serving a
+  model that cannot manage its list or use a task id it was handed.
 - Everything else, a plugin's tools included, is discoverable but not callable
   until loaded. A plugin's set is no longer loaded in full by category: one of
   its tools the model never calls is a prompt spent on every request.
@@ -2109,13 +2110,12 @@ the caller decides what to do about it.
 - **A connection has two states on screen**: online and offline. The reasons live
   in the status tool. A line that tried to state them would be a line about the
   plugin's internals.
-- **The status bar's `tools` count is loaded/total**: the request's tool list
-  first — the hub's loaded tools plus the agent process's mechanism tools — then
-  the catalogue's size. A tool nobody has loaded is still a tool that exists,
-  and a display that showed only one of the two could not say what on-demand
-  loading is doing. The window replaces both with the pair the last model call
-  was built from; the start-up line names the catalogue's pair before the first
-  turn, and the two differ by the mechanism's tools.
+- **The status bar's `tools` count is loaded/total**, both from the hub's
+  answer to one ask: the loaded list's length first, then the catalogue's size.
+  A tool nobody has loaded is still a tool that exists, and a display that
+  showed only one of the two could not say what on-demand loading is doing. The
+  window replaces both with the pair the last model call was built from; the
+  start-up line names the same pair before the window opens.
 - **Model output is plain text.** Nothing a model produces is parsed as markup;
   a `[bold]` a model wrote is seven characters on screen, not a formatting
   instruction.

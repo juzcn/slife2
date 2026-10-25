@@ -330,6 +330,11 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     a model or the harness**: it is how the window answers an `_approve`
     request a turn is parked on, and it is on this server because the waiting
     turn is (`slife2.libs.turn.loop`'s gate, SDD §7.7).
+
+    **`check_async` and `cancel_async` are declared here even though the task
+    table is this process's memory**, because the model must reach them and
+    every model tool is a catalogue row: the hub asks this server for them, and
+    `tool_load.autoload` keeps them loaded like any other.
     """
     async with Client(
         build_server(
@@ -343,6 +348,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "_check_new_input",
         "answer_approval",
         "attach_image",
+        "cancel_async",
+        "check_async",
         "model_list",
         "model_remove",
         "model_set",
@@ -355,6 +362,28 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "transcript",
         "watch",
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_background_tools_are_ordinary_model_tools(context, hub) -> None:
+    """**The task table is this process's, and the model still reaches it.**
+
+    `check_async` and `cancel_async` are declared on this server rather than
+    injected into the registry, so the hub catalogues them next to every other
+    model tool and autoload keeps them loaded.  Their bodies still run here:
+    a task id this process never issued is a refusal, not a transport fault.
+    """
+    async with Client(
+        build_server(
+            config(), context_client=context, hub_client=hub, backend=FakeBackend()
+        )
+    ) as client:
+        result = await client.call_tool(
+            "check_async", {"task_id": "nosuch"}, raise_on_error=False
+        )
+
+    assert result.is_error
+    assert "no async task 'nosuch'" in str(result.content)
 
 
 @pytest.mark.asyncio
@@ -2988,13 +3017,9 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     counted = [event for event in seen if isinstance(event, ToolsCounted)]
     catalogued = await hub.call_tool("list_tools", {})
     assert [event.total for event in counted] == [catalogued.data["total"]] * 2
-    # The request's list, not only the hub's loaded set: the agent process adds
-    # its own two mechanism tools, and they are model tools like any other.
-    from slife2.libs.harness.async_tasks import async_tools
-
-    assert [event.loaded for event in counted] == [
-        len(catalogued.data["tools"]) + len(async_tools())
-    ] * 2
+    # The request's list is the hub's list: every model tool, the background
+    # pair included, is a catalogue row and nothing is added beside it.
+    assert [event.loaded for event in counted] == [len(catalogued.data["tools"])] * 2
 
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]

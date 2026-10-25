@@ -1641,6 +1641,9 @@ DEFAULT_TOOL_LOAD = 100
 #:   turn.  A pair names a tool the request declares, so a request that omitted
 #:   one is a 400 the model could not have avoided.
 #: * `skill_use` reads the playbooks every session is meant to reach for.
+#: * `check_async` and `cancel_async` are the only tools that can use the task id
+#:   an `_async` call returns.  A list without them leaves a background call
+#:   running with no way to ask where it stands or stop it.
 #:
 #: **Spelled here rather than imported from the hub**, because this module is a
 #: library and `slife2.plugins.toolhub.server` is a server — the same split
@@ -1654,6 +1657,8 @@ REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "_func_tool_unload",
     "_check_new_input",
     "skill_use",
+    "check_async",
+    "cancel_async",
 )
 
 

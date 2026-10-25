@@ -68,19 +68,12 @@ class ContextChosen:
 class ToolsCounted:
     """The model's tool list against the catalogue it was chosen from.
 
-    **Two numbers because they answer two questions.**  `loaded` is the length
-    of the request's tool list — the catalogue rows the hub has loaded, plus the
-    mechanism's always-present tools, which are model tools like any other — and
-    `total` is every row the catalogue holds, skills and CLI entries included
-    and the rows of a server that is down among them.  A display that showed
-    only `total` could not say what on-demand loading is doing; one that showed
-    only `loaded` would hide how much there is to find.
-
-    **The two are not a subset pair, and that is deliberate.**  The mechanism's
-    two tools are not catalogue rows, so they are in `loaded` and not in
-    `total`; a skill or a CLI entry is a row, so it is in `total` and can never
-    be in `loaded`.  The pair states two facts about the same request rather
-    than pretending one is a fraction of the other.
+    **Two numbers because they answer two questions.**  `loaded` is the hub's
+    loaded set — the rows the next request carries — and `total` is every row
+    the catalogue holds, skills and CLI entries included and the rows of a
+    server that is down among them.  A display that showed only `total` could
+    not say what on-demand loading is doing; one that showed only `loaded` would
+    hide how much there is to find.
 
     `loaded` is `None` for a server that predates this half of the answer.  A
     zero would be a claim about the list; the display leaves the loaded half out

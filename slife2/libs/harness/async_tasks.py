@@ -58,10 +58,17 @@ Why a module rather than a corner of `slife2.libs.turn.tools`
 ---------------------------------------------------
 `slife2.libs.turn.tools` is the loop's *vocabulary* — names, a spec, and the one rule that
 a failure is text.  This is machinery with state, and it has two more callers
-besides the loop (the agent server builds the two tools into every registry it
-hands the model, and it is the one process that can hand a result back).  One
-module, three callers, and `slife2.libs.turn.tools` stays a leaf that a task registry would
-have made it stop being.
+besides the loop: the agent server serves the two tools, and it is the one
+process that can hand a result back.  One module, three callers, and
+`slife2.libs.turn.tools` stays a leaf that a task registry would have made it
+stop being.
+
+**The two tools are model tools and are managed like every other one.**  The
+agent server declares them as MCP tools, so the toolhub catalogues them, the
+operator's `tool_load.autoload` keeps them loaded, and the budget may not take
+them away (`REQUIRED_AUTOLOAD` / `ALWAYS_LOADED`).  They are not a private
+registry the model cannot see: their bodies live here because the task table is
+this process's memory, not because their names are outside the catalogue.
 """
 
 from __future__ import annotations
@@ -74,15 +81,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from slife2.libs.turn.messages import ToolSpec
-from slife2.libs.turn.tools import Tool, ToolFailed
+from slife2.libs.turn.tools import ToolFailed
 
 logger = logging.getLogger(__name__)
 
 #: The two tools the model polls and cancels with.  Bare names, no leading
-#: underscore: they are the model's tools, not the machinery's — the harness
-#: offers them and never calls them (`slife2.libs.turn.tools.is_harness` is about names
-#: the *machinery* calls, and this is the opposite case).
+#: underscore: they are the model's tools, not the machinery's — the agent
+#: server serves them and the harness never calls them
+#: (`slife2.libs.turn.tools.is_harness` is about names the *machinery* calls, and
+#: this is the opposite case).
 CHECK_ASYNC = "check_async"
 CANCEL_ASYNC = "cancel_async"
 
@@ -535,76 +542,12 @@ async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     return _answer(task, task_id)
 
 
-def _task_id_schema() -> dict[str, Any]:
-    """The one argument both tools take.
-
-    Built per tool rather than shared: the dict travels to a provider inside a
-    spec, and two tools describing the same parameter by reference would be two
-    schemas that cannot be edited apart.
-    """
-    return {
-        "type": "object",
-        "properties": {
-            "task_id": {
-                "type": "string",
-                "description": "The id the backgrounded call answered with.",
-            },
-        },
-        "required": ["task_id"],
-    }
-
-
-def async_tools() -> list[Tool]:
-    """The two tools, for a caller building a registry the model will see.
-
-    **Always present, and never in a catalogue.**  These are the mechanism's own
-    tools: they are not rows in the toolhub's catalogue, so the model's budget
-    cannot take them away and `_func_tool_unload` has never heard of them — which
-    is what a mechanism whose tools could be unloaded would deserve.
-
-    **They answer objects, and nothing here renders them.**  The registry does
-    (`slife2.libs.turn.tools.as_tool_text`) — the same rendering a plugin's tool
-    gets from FastMCP — which is what lets a body return its fields and lets the
-    tool's own tests assert them.
-    """
-    return [
-        Tool(
-            spec=ToolSpec(
-                name=CHECK_ASYNC,
-                description=(
-                    "Where one background call stands: `status` — running, "
-                    "finished, failed or cancelled — the `tool` and `call_id` it "
-                    "is about, and `result`, which is the answer only when the "
-                    "conversation has not been handed it. The result arrives on "
-                    "its own when the call ends."
-                ),
-                parameters=_task_id_schema(),
-            ),
-            run=check_async,
-        ),
-        Tool(
-            spec=ToolSpec(
-                name=CANCEL_ASYNC,
-                description=(
-                    "Abandon a running background call, and answer where it "
-                    "stands: `status` is `cancelled` when this is what stopped "
-                    "it, and the call's own ending when it was already over — in "
-                    "which case its `result` is still handed over, not dropped."
-                ),
-                parameters=_task_id_schema(),
-            ),
-            run=cancel_async,
-        ),
-    ]
-
-
 __all__ = [
     "CANCEL_ASYNC",
     "CHANNEL",
     "CHECK_ASYNC",
     "MARKER_PREFIX",
     "MAX_ASYNC_TASKS",
-    "async_tools",
     "cancel_async",
     "channel_for",
     "check_async",

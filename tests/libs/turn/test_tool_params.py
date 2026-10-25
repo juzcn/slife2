@@ -682,57 +682,15 @@ async def test_check_and_cancel_refuse_a_task_they_do_not_have() -> None:
             await tool({"task_id": "nosuch"})
 
 
-@pytest.mark.asyncio
-async def test_the_model_is_handed_the_answer_as_json() -> None:
-    """**The tool answers an object and the registry says it as JSON.**  These
-    two are built straight into the model's registry rather than served over
-    MCP — the agent server adds them to every one it hands the model — so the
-    rendering is `as_tool_text`'s and there is no FastMCP hop to do it.
+def test_the_two_tools_keep_the_names_the_prompt_uses() -> None:
+    """One spelling per tool, and the prompt's own sentence uses the same one.
+
+    The tools themselves are declared by the agent server and catalogued like
+    every other model tool (`slife2.plugins.agent.server`); what this holds is
+    the name the model is taught and the name the tool answers to.
     """
-
-    async def done(_arguments: dict[str, Any]) -> tuple[str, bool]:
-        return "the answer", True
-
-    task_id = async_tasks.schedule(done({}), call_id="call-json", tool="slow")
-    tools = async_tasks.async_tools()
-    check = next(one for one in tools if one.spec.name == CHECK_ASYNC)
-
-    text, ok = await ToolRegistry([check]).execute(
-        ToolCall(id="c1", name=CHECK_ASYNC, arguments={"task_id": task_id})
-    )
-
-    assert ok is True
-    assert json.loads(text)["call_id"] == "call-json"
-    assert json.loads(text)["task_id"] == task_id
-
-
-@pytest.mark.asyncio
-async def test_a_refusal_reaches_the_transcript_as_a_failure() -> None:
-    """**`Error:` in a *successful* call's text is the shape this closes.**  A
-    miss used to be returned, so the registry marked it `ok` and a window drew a
-    call that worked — one word aloud, and the model has to un-believe it.
-    Raised, the sentence arrives under the one prefix the registry adds itself.
-    """
-    cancel = next(
-        one
-        for one in async_tasks.async_tools()
-        if one.spec.name == async_tasks.CANCEL_ASYNC
-    )
-
-    text, ok = await ToolRegistry([cancel]).execute(
-        ToolCall(
-            id="c2", name=async_tasks.CANCEL_ASYNC, arguments={"task_id": "nosuch"}
-        )
-    )
-
-    assert ok is False
-    assert text.startswith("Error: no async task 'nosuch'")
-
-
-def test_the_two_tools_are_offered_under_the_names_the_prompt_uses() -> None:
-    """One spelling per tool, in the schema and in `check_async`'s own sentences."""
-    names = [tool.spec.name for tool in async_tasks.async_tools()]
-    assert names == [CHECK_ASYNC, "cancel_async"]
+    assert CHECK_ASYNC == "check_async"
+    assert async_tasks.CANCEL_ASYNC == "cancel_async"
     assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")
 
 

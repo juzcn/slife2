@@ -142,18 +142,11 @@ class ToolCounts:
     """The model's tool list against the catalogue it was chosen from.
 
     **The two numbers a display shows**, and they are different questions:
-    `loaded` is the count from the source that answered — a turn's report is the
-    request's whole tool list, while the start-up ask knows only the hub's
-    loaded set — and `total` is every row the catalogue holds: skills and CLI
-    entries included, and the rows of a server that is down.  One without the
-    other cannot say what on-demand loading is doing: `26/358` is a working
-    budget, `26/26` is everything.
-
-    **The two universes are not nested.**  The agent process's two mechanism
-    tools are in a turn's `loaded` and are not catalogue rows, so they are not
-    in `total`; the catalogue's skills and CLI entries are rows, so they are in
-    `total` and can never be in `loaded`.  The display shows the two facts side
-    by side rather than pretending they are a fraction of one set.
+    `loaded` is the hub's loaded set — the rows the next request carries — and
+    `total` is every row the catalogue holds: skills and CLI entries included,
+    and the rows of a server that is down.  One without the other cannot say
+    what on-demand loading is doing: `26/358` is a working budget, `26/26` is
+    everything.
 
     `loaded` is `None` for one case and not zero: a server that predates the
     loaded half of the answer.  A zero would be a claim about the list, and a

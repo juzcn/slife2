@@ -445,12 +445,12 @@ The status bar also reports the context size left by the last model call and
 its fraction of the model's window. Before each turn, a note names what the
 context decision kept and what it recalled from the turn log.
 
-It reports `tools 26/358` as well: what the model's list holds, then how many
-entries the catalogue has. The loaded half is the request's own list — the hub's
-loaded tools plus the agent process's two always-present tools — and the total
-includes every category, so skills and CLI entries are counted and so are the
-tools of a server that is down. The loaded half is replaced with each model
-call's list; the start-up line names the catalogue's pair before the first turn.
+It reports `tools 26/358` as well: what the hub's loaded set holds, then how
+many entries the catalogue has. The total includes every category, so skills and
+CLI entries are counted and so are the tools of a server that is down, while the
+loaded half is what the next request carries. Both numbers come from the same
+ask, so they are as current as the last model call, and the start-up line names
+the same pair before the window opens.
 
 ### Images
 
@@ -568,7 +568,8 @@ context:
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
   autoload: [tool_search, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, turn_read]   # and never evicted
+             _check_new_input, skill_use, check_async, cancel_async,
+             turn_read]                                # and never evicted
 
 tool_result:
   tokens: 8000               # per-result budget; minimum 128

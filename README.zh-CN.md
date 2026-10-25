@@ -404,11 +404,10 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 状态栏还会显示上一次模型调用留下的上下文大小，以及它占模型窗口的比例。每一轮
 之前，会有一行注记说明上下文决策保留了哪些轮次、从日志中召回了哪些轮次。
 
-状态栏也会显示 `工具 26/358`：先是模型当前清单中的数量，再是 catalogue 中的总条目
-数。前一个数字是请求自己的工具列表——hub 已加载的工具，加上 agent 进程固定携带的两
-个机制工具；总数包含所有类别，所以 skill 和 CLI 条目都算在内，连暂时连不上的 server
-的工具也算。每次模型调用都会刷新前一个数字；窗口打开前的那行启动信息报的是 catalogue
-的那对数。
+状态栏也会显示 `工具 26/358`：先是 hub 已加载的数量，再是 catalogue 中的总条目数。
+总数包含所有类别，所以 skill 和 CLI 条目都算在内，连暂时连不上的 server 的工具也算；
+前一个数字才是下一次请求实际携带的工具数。两个数字来自同一次询问，因此与最后一次模型
+调用一样新；窗口打开前的那行启动信息报的是同一对数。
 
 ### 图片
 
@@ -514,7 +513,8 @@ context:
 tool_load:
   threshold: 100             # 超过该数量后卸载最久未使用的
   autoload: [tool_search, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, turn_read]   # 且不会被卸载
+             _check_new_input, skill_use, check_async, cancel_async,
+             turn_read]                                # 且不会被卸载
 
 tool_result:
   tokens: 8000               # 单个结果的预算；最小 128

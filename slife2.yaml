@@ -153,7 +153,7 @@ tool_load:
   threshold: 100
   # The tools that start in the model's list, by the name the model calls them.
   # Everything else — a plugin's tools included — is found with `tool_search`
-  # and loaded with `func_tool_load`, and is evicted when unused. The first five
+  # and loaded with `func_tool_load`, and is evicted when unused. The first seven
   # are what the system works by; a list without them fails the start.
   autoload:
     - tool_search
@@ -161,6 +161,9 @@ tool_load:
     - _func_tool_unload
     - _check_new_input
     - skill_use
+    # The two that can use the task id an `_async` call returns.
+    - check_async
+    - cancel_async
     # Memory and recorded turns.
     - turn_search
     - turn_read

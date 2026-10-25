@@ -111,7 +111,13 @@ from slife2.clients.toolclient import (
 )
 from slife2.helpers.clock import now
 from slife2.libs.harness import dumps
-from slife2.libs.harness.async_tasks import Deliver, async_tools
+from slife2.libs.harness.async_tasks import (
+    CANCEL_ASYNC,
+    CHECK_ASYNC,
+    Deliver,
+    cancel_async,
+    check_async,
+)
 from slife2.libs.harness.dumps import Compress
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host import configfile
@@ -169,7 +175,7 @@ from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import render as render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolRegistry
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolFailed, ToolRegistry
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -1420,16 +1426,14 @@ def build_server(
     async def registry(
         client_id: ClientId, observer: TurnObserver | None = None
     ) -> ToolRegistry:
-        """What the model may call: the hub's tools, plus the mechanism's own.
+        """What the model may call: the hub's list, bound to this conversation.
 
-        **Two tools are added here rather than served by the hub**, and they are
-        the only ones: `check_async` and `cancel_async` are the vocabulary of
-        `_async: true`, and the work they describe is this process's — the
-        background tasks a turn started live in `slife2.libs.harness.async_tasks`, not in the
-        hub, which knows nothing about whose call it was.  They are therefore
-        outside the catalogue: the budget cannot unload them and `tool_search`
-        cannot find them, which is what a tool the mechanism itself needs
-        deserves (the system tools sit in every registry the same way).
+        **One source.**  Every model tool — `check_async` and `cancel_async`
+        included — is a catalogue row the hub advertises.  The two background
+        tools are *served* here because the task table is this process's memory
+        (`slife2.libs.harness.async_tasks`), but the hub catalogues them and
+        `tool_load.autoload` keeps them loaded like any other model tool; there
+        is no second list beside `found.tools`.
 
         **`observer` is where the catalogue's size goes**, and it is optional
         because this is also called to build a loop before a turn exists
@@ -1438,21 +1442,17 @@ def build_server(
         loop re-reads the list before a model call it passes its own observer,
         so the bar follows the hub rather than a snapshot from boot.
 
-        **The loaded count is the request's list, mechanism tools included.**
-        `check_async` and `cancel_async` are added here and are model tools like
-        every other, so the number a display shows is `len(tools)` — not only
-        the hub's loaded set.  `total` stays the catalogue's: those two are not
-        rows in it, so the pair is two facts about the request rather than a
-        fraction of one set (events.py says why).
+        **The count is the request's list, and the hub is its only source.**
+        `loaded` is the hub's loaded set and `total` the catalogue it was chosen
+        from: a clean pair (events.py says why).
         """
         found = await turn_tools(client_id)
-        tools = found.tools + async_tools()
         if observer is not None:
             await AgentLoop._emit(
                 observer,
-                ToolsCounted(total=found.total, loaded=len(tools)),
+                ToolsCounted(total=found.total, loaded=len(found.tools)),
             )
-        return ToolRegistry(tools)
+        return ToolRegistry(found.tools)
 
     def turn_annotation(
         messages: list[dict[str, Any]],
@@ -3007,6 +3007,38 @@ def build_server(
         # own comment has said it covers that case from the beginning; the code
         # did not.
         return take_waiting(client_id) or NOTHING_WAITING
+
+    @mcp.tool(name=CHECK_ASYNC, meta=FOR_THE_MODEL)
+    async def check_background_call(task_id: str) -> dict[str, Any]:
+        """Where one background call stands.
+
+        `status` is `running`, `finished`, `failed` or `cancelled`; `tool` and
+        `call_id` name the call, and `result` is the answer only when the
+        conversation has not been handed it yet.  The result arrives on its own
+        when the call ends; this asks where it stands, not what it said.
+
+        `task_id` is the id the backgrounded call answered with.  A task that
+        does not exist — or one this process never ran — is refused.
+        """
+        try:
+            return await check_async({"task_id": task_id})
+        except ToolFailed as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool(name=CANCEL_ASYNC, meta=FOR_THE_MODEL)
+    async def cancel_background_call(task_id: str) -> dict[str, Any]:
+        """Abandon a running background call, and answer where it stands.
+
+        `status` is `cancelled` when this is what stopped it, and the call's own
+        ending when it was already over — in which case its `result` is still
+        handed over, not dropped.
+
+        `task_id` is the id the backgrounded call answered with.
+        """
+        try:
+            return await cancel_async({"task_id": task_id})
+        except ToolFailed as exc:
+            raise ToolError(str(exc)) from exc
 
     @mcp.tool
     async def answer_approval(

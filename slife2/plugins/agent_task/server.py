@@ -471,6 +471,12 @@ def build_server(
         Bound to the agent's own id, so a tool that reads this agent's store
         reads the agent's own — which is the same fact as the key being the
         agent's, seen from the tool side.
+
+        **The hub's whole list, unfiltered.**  A loop's capability is not a
+        reason to special-case the catalogue: this loop has no `_async` (see
+        below), so it will never hand the model a task id, but `check_async` and
+        `cancel_async` are model tools like every other and arrive in the list
+        the hub advertises.
         """
         return ToolRegistry(await remote_tools(await hub(), task.identity))
 
@@ -692,9 +698,9 @@ def build_server(
             # runs one turn and has no second one for a background result to
             # arrive in, so there is nowhere to hand one back to: the loop
             # therefore *refuses* the mode with a sentence the model can act on
-            # (`BACKGROUND_UNAVAILABLE`) rather than running the call quietly, and
-            # this registry has no `check_async` to offer either — the two are one
-            # decision (`slife2.plugins.agent.server.registry`).
+            # (`BACKGROUND_UNAVAILABLE`) rather than running the call quietly.
+            # The background-call tools are still in the list like every other
+            # model tool; there is simply no task id here for them to answer.
         )
         result = await loop.run_turn(messages, opening)
         # After the turn and not during it: the tool list goes out with every

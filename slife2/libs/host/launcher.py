@@ -285,9 +285,8 @@ async def _open_catalogue_async(url: str) -> ToolCounts:
     **Both numbers, and they are different questions.**  The loaded half is the
     hub's loaded set and the total is the catalogue's size; the window's status
     bar starts on `loaded/total`, and this is the ask that can hand it both
-    before a turn exists.  The first model call replaces the loaded half with
-    the request's own list, which also holds the agent process's mechanism
-    tools — not catalogue rows, and not something this ask can see.
+    before a turn exists.  A turn asks the same hub for the same pair, so the
+    bar and this answer stay one fact.
     """
     client = await open_server(url, name=TOOLHUB_SERVER_NAME, fallback_tool=LIST_TOOLS)
     try:
@@ -306,9 +305,8 @@ def open_catalogue(config: Config) -> ToolCounts:
     **Both numbers**: `loaded` is the rows the hub has loaded and `total` counts
     every row the file has, skills and CLI entries included and a source that is
     down among them (`slife2.libs.store.catalogue.ToolStore.count`).  It is the
-    pair the window starts its status bar on; a turn's own report replaces the
-    loaded half with the request's list, which also carries the agent process's
-    two mechanism tools (not catalogue rows, so not in this ask).
+    pair the window puts in its status bar, and a turn's report is the same
+    pair from the same hub.
 
     **A home is formed when an agent starts in it**, and the catalogue is the
     part of that this process cannot write itself: `agents/tools.db` belongs to
