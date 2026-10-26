@@ -1207,9 +1207,7 @@ def build_server(
             task = task_of(store, name)
             stamp = due_at.strip()
             stamp = (
-                _key_of(store, task.name, stamp)
-                if stamp
-                else _newest_open(store, task)
+                _key_of(store, task.name, stamp) if stamp else _newest_open(store, task)
             )
             settled = store.settle(task.name, stamp, SKIPPED, note=note.strip())
         assert settled is not None  # the run was read a moment ago

@@ -1976,9 +1976,7 @@ def write_context(
     return written
 
 
-def append_context(
-    connection: sqlite3.Connection, turn_id: int
-) -> list[int] | None:
+def append_context(connection: sqlite3.Connection, turn_id: int) -> list[int] | None:
     """Add one turn to the end of the live-context list, read inside the write.
 
     Read-modify-write inside the caller's transaction rather than by the caller,

@@ -1184,7 +1184,9 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
         saved.data["turn_id"],
     ], "the turn saved while the decision ran is still the conversation"
     said = [
-        message["content"] for message in rebuilt.data["messages"] if message["role"] == "user"
+        message["content"]
+        for message in rebuilt.data["messages"]
+        if message["role"] == "user"
     ]
     assert said[-1].startswith("two"), "the turn it had not seen is in its context"
 
