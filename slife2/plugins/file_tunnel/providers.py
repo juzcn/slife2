@@ -1502,17 +1502,22 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
         stays non-empty straight through an outage that answers every
         published link with HTTP 530, and the monitor watching it never sees
         anything wrong.  **The scraped set is read only when the child announced
-        no metrics server at all** (SDD §12.1's boundary): a metrics server that was
-        announced and could not be asked leaves `_metrics_ready` answering
-        ``None`` while `_metrics_base` is set, and that is *unknown* — not
-        alive, because there is no probe answer for it and the scrape is
-        exactly the signal that stays full through the outage.
+        no metrics server at all** (SDD §12.1's boundary).
+
+        **A metrics server that was announced and could not be asked is
+        unknown, and unknown is alive.**  The scrape is still not a substitute —
+        it is exactly the signal that stays full through the outage — but
+        answering "dead" would tear the tunnel down and mint a new hostname,
+        killing every link already handed out.  That is the same asymmetry the
+        ngrok probe documents: a false dead costs more than a false alive, so
+        the unknown answer stays alive and the caller decides whether to expose
+        a URL it cannot prove.
         """
         probed = self._metrics_ready()
         if probed is not None:
             return probed
         if self._metrics_base is not None:
-            return False
+            return True
         return bool(self._registered)
 
     def _find_binary(self) -> str | None:

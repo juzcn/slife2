@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import inspect
 import json
 import logging
@@ -730,9 +729,15 @@ async def close_server(client: Client) -> None:
     actually doing with a message about the shutdown.  `CancelledError` is a
     `BaseException` and so is deliberately not suppressed here — a cancel that
     arrives *during* the close must still win.
+
+    **Not silently, though.**  A transport that repeatedly cannot close is a
+    leaked child or socket, and this is the only place it would show; the debug
+    line names the exception without replacing the caller's outcome.
     """
-    with contextlib.suppress(Exception):
+    try:
         await client.__aexit__(None, None, None)
+    except Exception as exc:
+        logger.debug("closing an MCP client did not tear down: %s", exc, exc_info=True)
 
 
 def tool_payload(result: Any) -> dict[str, Any]:

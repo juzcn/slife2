@@ -858,14 +858,15 @@ def test_losing_every_connector_reads_as_not_alive(monkeypatch) -> None:
     tunnel.stop()
 
 
-def test_a_failed_probe_is_not_permission_to_trust_the_scrape(monkeypatch) -> None:
+def test_a_failed_probe_is_unknown_and_is_not_read_as_dead(monkeypatch) -> None:
     """A metrics server that was announced and could not answer is *unknown*.
 
     The scraped connector set stays full straight through a QUIC outage — no
-    "Unregistered" line follows a "Serve tunnel error" — so letting it stand in
-    for the answer the probe could not give is exactly how a flapping tunnel
-    reports healthy.  SDD §12.1 declares the scrape only for a build that announces
-    no metrics server, which this is not.
+    "Unregistered" line follows a "Serve tunnel error" — so the scrape is not a
+    substitute for the answer the probe could not give.  But "dead" is not the
+    answer either: the monitor tears down on dead and mints a new hostname,
+    killing every link already handed out.  Unknown stays alive, the same
+    asymmetry the ngrok probe documents (SDD Appendix C).
     """
 
     def refuse(**kwargs):
@@ -876,7 +877,7 @@ def test_a_failed_probe_is_not_permission_to_trust_the_scrape(monkeypatch) -> No
     tunnel._registered = {"0"}
     tunnel._metrics_base = "http://127.0.0.1:20241"
     assert tunnel._metrics_ready() is None
-    assert tunnel._transport_alive() is False, "the scrape is not a substitute"
+    assert tunnel._transport_alive() is True, "unknown is not dead"
 
 
 def test_without_a_metrics_server_the_scraped_set_is_the_answer() -> None:

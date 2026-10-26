@@ -172,8 +172,16 @@ _CHECKOUT_MARKER = "pyproject.toml"
 _PROJECT_NAME = 'name = "slife2"'
 
 
-def in_checkout(directory: Path | None = None) -> bool:
-    """Whether this is a source checkout of slife2 rather than an installation.
+def checkout_root(directory: Path | None = None) -> Path | None:
+    """The checkout *directory* is in, if any — the nearest ancestor whose
+    `pyproject.toml` names this project.
+
+    **Parents are searched**, because a checkout is entered from its root in
+    the common case but not in every one: a command run from
+    `slife2/libs/turn/` is the same checkout, and reading only the working
+    directory sent its data to `~/.slife2` with nothing said (SDD Appendix C).
+    A nearer `pyproject.toml` that names another project does not stop the
+    walk; the marker is what identifies *this* checkout.
 
     Deliberately a *specific* signal — a `pyproject.toml` that names this
     project — rather than "there is a `.git` here" or "there is a `slife2.yaml`
@@ -182,28 +190,39 @@ def in_checkout(directory: Path | None = None) -> bool:
     about this decides where a database is written.
 
     **A marker that cannot be read is not a marker that is not there.**  Only
-    "no such file" answers False; a permissions error, or a directory sitting
-    where the marker should be, raises, because reading either as "not a
-    checkout" would send a checkout's whole data directory to `~/.slife2` with
-    nothing said (SDD Appendix C).
+    "no such file" continues the walk; a permissions error, or a directory
+    sitting where the marker should be, raises, because reading either as "not
+    a checkout" would send a checkout's whole data directory to `~/.slife2`
+    with nothing said.
     """
-    marker = (directory or Path.cwd()) / _CHECKOUT_MARKER
-    try:
-        text = marker.read_text(encoding="utf-8", errors="replace")
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    return _PROJECT_NAME in text
+    start = (directory or Path.cwd()).resolve()
+    for candidate in (start, *start.parents):
+        marker = candidate / _CHECKOUT_MARKER
+        try:
+            text = marker.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if _PROJECT_NAME in text:
+            return candidate
+    return None
+
+
+def in_checkout(directory: Path | None = None) -> bool:
+    """Whether this is a source checkout of slife2 rather than an installation."""
+    return checkout_root(directory) is not None
 
 
 def data_dir() -> Path:
     """The one directory slife2 keeps its files in.
 
-    **A checkout keeps everything beside itself; an installation keeps it under
+    **A checkout keeps everything at its root; an installation keeps it under
     the home directory.**  Working on slife2 means the config, the runtime state
     and the databases are the ones in front of you — the checked-in
     `slife2.yaml` is read, `slife2.libs.store.db/` is a directory you can open, and deleting
-    the checkout deletes the lot.  An installation has no checkout to sit in, so
-    it uses `~/.slife2`, which is per-user and survives whatever directory it
+    the checkout deletes the lot.  The root is the nearest ancestor whose
+    `pyproject.toml` names this project, so a command run from a subdirectory
+    still writes beside the checkout.  An installation has no such root, so it
+    uses `~/.slife2`, which is per-user and survives whatever directory it
     happens to be started from.
 
     `SLIFE2_DATA_DIR` overrides both, and `--data-dir` sets that.
@@ -211,15 +230,18 @@ def data_dir() -> Path:
     **The `~/.slife2` root is a registered fallback**: it is what an installation
     with no checkout gets, so a checkout that is not *recognised* writes its
     databases to the home directory instead of beside itself.  *Gives up:* the
-    checkout's own directory; *does not cover:* an override, which wins; *failure
-    goes:* nowhere visible until a file is missing where it was expected — flag
-    for SDD Appendix C.
+    checkout's own directory; *does not cover:* an override, which wins, and a
+    marker that cannot be read, which raises rather than being read as an
+    installation; *failure goes:* nowhere visible until a file is missing where
+    it was expected.
     """
     override = os.environ.get(DATA_ENV_VAR)
     path = (
         Path(override)
         if override
-        else (Path.cwd() if in_checkout() else Path.home() / ".slife2")
+        # The walk is not paid for when an override names the directory, and a
+        # marker that cannot be read does not refuse a home the caller named.
+        else (checkout_root() or Path.home() / ".slife2")
     )
     path.mkdir(parents=True, exist_ok=True)
     return path

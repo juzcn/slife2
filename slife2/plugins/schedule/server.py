@@ -74,6 +74,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -343,12 +344,18 @@ def ledgers() -> list[ScheduleStore]:
     beside it is a different level: that file was never this build's and its
     skip was designed (SDD §9.4), where this one is a damaged ledger somebody has to
     go and look at (SDD Appendix C).
+
+    **Only the failures that mean "this file cannot be opened" are skipped.**
+    A broad `except Exception` made a bug in `adopt` — or a schema this build
+    wrote and then cannot read — look like an operator's damaged file, and the
+    skip is the one shape that hides the clock's own defect.  A `TypeError` is
+    the clock's and propagates; SQLite's and the filesystem's are the file's.
     """
     found: list[ScheduleStore] = []
     for ledger in schedule_dbs():
         try:
             store = ScheduleStore.adopt(ledger.path, ledger.home)
-        except Exception:  # noqa: BLE001 - one unopenable file is not the clock's
+        except (OSError, sqlite3.DatabaseError):
             logger.error(
                 "%s could not be opened, so nothing in it will be fired until "
                 "an operator fixes it",

@@ -11,6 +11,7 @@ lives.
 from __future__ import annotations
 
 import asyncio
+import logging
 import types
 from pathlib import Path
 from typing import Any
@@ -214,6 +215,28 @@ async def test_a_failure_is_reported_until_the_new_listing_is_recorded() -> None
     assert await reading is True
     assert link.error == "", "the recorded listing is now the last thing it said"
     await link.close()
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_that_fails_is_named_and_does_not_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**A close that raises must not replace the caller's work** — but a
+    transport that repeatedly fails to close is a leaked child or socket, and
+    the debug line is the only place it shows."""
+
+    class Broken:
+        async def __aexit__(self, *args: object) -> None:
+            raise OSError("the socket is gone")
+
+    link = Connection(settings(), transport=lambda _settings: server())
+    link._client = Broken()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.DEBUG, logger="slife2.clients.gateway"):
+        await link.disconnect()
+
+    assert "the link did not tear down" in caplog.text
+    assert "the socket is gone" in caplog.text
 
 
 @pytest.mark.asyncio

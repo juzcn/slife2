@@ -176,12 +176,49 @@ def test_a_failed_load_is_paid_for_once(monkeypatch, tokenizer_resolver) -> None
     monkeypatch.setattr(tiktoken, "get_encoding", refuse)
     monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
     monkeypatch.setattr(tokens, "_encoding", None)
-    monkeypatch.setattr(tokens, "_encoding_failed", False)
+    monkeypatch.setattr(tokens, "_failed_at", None)
 
     for _ in range(3):
         assert tokens.estimate_text_tokens(ENGLISH) > 0
 
-    assert calls == [tokens._ENCODING], "tried once, remembered as unavailable"
+    assert calls == [tokens._ENCODING], "tried once inside the cooldown"
+
+
+def test_a_transient_failure_is_retried_after_the_cooldown(
+    monkeypatch, tokenizer_resolver
+) -> None:
+    """**One outage is not the process's whole life.**  The failure is remembered
+    for `_RETRY_AFTER` so an offline machine does not fetch per message, but a
+    machine that comes back online must get the real tokenizer again."""
+    import tiktoken
+
+    class Encoding:
+        def encode_ordinary(self, text: str) -> list[int]:
+            return [1, 2]
+
+    calls: list[str] = []
+
+    def refuse_once(name: str):
+        calls.append(name)
+        if len(calls) == 1:
+            raise RuntimeError("no network here")
+        return Encoding()
+
+    monkeypatch.setattr(tiktoken, "get_encoding", refuse_once)
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failed_at", None)
+
+    assert tokens.estimate_text_tokens(ENGLISH) > 0, "the fallback answered"
+    # Move the recorded failure past the cooldown without sleeping.
+    monkeypatch.setattr(
+        tokens,
+        "_failed_at",
+        tokens.time.monotonic() - tokens._RETRY_AFTER - 1,
+    )
+    assert tokens.estimate_text_tokens(ENGLISH) == 2
+
+    assert calls == [tokens._ENCODING, tokens._ENCODING], "retried after the cooldown"
 
 
 def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
@@ -200,10 +237,10 @@ def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
             sys.executable,
             "-I",
             "-c",
-            "import slife2.libs.turn.tokens as t; print(t._encoding, t._encoding_failed)",
+            "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)",
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert result.stdout.strip() == "None False"
+    assert result.stdout.strip() == "None None"

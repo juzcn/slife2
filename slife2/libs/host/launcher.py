@@ -273,9 +273,25 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
         return asyncio.run(
             _probe_async(spec, _T.timeouts.ready.probe if timeout is None else timeout)
         )
-    except Exception as exc:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
+    except OSError as exc:
+        # A refused connection, a timeout, a link that died mid-handshake: the
+        # peer is not up, which is the ordinary answer.  It stays at DEBUG so a
+        # machine with a few servers down does not log a warning per start.
         logger.debug(
-            "%s: the probe threw, so the peer is not up: %s",
+            "%s: the probe could not reach the peer, so it is not up: %s",
+            spec.url,
+            exc,
+            exc_info=True,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
+        # **A probe that threw for another reason is the probe's own failure.**
+        # The registered failure channel is "the probe's log"; at DEBUG it would
+        # be invisible, and `_bring_up` would spawn or report a conflict on a
+        # negative nobody can trace.  The peer is still treated as not up — the
+        # safe answer — but the defect is audible.
+        logger.warning(
+            "%s: the probe itself failed, so the peer is treated as not up: %s",
             spec.url,
             exc,
             exc_info=True,

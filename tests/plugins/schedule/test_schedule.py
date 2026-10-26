@@ -1472,6 +1472,22 @@ async def test_a_ledger_that_cannot_be_opened_is_skipped_not_fatal() -> None:
     assert [store.agent for store in schedule_server.ledgers()] == [OTHER]
 
 
+async def test_a_programming_error_in_the_walk_is_not_read_as_an_unopenable_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Only a file's failures are the file's.**  The broad `except Exception`
+    turned a bug in `adopt` into an operator-facing "could not be opened" and
+    skipped it — the one shape that hides the clock's own defect."""
+    paths.schedule_db("jack").write_bytes(b"not a sqlite database")
+
+    def bug(cls, path, home):
+        raise TypeError("a bug, not a bad file")
+
+    monkeypatch.setattr(schedule_server.ScheduleStore, "adopt", classmethod(bug))
+    with pytest.raises(TypeError, match="a bug, not a bad file"):
+        schedule_server.ledgers()
+
+
 # ── a dispatch whose peer will not answer ────────────────────────────────────
 
 

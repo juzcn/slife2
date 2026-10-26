@@ -18,6 +18,7 @@ a lane is a fact about a file rather than a chance to grade its tests.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import subprocess
 import sys
@@ -572,6 +573,39 @@ async def test_probe_refuses_to_run_inside_an_event_loop() -> None:
             SPEC,
             timeout=0.2,  # timeouts: the value this test is built around, not a budget
         )  # timeouts: the value this test is built around, not a budget
+
+
+def test_a_probe_that_failed_as_code_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A bug in the probe is not a peer that is down.**  The registered failure
+    channel is the probe's log; at DEBUG it is invisible at the default level,
+    and `_bring_up` acts on the negative."""
+
+    async def broken(spec, timeout):
+        raise TypeError("a bug in identifies")
+
+    monkeypatch.setattr(launcher, "_probe_async", broken)
+    with caplog.at_level(logging.WARNING, logger="slife2.libs.host.launcher"):
+        assert launcher.probe(SPEC, timeout=0.1) is False  # timeouts: the test's own
+
+    assert "probe itself failed" in caplog.text
+
+
+def test_a_probe_that_could_not_reach_the_peer_stays_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ordinary not-up case is not a warning: a few servers down would
+    otherwise log one per start."""
+
+    async def refused(spec, timeout):
+        raise ConnectionRefusedError("nothing is listening")
+
+    monkeypatch.setattr(launcher, "_probe_async", refused)
+    with caplog.at_level(logging.DEBUG, logger="slife2.libs.host.launcher"):
+        assert launcher.probe(SPEC, timeout=0.1) is False  # timeouts: the test's own
+
+    assert not any(one.levelno >= logging.WARNING for one in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -658,12 +658,25 @@ class Connection:
             self._on_failed(exc)
 
     async def disconnect(self) -> None:
-        """Drop the connection, keeping the configuration and the error."""
+        """Drop the connection, keeping the configuration and the error.
+
+        **A teardown that fails must not replace the caller's work**, so the
+        failure is suppressed — but not silently: a transport that repeatedly
+        fails to close is a leaked child or socket, and the debug line is the
+        only trace it leaves.  A cancellation still wins (`BaseException`).
+        """
         client, self._client = self._client, None
         self._ready = False
         if client is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await client.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.debug(
+                    "%s: the link did not tear down: %s",
+                    self.settings.name,
+                    exc,
+                    exc_info=True,
+                )
 
     # --- a call --------------------------------------------------------------
 

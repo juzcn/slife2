@@ -28,9 +28,11 @@ so a machine that is offline, air-gapped or behind a proxy that blocks it has no
 tokenizer to use — and this project's whole point is that its endpoints are
 DeepSeek, Qwen, Ollama and whatever gateway the operator points at, most of
 which run perfectly well with no internet at all.  So a failure to load is
-**not** an error here: it is remembered once per process, logged once, and the
-script measure answers from then on.  That is also why nothing resolves at
-import — a backend process that never sizes a conversation never touches this.
+**not** an error here: it is logged, remembered for a cooldown, and the script
+measure answers meanwhile.  The retry matters because one transient outage
+should not degrade a long-lived process forever.  That is also why nothing
+resolves at import — a backend process that never sizes a conversation never
+touches this.
 
 **No vocabulary is exact for a non-OpenAI endpoint**, and this one is not
 claimed to be: a Qwen or DeepSeek model has its own.  What makes `o200k_base`
@@ -49,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -59,11 +62,16 @@ logger = logging.getLogger(__name__)
 #: use, and the name is the whole of what a reader needs to check that.
 _ENCODING = "o200k_base"
 
-#: Resolved once per process, on the first estimate.  `None` with `_ENCODING_OK`
-#: false means "not tried yet"; `None` with it true means "tried and could not be
-#: had", which is the state an offline machine stays in for its whole life.
+#: Resolved once per process, on the first estimate.  `None` means "not resolved
+#: yet"; `_failed_at` says when the last attempt failed, which is what the retry
+#: cooldown is measured from.
 _encoding: Any = None
-_encoding_failed = False
+_failed_at: float | None = None
+
+#: How long a failed fetch is remembered before the next attempt.  Long enough
+#: that an offline machine does not pay a network timeout per turn; short enough
+#: that a transient outage does not degrade this process for its whole life.
+_RETRY_AFTER = 600.0
 
 
 def _openai_encoding() -> Any:
@@ -73,17 +81,26 @@ def _openai_encoding() -> Any:
     Resolved lazily and never at import: the vocabulary is a few megabytes
     `tiktoken` downloads the first time anybody asks, and a process that never
     sizes a conversation — a model backend, the TUI, most plugins — should not
-    pay for one at all.  A failure is remembered as firmly as a success, so a
-    machine without it pays the attempt once rather than once per turn.
+    pay for one at all.
+
+    **A failure is remembered, but not forever.**  Retrying on every message
+    would be one failed fetch per message of every conversation; remembering it
+    for the process's whole life would turn one transient network error into a
+    permanent 25–60% overestimate.  The attempt is retried after
+    `_RETRY_AFTER`, so an offline machine pays once every ten minutes and a
+    machine that comes back online gets the real tokenizer on its next try.
     """
-    global _encoding, _encoding_failed
-    if _encoding is None and not _encoding_failed:
+    global _encoding, _failed_at
+    if _encoding is None:
+        now = time.monotonic()
+        if _failed_at is not None and now - _failed_at < _RETRY_AFTER:
+            return None
         try:
             import tiktoken
 
             _encoding = tiktoken.get_encoding(_ENCODING)
         except Exception as exc:  # noqa: BLE001 — any failure means "no vocabulary"
-            _encoding_failed = True
+            _failed_at = now
             logger.warning(
                 "tokenizer_unavailable encoding=%s error=%s — falling back to the "
                 "script measure, which runs high on both scripts",

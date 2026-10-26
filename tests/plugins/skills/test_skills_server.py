@@ -321,8 +321,14 @@ def test_an_unreadable_manifest_is_a_row_that_says_so(
     skill(isolated_runtime, "one")
     manifest = isolated_runtime / "skills" / "one" / "SKILL.md"
 
+    real_read_text = Path.read_text
+
     def refuse(self: Path, *args: object, **kwargs: object) -> str:
-        raise OSError("cannot read")
+        # Only this file: `data_dir` now walks ancestor manifests, and a
+        # blanket refusal would make the checkout marker unreadable too.
+        if self == manifest:
+            raise OSError("cannot read")
+        return real_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", refuse)
     rows = catalogue(default_config().skills)

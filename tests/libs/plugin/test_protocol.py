@@ -31,6 +31,7 @@ from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.protocol import (
     RETURNS,
+    close_server,
     house_server,
     identifies,
     open_server,
@@ -51,6 +52,24 @@ class CountingClient:
     async def list_tools(self) -> list[SimpleNamespace]:
         self.list_calls += 1
         return [SimpleNamespace(name=n) for n in self.tools]
+
+
+@pytest.mark.asyncio
+async def test_close_server_names_a_teardown_that_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**Suppressed is not silent.**  The close must not replace the caller's
+    outcome, but a transport that repeatedly cannot close is a leaked child or
+    socket, and the debug line is the only trace."""
+
+    class Broken:
+        async def __aexit__(self, *args: object) -> None:
+            raise OSError("gone")
+
+    with caplog.at_level(logging.DEBUG, logger="slife2.libs.plugin.protocol"):
+        await close_server(Broken())  # type: ignore[arg-type]
+
+    assert "did not tear down" in caplog.text
 
 
 @pytest.mark.asyncio

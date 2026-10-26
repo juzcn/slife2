@@ -2419,8 +2419,10 @@ A name is not a property of a directory. `--agent jack --data-dir D` names the
 agent and says where its files go. The name is claimed once per machine. Which
 directory a name used previously is not remembered.
 
-The default location is the checkout when running from a checkout, otherwise
-`~/.slife2`.
+The default location is the checkout when running from one — the nearest
+ancestor whose `pyproject.toml` names this project, so a command run from a
+subdirectory still writes beside the checkout — otherwise `~/.slife2`. A marker
+that cannot be read is refused rather than read as an installation.
 
 ### 11.4 Runtime directory
 
@@ -2960,7 +2962,7 @@ The four shapes an undeclared fallback takes:
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
 | The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
-| Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
+| Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
 | A turn fails with an image attached | Drop every image from the live list, keeping the note | The bytes in the live conversation; a pasted image may have no copy this process can recover | An image attached after the repair, which is an ordinary attachment; the record, which never had the pixels | The note, the dropped-image sentence, and the original error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
@@ -2970,7 +2972,7 @@ The four shapes an undeclared fallback takes:
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
-| An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | Bad rows, handled per pass | The error naming the path |
+| An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | A programming error, which propagates instead of being read as a damaged file; bad rows, handled per pass | The error naming the path |
 | A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
 | A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start rather than leave a live client uncounted | A warning naming the path |
@@ -2978,12 +2980,12 @@ The four shapes an undeclared fallback takes:
 | A subagent record cannot be read | Treat it as not a fork | The shared work directory a fork uses | A record that parses | A warning naming the record |
 | A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
-| The checkout marker is absent | Use `~/.slife2` | The checkout's data directory | An override, which wins | A missing database or config |
+| No ancestor names this checkout | Use `~/.slife2` | The checkout's data directory | An override, which wins; a marker that cannot be read, which raises | A missing database or config |
 | The default CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, which is refused when not found; a default found nowhere | The resolved path in `tunnel_status` |
 | A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive and its URL as reachable | Telling a broken probe from an outage | A transport the provider proves dead | A debug line and `tunnel_status` |
 | A progress line cannot be read | Drop it; default counts to zero | The difference between unmeasured and zero | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
 | A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
-| A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server | The probe's log and the launcher's conflict report |
+| A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server; a code-level failure, warned rather than read as a dead peer | A warning for a code-level failure, debug for a connection failure, and the launcher's conflict report |
 | `taskkill` could not run | Poll the pid and report | Why the force failed | A process that survives the poll | The pid the caller then polls |
 | A tool answer is not JSON-serialisable | Render a string form of the value (`default=str`) | The object's exact shape | An answer JSON can encode, or `None` | The rendered text in the record |
 | A lone surrogate reaches tool text | Escape it | Nothing the model needs | Text that is not a surrogate | Nothing; the request survives |
@@ -2992,7 +2994,7 @@ The four shapes an undeclared fallback takes:
 | A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
 | A trim answer cannot be read | Return `{}`; `trim_answer` refuses it | The trim and the names the model would have seen | A call that could not be made, which raises and the caller reports | A refusal in the server log |
-| Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | Nothing; a teardown must not replace the caller's work |
+| Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | A debug line naming the link; a teardown must not replace the caller's work |
 | The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, or a `.corrupt` that already exists, where mutations refuse and both files stay | A warning naming the path, and the preserved file |
