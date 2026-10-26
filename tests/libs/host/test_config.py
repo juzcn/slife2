@@ -44,14 +44,19 @@ providers:
         max_tokens: 4000
         temperature: 0.3
       - model: small
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: small-emb
 default: local/small
 """
 
 
-#: The smallest valid `providers:` section.  **A file without one is refused**
-#: (SDD §4.1), so a test about another section gets this prepended; none of
-#: them asserts on it, and its one model is named so it cannot be mistaken for
-#: a provider a test meant to write.
+#: The smallest valid `providers:` and `embeddings:` sections.  **A file
+#: without either is refused** (SDD §4.1), so a test about another section gets
+#: these prepended; none of them asserts on them, and their one row each is
+#: named so it cannot be mistaken for a section a test meant to write.
 A_MINIMAL_PROVIDER = """
 providers:
   test:
@@ -61,18 +66,28 @@ providers:
       - model: test-model
 """
 
+A_MINIMAL_EMBEDDINGS = """
+embeddings:
+  providers:
+    test:
+      base_url: http://127.0.0.1:17347/v1
+      model: test-emb
+"""
 
-def write(tmp_path, text: str, *, providers: bool = True):
-    """Write *text* where the loader looks, with the section every file needs.
 
-    **`providers:` is prepended unless the text already writes one**, because
-    the loader refuses a file without it and a test about `tool_load:` or
-    `servers:` would otherwise be a test about that refusal.  Pass
-    `providers=False` when the file's own subject is the absence of the
-    section, or the shape of the top level.
+def write(tmp_path, text: str, *, required: bool = True):
+    """Write *text* where the loader looks, with the sections every file needs.
+
+    **A missing required section is prepended**, because the loader refuses a
+    file without one and a test about `tool_load:` or `servers:` would otherwise
+    be a test about that refusal.  Pass `required=False` when the file's own
+    subject is the absence of a section, or the shape of the top level.
     """
-    if providers and not re.search(r"^providers:", text, re.MULTILINE):
-        text = A_MINIMAL_PROVIDER + text
+    if required:
+        if not re.search(r"^providers:", text, re.MULTILINE):
+            text = A_MINIMAL_PROVIDER + text
+        if not re.search(r"^embeddings:", text, re.MULTILINE):
+            text = A_MINIMAL_EMBEDDINGS + text
     path = tmp_path / "slife2.yaml"
     path.write_text(text, encoding="utf-8")
     return path
@@ -593,7 +608,24 @@ def test_a_file_with_no_providers_is_refused(tmp_path) -> None:
     """
     for text in ("providers: {}\n", "# nothing here\n"):
         with pytest.raises(ConfigError, match="at least one provider"):
-            load(write(tmp_path, text, providers=False))
+            load(write(tmp_path, text, required=False))
+
+
+def test_a_file_with_no_embeddings_is_refused(tmp_path) -> None:
+    """**There is no built-in embedder to run on** (SDD §4.1).
+
+    Leaving the section out used to run the built-in local embedder, at an
+    address the file never named and on a machine that may not serve it.  A
+    store whose turns cannot be searched semantically is not a slife2 home, so
+    the section is required exactly as `providers:` is.
+    """
+    with pytest.raises(ConfigError, match="embeddings: is required"):
+        load(write(tmp_path, A_MINIMAL_PROVIDER, required=False))
+
+    # And a section that is there but names no provider is refused for the
+    # reason the code comment gives: there is no mode in which it would work.
+    with pytest.raises(ConfigError, match="at least one provider"):
+        load(write(tmp_path, "embeddings: {}\n", required=False))
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:
@@ -728,7 +760,12 @@ def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
         "  elsewhere:\n"
         "    api: openai-completions\n"
         "    base_url: https://other.test/v1\n"
-        "    models: [{model: m}]\n",
+        "    models: [{model: m}]\n"
+        "embeddings:\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://127.0.0.1:17347/v1\n"
+        "      model: big-emb\n",
         encoding="utf-8",
     )
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
@@ -744,7 +781,7 @@ def test_malformed_yaml_is_fatal(tmp_path) -> None:
 
 def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
     with pytest.raises(ConfigError, match="mapping"):
-        load(write(tmp_path, "- one\n- two\n", providers=False))
+        load(write(tmp_path, "- one\n- two\n", required=False))
 
 
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
@@ -1718,6 +1755,7 @@ def test_a_default_of_the_wrong_kind_is_refused_rather_than_replaced(tmp_path) -
     path = tmp_path / "slife2.yaml"
     path.write_text(
         A_MINIMAL_PROVIDER
+        + A_MINIMAL_EMBEDDINGS
         + """
 media:
   providers:
@@ -1740,6 +1778,7 @@ media:
     # the registration is for.
     path.write_text(
         A_MINIMAL_PROVIDER
+        + A_MINIMAL_EMBEDDINGS
         + """
 media:
   providers:

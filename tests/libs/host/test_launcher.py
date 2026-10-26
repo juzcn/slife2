@@ -407,6 +407,9 @@ providers:
   b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n}]}
   c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o}]}
   d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p}]}
+embeddings:
+  providers:
+    local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}
 default: a/m
 """,
         encoding="utf-8",
@@ -430,7 +433,8 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
     """A server for a protocol nobody uses holds nobody's key."""
     path = tmp_path / "one.yaml"
     path.write_text(
-        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}\n",
+        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}\n"
+        "embeddings:\n  providers:\n    local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}\n",
         encoding="utf-8",
     )
     names = [spec.name for spec in launcher.specs(load(path))]

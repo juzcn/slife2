@@ -42,6 +42,11 @@ providers:
         name: 'Big one'
         context_window: 100000
         max_tokens: 4000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 
 # ── Other people's servers ──────────────────────────────────────────────────
@@ -78,15 +83,20 @@ def added(path, name: str, section: str = "mcp") -> str:
     return block.split("\n# ", 1)[0]
 
 
-#: The one section a file cannot leave out (SDD §4.1).  The texts below are
-#: about comments and entries, and the writer judges every result through the
-#: loader — so a file it edits has to be a file the loader accepts.
-PROVIDERS = """\
+#: The sections a file cannot leave out (SDD §4.1).  The texts below are about
+#: comments and entries, and the writer judges every result through the loader
+#: — so a file it edits has to be a file the loader accepts.
+REQUIRED = """\
 providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
     models: [{model: big}]
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 """
 
 
@@ -170,7 +180,7 @@ def test_a_write_leaves_the_entry_below_it_its_comment(tmp_path) -> None:
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        PROVIDERS + "mcp:\n"
+        REQUIRED + "mcp:\n"
         "  # Describes slow-one, which is written again.\n"
         "  slow-one:\n"
         "    command: npx\n"
@@ -307,7 +317,7 @@ def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        PROVIDERS + "# ── REST APIs ──\n"
+        REQUIRED + "# ── REST APIs ──\n"
         "rest-api:\n"
         "  # Documents the entry, and the entry is going.\n"
         "  registry:\n"
@@ -353,7 +363,7 @@ def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        PROVIDERS + "mcp:\n"
+        REQUIRED + "mcp:\n"
         "  # Describes slow-one, and slow-one is going.\n"
         "  slow-one:\n"
         "    command: npx\n"
@@ -411,7 +421,7 @@ def test_an_entry_that_ends_on_a_sequence_keeps_the_next_comment(tmp_path) -> No
     """
     path = tmp_path / "slife2.yaml"
     sequence_ending = (
-        PROVIDERS + "mcp:\n"
+        REQUIRED + "mcp:\n"
         "  # Describes slow-one, which is written again.\n"
         "  slow-one:\n"
         "    command: npx\n"

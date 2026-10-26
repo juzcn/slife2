@@ -2478,6 +2478,11 @@ providers:
     api_key: ${SLIFE2_TEST_KEY:-none}
     models:
       - model: big
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 """
 
@@ -2542,6 +2547,11 @@ providers:
     api_key: ${SLIFE2_TEST_KEY:-none}
     models:
       - model: big
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: oai/big
 """
 

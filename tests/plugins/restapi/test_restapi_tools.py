@@ -36,6 +36,11 @@ providers:
       - model: big
         context_window: 100000
         max_tokens: 4000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 
 # ── REST APIs ───────────────────────────────────────────────────────────────

@@ -2348,9 +2348,10 @@ def default_config() -> Config:
     """The base every file is built on: what a section the file leaves out says.
 
     **Not a configuration a home may run on.**  `load` refuses a missing file,
-    and `_build` refuses a file without `providers:` — the one section this base
-    does not supply.  The provider row below exists for the tests that inject a
-    config and need a model to resolve; no file ever inherits it.
+    and `_build` refuses a file without `providers:` or `embeddings:` — the two
+    sections this base does not supply.  The provider and embedder rows below
+    exist for the tests that inject a config and need a model to resolve; no
+    file ever inherits them.
 
     Deliberately a single OpenAI-compatible provider: it is the shape the
     project is developed against, and a second provider nobody has credentials
@@ -2818,7 +2819,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         context=_context(raw.get("context"), base.context),
         tool_load=_tool_load(raw.get("tool_load"), base.tool_load),
         tool_result=_tool_result(raw.get("tool_result"), base.tool_result),
-        embeddings=_embeddings(raw.get("embeddings"), base.embeddings),
+        embeddings=_embeddings(raw.get("embeddings")),
         media=_media(raw.get("media"), base.media),
         file_tunnel=_file_tunnel(raw.get("file-tunnel"), base.file_tunnel),
         peer_agent=_a2a(
@@ -3329,15 +3330,16 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     )
 
 
-def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
-    """The `embeddings:` section, defaulted.
+def _embeddings(raw: Any) -> EmbeddingsSettings:
+    """The `embeddings:` section, which a file must have.
 
-    **Absent means the default, not an error.**  A config file written before
-    embeddings existed still loads, and a fresh checkout runs — the alternative
-    would be a migration in a different coat, which is the thing this project
-    does not have.  The requirement is enforced where it is real: a section that
-    *is* there may not be empty, because there is no configuration in which a
-    store runs without an embedding model.
+    **Required, and there is no built-in one.**  A file that left the section
+    out used to run the built-in local embedder — bge-m3 on `127.0.0.1:17347`,
+    an endpoint the file never named and the machine may not have.  The section
+    is the only place a vector's identity comes from (the address, the model,
+    the width), so it is stated like the providers are (SDD §4.1).  A section
+    that *is* there may not be empty, for the same reason: there is no
+    configuration in which a store runs without an embedding model.
 
     **An `active_model` this config does not define is refused, naming the
     providers that do exist.**  It used to fall back to the first provider, so
@@ -3348,7 +3350,11 @@ def _embeddings(raw: Any, base: EmbeddingsSettings) -> EmbeddingsSettings:
     not a substitution.
     """
     if raw is None:
-        return base
+        raise ConfigError(
+            "embeddings: is required — slife2 stores vectors from the provider "
+            "this section names, and there is no built-in embedder to run on "
+            "without one"
+        )
 
     section = _mapping(raw, "embeddings")
     providers_raw = _mapping(section.get("providers"), "embeddings.providers")

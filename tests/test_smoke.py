@@ -122,6 +122,11 @@ providers:
       - model: big
         context_window: 100000
         max_tokens: 4000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: nosuch/model
 """
 
@@ -991,6 +996,11 @@ providers:
         context_window: 1000
       - model: big
         context_window: 200000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: p/small
 """,
         encoding="utf-8",
@@ -1015,6 +1025,11 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: p/m
 """,
         encoding="utf-8",

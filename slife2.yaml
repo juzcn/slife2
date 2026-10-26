@@ -1,8 +1,8 @@
 # slife2.yaml — the machine's configuration.
 #
 # One file, read by the launcher and every server. It must exist, be readable,
-# and name at least one provider; a missing, unreadable or provider-less one
-# stops the start and names the mistake.
+# and name its providers and embedder; a file that does not stops the start
+# and names the mistake.
 #
 # Keep secrets out. `${VAR}`, `${VAR:-default}` and `keyring:<service>/<key>`
 # are resolved from the shell environment, credstore or the OS keyring.

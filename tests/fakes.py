@@ -549,11 +549,11 @@ def upstream_server() -> FastMCP:
     return server
 
 
-#: The `slife2.yaml` every test home starts with.  **`providers:` is the one
-#: section a file does not inherit** (SDD §4.1), so a home needs at least this;
-#: everything else is left out and takes its built-in default.  The provider is
-#: `default_config()`'s, so a test that reads this file gets the configuration
-#: the suite had before the file was required.
+#: The `slife2.yaml` every test home starts with.  **`providers:` and
+#: `embeddings:` are the sections a file does not inherit** (SDD §4.1), so a
+#: home needs at least these; everything else is left out and takes its built-in
+#: default.  Both rows are `default_config()`'s, so a test that reads this file
+#: gets the configuration the suite had before the sections were required.
 A_HOME_CONFIG = """\
 providers:
   deepseek:
@@ -569,6 +569,12 @@ providers:
         max_tokens: 384000
         temperature: 0.7
         top_p: 1.0
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: bge-m3
+      api_key: local
 """
 
 

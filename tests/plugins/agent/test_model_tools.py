@@ -56,6 +56,11 @@ providers:
         context_window: 100000
       - model: small
         name: Small
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 """
 
@@ -304,6 +309,11 @@ providers:
     api_key: ${ASIDE_KEY}
     models:
       - model: only
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 """
     write_config(isolated_runtime, two)
@@ -333,6 +343,11 @@ providers:
     api_key: ${LOCAL_KEY}
     models:
       - model: only
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 """
     write_config(isolated_runtime, one)
     before = written(isolated_runtime)
@@ -577,6 +592,11 @@ providers:
     models:
       - model: big
         name: Big
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 default: local/big
 """
 

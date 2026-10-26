@@ -435,9 +435,9 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 配置文件是数据目录中的 `slife2.yaml`。从代码检出运行时，数据目录就是检出目录；
 否则是 `~/.slife2`。使用 `--data-dir DIR` 或 `SLIFE2_DATA_DIR` 覆盖它。
 
-配置文件是必需的，并且必须至少写下一个 provider（`providers:` 段）。缺少配置
-文件时，启动会以一行错误停止，并点名搜索过的目录；文件存在但无法加载时同样如此，
-并点名文件和错误原因。
+配置文件是必需的，并且必须至少写下一个 provider（`providers:` 段）和一个
+embedding provider（`embeddings:` 段）。缺少配置文件时，启动会以一行错误停止，
+并点名搜索过的目录；文件存在但无法加载时同样如此，并点名文件和错误原因。
 
 安装器可能会在已有配置旁边写入 `slife2-default.yaml` 作为参考。slife2 只读取
 `slife2.yaml`；参考文件供人比较和合并。

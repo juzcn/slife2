@@ -43,6 +43,11 @@ providers:
     api: openai-completions
     base_url: https://example.test/v1
     models: [{model: big}]
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
 cli:
   yt-dlp:
     command: yt-dlp

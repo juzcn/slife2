@@ -2946,6 +2946,11 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
         "    api: openai-completions\n"
         "    base_url: https://example.test/v1\n"
         "    models: [{model: big}]\n"
+        "embeddings:\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://127.0.0.1:17347/v1\n"
+        "      model: big-emb\n"
         "agent:\n  system_prompt: not-here.j2\n",
         encoding="utf-8",
     )
