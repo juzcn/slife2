@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import logging
 import os
 import subprocess
 import sys
@@ -68,6 +69,8 @@ from slife2.libs.host.runtime import (
     write_claim,
 )
 from slife2.libs.plugin.protocol import close_server, identifies, open_server
+
+logger = logging.getLogger(__name__)
 
 #: The tool every model server answers to, and how they are named.  One tool
 #: and one prefix for all of them, because a backend is a backend whatever
@@ -269,7 +272,13 @@ def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
         return asyncio.run(
             _probe_async(spec, _T.timeouts.ready.probe if timeout is None else timeout)
         )
-    except Exception:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
+    except Exception as exc:  # noqa: BLE001 - a probe answers yes or no; a peer that threw is not up
+        logger.debug(
+            "%s: the probe threw, so the peer is not up: %s",
+            spec.url,
+            exc,
+            exc_info=True,
+        )
         return False
 
 

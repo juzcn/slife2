@@ -24,8 +24,11 @@ once, in :meth:`ToolCall.to_wire`.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
+
+logger = logging.getLogger(__name__)
 
 #: The four roles the loop and both providers agree on.  `tool` carries a tool's
 #: result back to the model, addressed by `tool_call_id`.
@@ -221,8 +224,29 @@ class Message:
         if content == "" and tool_calls:
             content = None
 
+        role = raw.get("role")
+        if role not in ("system", "user", "assistant", "tool"):
+            # **A message with no readable role is damage, and "user" is the
+            # worst default to give it silently**: it puts words in the
+            # person's mouth.  The shape still says which arm it belongs to —
+            # a tool result addresses a call, an assistant turn makes one — so
+            # the message keeps its place, and the warning says what was
+            # inferred (SDD Appendix C).
+            role = (
+                "tool"
+                if raw.get("tool_call_id")
+                else "assistant"
+                if tool_calls
+                else "user"
+            )
+            logger.warning(
+                "a message carried no readable role (%r); reading it as %r",
+                raw.get("role"),
+                role,
+            )
+
         return cls(
-            role=cast(Role, raw.get("role", "user")),
+            role=cast(Role, role),
             content=content,
             thinking=str(raw.get("thinking") or ""),
             tool_calls=tool_calls,

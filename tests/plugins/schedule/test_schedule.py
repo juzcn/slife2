@@ -156,6 +156,9 @@ class Tasks:
 
     client: Client | None = None
     refuse: bool = False
+    #: Answer a start without a `task_id` — the shape a peer this build cannot
+    #: read answers with, and the one the ledger must not leave `pending`.
+    no_id: bool = False
     status: str = TASK_RUNNING
     started: list[dict[str, Any]] = field(default_factory=list)
     asked: list[str] = field(default_factory=list)
@@ -186,13 +189,15 @@ class Tasks:
                     "home": str(paths.home()),
                 }
             )
-            return {
-                "task_id": f"agent-task:{name}",
+            answer = {
                 "name": name,
                 "status": TASK_RUNNING,
                 "started_at": "",
                 "finished_at": "",
             }
+            if not self.no_id:
+                answer["task_id"] = f"agent-task:{name}"
+            return answer
 
         @self.mcp.tool
         async def agent_task_list(ctx: Context) -> dict[str, Any]:
@@ -839,6 +844,25 @@ async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(
     run = ledger().newest("daily")
     assert run is not None and run.status == FAILED
     assert "already running" in run.error
+
+
+async def test_a_start_whose_id_cannot_be_read_closes_the_run(tasks: Tasks) -> None:
+    """**A task the plugin cannot name is a run nothing can resolve.**
+
+    The call succeeded, so the work may still run; what cannot happen is a
+    `pending` row with an empty `agent_task_id` — `in_flight` skips it and the
+    poll has nothing to ask about.  It takes the failed dispatch's ending: the
+    run is closed with the reason, and the caller is told.
+    """
+    tasks.no_id = True
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        with pytest.raises(ToolError, match="could not be followed"):
+            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    run = ledger().newest("daily")
+    assert run is not None and run.status == FAILED
+    assert "no task id" in run.error
 
 
 async def test_the_work_ending_closes_the_run_at_the_moment_it_ended(

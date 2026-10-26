@@ -271,6 +271,27 @@ def test_a_fork_shares_its_makers_work_directory(
     )
 
 
+def test_a_damaged_fork_record_is_named_not_silently_read(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A record that cannot be read is not a record that says "not a fork".**
+
+    The directory is the subagent's own either way, which is the safe answer
+    for a live subagent; what the warning adds is that a fork whose record was
+    lost would otherwise write into its own directory with nothing said.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    researcher = agent_dir("jack", "researcher")
+    subagent_file("jack", "researcher").write_text(
+        "fork: [unclosed\n", encoding="utf-8"
+    )
+
+    with caplog.at_level("WARNING"):
+        assert work_dir("jack", "researcher") == researcher
+
+    assert any("not a fork" in one.getMessage() for one in caplog.records)
+
+
 def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

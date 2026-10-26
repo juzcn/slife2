@@ -338,9 +338,17 @@ class IlinkClient:
             return {"expired": True}
         if state == "scaned_but_redirect":
             redirect_host = status.get("redirect_host")
-            return (
-                {"redirect_base": f"https://{redirect_host}"} if redirect_host else {}
-            )
+            if not redirect_host:
+                # **The state says the code was scanned and names the host to
+                # follow it on.**  Answering `{}` here is indistinguishable from
+                # "still waiting", so the watch would poll the original host
+                # until its deadline and then report that nobody scanned — the
+                # wrong verdict for a login that did happen.  A damaged answer
+                # fails as itself.
+                raise UnreadableAnswer(
+                    "the bridge reported the code scanned but named no redirect host"
+                )
+            return {"redirect_base": f"https://{redirect_host}"}
         if state == "scaned":
             return {"scanned": True, "verify_code_accepted": bool(verify_code)}
         if state in ("need_verifycode", "verify_code_blocked") or status.get(

@@ -66,6 +66,27 @@ def _answer(turns: list[dict[str, Any]], task_id: str) -> str | None:
     return None
 
 
+def _unreadable_marker(turns: list[dict[str, Any]]) -> bool:
+    """Whether a result marker was delivered that this build cannot read.
+
+    **A marker that will not parse is not a marker that is absent.**  `_answer`
+    skips a malformed one, because it may belong to another task or to a newer
+    build; when no answer is found, this is what tells the probe's "not
+    delivered" verdict apart from "delivered, and unreadable".
+    """
+    decoder = json.JSONDecoder()
+    for turn in turns:
+        for message in turn.get("messages") or []:
+            text = message_text(message.get("content"))
+            if not text.startswith(MARKER_PREFIX):
+                continue
+            try:
+                decoder.raw_decode(text[len(MARKER_PREFIX) :])
+            except ValueError:
+                return True
+    return False
+
+
 async def probe_tui(
     config: Config,
     agent: str,
@@ -153,6 +174,11 @@ async def probe_tui(
             if text is not None:
                 return ProbeResult(text=text, task_id=task_id)
             if loop.time() >= deadline:
+                if _unreadable_marker(turns):
+                    raise ProbeError(
+                        f"the agent task {name!r} finished, but a result marker "
+                        f"in {agent!r}'s transcript could not be read"
+                    )
                 raise ProbeError(
                     f"the agent task {name!r} finished, but its answer was not "
                     f"delivered to {agent!r} within {timeout:.0f}s "

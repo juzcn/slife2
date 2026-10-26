@@ -2445,12 +2445,11 @@ def _ensure_windows_selector_loop() -> None:
     asyncio-subprocess tests.  Scoped to the plugin entry.
     """
     if sys.platform == "win32":  # pragma: no cover — Windows-only
-        try:
-            asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy(),
-            )
-        except (ValueError, AttributeError):
-            pass
+        # **No catch.**  A policy that cannot be set is a mesh that cannot run
+        # (the Proactor loop has no `add_reader`), so the process fails here,
+        # naming the capability, rather than later on a connection error that
+        # names neither the cause nor the remedy.
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 #: What the tools say, **with the words that differ per network left as holes**.

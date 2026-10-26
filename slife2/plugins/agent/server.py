@@ -1478,7 +1478,16 @@ def build_server(
                     continue
                 try:
                     arguments = json.loads(function.get("arguments") or "{}")
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as exc:
+                    # **The annotation is a field, and the turn is the record.**
+                    # The tool already answered `captured`; failing the save
+                    # over a damaged argument would lose the turn the
+                    # annotation belongs to.  The damage is named instead.
+                    logger.warning(
+                        "a turn_summarize call's arguments could not be read; "
+                        "the annotation is dropped: %s",
+                        exc,
+                    )
                     continue
                 if not isinstance(arguments, dict):
                     continue

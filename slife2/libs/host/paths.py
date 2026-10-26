@@ -115,12 +115,15 @@ import argparse
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
@@ -662,7 +665,20 @@ def forked(agent: str, subagent: str) -> bool:
     path = subagent_path(agent, subagent) / _SUBAGENT_YAML
     try:
         record = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, YAMLError):
+    except FileNotFoundError:
+        return False  # no record is the ordinary state, and is not damage
+    except (OSError, ValueError, YAMLError) as exc:
+        # **A record that cannot be read is not a record that says "not a
+        # fork".**  The directory is the subagent's own either way, which is
+        # the safe answer for a live subagent, but the damage is named: a fork
+        # whose record is lost would otherwise write into its own directory
+        # with nothing said (SDD Appendix C).
+        logger.warning(
+            "the record of %s/%s could not be read, so it is treated as not a fork: %s",
+            agent,
+            subagent,
+            exc,
+        )
         return False
     return isinstance(record, dict) and record.get("fork") is True
 

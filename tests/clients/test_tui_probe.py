@@ -39,14 +39,16 @@ class FakeTask:
 class FakeAgent:
     """The agent server: the delivered task message, and nothing else."""
 
-    def __init__(self, task: FakeTask) -> None:
+    def __init__(self, task: FakeTask, *, malformed: bool = False) -> None:
         self.task = task
+        self.malformed = malformed
 
     async def call_tool(self, name, arguments, **kwargs):
         assert name == tui.TRANSCRIPT
-        marker = tui.MARKER_PREFIX + json.dumps(
+        report = json.dumps(
             {"task_id": f"agent-task:{self.task.name}", "name": self.task.name}
         )
+        marker = tui.MARKER_PREFIX + ('{"task_id": ' if self.malformed else report)
         return {
             "turns": [
                 {
@@ -57,8 +59,8 @@ class FakeAgent:
         }
 
 
-def install(monkeypatch, task: FakeTask) -> FakeAgent:
-    agent = FakeAgent(task)
+def install(monkeypatch, task: FakeTask, *, malformed: bool = False) -> FakeAgent:
+    agent = FakeAgent(task, malformed=malformed)
     config = default_config()
 
     async def fake_open(url, *, fallback_tool="", timeout=None):
@@ -99,6 +101,22 @@ async def test_a_failed_task_is_a_probe_failure(monkeypatch) -> None:
 
     with pytest.raises(ProbeError, match="failed"):
         await tui.probe_tui(default_config(), "tb-1", "do it", timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_a_marker_that_will_not_parse_is_not_reported_as_undelivered(
+    monkeypatch,
+) -> None:
+    """**A result that cannot be read is not a result that never arrived.**
+
+    The probe used to skip a malformed marker and then blame the window.  The
+    marker is a delivery; what failed is reading it, and the error says so.
+    """
+    task = FakeTask()
+    install(monkeypatch, task, malformed=True)
+
+    with pytest.raises(ProbeError, match="could not be read"):
+        await tui.probe_tui(default_config(), "tb-1", "do it", timeout=0)
 
 
 def test_the_marker_is_matched_by_its_task_id() -> None:

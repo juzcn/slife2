@@ -2942,6 +2942,7 @@ The four shapes an undeclared fallback takes:
 | Unknown `file-tunnel.active` | Degrade to ngrok with a warning | The operator's intent | A malformed shape (refused) | The warning and `tunnel_status` |
 | A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
 | A stored `usage` breakdown will not parse | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
+| A `turn_summarize` call's arguments will not parse | Save the turn without its annotation | The summary and tags | A call whose arguments parse | A warning naming the call |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
 | A turn file from the previous schema (only a `turns` table) | Create an empty `turn` table and run | The turns on disk | A file missing a declared `turn` column, which is refused | One `logger.error` naming the file |
 | A stored tool schema will not parse | Serve the tool with no arguments | The arguments | A schema that parses | The tool's own error |
@@ -2952,6 +2953,8 @@ The four shapes an undeclared fallback takes:
 | The `qrcode` renderer is not installed | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A bookkeeping write fails | Log and continue | The record | Nothing; the write is attempted or not | A warning naming the path |
 | A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
+| A subagent record cannot be read | Treat it as not a fork | The shared work directory a fork uses | A record that parses | A warning naming the record |
+| A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
 | The checkout marker is absent | Use `~/.slife2` | The checkout's data directory | An override, which wins | A missing database or config |
 | A stale `media.defaults:` entry | Use the first model of the kind | The operator's default | A wrong-kind or unknown-provider reference (refused) | The answer's own `provider/model` |

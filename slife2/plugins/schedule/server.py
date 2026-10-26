@@ -467,6 +467,22 @@ async def dispatch(
             await close_server(client)
     payload = tool_payload(answer)
     started = str(payload.get("task_id") or "")
+    if not started:
+        # **A task whose id cannot be read is a run the ledger cannot follow.**
+        # The row is `pending` with an empty `agent_task_id`, which is the one
+        # state nothing can resolve (the docstring above): `in_flight` skips it
+        # and the poll has nothing to ask about.  So it takes the failed
+        # dispatch's ending — the run is closed with the reason, and the turn
+        # that asked is told.  The task itself may still be running; its answer
+        # still reaches the conversation through the agent-task plugin.
+        reason = (
+            "the agent task was started, but the answer named no task id, so "
+            "its ending cannot be followed"
+        )
+        store.settle(task.name, due_at, FAILED, error=reason)
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at} could not be followed: {reason}"
+        )
     attached = store.attach(task.name, due_at, started)
     assert attached is not None  # the run was read a moment ago
     logger.info(

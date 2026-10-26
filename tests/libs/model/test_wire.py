@@ -271,6 +271,32 @@ def test_a_message_without_reasoning_has_no_thinking_key() -> None:
     assert Message.from_wire(wire).thinking == ""
 
 
+def test_a_message_without_a_readable_role_keeps_its_shape() -> None:
+    """**A role that cannot be read is not permission to call it the user's.**
+
+    The three arms are told apart by what the message carries: a tool result
+    addresses a call, an assistant turn makes one, and anything else is the
+    person's.  The warning names the inference (`SDD Appendix C`); the
+    conversation keeps a message whose role would otherwise be guessed wrong.
+    """
+    tool = Message.from_wire({"content": "4", "tool_call_id": "c1"})
+    assistant = Message.from_wire(
+        {
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "function": {"name": "calc", "arguments": "{}"}}
+            ],
+        }
+    )
+    user = Message.from_wire({"content": "hi"})
+    unknown = Message.from_wire({"role": "robot", "content": "hi"})
+
+    assert tool.role == "tool"
+    assert assistant.role == "assistant"
+    assert user.role == "user"
+    assert unknown.role == "user", "an unknown role is not passed to a provider"
+
+
 def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:
     assert StreamChatResult.from_wire(None) == StreamChatResult()
 

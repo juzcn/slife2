@@ -1660,3 +1660,30 @@ async def test_a_body_that_is_not_json_is_a_broken_link_not_an_empty_poll() -> N
     client.last_error = None
     assert await client.poll_updates() == []
     assert client.last_error, "a poll that read nothing did not read an empty inbox"
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_without_a_host_is_a_damaged_answer() -> None:
+    """**`scaned_but_redirect` names where to follow the login.**
+
+    Read as `{}` — the same answer as "still waiting" — the watch polls the
+    original host until its deadline and then reports that nobody scanned a
+    code that was scanned.  A redirect that names no host fails as itself.
+    """
+    bridge = Bridge()
+    bridge.scan = {"status": "scaned_but_redirect"}
+    client = ilink.IlinkClient(http=bridge)
+
+    with pytest.raises(ilink.UnreadableAnswer, match="redirect host"):
+        await client.poll_login_status("QR-1", "")
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_with_a_host_is_followed() -> None:
+    bridge = Bridge()
+    bridge.scan = {"status": "scaned_but_redirect", "redirect_host": "other.example"}
+    client = ilink.IlinkClient(http=bridge)
+
+    assert await client.poll_login_status("QR-1", "") == {
+        "redirect_base": "https://other.example"
+    }

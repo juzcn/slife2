@@ -115,6 +115,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import platform
 import re
 import subprocess
 from collections.abc import Callable, Mapping
@@ -2409,16 +2410,17 @@ _MIRRORED: bool | None = None
 
 
 def _is_wsl() -> bool:
-    """Whether this Linux is WSL, without starting anything to ask."""
+    """Whether this Linux is WSL, without starting anything to ask.
+
+    `platform.release()` is the kernel release the kernel reports, and it is the
+    same string `/proc/sys/kernel/osrelease` holds.  Reading the proc file made
+    an unreadable file the verdict "not WSL", which would silently leave a WSL
+    instance on the Windows port set and let the two reuse each other's loopback
+    servers (SDD Appendix C).  The release string cannot fail to be read.
+    """
     if os.environ.get("WSL_DISTRO_NAME"):
         return True
-    try:
-        release = Path("/proc/sys/kernel/osrelease").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
-        return False
-    return "microsoft" in release.lower()
+    return "microsoft" in platform.release().lower()
 
 
 def _wsl_mirrored() -> bool:
