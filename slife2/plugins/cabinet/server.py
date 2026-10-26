@@ -773,7 +773,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The title as it is stored — `kind`, `key`, `title`, `time`, `tags`,
-            `summary`, `mirror`, `period_start` and `period_end`.
+            `summary`, `mirror`, `period_start` and `period_end`.  `time` is
+            when the report was first written; adding a section does not
+            change it.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -798,7 +800,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Returns:
             The report's `kind`, `key`, `title`, `time`, `tags`, `summary`,
             `mirror`, `period_start` and `period_end`, and every section under
-            `text`.
+            `text`.  `time` is when the report was first written.
         """
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
@@ -813,11 +815,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """List reports, newest first, by when they were written.
+        """List reports, newest first, by when each was first written.
+
+        Adding a section to a report does not move it: the order is when the
+        report was first written, not the last time it was added to.
 
         Args:
-            since: Only reports written at or after this.
-            until: Only reports written at or before this.
+            since: Only reports first written at or after this.
+            until: Only reports first written at or before this.
             limit: How many reports this page may hold.
             offset: How many reports to skip — that is how you page back.
 
