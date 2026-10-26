@@ -32,12 +32,13 @@ pytestmark = pytest.mark.unit
 def a_home(path: Path) -> None:
     """Give a directory the `slife2.yaml` every home must have (SDD §4.1).
 
-    The file says nothing: an absent *section* still takes its built-in
-    default.  These tests drive `--data-dir` at a directory of their own, which
-    the autouse fixture's home is not, so they make it a home themselves.
+    These tests drive `--data-dir` at a directory of their own, which the
+    autouse fixture's home is not, so they make it a home themselves.
     """
+    from tests.fakes import home_config
+
     path.mkdir(parents=True, exist_ok=True)
-    (path / "slife2.yaml").write_text("# this home's configuration\n", encoding="utf-8")
+    home_config(path)
 
 
 def test_version_is_exposed() -> None:

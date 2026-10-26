@@ -54,7 +54,7 @@ from slife2.plugins.cabinet.store import (
     store_of,
     vector_text,
 )
-from tests.fakes import FailingEmbedder, StubEmbedder
+from tests.fakes import FailingEmbedder, StubEmbedder, home_config
 
 pytestmark = pytest.mark.unit
 
@@ -123,10 +123,8 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
     # A home of its own needs its configuration (SDD §4.1), exactly as a real
-    # one does; the file says nothing, so every section takes its default.
-    (tmp_path / "slife2.yaml").write_text(
-        "# this home's configuration\n", encoding="utf-8"
-    )
+    # one does: a provider, and nothing else.
+    home_config(tmp_path)
     researcher = agent_dir("jack", "researcher")
     record = subagent_file("jack", "researcher")
 

@@ -2347,10 +2347,10 @@ class Config:
 def default_config() -> Config:
     """The base every file is built on: what a section the file leaves out says.
 
-    **Not a configuration a home may run without.**  `load` refuses a missing
-    file (SDD Appendix C), so this object is only ever the starting point the
-    loader fills from a file — and, for a test that is about something other
-    than a file, the configuration it hands in.
+    **Not a configuration a home may run on.**  `load` refuses a missing file,
+    and `_build` refuses a file without `providers:` — the one section this base
+    does not supply.  The provider row below exists for the tests that inject a
+    config and need a model to resolve; no file ever inherits it.
 
     Deliberately a single OpenAI-compatible provider: it is the shape the
     project is developed against, and a second provider nobody has credentials
@@ -2741,26 +2741,22 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             "it configures, and `a2a` is the plugin that serves it; rename the key"
         )
 
-    # **An absent section is the built-in provider; an *empty* one is a
-    # mistake.**  `providers: {}` used to fall through the same `if not raw`
-    # test as no section at all, so a config that named no provider quietly ran
-    # on the built-in one and called api.deepseek.com — with the operator's file
-    # saying, in the section they had just edited, that there was no such
-    # provider.  `embeddings.providers` already draws the line this way, and the
-    # section is the same shape.
-    if raw.get("providers") is None:
-        providers = dict(base.providers)
-    else:
-        providers_raw = _mapping(raw.get("providers"), "providers")
-        if not providers_raw:
-            raise ConfigError(
-                "providers: needs at least one provider — leave the section out "
-                "for the built-in one"
-            )
-        providers = {
-            str(name): _provider(spec, str(name))
-            for name, spec in providers_raw.items()
-        }
+    # **`providers:` is required, and an empty one is refused for a second
+    # reason.**  Leaving the section out used to run the built-in DeepSeek
+    # provider and call api.deepseek.com — a machine nobody described, from a
+    # file that did not mention it.  There is no such row any more: the file is
+    # the description, and a file that names no provider describes a machine
+    # with no models.  `providers: {}` is refused as it always was, because an
+    # empty section is a statement, and the statement is "none".
+    providers_raw = _mapping(raw.get("providers"), "providers")
+    if not providers_raw:
+        raise ConfigError(
+            "providers: needs at least one provider — the file is the machine's "
+            "description, and there is no built-in provider to run on without one"
+        )
+    providers = {
+        str(name): _provider(spec, str(name)) for name, spec in providers_raw.items()
+    }
 
     agent_raw = _mapping(raw.get("agent"), "agent")
     max_iterations = _int_or(

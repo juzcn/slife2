@@ -530,7 +530,8 @@ description and there is no default machine: a home without `slife2.yaml` stops
 the start with a one-line message naming the directory that was searched, and a
 file that exists and cannot be read stops it naming the file and the mistake.
 The configuration a process runs on is one it read from a file, never one this
-build supplied in the file's place.
+build supplied in the file's place. The file must name at least one provider:
+there is no built-in provider to run on.
 
 `libs/host/configfile.py` is the single writer for edits made by plugins. It
 performs a document edit under a cross-process lock, preserves comments, and
@@ -2312,10 +2313,12 @@ whose default is empty that means *off*:
   what to add;
 - no `wechat:` section exists at all; a login is created by scanning.
 
-`providers:` and `embeddings:` are not switches at all: leaving either out runs
-the built-in DeepSeek provider and the built-in local embedder respectively, and
-writing either section empty is refused, because an empty section is a statement
-and the default is not it.
+`providers:` is not one of those sections and has no default. The file must name
+at least one provider; an absent or empty section is refused. A built-in
+provider was a machine calling an address no file mentioned, and it is gone.
+`embeddings:` is the remaining built-in — leaving it out runs the local embedder,
+which needs no credential — and writing it empty is refused, because an empty
+section is a statement and the default is not it.
 
 A present but invalid section is refused by name at load. Examples:
 

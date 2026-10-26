@@ -483,9 +483,10 @@ The configuration file is `slife2.yaml` inside the data directory. A data
 directory is the checkout when running from a checkout, otherwise
 `~/.slife2`. Use `--data-dir DIR` or `SLIFE2_DATA_DIR` to override it.
 
-The file is required. A missing configuration file stops the start with a
-one-line error naming the directory that was searched, and so does a file that
-exists but cannot be loaded, naming the file and the mistake.
+The file is required, and it must name at least one provider under `providers:`.
+A missing configuration file stops the start with a one-line error naming the
+directory that was searched, and so does a file that exists but cannot be
+loaded, naming the file and the mistake.
 
 The installer may write `slife2-default.yaml` beside an existing configuration
 as a reference. slife2 reads only `slife2.yaml`; the reference is for a person

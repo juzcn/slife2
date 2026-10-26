@@ -66,19 +66,35 @@ from tests.fakes import StubEmbedder, config_file, plugin_transports, upstream_s
 
 #: Two homes' `cli:` sections, for the test that needs one process to serve
 #: both: distinct names, because the question is not which one wins.
-MINE_CLI = """
+#: The section every file must have (SDD §4.1).  These homes are read through
+#: `load_cached`, so each is a file the loader has to accept.
+PROVIDERS = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
+"""
+
+MINE_CLI = (
+    PROVIDERS
+    + """
 cli:
   mine-only:
     command: mine
     description: Recorded in this home.
 """
+)
 
-THEIRS_CLI = """
+THEIRS_CLI = (
+    PROVIDERS
+    + """
 cli:
   theirs-only:
     command: theirs
     description: Recorded in the other one.
 """
+)
 
 pytestmark = pytest.mark.unit
 
@@ -3088,8 +3104,8 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
     """
     mine, theirs = tmp_path / "mine", tmp_path / "theirs"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
-    config_file(mine, "")
-    config_file(theirs, "")
+    config_file(mine, PROVIDERS)
+    config_file(theirs, PROVIDERS)
     # Every ask finds the link due, so the second home's ask is a re-read.
     monkeypatch.setattr(_T.timeouts.pacing, "relist_after", 0.0)
     base = default_config()

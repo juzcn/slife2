@@ -2938,7 +2938,17 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
     from slife2.libs.host.config import ConfigError, load
 
     path = tmp_path / "slife2.yaml"
-    path.write_text("agent:\n  system_prompt: not-here.j2\n", encoding="utf-8")
+    # A provider, because a file without one is refused before its own
+    # mistakes are named (SDD §4.1).
+    path.write_text(
+        "providers:\n"
+        "  local:\n"
+        "    api: openai-completions\n"
+        "    base_url: https://example.test/v1\n"
+        "    models: [{model: big}]\n"
+        "agent:\n  system_prompt: not-here.j2\n",
+        encoding="utf-8",
+    )
     with pytest.raises(ConfigError, match="not-here.j2"):
         load(path)
 

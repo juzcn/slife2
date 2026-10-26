@@ -203,14 +203,13 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "data"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(data))
     monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
-    # The file says nothing, so every section keeps the built-in default the
-    # suite has always run on; a test about the refusal removes it, or points
-    # `--data-dir` at a directory of its own.
+    # `providers:` is the one section a file cannot leave out, so the shared
+    # `A_HOME_CONFIG` supplies it and nothing else; every other section keeps
+    # the built-in default the suite has always run on.
+    from tests.fakes import home_config
+
     data.mkdir(parents=True, exist_ok=True)
-    (data / "slife2.yaml").write_text(
-        "# This home's configuration; the sections it leaves out take their defaults.\n",
-        encoding="utf-8",
-    )
+    home_config(data)
     # The platform rule shifts ports on WSL in mirrored mode; a test asserts the
     # config it names, not the networking mode of the machine it runs on.
     import slife2.libs.host.config as config_module

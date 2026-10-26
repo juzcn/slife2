@@ -26,6 +26,16 @@ BATCH = SCRIPTS / "install.cmd"
 
 pytestmark = pytest.mark.unit
 
+#: The section every file must have (SDD §4.1).  `require` loads the home's
+#: file, so a config these tests hand it has to be one the loader accepts.
+PROVIDERS = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
+"""
+
 
 def _commands(text: str) -> list[str]:
     """The script's lines that can run something, as opposed to prose."""
@@ -817,7 +827,7 @@ def test_requirements_report_unknown_commands_with_their_source(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "slife2.yaml").write_text(
-        "mcp:\n  mystery:\n    command: no-such-tool\n"
+        PROVIDERS + "mcp:\n  mystery:\n    command: no-such-tool\n"
         "cli:\n  yt:\n    command: yt-dlp\n",
         encoding="utf-8",
     )
@@ -837,7 +847,7 @@ def test_requirements_carry_a_cli_install_hint(tmp_path: Path) -> None:
     entry carries no install line, because there is nothing to print.
     """
     (tmp_path / "slife2.yaml").write_text(
-        "mcp:\n"
+        PROVIDERS + "mcp:\n"
         "  mystery:\n"
         "    command: no-such-tool\n"
         "cli:\n"

@@ -7,6 +7,7 @@ that are absent rather than defaulted.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -47,7 +48,31 @@ default: local/small
 """
 
 
-def write(tmp_path, text: str):
+#: The smallest valid `providers:` section.  **A file without one is refused**
+#: (SDD §4.1), so a test about another section gets this prepended; none of
+#: them asserts on it, and its one model is named so it cannot be mistaken for
+#: a provider a test meant to write.
+A_MINIMAL_PROVIDER = """
+providers:
+  test:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models:
+      - model: test-model
+"""
+
+
+def write(tmp_path, text: str, *, providers: bool = True):
+    """Write *text* where the loader looks, with the section every file needs.
+
+    **`providers:` is prepended unless the text already writes one**, because
+    the loader refuses a file without it and a test about `tool_load:` or
+    `servers:` would otherwise be a test about that refusal.  Pass
+    `providers=False` when the file's own subject is the absence of the
+    section, or the shape of the top level.
+    """
+    if providers and not re.search(r"^providers:", text, re.MULTILINE):
+        text = A_MINIMAL_PROVIDER + text
     path = tmp_path / "slife2.yaml"
     path.write_text(text, encoding="utf-8")
     return path
@@ -57,11 +82,13 @@ def write(tmp_path, text: str):
 
 
 def test_the_defaults_are_one_working_provider() -> None:
-    """No config file should still give something that can answer.
+    """The base a file is built on carries a provider a test can resolve.
 
-    Deliberately *not* equal to the checked-in `slife2.yaml`, which lists the
-    providers this machine can reach — a config carrying somebody's provider
-    table would be wrong for everybody else.
+    **No file inherits it** — `providers:` is required (SDD §4.1) — but a test
+    that hands `default_config()` to a server needs a model to name, and this
+    is it.  Deliberately *not* equal to the checked-in `slife2.yaml`, which
+    lists the providers this machine can reach — a config carrying somebody's
+    provider table would be wrong for everybody else.
     """
     config = default_config()
     assert list(config.providers) == ["deepseek"]
@@ -484,9 +511,7 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     configuration, it is a reader that answers nothing and a shortening that
     keeps nothing.
     """
-    assert (
-        load(write(tmp_path, "{}\n")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
-    )
+    assert load(write(tmp_path, "")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
     stated = load(write(tmp_path, "tool_result:\n  tokens: 500\n")).tool_result
     assert stated.tokens == 500
 
@@ -557,25 +582,18 @@ def test_a_leftover_tools_section_is_refused(tmp_path) -> None:
         load(write(tmp_path, "tools:\n  serper:\n    command: npx\n"))
 
 
-def test_an_empty_providers_section_is_refused(tmp_path) -> None:
-    """**Absent is the built-in provider; empty is a mistake.**
+def test_a_file_with_no_providers_is_refused(tmp_path) -> None:
+    """**There is no built-in provider to run on** (SDD §4.1).
 
-    `providers: {}` fell through the same `if not raw` test as no section at
-    all, so a config that named no provider quietly ran on the built-in one and
-    called api.deepseek.com — with the operator's own file saying, in the
-    section they had just edited, that there was no such provider.
+    An absent section used to run DeepSeek and call api.deepseek.com — a
+    machine the file never described.  Empty was always refused, and both are
+    now refused for the same reason: a file that names no provider describes a
+    machine with no models, and an empty section is simply more explicit about
+    it.
     """
-    with pytest.raises(ConfigError, match="at least one provider"):
-        load(write(tmp_path, "providers: {}\n"))
-
-    # Absent is still the built-in provider — a section a file leaves out, not a
-    # file that is not there (SDD §4.1 refuses that) — and the invariant is the
-    # *table*, not "some provider": a loader that answered with one stray entry
-    # would satisfy a bare truthiness test while having lost the built-in
-    # provider a file leaving the section out runs on.
-    config = load(write(tmp_path, "# nothing here\n"))
-    assert set(config.providers) == {"deepseek"}
-    assert config.default == "deepseek/deepseek-flash"
+    for text in ("providers: {}\n", "# nothing here\n"):
+        with pytest.raises(ConfigError, match="at least one provider"):
+            load(write(tmp_path, text, providers=False))
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:
@@ -703,13 +721,20 @@ def test_env_var_names_the_data_directory(
 
 
 def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
-    env_path = write(tmp_path, A_PROVIDER)
+    write(tmp_path, A_PROVIDER)
     other = tmp_path / "other.yaml"
-    other.write_text("default: ''\n", encoding="utf-8")
-    monkeypatch.setenv(DATA_ENV_VAR, str(env_path))
-    # `other.yaml` has no providers, so it falls back to the defaults, which do
-    # not include `local` — enough to tell the two apart.
+    other.write_text(
+        "providers:\n"
+        "  elsewhere:\n"
+        "    api: openai-completions\n"
+        "    base_url: https://other.test/v1\n"
+        "    models: [{model: m}]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    # The two files name different providers — enough to tell them apart.
     assert "local" not in load(other).providers
+    assert "elsewhere" in load(other).providers
 
 
 def test_malformed_yaml_is_fatal(tmp_path) -> None:
@@ -719,7 +744,7 @@ def test_malformed_yaml_is_fatal(tmp_path) -> None:
 
 def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
     with pytest.raises(ConfigError, match="mapping"):
-        load(write(tmp_path, "- one\n- two\n"))
+        load(write(tmp_path, "- one\n- two\n", providers=False))
 
 
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
@@ -1692,7 +1717,8 @@ def test_a_default_of_the_wrong_kind_is_refused_rather_than_replaced(tmp_path) -
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        """
+        A_MINIMAL_PROVIDER
+        + """
 media:
   providers:
     p:
@@ -1713,7 +1739,8 @@ media:
     # And a name that no longer resolves still falls back, which is the half
     # the registration is for.
     path.write_text(
-        """
+        A_MINIMAL_PROVIDER
+        + """
 media:
   providers:
     p:

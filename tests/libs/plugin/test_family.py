@@ -39,21 +39,37 @@ from tests.fakes import config_file
 
 pytestmark = pytest.mark.unit
 
+#: The section every file must have (SDD §4.1).  These homes are read through
+#: `load_cached`, so each one is a file the loader has to accept.
+PROVIDERS = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
+"""
+
 #: Two homes, each naming one command of its own.  Distinct names, because the
 #: question is not which one wins but whether the other can be seen at all.
-MINE = """
+MINE = (
+    PROVIDERS
+    + """
 cli:
   mine-only:
     command: mine
     description: Recorded in this home.
 """
+)
 
-THEIRS = """
+THEIRS = (
+    PROVIDERS
+    + """
 cli:
   theirs-only:
     command: theirs
     description: Recorded in the other one.
 """
+)
 
 
 async def list_from(client: Client, home: Path) -> Any:

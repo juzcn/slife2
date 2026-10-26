@@ -3422,8 +3422,8 @@ def build_server(
         )
         if total == 1:
             raise ToolError(
-                f"`{ref}` is the last model in the config; without it slife2 "
-                f"would fall back to its built-in default. `model_set` another "
+                f"`{ref}` is the last model in the config; without it the file "
+                f"would name no model for slife2 to run on. `model_set` another "
                 f"first."
             )
         if ref == active:

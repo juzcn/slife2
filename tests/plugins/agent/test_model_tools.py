@@ -318,10 +318,12 @@ default: local/big
 
 @pytest.mark.asyncio
 async def test_the_last_model_in_the_config_cannot_be_removed(isolated_runtime) -> None:
-    """Emptying `providers:` would quietly bring the built-in ones back.
+    """Emptying `providers:` would leave a file the loader refuses.
 
-    `slife2.libs.host.config` substitutes its own providers for an empty section, so the
-    answer would say "removed" while a phantom provider went live.
+    A home runs on the providers its file names and there is no built-in one to
+    fall back to (SDD §4.1), so a `model_remove` that took the last model would
+    write `providers: {}` — a config the next start refuses — over an edit that
+    reported success.
     """
     one = """\
 providers:

@@ -34,6 +34,16 @@ from slife2.plugins.skills.server import (
 
 pytestmark = pytest.mark.unit
 
+#: The section every file must have (SDD §4.1); these tests write a file to
+#: read a `skills:` section out of, and the loader judges the whole document.
+PROVIDERS = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
+"""
+
 
 def skill(
     root: Path,
@@ -219,7 +229,8 @@ async def test_the_two_names_read_one_entry_and_agree(
     )
     path = isolated_runtime / "slife2.yaml"
     path.write_text(
-        "skills:\n"
+        PROVIDERS
+        + "skills:\n"
         "  the-name:\n"
         "    env: {SOME_KEY: a-real-key}\n"
         "  the-folder:\n"
@@ -262,7 +273,8 @@ async def test_a_declared_key_is_read_here_and_reported_before_the_model_acts(
     )
     path = isolated_runtime / "slife2.yaml"
     path.write_text(
-        "skills:\n  one:\n    env: {BAIDU_API_KEY: secret}\n", encoding="utf-8"
+        PROVIDERS + "skills:\n  one:\n    env: {BAIDU_API_KEY: secret}\n",
+        encoding="utf-8",
     )
 
     async with Client(build_server(load(path))) as client:

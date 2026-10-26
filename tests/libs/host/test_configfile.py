@@ -78,13 +78,24 @@ def added(path, name: str, section: str = "mcp") -> str:
     return block.split("\n# ", 1)[0]
 
 
+#: The one section a file cannot leave out (SDD §4.1).  The texts below are
+#: about comments and entries, and the writer judges every result through the
+#: loader — so a file it edits has to be a file the loader accepts.
+PROVIDERS = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
+"""
+
+
 def write(tmp_path, text: str = CONFIG):
     """A config file at *tmp_path*, creating the directory it goes in.
 
     The `mkdir` is for the test that writes into the data directory, which the
-    autouse fixture only *names*: it is `slife2.libs.host.paths.data_dir` that creates one,
-    and a test that writes before anything has resolved it would otherwise be
-    the thing that creates it — with a traceback instead of a config.
+    autouse fixture also gives a config; a test that writes a file of its own
+    there must still be able to before anything has resolved the path.
     """
     path = tmp_path / "slife2.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +170,7 @@ def test_a_write_leaves_the_entry_below_it_its_comment(tmp_path) -> None:
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        "mcp:\n"
+        PROVIDERS + "mcp:\n"
         "  # Describes slow-one, which is written again.\n"
         "  slow-one:\n"
         "    command: npx\n"
@@ -296,7 +307,7 @@ def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        "# ── REST APIs ──\n"
+        PROVIDERS + "# ── REST APIs ──\n"
         "rest-api:\n"
         "  # Documents the entry, and the entry is going.\n"
         "  registry:\n"
@@ -342,7 +353,7 @@ def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
     """
     path = tmp_path / "slife2.yaml"
     path.write_text(
-        "mcp:\n"
+        PROVIDERS + "mcp:\n"
         "  # Describes slow-one, and slow-one is going.\n"
         "  slow-one:\n"
         "    command: npx\n"
@@ -400,7 +411,7 @@ def test_an_entry_that_ends_on_a_sequence_keeps_the_next_comment(tmp_path) -> No
     """
     path = tmp_path / "slife2.yaml"
     sequence_ending = (
-        "mcp:\n"
+        PROVIDERS + "mcp:\n"
         "  # Describes slow-one, which is written again.\n"
         "  slow-one:\n"
         "    command: npx\n"

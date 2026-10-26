@@ -549,6 +549,34 @@ def upstream_server() -> FastMCP:
     return server
 
 
+#: The `slife2.yaml` every test home starts with.  **`providers:` is the one
+#: section a file does not inherit** (SDD §4.1), so a home needs at least this;
+#: everything else is left out and takes its built-in default.  The provider is
+#: `default_config()`'s, so a test that reads this file gets the configuration
+#: the suite had before the file was required.
+A_HOME_CONFIG = """\
+providers:
+  deepseek:
+    api: openai-completions
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    models:
+      - model: deepseek-flash
+        name: DeepSeek Flash
+        reasoning: true
+        input: [text, image]
+        context_window: 1000000
+        max_tokens: 384000
+        temperature: 0.7
+        top_p: 1.0
+"""
+
+
+def home_config(data_dir: Path) -> Path:
+    """Write the config a home must have, and answer its path."""
+    return config_file(data_dir, A_HOME_CONFIG)
+
+
 def config_file(data_dir: Path, text: str) -> Path:
     """Write one config file where the loader will look for it.
 

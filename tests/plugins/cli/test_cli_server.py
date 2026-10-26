@@ -38,6 +38,11 @@ from slife2.plugins.cli.server import (
 pytestmark = pytest.mark.unit
 
 CLI = """
+providers:
+  local:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models: [{model: big}]
 cli:
   yt-dlp:
     command: yt-dlp
