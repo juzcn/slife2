@@ -25,43 +25,46 @@ def call_with(arguments: object) -> ToolCall:
     )
 
 
-@pytest.mark.parametrize("junk", ["[]", "null", "5", '"a string"', "[{}]"])
-def test_arguments_that_parse_to_something_that_is_not_an_object_degrade(
-    junk: str,
-) -> None:
-    """**Valid JSON is not the same as valid arguments.**
+@pytest.mark.parametrize("junk", ["[]", "null", "5", '"a string"', "[{}]", "{oops"])
+def test_arguments_that_are_not_an_object_are_kept_and_marked(junk: str) -> None:
+    """**Valid JSON is not the same as valid arguments, and neither is run.**
 
-    `arguments` is a dict — the class says so, and everything downstream relies
-    on it — so `[]`, `null` and `5` are damage however well-formed they are, and
-    all three used to be assigned as they came.  The first reader is
-    `split_meta`, inside the loop, which calls `.items()` on them: the loop has
-    no handler for that `AttributeError`, so one bad call ended the turn with a
-    traceback about a list where the model should have been told its own call
-    was malformed and given the chance to correct it.
+    `arguments` is a dict — everything downstream relies on it — and `[]`,
+    `null` and `5` are not one however well-formed they are.  Reading them as
+    `{}` used to dispatch the tool on defaults the model never chose, and its
+    validation error then blamed a missing required argument instead of the
+    call the model got wrong; assigning them as they came was worse, an
+    `AttributeError` out of the loop.
 
-    Degrading rather than raising is what this path already does for JSON that
-    will not parse, and for the same reason: the error belongs to the tool call,
-    which is the loop's normal feedback path.
+    So the call keeps its id and name, its `arguments` stay empty, and `error`
+    carries the sentence `ToolRegistry.execute` answers with — the tool is
+    never reached.
     """
     call = call_with(junk)
 
     assert call.arguments == {}
-    # The reader that used to be handed a list: it has to be able to take the
-    # answer, or the degradation has bought nothing.
+    assert call.error is not None
+    assert "was not run" in call.error
+    assert call.raw_arguments == junk
+    # The reader that used to be handed a list: it still has a dict.
     assert split_meta(call.arguments)[0] == {}
 
 
 def test_arguments_that_are_already_a_mapping_are_kept() -> None:
     """Read back off our own wire, or off a provider that sent one already."""
-    assert call_with({"e": "2+2"}).arguments == {"e": "2+2"}
+    call = call_with({"e": "2+2"})
+    assert call.arguments == {"e": "2+2"}
+    assert call.error is None
 
 
-def test_a_tool_call_with_arguments_that_are_not_a_dict_round_trips_as_empty() -> None:
-    """The degraded call is still a call, with its name and its id intact.
+def test_a_damaged_call_round_trips_with_what_the_model_wrote() -> None:
+    """The call is still a call, and the record keeps the text that arrived.
 
-    Losing the id would be worse than losing the arguments: the tool result has
-    to answer *this* call, and a message whose `tool_call_id` answers nothing is
-    the one history state every provider rejects.
+    The id has to survive — a tool result answers it, and a message whose
+    `tool_call_id` answers nothing is the one history state every provider
+    rejects — and the name has to survive, because it is what tells the model
+    which call it got wrong.  The arguments survive as the wire's own string:
+    an empty object in their place is the lie this refuses.
     """
     message = Message.from_wire(
         {
@@ -73,4 +76,9 @@ def test_a_tool_call_with_arguments_that_are_not_a_dict_round_trips_as_empty() -
         }
     )
 
-    assert message.tool_calls == [ToolCall(id="c1", name="calc", arguments={})]
+    (call,) = message.tool_calls
+    assert (call.id, call.name) == ("c1", "calc")
+    assert call.error is not None
+    wire = message.to_wire()
+    assert wire["tool_calls"][0]["function"]["arguments"] == "[]"
+    assert Message.from_wire(wire) == message

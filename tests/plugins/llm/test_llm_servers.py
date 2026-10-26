@@ -1375,37 +1375,40 @@ def test_accumulator_synthesises_an_id_when_the_provider_sent_none() -> None:
     assert call.id.startswith("call_0_")
 
 
-def test_accumulator_refuses_arguments_that_never_parsed() -> None:
-    """Reading a truncated stream as `{}` re-attributes the fault to the model.
+def test_accumulator_marks_arguments_that_never_parsed() -> None:
+    """**The call is answered, not the turn ended, and the tool is not run.**
 
-    The provider cuts the JSON short or mangles it; an empty argument dict then
-    reaches the tool, which reports a validation error about a call the model
-    got right — and the model retries the call it never got wrong.  So the turn
-    fails, naming the call (SDD Appendix C: a value that cannot be read is not a value
-    that is absent).
+    The provider cut the JSON short or mangled it; the call keeps its id and
+    name and carries the sentence the registry reports, with the fragment as it
+    arrived.  An empty argument dict would dispatch the tool on defaults the
+    model never sent, and a `ValueError` would take the whole turn down over one
+    call (SDD Appendix C: the call is not dispatched, and the error is its
+    answer).
     """
     accumulator = ToolCallAccumulator()
     accumulator.add(
         ToolCallDelta(index=0, id="c1", name="calc", arguments_delta="{oops")
     )
-    with pytest.raises(ValueError, match="did not parse as JSON"):
-        accumulator.complete()
+    (call,) = accumulator.complete()
+    assert call.arguments == {}
+    assert call.error is not None and "not JSON" in call.error
+    assert call.raw_arguments == "{oops"
 
 
-def test_accumulator_refuses_arguments_that_are_not_an_object() -> None:
+def test_accumulator_marks_arguments_that_are_not_an_object() -> None:
     """Valid JSON that is not an object is as unreadable as JSON that never
     parsed.  `[]`, `"x"` and `null` all parse, and a call's arguments are an
-    object by the protocol — so coercing one to `{}` hands the tool an empty
-    argument dict the model never sent, the very substitution the unparseable
-    case refuses (SDD Appendix C: a value that cannot be read is not a value that is
-    absent)."""
+    object by the protocol — reading one as `{}` is the substitution the
+    unparseable case refuses, and both now fail the call rather than the turn."""
     for raw in ("[]", '"x"', "null"):
         accumulator = ToolCallAccumulator()
         accumulator.add(
             ToolCallDelta(index=0, id="c1", name="calc", arguments_delta=raw)
         )
-        with pytest.raises(ValueError, match="not a JSON object"):
-            accumulator.complete()
+        (call,) = accumulator.complete()
+        assert call.arguments == {}
+        assert call.error is not None and "not a JSON object" in call.error
+        assert call.raw_arguments == raw
 
 
 def test_accumulator_keeps_an_empty_argument_dict_as_empty() -> None:
@@ -1414,6 +1417,7 @@ def test_accumulator_keeps_an_empty_argument_dict_as_empty() -> None:
     accumulator.add(ToolCallDelta(index=0, id="c1", name="now", arguments_delta=""))
     (call,) = accumulator.complete()
     assert call.arguments == {}
+    assert call.error is None
 
 
 # --- end to end over the in-memory transport ---------------------------------

@@ -1538,7 +1538,7 @@ server sees them.
 
 | Parameter | Semantics |
 |---|---|
-| `_timeout` | Seconds for this call. Overrides the tool's default. `0` or negative means "use the default", never "no limit". A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
+| `_timeout` | Seconds for this call: a positive, finite number, overriding the tool's default. Any other value — `0`, negative, text, `inf` — fails the call with an error the model reads; the tool is not run and the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
 | `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.tokens`. An agent task's loop has no `_async`. |
 | `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
 
@@ -2940,8 +2940,6 @@ The four shapes an undeclared fallback takes:
 | The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
 | Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
-| A model's per-call timeout is not a positive, finite number | Treat the call as one nobody bounded | The bound the model asked for; the call may run unbounded | A positive, finite number, which is honoured | A debug line naming the value |
-| A model's tool-call arguments are not a JSON object | Dispatch the call with no arguments | The arguments, so a tool with only optional parameters runs on its defaults | A value that parses as an object, which is used | The tool's own validation error, or the empty arguments in a replay |
 | An image is refused by a provider | Drop the pixels, keep the note | The bytes in the live conversation | The record, which never had them | The note and the error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |

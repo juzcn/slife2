@@ -217,9 +217,10 @@ def is_harness(name: str) -> bool:
 # *history* keeps are two dicts, and the second one still carries all three.
 # Removing them from history would be rewriting what the model said.
 
-#: Seconds; how long this one call may take.  Positive only, and it overrides
-#: every default — `0`, negative and missing all mean "use the default", and
-#: **never** "no bound" (`bind_timeout`).
+#: Seconds; how long this one call may take.  **A positive, finite number, or
+#: the call is not run**: zero, a negative, text and `inf` all fail it with a
+#: sentence the model reads (`read_timeout`).  Omitted means nobody asked, and
+#: the tool's own default governs.
 TIMEOUT_PARAM = "_timeout"
 
 #: Truthy; run the call in the background and answer a task id instead of a
@@ -247,8 +248,9 @@ META_PROPERTIES: dict[str, Any] = {
     TIMEOUT_PARAM: {
         "type": "number",
         "description": (
-            "Seconds this one call may take. Overrides the tool's own default; "
-            "0 or less means 'use the default', never 'no limit'."
+            "Seconds this one call may take: a positive, finite number. It "
+            "overrides the tool's own default; omit it to keep that default. "
+            "Any other value fails the call."
         ),
     },
     BACKGROUND_PARAM: {
@@ -316,6 +318,10 @@ class Meta:
     #: Ask before running.  Truthiness for the same reason, and it fails the
     #: same safe way: anything the model wrote that is not empty asks.
     approve: bool
+    #: Why a `_timeout` that was written cannot be honoured, or None.  A call
+    #: with this set is answered by the loop with the sentence and is never
+    #: dispatched (`read_timeout`).
+    timeout_error: str | None = None
 
 
 def split_meta(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Meta]:
@@ -325,50 +331,64 @@ def split_meta(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Meta]:
     itself is untouched, which is what keeps the model's own history intact
     (see the section comment above).
 
-    A malformed `_timeout` — the model writing `"5 seconds"`, which they do —
-    degrades to "nobody said" rather than raising.  It is the model's own call
-    that would die: an exception here escapes a whole batch of concurrent calls
-    and ends the turn, which is a disproportionate answer to a bad number.
-    **That is the fallback registered in SDD Appendix C**: *what it gives up*
-    is the bound the model asked for, *it does not cover* a positive, finite
-    number, which is honoured, and the failure goes to the debug line
-    `parse_timeout` writes.
+    A `_timeout` that is not a positive, finite number is **not** read as
+    "nobody said": it is `Meta.timeout_error`, and the loop answers the call
+    with that sentence without dispatching it.  The old reading — treat the
+    call as unbounded and log a debug line — ran a tool for longer than the
+    model asked, or indefinitely, and told nobody; a number the system cannot
+    honour is a bad call, and a bad call is the model's to correct
+    (SDD Appendix C: the call is not dispatched, and the error is its answer).
+
+    `_async` and `_approve` keep their truthy reading.  A boolean cannot be
+    misread the way a number can, and the direction is the safe one: anything
+    written there asks.
     """
     rest = {name: value for name, value in arguments.items() if name not in META_PARAMS}
+    timeout, timeout_error = read_timeout(arguments.get(TIMEOUT_PARAM))
     return rest, Meta(
-        timeout=parse_timeout(arguments.get(TIMEOUT_PARAM)),
+        timeout=timeout,
         background=bool(arguments.get(BACKGROUND_PARAM)),
         approve=bool(arguments.get(APPROVE_PARAM)),
+        timeout_error=timeout_error,
     )
 
 
-def parse_timeout(value: Any) -> float | None:
-    """A `_timeout` as a positive, **finite** number of seconds, or None.
+def read_timeout(
+    value: Any, name: str = TIMEOUT_PARAM
+) -> tuple[float | None, str | None]:
+    """A per-call timeout as `(seconds, None)`, or `(None, why it is not one)`.
 
-    None means "nobody said" and covers every way of saying nothing: the
-    argument absent, `None`, zero-or-negative, text that is not a number, and a
-    number with no end to it.  The reason it is a rule rather than a
-    convenience: the tool reading `timeout=0` into `wait_for(..., timeout=0)`
-    fires *instantly*, so a pass-through zero would be the exact opposite of the
-    "0 = no bound" the prompt promises.
+    `None, None` means "nobody said": the argument absent, or `None`.
+    Everything else must be a positive, **finite** number of seconds, and
+    anything that is not — zero, a negative, a boolean, text, `inf` — is an
+    error the call is answered with instead of being run.
 
-    **And `inf` is one of those ways**, though it is the one nobody wrote down.
-    `float("inf")` is what `1e999` — valid JSON, and the natural way to write
-    "no limit" — arrives as, and it is positive, so it used to pass through as a
-    bound: `bind_timeout` then did `int(inf)` for a tool that declares its own
-    `timeout` and raised `OverflowError` out of `run_turn`, which does not catch
-    it.  A turn ended by a number meaning "no limit" is the disproportionate
-    answer `split_meta` says this module exists to avoid, and an unbounded wait
-    is exactly what None asks for.
+    Zero is included on purpose.  The tool reading `timeout=0` into
+    `wait_for(..., timeout=0)` fires *instantly*, and a number the model wrote
+    is not the same request as one it left out, so neither "unbounded" nor
+    "the default" is an honest reading of it.
+
+    **`inf` is included too**, though it is the one nobody wrote down: `1e999`
+    is valid JSON, arrives as `float("inf")`, and used to pass through as a
+    bound until `int(inf)` raised `OverflowError` out of a turn.  It is not a
+    duration anyone can honour, so it is refused like any other unreadable
+    value.
     """
     if value is None:
-        return None
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        logger.debug("tool timeout not a number, ignored: %r", value)
-        return None
-    return seconds if math.isfinite(seconds) and seconds > 0 else None
+        return None, None
+    seconds: float | None = None
+    if not isinstance(value, bool):
+        # `float(True)` is 1.0; a boolean is not a number of seconds.
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            seconds = None
+    if seconds is None or not math.isfinite(seconds) or seconds <= 0:
+        return (
+            None,
+            f"`{name}` must be a positive, finite number of seconds; got {value!r}",
+        )
+    return seconds, None
 
 
 def declares_timeout(spec: ToolSpec | None) -> bool:
@@ -388,7 +408,7 @@ def declares_timeout(spec: ToolSpec | None) -> bool:
 
 def bind_timeout(
     arguments: dict[str, Any], spec: ToolSpec | None, asked: float | None
-) -> float | None:
+) -> tuple[float | None, str | None]:
     """Put a per-call timeout where the tool that has to honour it will read it.
 
     Two shapes, and which one applies is `declares_timeout`:
@@ -406,7 +426,11 @@ def bind_timeout(
       is the worst possible price for a good intention.  The
       answer is the number the loop should enforce, or None when nobody asked.
 
-    Either way `arguments` is what the tool will be dispatched with.
+    Either way `arguments` is what the tool will be dispatched with, and the
+    answer is `(bound, error)`: a non-None error means the call must be answered
+    with that sentence and not dispatched — a bare `timeout` that is not a
+    positive, finite number is read exactly as strictly as `_timeout` is
+    (`read_timeout`), because it is the same request in the other spelling.
     """
     if declares_timeout(spec):
         if asked is not None:
@@ -432,7 +456,7 @@ def bind_timeout(
                 bare = 1.0
             if bare <= 0:
                 arguments.pop("timeout", None)
-        return None
+        return None, None
 
     # **The bare key comes out whatever `_timeout` said**, which is the rule the
     # paragraph above states and the one case that was missing it: popping only
@@ -441,8 +465,10 @@ def bind_timeout(
     # "Unexpected keyword argument" with a bound the model *had* asked for
     # sitting right there.  `_timeout` is the harness's own spelling and wins
     # when both are given.
-    bare = parse_timeout(arguments.pop("timeout", None))
-    return asked if asked is not None else bare
+    bare, error = read_timeout(arguments.pop("timeout", None), "timeout")
+    if error is not None:
+        return None, error
+    return (asked if asked is not None else bare), None
 
 
 class ToolFailed(Exception):
@@ -510,11 +536,22 @@ class ToolRegistry:
         Never raises.  An unknown name, bad arguments, or a tool that throws all
         come back as `ok=False` with a message a model can act on.
 
+        **A call whose arguments could not be read is not run at all.**  It
+        carries `error` from the hop that decoded it (`ToolCall.from_wire` or
+        the LLM server's accumulator), and the tool would otherwise be handed an
+        empty dict — defaults the model never chose — so the sentence is the
+        answer and the lookup and dispatch are skipped (SDD Appendix C: the call
+        is not dispatched, and the error is its result).
+
         The answer is rendered here rather than by each tool (`as_tool_text`),
         which is what lets a tool answer an object: what a model's message
         carries is text on every wire, and the tool that produced the fields has
         nothing to do with that.
         """
+        if call.error is not None:
+            logger.info("tool call %s was not dispatched: %s", call.name, call.error)
+            return f"Error: {call.error}", False
+
         tool = self._tools.get(call.name)
         if tool is None:
             # **The way back, not the whole list.**  A name that is not in this

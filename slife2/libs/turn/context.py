@@ -200,7 +200,7 @@ def _is_id(value: Any) -> bool:
 
     * `bool` is a subclass of `int`, and `true` would otherwise become turn 1;
     * a float, because a turn id is a whole count and the same rule
-      `slife2.libs.turn.tools.parse_timeout` states for a bound applies here:
+      `slife2.libs.turn.tools.read_timeout` states for a bound applies here:
       `1e999` is valid JSON, arrives as `inf`, and `int(inf)` raises
       `OverflowError` out of a function whose whole contract is that a malformed
       reply is refused rather than raised.

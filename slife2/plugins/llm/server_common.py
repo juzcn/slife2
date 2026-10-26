@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import json
 import logging
 import time
 import uuid
@@ -50,6 +49,7 @@ from slife2.libs.turn.messages import (
     ToolCall,
     ToolSpec,
     Usage,
+    read_arguments,
 )
 from slife2.libs.turn.tools import as_tool_text
 
@@ -129,15 +129,18 @@ class ToolCallAccumulator:
     def complete(self) -> list[ToolCall]:
         """Assemble the calls, ordered by index.
 
-        A call whose arguments did not parse **fails the turn** rather than
-        becoming an empty argument dict: `_parse_arguments` refuses it there,
-        naming the call, because a truncated or corrupt fragment stream is the
-        provider's fault and reading it as `{}` re-attributes it to the model —
-        which then sees a validation error about its own call and retries the
-        call it never got wrong (SDD Appendix C: a value that cannot be read is not a
-        value that is absent).  A call that genuinely took no arguments is
-        unaffected: an empty string still parses to no arguments, which is a
-        real absence rather than a damaged one.
+        A call whose arguments are not a JSON object is returned **marked, not
+        raised**.  `read_arguments` is the one reading: it gives the call an
+        empty dict, the sentence saying why, and the fragment as it arrived —
+        and `ToolRegistry.execute` reports that sentence to the model in place
+        of running the tool.  Raising instead would end the turn over one bad
+        call and tell the model nothing it could act on; running on `{}` would
+        dispatch a tool on defaults the model never chose (SDD Appendix C: the
+        call is not dispatched, and the error is its answer).
+
+        A call that genuinely took no arguments is unaffected: an empty string
+        still parses to no arguments, which is a real absence rather than a
+        damaged one.
         """
         calls = []
         for index in sorted(self._parts):
@@ -149,47 +152,17 @@ class ToolCallAccumulator:
             # conversation still points at it.  The random suffix costs nothing
             # and makes the key as durable as the row it names.
             call_id = part.id or f"call_{index}_{uuid.uuid4().hex}"
+            arguments, error = read_arguments(part.name or call_id, part.arguments)
             calls.append(
                 ToolCall(
                     id=call_id,
                     name=part.name,
-                    arguments=_parse_arguments(part.arguments, part.name or call_id),
+                    arguments=arguments,
+                    error=error,
+                    raw_arguments=part.arguments if error is not None else None,
                 )
             )
         return calls
-
-
-def _parse_arguments(raw: str, call: str) -> dict[str, Any]:
-    """Parse a reassembled arguments string — or refuse it, naming the call.
-
-    An empty string is a call with no arguments, which is a real value.  A
-    non-empty one that is not JSON is damage: the stream was cut short or the
-    provider mangled it, and answering `{}` for it hands the model an empty
-    argument dict it never sent.  So the refusal is a `ValueError` naming the
-    tool and the fragment, and the caller's turn dies with the fault attributed
-    where it happened.
-
-    **Valid JSON that is not an object is the same damage.**  `[]`, `"x"` and
-    `null` all parse, and a call's arguments are an object by the protocol — so
-    coercing one to `{}` is the very substitution refused above, just past the
-    parser instead of through it (SDD Appendix C: a value that cannot be read is not a
-    value that is absent).
-    """
-    if not raw.strip():
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"the arguments for tool call {call!r} did not parse as JSON "
-            f"({exc}): {raw[:200]!r}"
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(
-            f"the arguments for tool call {call!r} are not a JSON object but "
-            f"{type(parsed).__name__}: {raw[:200]!r}"
-        )
-    return parsed
 
 
 @dataclass

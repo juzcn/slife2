@@ -35,6 +35,38 @@ logger = logging.getLogger(__name__)
 Role = Literal["system", "user", "assistant", "tool"]
 
 
+def read_arguments(name: str, raw: str) -> tuple[dict[str, Any], str | None]:
+    """The arguments *raw* carries, or why the call must not be dispatched.
+
+    **An empty string is a call with no arguments; anything else must be a JSON
+    object.**  `[]`, `null` and `5` parse and are still not arguments — the
+    protocol says a call's arguments are an object — so they are refused rather
+    than read as `{}`.  An empty dict is not a neutral stand-in: it runs a tool
+    on defaults the model never chose, and the tool's own complaint then blames
+    the wrong mistake (a missing required argument, from a call the model got
+    wrong in a different way).
+
+    The sentence names the tool and carries the first 200 characters of what
+    arrived, because the reader is the model and that is what it needs to redo
+    the call.  The call is not dispatched; the error is its answer.
+    """
+    if not raw.strip():
+        return {}, None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {}, (
+            f"tool call {name!r} was not run: its arguments are not JSON "
+            f"({exc}): {raw[:200]!r}"
+        )
+    if not isinstance(parsed, dict):
+        return {}, (
+            f"tool call {name!r} was not run: its arguments are not a JSON "
+            f"object but {type(parsed).__name__}: {raw[:200]!r}"
+        )
+    return parsed, None
+
+
 @dataclass
 class ToolCall:
     """A complete tool call the model asked for.
@@ -42,11 +74,25 @@ class ToolCall:
     `arguments` is always a parsed dict.  Providers stream it as a JSON *string*
     in fragments and the fragments are reassembled by the LLM server, so nothing
     downstream of that hop ever sees a half-parsed call or a raw string.
+
+    **A call whose arguments are not a JSON object carries `error` and is never
+    dispatched.**  `arguments` is then empty and `raw_arguments` holds what the
+    wire said, because a reader needs both facts: the tool must not run on
+    arguments the model never sent, and the record must show what it did send.
+    `ToolRegistry.execute` answers the error text with `ok=False` and does not
+    invoke the tool.
     """
 
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    #: Why this call cannot be dispatched, or `None`.  Set only when the wire's
+    #: arguments are neither empty nor a JSON object — see `read_arguments`.
+    error: str | None = None
+    #: The arguments exactly as the wire carried them, kept only beside `error`;
+    #: `to_wire` sends these back rather than an empty object, so a stored turn
+    #: records what the model actually wrote.
+    raw_arguments: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Render as the OpenAI tool-call object.
@@ -60,58 +106,64 @@ class ToolCall:
         server log on a console whose codepage is not UTF-8, and a mojibake log
         line is a worse failure than an escaped one.
         """
+        rendered = (
+            self.raw_arguments
+            if self.raw_arguments is not None
+            else json.dumps(self.arguments, ensure_ascii=True)
+        )
         return {
             "id": self.id,
             "type": "function",
-            "function": {
-                "name": self.name,
-                "arguments": json.dumps(self.arguments, ensure_ascii=True),
-            },
+            "function": {"name": self.name, "arguments": rendered},
         }
 
     @classmethod
     def from_wire(cls, raw: dict[str, Any]) -> ToolCall:
         """Rebuild from the OpenAI tool-call object.
 
-        Tolerates malformed `arguments` (invalid JSON, or already a dict) by
-        degrading to an empty dict rather than raising: a model that emits
-        unparseable arguments should get an error *from its own tool call*, not
-        kill the turn.  The tool then reports the problem back to the model,
-        which is the loop's normal feedback path.
+        **A call whose arguments are not a JSON object is kept, marked, and
+        not dispatched.**  Invalid JSON and valid JSON that is not an object are
+        the same damage: the call is still a call — its id is what a result
+        answers, and its name is what the model needs to hear — so it is decoded
+        with `error` set and the tool never runs.  `to_wire` sends the original
+        text back, so the record keeps what the model wrote rather than an empty
+        object it never sent.
 
-        **"Malformed" includes the JSON that parses and is not an object.**  A
-        model that emitted `[]`, `null` or `5` as its arguments produced JSON —
-        `json.loads` is happy with all three — and they are not a dict, so
-        assigning them left the class's invariant ("`arguments` is always a
-        parsed dict") broken everywhere downstream: `split_meta` calls
-        `.items()` on it inside the loop, which has no handler for the
-        `AttributeError`, so one bad call took the whole turn down instead of
-        being reported back to the model as a bad call.  Degrading these the way
-        invalid JSON is degraded is what this docstring said it did all along.
-
-        **This is the fallback registered in SDD Appendix C**: *it gives up*
-        the arguments, so a tool with only optional parameters runs on its
-        defaults; *it does not cover* a value that parses as an object, which
-        is used; *the failure goes* to the tool's own validation error for a
-        live call, and to the empty arguments in a replayed one.
+        The same reading is in `read_arguments`, and it is the same sentence the
+        LLM server uses when it assembles a damaged provider stream: one rule,
+        whichever hop the call came through.
         """
         function = raw.get("function") or {}
+        call_id = str(raw.get("id") or "")
+        name = str(function.get("name") or "")
         raw_args = function.get("arguments")
-        if isinstance(raw_args, str):
-            try:
-                decoded = json.loads(raw_args) if raw_args.strip() else {}
-            except json.JSONDecodeError:
-                decoded = {}
-            arguments = decoded if isinstance(decoded, dict) else {}
-        elif isinstance(raw_args, dict):
-            arguments = raw_args
-        else:
-            arguments = {}
 
+        if isinstance(raw_args, dict):
+            return cls(id=call_id, name=name, arguments=raw_args)
+        if raw_args is None:
+            # Absent is a call with no arguments — a real value, not damage.
+            return cls(id=call_id, name=name)
+        if isinstance(raw_args, str):
+            arguments, error = read_arguments(name, raw_args)
+            return cls(
+                id=call_id,
+                name=name,
+                arguments=arguments,
+                error=error,
+                raw_arguments=raw_args if error is not None else None,
+            )
+
+        # Neither a string nor an object is not a shape this build writes; it
+        # is still damage, and it is named rather than dropped.
+        rendered = json.dumps(raw_args, ensure_ascii=True, default=str)
         return cls(
-            id=str(raw.get("id") or ""),
-            name=str(function.get("name") or ""),
-            arguments=arguments,
+            id=call_id,
+            name=name,
+            error=(
+                f"tool call {name!r} was not run: its arguments are not a JSON "
+                f"object but {type(raw_args).__name__}: {rendered[:200]!r}"
+            ),
+            raw_arguments=rendered,
         )
 
 

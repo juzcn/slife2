@@ -56,6 +56,23 @@ async def test_execute_returns_the_result_and_ok() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_call_with_unreadable_arguments_is_not_dispatched() -> None:
+    """**The tool is never run on arguments the model did not send.**
+
+    The call carries its error from the hop that decoded it; `execute` answers
+    that sentence and skips the lookup and the tool.  The tool picked here
+    would have answered "fine", which is what proves the dispatch did not
+    happen.
+    """
+    text, ok = await registry().execute(
+        ToolCall(id="c1", name="ok", error="tool call 'ok' was not run: nope")
+    )
+
+    assert ok is False
+    assert text == "Error: tool call 'ok' was not run: nope"
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool_is_a_result_not_an_exception() -> None:
     """The error is a message the model can act on, not a dead turn.
 

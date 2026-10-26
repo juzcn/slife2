@@ -40,7 +40,7 @@ from slife2.libs.turn.tools import (
     ToolFailed,
     ToolRegistry,
     bind_timeout,
-    parse_timeout,
+    read_timeout,
 )
 
 pytestmark = pytest.mark.unit
@@ -136,21 +136,41 @@ async def test_a_timeout_bounds_a_call_that_has_no_bound_of_its_own() -> None:
 
 
 @pytest.mark.asyncio
-async def test_garbage_timeout_never_kills_the_turn() -> None:
-    """A model that writes "5 seconds" gets its call run, not an exception.
+async def test_an_unreadable_timeout_is_reported_and_the_tool_never_runs() -> None:
+    """**A bound nobody can read is not "no bound".**  The call is the answer.
 
-    The failure this prevents is disproportionate: a `float()` that raises
-    escapes the whole batch and ends the turn, over a number nobody needed.
+    It used to run the tool anyway, unbounded, with a debug line nobody reads —
+    a number the model wrote, silently ignored, and a call that could outlive
+    anything the model meant.  Now the tool is never dispatched and the sentence
+    names the parameter and the value, so the model can write one this system
+    can honour.
     """
+    ran: list[str] = []
 
     async def quick(_arguments: dict[str, Any]) -> str:
+        ran.append("ran")
         return "ran"
 
-    for written in ("5 seconds", "x", None, 0, -1):
+    for written in ("5 seconds", "x", 0, -1, True):
         messages: list[Message] = []
         call = ToolCall(id="1", name="quick", arguments={"_timeout": written})
         await one(call, [a_tool("quick", quick)]).run_turn(messages, "hi")
-        assert tool_message(messages) == "ran", written
+        answer = tool_message(messages)
+        assert answer.startswith(
+            "Error: tool call 'quick' was not run: `_timeout` must be a positive, "
+            "finite number"
+        ), (written, answer)
+        assert repr(written) in answer, written
+    assert ran == [], "the tool was dispatched with a bound it could not honour"
+
+    # Omitted and an explicit null are "nobody said": the call runs.
+    for arguments in ({}, {"_timeout": None}):
+        messages = []
+        await one(
+            ToolCall(id="1", name="quick", arguments=arguments),
+            [a_tool("quick", quick)],
+        ).run_turn(messages, "hi")
+        assert tool_message(messages) == "ran", arguments
 
 
 @pytest.mark.asyncio
@@ -694,26 +714,25 @@ def test_the_two_tools_keep_the_names_the_prompt_uses() -> None:
     assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")
 
 
-def test_an_endless_timeout_is_nobody_saying_one() -> None:
-    """**`1e999` is valid JSON and means "no limit", and it ended the turn.**
+def test_an_endless_timeout_is_refused_like_any_other_bad_number() -> None:
+    """**`1e999` is valid JSON and is not a duration anyone can honour.**
 
-    `float("inf")` is what it arrives as, and it is positive, so it used to pass
-    `parse_timeout` as a bound: `bind_timeout` then did `int(inf)` for a tool
-    that declares its own `timeout` and raised `OverflowError` out of the loop,
-    which is the disproportionate answer to a bad number this module exists to
-    avoid.  An unbounded wait is what `None` already means.
+    It arrives as `inf`, and it used to pass through as a bound until `int(inf)`
+    raised `OverflowError` out of a turn.  It is now refused like every other
+    value that is not a positive, finite number, and the call is answered with
+    the sentence instead of being run.
     """
-    assert parse_timeout(1e999) is None
-    assert parse_timeout("inf") is None
-    assert parse_timeout(float("inf")) is None
-    # And the same through the binder, which is where the crash surfaced.
-    spec = ToolSpec(
-        name="render",
-        description="",
-        parameters={"properties": {"timeout": {"type": "integer"}}},
-    )
-    arguments: dict[str, Any] = {}
-    assert bind_timeout(arguments, spec, parse_timeout(1e999)) is None
+    for value in (1e999, float("inf"), "inf"):
+        seconds, error = read_timeout(value)
+        assert seconds is None
+        assert error is not None and "positive, finite" in error
+
+    # And the same through the binder, where the crash surfaced: a bare
+    # `timeout` the tool does not declare is read just as strictly.
+    spec = ToolSpec(name="render", description="", parameters={"properties": {}})
+    arguments: dict[str, Any] = {"timeout": 1e999}
+    bound, error = bind_timeout(arguments, spec, None)
+    assert bound is None and error is not None
     assert "timeout" not in arguments
 
 

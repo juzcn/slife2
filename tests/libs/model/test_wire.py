@@ -188,18 +188,21 @@ def test_tool_call_arguments_survive_as_a_string_on_the_wire() -> None:
     assert ToolCall.from_wire(wire) == call
 
 
-def test_unparseable_tool_arguments_degrade_to_empty() -> None:
-    """A model that emits bad JSON should get an error *from its tool*.
+def test_unparseable_tool_arguments_are_kept_and_marked() -> None:
+    """The call is answered with an error, and the tool is never run.
 
-    Raising here would abort the turn; degrading lets the loop hand the tool an
-    empty argument dict, the tool report the problem, and the model correct
-    itself -- the loop's normal feedback path.
+    An empty argument dict would dispatch the tool on defaults the model never
+    chose; raising would end the turn over one call.  So the call keeps what
+    arrived — its id, its name and the text — and carries the sentence the
+    registry reports in place of a result.
     """
     call = ToolCall.from_wire(
         {"id": "c1", "function": {"name": "calc", "arguments": "{not json"}}
     )
     assert call.arguments == {}
     assert call.name == "calc"
+    assert call.error is not None and "was not run" in call.error
+    assert call.to_wire()["function"]["arguments"] == "{not json"
 
 
 def test_tool_message_omits_the_tool_calls_key() -> None:

@@ -187,6 +187,17 @@ class TurnResult:
         return self.stop_reason == "max_iterations"
 
 
+def _not_run(call: ToolCall, why: str) -> ToolCall:
+    """The call, marked with the sentence its result will be.
+
+    The tool's name is in the sentence because a turn carries several calls and
+    an opaque `tool_call_id` is not what the model recognises its own mistake
+    by.  `ToolRegistry.execute` is what turns the mark into `Error: …` and
+    stops the dispatch; this only says which call and why.
+    """
+    return replace(call, error=f"tool call {call.name!r} was not run: {why}")
+
+
 class AgentLoop:
     """Runs turns against a backend and a tool registry."""
 
@@ -559,6 +570,10 @@ class AgentLoop:
           refused never happened as far as the transcript is concerned, and the
           reason is the display — a panel that appeared and then said "denied"
           would have told a reader the tool ran.
+        * **A call that cannot be run is answered before it is announced.**  Its
+          arguments could not be read, or its `_timeout` is not a positive,
+          finite number; the tool is never reached, and the error is the call's
+          result (`ToolRegistry.execute`).
         * **The clock starts after the announcement**, so a call's duration is
           the call and not the time somebody spent deciding.
         * **The call is announced with the arguments the model wrote**, including
@@ -566,11 +581,25 @@ class AgentLoop:
           what a reader sees is what the model said, and what the tool sees is
           what the tool takes.
         """
+        # **A call this system cannot run is answered, not announced.**  Its
+        # arguments could not be read at the hop that decoded it, or its
+        # `_timeout` is not a positive, finite number; either way the tool is
+        # never reached and the sentence is the call's result (SDD Appendix C).
+        # `execute` is what spells the refusal, so there is one copy of it.
+        if call.error is not None:
+            return await self._tools.execute(call)
+
         arguments, meta = split_meta(call.arguments)
+        if meta.timeout_error is not None:
+            return await self._tools.execute(_not_run(call, meta.timeout_error))
         # The tool's own schema decides who enforces the deadline, so the number
         # is put where it will be read and what is left for this method is
         # whatever nobody else took (`slife2.libs.turn.tools.bind_timeout`).
-        bound = bind_timeout(arguments, self._tools.spec_of(call.name), meta.timeout)
+        bound, timeout_error = bind_timeout(
+            arguments, self._tools.spec_of(call.name), meta.timeout
+        )
+        if timeout_error is not None:
+            return await self._tools.execute(_not_run(call, timeout_error))
         dispatch = replace(call, arguments=arguments)
 
         if meta.background and self._deliver is None:
