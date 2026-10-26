@@ -1938,8 +1938,7 @@ class MediaSettings:
         answer carries its own `provider/model`.  *Gives up:* the operator's
         `defaults:` intent for that kind.  *Does not cover:* a reference that
         names a model of the wrong kind or an unknown provider, which is refused
-        here.  *Failure goes:* nowhere beyond the answer itself — flag for
-        SDD Appendix C.
+        here.  *Failure goes:* nowhere beyond the answer itself (SDD Appendix C).
 
         Raises:
             ConfigError: If nothing can answer — including the case of a

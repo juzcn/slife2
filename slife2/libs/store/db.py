@@ -1969,6 +1969,12 @@ def _usage(raw: Any, *, what: str) -> Usage | None:
     existed, and a value that will not read as one.  The totals beside it are
     still the row's own, so a damaged breakdown costs the split and not the
     bill — the same field-not-structure rule `_messages` follows.
+
+    **The damaged half is the fallback registered in SDD Appendix C**: *it
+    gives up* the token split for that turn, *it does not cover* the messages,
+    which have their own row, and the failure goes to the warning naming the
+    row.  Refusing the row instead would turn one damaged field into unreadable
+    history, which is the total loss `_messages` exists to avoid.
     """
     if raw is None:
         return None

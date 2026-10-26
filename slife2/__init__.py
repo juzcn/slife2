@@ -842,6 +842,11 @@ def _logs(config: Config, server: str, lines: int, every: bool) -> int:
     No `--follow`: the log a server is writing is the one a failing start names
     in its error, and a terminal that owns the screen is not the place to watch
     it.  Reading a bounded tail is the recurring need.
+
+    **A log that cannot be read is named, never drawn as one that does not
+    exist** (SDD Appendix C).  Every branch reads first and tells a missing
+    file from a file the process may not open; `Path.exists` cannot make that
+    distinction, because it answers False for both.
     """
     targets = _log_targets(config)
     server = server.strip()
@@ -850,19 +855,30 @@ def _logs(config: Config, server: str, lines: int, every: bool) -> int:
         for name, _url, path, _aliases in targets:
             try:
                 size = path.stat().st_size
-            except OSError:
-                size = 0
-            state = f"{size} bytes" if size else "no log yet"
+            except FileNotFoundError:
+                state = "no log yet"
+            except OSError as exc:
+                # **A log that cannot be read is not a log that does not
+                # exist.**  Answering "no log yet" here would state as fact
+                # what the check did not find (SDD Appendix C), so the failure
+                # is named in the line instead.
+                state = f"the log could not be read: {exc}"
+            else:
+                state = f"{size} bytes" if size else "no log yet"
             print(f"  {name:<24} {path}  ({state})")
         return 0
 
     if every:
         for name, _url, path, _aliases in targets:
             print(f"== {name} <{path}> ==")
-            if not path.exists():
+            try:
+                text = _log_text(path, lines)
+            except FileNotFoundError:
                 print("(no log yet)")
                 continue
-            text = _log_text(path, lines)
+            except OSError as exc:
+                print(f"(the log could not be read: {exc})")
+                continue
             if text:
                 print(text)
         return 0
@@ -876,10 +892,17 @@ def _logs(config: Config, server: str, lines: int, every: bool) -> int:
         )
         return 2
     name, _url, path, _aliases = target
-    if not path.exists():
+    try:
+        text = _log_text(path, lines)
+    except FileNotFoundError:
         print(f"slife2: {name} has no log at {path}", file=sys.stderr)
         return 2
-    text = _log_text(path, lines)
+    except OSError as exc:
+        print(
+            f"slife2: {name}'s log at {path} could not be read: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     if text:
         print(text)
     return 0

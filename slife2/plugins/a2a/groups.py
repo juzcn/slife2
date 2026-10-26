@@ -506,7 +506,15 @@ class GroupStore:
         return store
 
     def _quarantine(self, reason: str) -> GroupStore:
-        """Keep the bytes of a file this build cannot read, and start empty."""
+        """Keep the bytes of a file this build cannot read, and start empty.
+
+        **This is the fallback registered in SDD Appendix C**: *what it does*
+        is move the file aside as ``.corrupt`` and answer no groups; *it gives
+        up* every group in that file; *it does not cover* a file that cannot be
+        moved aside, where `load_error` refuses every mutation instead; *the
+        failure goes* to the warning naming the path and to the preserved
+        ``.corrupt`` file.
+        """
         assert self.path is not None
         logger.warning(
             "a2a_groups_unreadable path=%s reason=%s — starting empty",

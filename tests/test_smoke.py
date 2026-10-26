@@ -314,6 +314,74 @@ def test_logs_lists_the_configured_logs(capsys) -> None:
     assert "bytes" in out
 
 
+def test_logs_names_a_log_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**A log that cannot be read is not a log that does not exist.**
+
+    The listing used to answer `0` for any stat failure, which printed "no log
+    yet" over a file the command had just failed to look at — the deformation
+    SDD Appendix C names, in the one command whose whole job is saying what is
+    on disk.
+    """
+    from pathlib import Path
+
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    assert slife2._logs(config, "", 50, False) == 0
+    line = next(one for one in capsys.readouterr().out.splitlines() if str(path) in one)
+    assert "the log could not be read" in line
+    assert "no log yet" not in line
+
+
+def test_logs_all_and_one_name_a_log_they_cannot_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The read branches do not ask `Path.exists`, which answers False for a
+    file the process may not stat — so they would have called it absent.
+
+    A read is the first act in both: a missing file is still "no log yet", and
+    a file that is there and refuses is named as itself.
+    """
+    from pathlib import Path
+
+    from slife2.libs.host import launcher, runtime
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    path = runtime.log_path(spec.url)
+    real_read = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert slife2._logs(config, "", 50, True) == 0
+    every = capsys.readouterr().out
+    assert f"== {spec.name} <{path}> ==" in every
+    assert "(the log could not be read:" in every
+
+    assert slife2._logs(config, spec.name, 50, False) == 2
+    err = capsys.readouterr().err
+    assert "could not be read" in err
+    assert "has no log at" not in err
+
+
 def test_logs_prints_the_tail(capsys) -> None:
     from slife2.libs.host import launcher, runtime
 

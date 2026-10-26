@@ -85,6 +85,12 @@ class ToolCall:
         `AttributeError`, so one bad call took the whole turn down instead of
         being reported back to the model as a bad call.  Degrading these the way
         invalid JSON is degraded is what this docstring said it did all along.
+
+        **This is the fallback registered in SDD Appendix C**: *it gives up*
+        the arguments, so a tool with only optional parameters runs on its
+        defaults; *it does not cover* a value that parses as an object, which
+        is used; *the failure goes* to the tool's own validation error for a
+        live call, and to the empty arguments in a replayed one.
         """
         function = raw.get("function") or {}
         raw_args = function.get("arguments")

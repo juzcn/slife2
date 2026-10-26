@@ -85,7 +85,10 @@ def _detect_language() -> str:
     in it.  Detection never raises — the OS query can fail on an unknown
     language id or an unset environment — and any failure degrades to English,
     because a window that cannot be drawn is worse than one in the wrong
-    language.
+    language.  **That degrade is the fallback registered in SDD Appendix C**:
+    *it gives up* the operator's locale, *it does not cover* a locale that
+    resolves, and the failure goes nowhere because the window it draws is the
+    only thing the answer feeds.
     """
     try:
         code = _os_language().lower()

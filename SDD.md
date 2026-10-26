@@ -2934,11 +2934,14 @@ The four shapes an undeclared fallback takes:
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
 | Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
+| A model's per-call timeout is not a positive, finite number | Treat the call as one nobody bounded | The bound the model asked for; the call may run unbounded | A positive, finite number, which is honoured | A debug line naming the value |
+| A model's tool-call arguments are not a JSON object | Dispatch the call with no arguments | The arguments, so a tool with only optional parameters runs on its defaults | A value that parses as an object, which is used | The tool's own validation error, or the empty arguments in a replay |
 | An image is refused by a provider | Drop the pixels, keep the note | The bytes in the live conversation | The record, which never had them | The note and the error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
 | Unknown `file-tunnel.active` | Degrade to ngrok with a warning | The operator's intent | A malformed shape (refused) | The warning and `tunnel_status` |
 | A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
+| A stored `usage` breakdown will not parse | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
 | A turn file from the previous schema (only a `turns` table) | Create an empty `turn` table and run | The turns on disk | A file missing a declared `turn` column, which is refused | One `logger.error` naming the file |
 | A stored tool schema will not parse | Serve the tool with no arguments | The arguments | A schema that parses | The tool's own error |
@@ -2946,6 +2949,7 @@ The four shapes an undeclared fallback takes:
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
 | An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | Bad rows, handled per pass | The error naming the path |
 | A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
+| The `qrcode` renderer is not installed | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A bookkeeping write fails | Log and continue | The record | Nothing; the write is attempted or not | A warning naming the path |
 | A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
@@ -2953,6 +2957,7 @@ The four shapes an undeclared fallback takes:
 | A stale `media.defaults:` entry | Use the first model of the kind | The operator's default | A wrong-kind or unknown-provider reference (refused) | The answer's own `provider/model` |
 | A `SKILL.md` header will not parse | Read as a skill with no header | The declared name, description, and requirements | A header that is a mapping | A warning naming the parse error |
 | A CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, or one found nowhere | The resolved path in `tunnel_status` |
+| A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive and its URL as reachable | Telling a broken probe from an outage | A transport the provider proves dead | A debug line and `tunnel_status` |
 | A progress line cannot be read | Drop it; default counts to zero | The difference between unmeasured and zero | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
 | A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
 | A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server | The probe's log and the launcher's conflict report |
@@ -2966,6 +2971,8 @@ The four shapes an undeclared fallback takes:
 | The trim tool is missing or unreadable | Answer empty, log the reason | The trim and the names the model would have seen | A trim the hub answers | A warning in the server log |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | Nothing; a teardown must not replace the caller's work |
 | The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
+| The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
+| An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
 
 Everything not in this register is a defect. A path that substitutes a weaker
 behaviour and is not here is an undeclared fallback. A fallback that stops being

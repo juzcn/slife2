@@ -329,6 +329,10 @@ def split_meta(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Meta]:
     degrades to "nobody said" rather than raising.  It is the model's own call
     that would die: an exception here escapes a whole batch of concurrent calls
     and ends the turn, which is a disproportionate answer to a bad number.
+    **That is the fallback registered in SDD Appendix C**: *what it gives up*
+    is the bound the model asked for, *it does not cover* a positive, finite
+    number, which is honoured, and the failure goes to the debug line
+    `parse_timeout` writes.
     """
     rest = {name: value for name, value in arguments.items() if name not in META_PARAMS}
     return rest, Meta(

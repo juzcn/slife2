@@ -219,8 +219,8 @@ def _read_json_dataclass[RecordT](
     held.  *Does not cover:* nothing — this is the floor, and a caller that
     knows the file must exist (`read_claim`, `read_record`) still only learns
     that it does not.  *Failure goes:* nowhere, which is why the process that
-    wrote the file is the one to read the warning `_write_json_atomic` logs;
-    flag for SDD Appendix C.
+    wrote the file is the one to read the warning `_write_json_atomic` logs
+    (SDD Appendix C).
 
     The broad `except` is the point rather than a shortcut, and each arm is a
     different way the file fails to be one: `read_text` raises `OSError` when it
@@ -251,7 +251,7 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
     landed is invisible to `stop` and is then orphaned.  *Gives up:* the record,
     at the moment it was written.  *Does not cover:* nothing — the write is
     either complete or not attempted.  *Failure goes:* a warning naming the
-    path, so the orphan is findable in the log; flag for SDD Appendix C.
+    path, so the orphan is findable in the log (SDD Appendix C).
     """
     tmp = path.with_suffix(".tmp")
     try:

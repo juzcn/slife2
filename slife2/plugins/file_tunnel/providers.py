@@ -184,8 +184,9 @@ def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
     is what makes the feature work there, and also means PATH does not
     necessarily win.  The order is therefore reported rather than trusted:
     :attr:`_TunnelProviderBase.binary_path` carries the resolved path into
-    :meth:`_TunnelProviderBase.status`.  (Flagged for SDD Appendix C: the
-    fallback narrows *which* binary runs to a guess when PATH is silent.)
+    :meth:`_TunnelProviderBase.status`.  The fallback narrows *which* binary
+    runs to a guess when PATH is silent; it is registered in SDD Appendix C,
+    and *the failure goes* to that reported path.
     """
     found = shutil.which(binary)
     if found:
@@ -284,6 +285,12 @@ def _ngrok_tunnel_alive(public_url: str) -> bool:
     apart from "this build does not track them".  A NON-EMPTY list that omits
     our URL does answer: there the SDK is demonstrably tracking listeners for
     this session and ours is not among them.
+
+    **This is the fallback registered in SDD Appendix C**, and its shape is
+    that of the two beside it: *what it does* is treat a probe that could not
+    answer as alive; *it gives up* telling a broken probe from an outage; *it
+    does not cover* a non-empty listener list that proves our URL gone; *the
+    failure goes* to the debug line below and to `tunnel_status`.
     """
     try:
         ngrok = _import_ngrok()
@@ -302,7 +309,12 @@ def _ngrok_tunnel_alive(public_url: str) -> bool:
             if str(url).rstrip("/") == want:
                 return True
         return False
-    except Exception:  # noqa: BLE001 — a failed probe must not flap the tunnel
+    except Exception as exc:  # noqa: BLE001 — a failed probe must not flap the tunnel
+        logger.debug(
+            "ngrok_liveness_probe_failed url=%s err=%s — treating the tunnel as alive",
+            public_url,
+            exc,
+        )
         return True
 
 
@@ -486,12 +498,24 @@ class _TunnelProviderBase:
         a claim about a transport this process is not running and never probed.
         With nothing of ours behind the URL there is nothing to ask, so the
         answer is whether there is a URL at all.
+
+        **A probe that throws is the fallback registered in SDD Appendix C**:
+        *what it does* is treat the URL as reachable; *it gives up* telling a
+        broken probe from an outage; *it does not cover* a transport its
+        provider proves dead; *the failure goes* to the debug line below and to
+        `tunnel_status`.
         """
         if self._public_url is None:
             return self.public_url is not None
         try:
             return bool(self.is_alive())
-        except Exception:  # noqa: BLE001 — a failed probe must not refuse
+        except Exception as exc:  # noqa: BLE001 — a failed probe must not refuse
+            logger.debug(
+                "tunnel_reachability_probe_failed provider=%s err=%s — "
+                "treating the URL as reachable",
+                self.label,
+                exc,
+            )
             return True
 
     def share_url_for(self, file_id: str) -> str | None:
@@ -984,7 +1008,14 @@ class _CliTunnelProvider(_TunnelProviderBase):
         try:
             if proc.poll() is not None:
                 return False
-        except Exception:  # noqa: BLE001 — a broken probe must not flap
+        except Exception as exc:  # noqa: BLE001 — a broken probe must not flap
+            logger.debug(
+                "tunnel_process_probe_failed provider=%s pid=%s err=%s — "
+                "treating the tunnel as alive",
+                self.label,
+                getattr(proc, "pid", "?"),
+                exc,
+            )
             return True
         return self._transport_alive()
 

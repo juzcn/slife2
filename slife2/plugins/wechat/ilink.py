@@ -282,9 +282,12 @@ class IlinkClient:
     async def fetch_qrcode(self, base_url: str = "") -> dict[str, Any]:
         """A fresh login QR, as the bridge describes it.
 
-        POST first and GET as a fallback: the documented call is the POST, and
-        the GET answers when the POST comes back without a `qrcode` — kept
-        because a login that cannot start is a login that cannot be retried.
+        POST first and GET as the second route: the documented call is the POST,
+        and the bridge answers the same endpoint on GET when the POST comes
+        back without a `qrcode` — kept because a login that cannot start is a
+        login that cannot be retried.  This is **a second route to the same
+        capability, not a fallback**: it returns the code or fails exactly as
+        the POST does, so nothing is given up by taking it.
         **What reaches the GET is a POST that answered and had no `qrcode`**:
         one whose body could not be read raises (`UnreadableAnswer`), because
         taking a second run at a link that just answered something
@@ -297,7 +300,7 @@ class IlinkClient:
         )
         if data.get("qrcode"):
             return data
-        logger.debug("qr_post_empty action=get_fallback")
+        logger.debug("qr_post_empty action=get_second_route")
         return await self._get("ilink/bot/get_bot_qrcode?bot_type=3", base_url)
 
     async def poll_login_status(
