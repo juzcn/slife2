@@ -1609,6 +1609,75 @@ async def test_a_harness_tool_call_is_not_drawn() -> None:
     assert names == ["calc"]
 
 
+async def test_a_live_harness_tool_call_is_not_drawn() -> None:
+    """The live half of the same rule: a harness pair is not a tool panel.
+
+    `_check_new_input` reaches the screen as the `MessageCutIn` line, and
+    `_func_tool_unload` reaches it as nothing at all.  Drawing a tool panel for
+    either is how a cut-in came to appear twice — once as the message it was,
+    and once as the machinery's call that carried it.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallStarted(
+                call_id="_harness_check_new_input_1",
+                name="_check_new_input",
+                arguments={},
+            )
+        )
+        on_event(
+            ToolCallFinished(
+                call_id="_harness_check_new_input_1",
+                name="_check_new_input",
+                ok=True,
+                result_preview="a note",
+                result_chars=6,
+                elapsed_ms=1,
+            )
+        )
+        on_event(MessageCutIn(text="a note", channel="wechat"))
+        on_event(
+            ToolCallStarted(
+                call_id="_harness_func_tool_unload_2",
+                name=FUNC_TOOL_UNLOAD,
+                arguments={},
+            )
+        )
+        on_event(
+            ToolCallFinished(
+                call_id="_harness_func_tool_unload_2",
+                name=FUNC_TOOL_UNLOAD,
+                ok=True,
+                result_preview="dropped 3",
+                result_chars=9,
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        on_event(
+            TurnFinished(
+                text="done",
+                usage=Usage(completion_tokens=1),
+                last_usage=Usage(completion_tokens=1),
+                iterations=1,
+                stop_reason="stop",
+            )
+        )
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        names = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        text = shown(app)
+
+    assert names == [], "the harness's calls are not tool panels"
+    assert "Wechat> a note" in text, "the cut-in is the message's own line"
+    assert "_check_new_input" not in text
+    assert FUNC_TOOL_UNLOAD not in text
+
+
 async def test_a_restored_history_ends_at_its_tail() -> None:
     """The reader is put where a live session would have left them."""
     many = [

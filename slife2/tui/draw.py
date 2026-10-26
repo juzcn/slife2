@@ -42,6 +42,7 @@ from slife2.libs.turn.events import (
     TurnEvent,
     TurnFinished,
 )
+from slife2.libs.turn.tools import is_harness
 from slife2.tui import notes
 from slife2.tui.widgets import ChatView
 
@@ -54,6 +55,16 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
     decided it does not own any of them, which is exactly what a watcher is.
     """
     match event:
+        case ToolCallStarted(name=name) | ToolCallFinished(name=name) if is_harness(
+            name
+        ):
+            # **The harness's own pairs are not tool panels.**  `_check_new_input`
+            # is drawn as the cut-in its `MessageCutIn` event carries, and
+            # `_func_tool_unload` is the budget talking to itself; a panel for
+            # either would be a second line for a call the model did not make.
+            # A rebuilt transcript has always skipped them (`restore._draw_answer`);
+            # this is the live half of the same rule.
+            return True
         case MessageCutIn(text=text, channel=channel):
             # A message that jumped the queue, drawn inside the turn that took
             # it: the line belongs here and the turn stays open.

@@ -289,6 +289,8 @@ class AgentLoop:
         observer: TurnObserver = NULL_OBSERVER,
         *,
         auto: Callable[[], AutoCall | None] | None = None,
+        folded: Callable[[], tuple[str, str] | None] | None = None,
+        injected: Callable[[], int] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
 
@@ -327,6 +329,18 @@ class AgentLoop:
         metadata and both halves are echoed on `MessageCutIn`, so there is one
         answer to "what arrived, and for whom" whether a reader looks at the
         live stream or at the turn log.
+
+        **The model can make the same call itself**, because the tool is
+        declared and a provider hands the loop whatever the model asked for.
+        That path must not be a second, poorer account of a cut-in: `injected`
+        answers how many messages this turn has taken, `folded` answers the
+        channel and receipt of the one just taken, and a count that grew across
+        the call writes the channel onto the tool message and emits the same
+        `MessageCutIn`.  Without that pair a message the model took early lost
+        its channel in the record and was drawn again by the window when its
+        submission's own turn began — one message, two lines, the second below
+        the answer.  Both are optional: a loop with no inbox behind it has
+        nothing to fold.
 
         **Three arguments the model may add to any call.**  `_timeout`, `_async`
         and `_approve` are read off every call and stripped before dispatch, so
@@ -496,8 +510,10 @@ class AgentLoop:
             # result
             # against: it no longer contains a half-written batch.
             answers: list[Message] = []
+            cutins: list[tuple[str, str, str]] = []
             for index, call in enumerate(result.tool_calls):
                 text: str | None = None
+                before = injected() if injected is not None else 0
                 try:
                     text, _ok = await self._one(call, observer, iteration, messages)
                     fitted = await self._fit(call, text, messages)
@@ -513,11 +529,39 @@ class AgentLoop:
                     messages.append(answer)
                     messages.extend(answers)
                     raise
+                channel = ""
+                receipt = ""
+                took = False
+                if folded is not None and injected is not None and injected() > before:
+                    found = folded()
+                    if found is not None:
+                        channel, receipt = found
+                    took = True
                 answers.append(
-                    Message(role="tool", content=fitted, tool_call_id=call.id)
+                    Message(
+                        role="tool",
+                        content=fitted,
+                        tool_call_id=call.id,
+                        channel=channel,
+                    )
                 )
+                if took:
+                    cutins.append((text or "", channel, receipt))
             messages.append(answer)
             messages.extend(answers)
+            # After the batch is in the conversation, as the auto path's event
+            # is after its pair: a screen is told about a message the
+            # conversation already holds, and a rebuilt transcript can draw the
+            # same line from the channel on the tool message.
+            for cutin_text, cutin_channel, cutin_receipt in cutins:
+                await self._emit(
+                    observer,
+                    MessageCutIn(
+                        text=cutin_text,
+                        channel=cutin_channel,
+                        receipt=cutin_receipt,
+                    ),
+                )
 
         # Only a capped turn ever gets here: with no cap the iterator does not
         # end, so the only way out of the loop is the return above.

@@ -279,6 +279,50 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     ] == ["c1"]
 
 
+async def test_a_message_the_model_takes_early_is_the_same_cut_in() -> None:
+    """`_check_new_input` is declared, so the model can call it itself.
+
+    The early call must not be a poorer account of the same message: the tool
+    message keeps the channel and the loop emits the `MessageCutIn` with the
+    submission's receipt.  Without that the window had no cut-in to mark the
+    submission drawn, and drew the line again below the turn's answer.
+    """
+    taken: list[str] = []
+
+    async def check_new_input(arguments: dict[str, Any]) -> str:
+        taken.append("one")
+        return "the message the model took"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="_check_new_input", arguments={})),
+        text_turn("done"),
+    )
+    harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
+    observer = ListObserver()
+    messages: list[Message] = []
+
+    result = await AgentLoop(backend, ToolRegistry(harness_tools)).run_turn(
+        messages,
+        "start",
+        observer,
+        folded=lambda: ("wechat", "submission-9"),
+        injected=lambda: len(taken),
+    )
+
+    assert result.text == "done"
+    answered = messages[2]
+    assert (answered.role, answered.tool_call_id) == ("tool", "c1")
+    assert answered.content == "the message the model took"
+    assert answered.channel == "wechat", "the rebuilt line needs the bubble"
+    assert [e for e in observer.events if isinstance(e, MessageCutIn)] == [
+        MessageCutIn(
+            text="the message the model took",
+            channel="wechat",
+            receipt="submission-9",
+        )
+    ]
+
+
 async def test_a_failing_tool_is_fed_back_as_text() -> None:
     """The model gets to see the mistake and correct itself."""
     backend = FakeBackend(

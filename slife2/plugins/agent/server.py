@@ -2566,6 +2566,23 @@ def build_server(
                 receipt=waiting.receipt,
             )
 
+        def injected_count() -> int:
+            """How many messages this turn has taken, for the early cut-in."""
+            return len(loop.injected)
+
+        def folded_message() -> tuple[str, str] | None:
+            """The channel and receipt of the message taken most recently.
+
+            `take_waiting` appends the entry after it pops it, so the last one
+            is the message the call just took.  The loop asks only when the
+            count grew across that call; a `_check_new_input` that answered
+            "nothing waiting" must not wear the previous message's bubble.
+            """
+            if not loop.injected:
+                return None
+            item = loop.injected[-1]
+            return item.channel, item.receipt
+
         # The monotonic clock is the duration's, and `started_at` the row's:
         # both are needed, and neither can be derived from the other without
         # reading the store's own timestamp format back (see `Outcome.elapsed`).
@@ -2721,7 +2738,12 @@ def build_server(
             # replaces the list wholesale, so a message appended before it would
             # be destroyed, which is why `run_turn` appends this one itself.
             outcome.result = await agent_loop.run_turn(
-                loop.messages, user, observer, auto=auto_invoke
+                loop.messages,
+                user,
+                observer,
+                auto=auto_invoke,
+                folded=folded_message,
+                injected=injected_count,
             )
         except asyncio.CancelledError:
             # **The interruption is repaired in the loop.**  A batch the

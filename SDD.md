@@ -975,6 +975,13 @@ Rules:
 4. **A pair is written only when something moved.** An empty pair every turn
    records something that did not happen.
 
+A model's own `_check_new_input` call is the same cut-in, not a second account
+of one. The channel the message arrived on rides its tool message — so a
+rebuilt transcript wears the same bubble — and the loop emits the same
+`MessageCutIn` with the submission's receipt, so the window that submitted it
+does not draw the line again when its own turn begins. Only the side that wrote
+the pair differs.
+
 ### 5.4 Channels and delivery
 
 A message that arrives from anywhere other than this terminal becomes a turn, and
