@@ -903,7 +903,7 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
         "      SERPER_API_KEY: ${SERPER_API_KEY}\n"
         "file-tunnel:\n"
         "  providers:\n"
-        "    ssh:\n"
+        "    localhost.run:\n"
         "      binary: ${SSH_BINARY:-ssh}\n"
         "    ngrok:\n"
         "      token: keyring:slife2/ngrok\n",

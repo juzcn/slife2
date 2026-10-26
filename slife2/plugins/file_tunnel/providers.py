@@ -1541,18 +1541,18 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
 def create_provider(name: str, options: dict | None = None) -> TunnelProvider:
     """Build the tunnel provider named by the `file-tunnel:` section.
 
-    An unknown name falls back to ngrok with a warning — a bad config value
-    must never keep the plugin from loading, which is the rule the loader
-    states where it reads the section.
+    **A name this build does not have is refused**, and the config loader
+    refuses it before this is called.  Substituting another provider would
+    publish the machine through a vendor the operator did not choose, which is
+    a decision this factory has no business making.
     """
+    if name == "ngrok":
+        return NgrokTunnel(options)
     if name == "localhost.run":
         return LocalhostRunTunnel(options)
     if name == "cloudflare":
         return CloudflareQuickTunnel(options)
-    if name != DEFAULT_PROVIDER:
-        logger.warning(
-            "file_tunnel_provider_unknown provider=%s fallback=%s",
-            name,
-            DEFAULT_PROVIDER,
-        )
-    return NgrokTunnel(options)
+    raise ValueError(
+        f"unknown tunnel provider {name!r}; known: "
+        + ", ".join(sorted(KNOWN_PROVIDERS))
+    )

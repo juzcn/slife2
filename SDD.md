@@ -2588,10 +2588,12 @@ Three providers are supported:
 | localhost.run | `ssh` | Random rotating hostname; TLS ends at the provider. |
 | cloudflare | `cloudflared` | Random hostname stable for the process. |
 
-An unknown `active:` provider degrades to ngrok with a warning, and
-`tunnel_status` reports the provider actually in use. A malformed shape is
-refused. The tunnel is a subordinate dependency; a name this build does not have
-must not keep the plugin from loading.
+An unknown `active:` is a config error: the loader refuses it and names the
+providers this build has, and a provider named under `providers:` is checked
+the same way. A malformed shape is refused too. Which tunnel a machine publishes
+through is the operator's reachability decision, so an unrecognised name is a
+mistake in a file a person edits rather than a version to tolerate — substituting
+another provider would make that decision for them.
 
 A published URL is not a working URL. A transport that has lost the edge keeps
 its URL and answers HTTP 530, so reachability is checked separately and the tool
@@ -2946,7 +2948,6 @@ The four shapes an undeclared fallback takes:
 | An image is refused by a provider | Drop the pixels, keep the note | The bytes in the live conversation | The record, which never had them | The note and the error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
-| Unknown `file-tunnel.active` | Degrade to ngrok with a warning | The operator's intent | A malformed shape (refused) | The warning and `tunnel_status` |
 | A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
 | A stored `usage` breakdown will not parse | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
 | A `turn_summarize` call's arguments will not parse | Save the turn without its annotation | The summary and tags | A call whose arguments parse | A warning naming the call |

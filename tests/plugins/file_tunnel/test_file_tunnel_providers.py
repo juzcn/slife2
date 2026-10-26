@@ -238,9 +238,11 @@ def test_every_known_provider_is_constructible(name, expected) -> None:
     assert isinstance(create_provider(name), expected)
 
 
-def test_an_unknown_name_falls_back_rather_than_raising() -> None:
-    """A bad config value must never keep the plugin from loading."""
-    assert isinstance(create_provider("made-up"), NgrokTunnel)
+def test_an_unknown_name_is_refused() -> None:
+    """Substituting ngrok would publish the machine through a vendor the
+    operator did not choose; the config loader refuses the name first."""
+    with pytest.raises(ValueError, match="made-up"):
+        create_provider("made-up")
 
 
 def test_every_provider_shares_the_lifecycle() -> None:
@@ -548,10 +550,9 @@ def test_the_ssh_binary_option_is_honoured() -> None:
 
 
 def test_a_malformed_remote_port_is_refused() -> None:
-    """SDD §12.1 declares exactly one warn-instead-of-refuse in this section — an
-    unknown provider *name* — and says a malformed *shape* is refused.  A bad
-    value in a known option is that same mistake: reading "not a number" as 80
-    silently forwards a different remote port than the config wrote."""
+    """A bad value in a known option is a config mistake like a bad `active:`:
+    reading "not a number" as 80 silently forwards a different remote port than
+    the config wrote."""
     with pytest.raises(ValueError, match=r"remote_port 'not a number'"):
         LocalhostRunTunnel({"remote_port": "not a number"})
     # An absent option is still the documented default, and a written one is

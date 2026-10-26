@@ -633,8 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         note=lambda config: (
             f"exposing through {config.file_tunnel.active}"
             if config.file_tunnel.providers
-            else f"no `{CONFIG_KEY}:` section — falling back to "
-            f"{config.file_tunnel.active}"
+            else f"no `{CONFIG_KEY}:` section — using {config.file_tunnel.active}"
         ),
     )
 

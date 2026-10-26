@@ -2029,15 +2029,13 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` falls back rather than raising**, which is SDD §12.1's
-    registered exception and the reason a tunnel is allowed it (it is no longer
-    shared with `embeddings.active_model`, which now refuses an undefined
-    name): a tunnel is a *subordinate* dependency, and a name this build does
-    not have must not be able to keep the plugin from loading.  What a
-    malformed *shape* does is the opposite — the loader refuses that, like
-    every other section, because a `providers:` that is not a mapping is a
-    mistake somebody has to be told about rather than a vendor this build
-    lacks.
+    **An unknown `active:` is a config error and is refused**, like every other
+    section's: a provider this build does not have is a typo or a config copied
+    from a build that had one, and a tunnel is the one capability whose provider
+    is a *reachability* decision — substituting another one makes that decision
+    for the operator.  A provider named under `providers:` is checked the same
+    way, because an entry nothing can construct is the same typo one line down.
+    A malformed *shape* is refused too, by `_mapping`.
     """
 
     #: Which provider is live.  The others stay configured and inert.
@@ -3129,19 +3127,11 @@ def _media(raw: Any, base: MediaSettings) -> MediaSettings:
 def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     """The `file-tunnel:` section.
 
-    One judgement call, and it is the whole of this function: **a malformed
-    shape raises and a name this build does not have falls back.**
-
-    The first is this module's rule everywhere — a `providers:` that is not a
-    mapping, or an entry that is not one, is a mistake in a file a person
-    edits, and every other section refuses it at load rather than at the call
-    that finds it.  The second is the opposite: a tunnel provider is a
-    *subordinate* dependency, so an `active:` naming something
-    this build cannot construct — a typo, a provider removed since the config
-    was written, a config copied from another machine — degrades to the default
-    with a warning instead of a plugin that will not load.  What makes that
-    safe rather than silent is `tunnel_status`, which reports the provider
-    actually in use.
+    **Every name is checked against this build's providers**, and a malformed
+    shape is refused the same way: both are mistakes in a file a person edits,
+    and the module refuses both at load rather than at the call that finds them.
+    `active:` cannot degrade to another provider — which tunnel a machine
+    publishes through is the operator's decision, not a default to fall back on.
 
     Imported inside the function because the providers module reaches
     `subprocess` and an SDK, and this module is on the import path of the TUI
@@ -3152,10 +3142,15 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     if raw is None:
         return base
     section = _mapping(raw, "file-tunnel")
+    known = ", ".join(sorted(KNOWN_PROVIDERS))
     providers: dict[str, dict] = {}
     for name, spec in _mapping(
         section.get("providers"), "file-tunnel.providers"
     ).items():
+        if str(name) not in KNOWN_PROVIDERS:
+            raise ConfigError(
+                f"file-tunnel.providers.{name}: not a tunnel provider; known: {known}"
+            )
         if not isinstance(spec, dict):
             raise ConfigError(
                 f"file-tunnel.providers.{name}: expected a mapping of that "
@@ -3173,13 +3168,9 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
 
     active = str(section.get("active") or DEFAULT_PROVIDER).strip()
     if active not in KNOWN_PROVIDERS:
-        logger.warning(
-            "file_tunnel_active_unknown active=%s fallback=%s known=%s",
-            active,
-            DEFAULT_PROVIDER,
-            sorted(KNOWN_PROVIDERS),
+        raise ConfigError(
+            f"file-tunnel.active: {active!r} is not a tunnel provider; known: {known}"
         )
-        active = DEFAULT_PROVIDER
 
     return FileTunnelSettings(active=active, providers=providers)
 

@@ -1268,14 +1268,28 @@ def test_a_tunnel_option_is_not_resolved_by_the_load(
     section = load(
         write(
             tmp_path,
-            "file-tunnel:\n  providers:\n    ssh:\n"
+            "file-tunnel:\n  providers:\n    localhost.run:\n"
             "      binary: ${SLIFE2_TEST_BINARY:-ssh}\n",
         )
     ).file_tunnel
 
     assert calls == []
-    assert section.options_for("ssh")["binary"] == "ssh"
+    assert section.options_for("localhost.run")["binary"] == "ssh"
     assert calls == ["SLIFE2_TEST_BINARY"]
+
+
+def test_an_unknown_tunnel_provider_is_a_config_error(tmp_path) -> None:
+    """A tunnel publishes the machine; which provider does it is the operator's
+    decision, so a name this build lacks is refused rather than swapped for the
+    default."""
+    with pytest.raises(ConfigError, match="file-tunnel.active.*made-up"):
+        load(write(tmp_path, "file-tunnel:\n  active: made-up\n"))
+
+
+def test_an_unknown_tunnel_providers_entry_is_a_config_error(tmp_path) -> None:
+    """The same typo one line down: an entry nothing can construct is refused."""
+    with pytest.raises(ConfigError, match="file-tunnel.providers.grok"):
+        load(write(tmp_path, "file-tunnel:\n  providers:\n    grok: {}\n"))
 
 
 def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:

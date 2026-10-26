@@ -436,8 +436,8 @@ media:
 file-tunnel:
   # Exactly one provider is active; the others stay configured and inert.
   # `expose_local_image` serves a local file through the tunnel. An unknown
-  # `active` falls back to ngrok with a warning; `tunnel_status` reports the
-  # provider in use.
+  # provider name is a config error, refused at load; `tunnel_status` reports
+  # the provider in use.
   active: cloudflare
   providers:
     ngrok:
