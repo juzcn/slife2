@@ -56,6 +56,7 @@ from slife2.libs.host.runtime import (
     exclusive,
     live_clients,
     pid_alive,
+    process_start_token,
     read_claim,
     read_record,
     register_client,
@@ -858,22 +859,32 @@ def _stop_one(spec: ServerSpec) -> Outcome:
 
     if not same_process(record):
         clear_record(spec.url)
-        # `same_process` is False for two situations, and they are not the same
-        # sentence.  A pid that is simply gone is the common one — a launcher
-        # that killed a server which never became ready leaves exactly this
-        # record, and so does a machine that was rebooted — while a pid that
-        # belongs to somebody else is the one the start token exists to catch.
-        # Calling the first "pid reused" asserts something nobody checked, in
-        # the one line a reader gets when a server did not stop.
-        why = "the process is gone" if not pid_alive(record.pid) else "pid reused"
-        return Outcome(
-            spec,
-            Status.STOPPED,
-            detail=(
+        # `same_process` is False for three situations, and they are not the
+        # same sentence.  A pid that is simply gone is the common one — a
+        # launcher that killed a server which never became ready leaves exactly
+        # this record, and so does a machine that was rebooted — while a pid
+        # that belongs to somebody else is the one the start token exists to
+        # catch.  The third is *no proof at all*: an empty record token, or a
+        # lookup that could not read the live one.  Calling either of the first
+        # two without evidence "pid reused" asserts something nobody checked,
+        # in the one line a reader gets when a server did not stop; the third
+        # says what it knows (SDD Appendix C).
+        if not pid_alive(record.pid):
+            detail = (
                 f"record points at pid {record.pid}, which is no longer "
-                f"{spec.name} ({why}); left alone"
-            ),
-        )
+                f"{spec.name} (the process is gone); left alone"
+            )
+        elif record.start_token and process_start_token(record.pid) is not None:
+            detail = (
+                f"record points at pid {record.pid}, which is no longer "
+                f"{spec.name} (pid reused); left alone"
+            )
+        else:
+            detail = (
+                f"record points at pid {record.pid}, but its ownership could "
+                f"not be proven; left alone"
+            )
+        return Outcome(spec, Status.STOPPED, detail=detail)
 
     gone = terminate(record.pid)
     if not gone:

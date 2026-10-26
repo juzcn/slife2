@@ -184,9 +184,13 @@ def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
     is what makes the feature work there, and also means PATH does not
     necessarily win.  The order is therefore reported rather than trusted:
     :attr:`_TunnelProviderBase.binary_path` carries the resolved path into
-    :meth:`_TunnelProviderBase.status`.  The fallback narrows *which* binary
-    runs to a guess when PATH is silent; it is registered in SDD Appendix C,
-    and *the failure goes* to that reported path.
+    :meth:`_TunnelProviderBase.status`.
+
+    **The guess is only for the default binary.**  When the operator named one
+    (`binary:`), a name that cannot be found is refused rather than replaced by
+    another program from a guessed location; `_find_binary` passes no `extra`
+    in that case.  It is registered in SDD Appendix C, and *the failure goes*
+    to that reported path or to the refusal that names the configured binary.
     """
     found = shutil.which(binary)
     if found:
@@ -950,7 +954,13 @@ class _CliTunnelProvider(_TunnelProviderBase):
     def __init__(self, options: dict | None = None) -> None:
         super().__init__()
         opts = options or {}
-        self._binary: str = str(opts.get("binary") or self.default_binary)
+        named = str(opts.get("binary") or "").strip()
+        self._binary: str = named or self.default_binary
+        #: Whether the operator named the binary.  A named binary that cannot be
+        #: found is refused rather than replaced by a guessed install location —
+        #: running a *different* program than the one configured is the
+        #: deformation the fallback must not make.
+        self._binary_named: bool = bool(named)
 
         self._proc: subprocess.Popen | None = None
         self._pending_url: str | None = None  # set by the reader for a start
@@ -1367,7 +1377,8 @@ class LocalhostRunTunnel(_CliTunnelProvider):
                 ) from exc
 
     def _find_binary(self) -> str | None:
-        return _which(self._binary, _windows_ssh_fallbacks())
+        extra = () if self._binary_named else _windows_ssh_fallbacks()
+        return _which(self._binary, extra)
 
     def _argv(self, binary: str, port: int) -> list[str]:
         return [
@@ -1505,7 +1516,8 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
         return bool(self._registered)
 
     def _find_binary(self) -> str | None:
-        return _which(self._binary, _cloudflared_fallbacks())
+        extra = () if self._binary_named else _cloudflared_fallbacks()
+        return _which(self._binary, extra)
 
     def _argv(self, binary: str, port: int) -> list[str]:
         return [

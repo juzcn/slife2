@@ -149,6 +149,43 @@ async def test_a_saved_turn_reads_back_whole(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_usage_object_that_parses_but_is_foreign_drops_the_split(
+    tmp_path, caplog
+) -> None:
+    """**A parseable foreign object is not an all-zero split.**  `Usage.from_wire`
+    coerces every missing key to zero, so a stored `{"prompt": 10}` would read
+    as an honest "no cache" measurement nobody made.  The shape is checked
+    against the writer's keys; the totals stay, the split goes, the row is named.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    usage = Usage(
+        prompt_tokens=200, completion_tokens=45, cache_read=150, cache_creation=20
+    )
+    await store.save_turn(
+        embedder=EMBEDDER,
+        messages=[{"role": "user", "content": "hi"}],
+        channel="tui",
+        who_helped="jack",
+        what_model="deepseek/deepseek-flash",
+        token_count=usage.total_tokens,
+        context_tokens=135,
+        usage=usage,
+        created_at="2026-10-07T08:00:00+08:00",
+        completed_at="2026-10-07T08:00:02+08:00",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE turn SET usage = ?", ('{"prompt": 10}',))
+
+    with caplog.at_level(logging.WARNING, logger="slife2.libs.store.db"):
+        (record,), _ = store.turns()
+
+    assert record.usage is None
+    assert record.token_count == usage.total_tokens
+    assert "not this build's breakdown" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_turns_are_newest_first(tmp_path) -> None:
     """Retrieval is by time, and the order is the rowid's — not the clock's.
 
@@ -251,14 +288,14 @@ def test_an_insert_that_recorded_nothing_is_not_a_rowid_of_zero() -> None:
     assert "a turn" in str(raised.value)
 
 
-def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
-    """An old file is not migrated, so it has to be said rather than discovered.
+def test_a_file_from_the_previous_schema_is_refused(tmp_path, caplog) -> None:
+    """**An old file is refused, not rebuilt beside itself.**
 
-    There is no migration layer by design, and the file it leaves behind is the
-    confusing kind of broken: the old `turns` table stays, an empty `turn`
-    appears beside it, and every read afterwards honestly reports no history.
-    Once per file, too — the store is built on every call, and the same
-    complaint on every turn is a log nobody reads.
+    Creating an empty `turn` table in it would leave the old rows on disk and
+    every read afterwards reporting no history — turns invisible while nothing
+    looks wrong, which the store's own comment calls worse than turns that are
+    gone.  There is no migration layer, and the file is not this build's to
+    half-use.  Reported once per process per file; refused every time.
     """
     path = tmp_path / "jack.turn.db"
     with sqlite3.connect(path) as connection:
@@ -266,15 +303,23 @@ def test_a_file_from_the_previous_schema_is_reported(tmp_path, caplog) -> None:
         connection.execute("INSERT INTO turns (prompt) VALUES ('from before')")
 
     with caplog.at_level(logging.ERROR, logger="slife2.libs.store.db"):
-        first = TurnStore(path)
-        TurnStore(path)
+        with pytest.raises(StaleSchema) as refusal:
+            TurnStore(path)
+        with pytest.raises(StaleSchema):
+            TurnStore(path)
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, errors
-    assert str(path) in errors[0]
-    # The count is what makes the report necessary: it is not an error, it is a
-    # truthful zero.
-    assert first.count() == 0
+    assert str(path) in str(refusal.value)
+    # The refusal runs before the DDL, so the old file is exactly as it was.
+    with sqlite3.connect(path) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert tables == {"turns"}
 
 
 def test_a_file_from_before_the_usage_breakdown_is_refused(tmp_path, caplog) -> None:

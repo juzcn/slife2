@@ -292,6 +292,23 @@ def test_a_damaged_fork_record_is_named_not_silently_read(
     assert any("not a fork" in one.getMessage() for one in caplog.records)
 
 
+def test_an_empty_fork_record_is_named_too(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**A file that parsed to nothing is damage, not absence.**  A zero-byte
+    record loads as `None` and the old mapping check read it as "not a fork"
+    without a word — the one arm of the read that did not name what it found.
+    The answer stays the safe one; the warning is the trace."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    researcher = agent_dir("jack", "researcher")
+    subagent_file("jack", "researcher").write_text("", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        assert work_dir("jack", "researcher") == researcher
+
+    assert any("not a mapping" in one.getMessage() for one in caplog.records)
+
+
 def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

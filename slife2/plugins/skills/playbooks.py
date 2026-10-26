@@ -26,6 +26,14 @@ because the alternative is a folder that exists on disk and cannot be seen from
 inside the system at all — which is a worse answer than a skill whose
 description is missing.  Only a *directory* with no manifest is not a skill.
 
+**A manifest that does not parse is not a manifest with no header.**  Damage and
+absence are different facts: a `SKILL.md` with no frontmatter is a prose skill
+and is read, while one whose header cannot be read is refused — the same
+`SkillHeaderError` at install (`install` writes nothing) and at load (`scan`
+keeps the skill visible as an `error` row and `skill_use` refuses it).  Reading
+a damaged header as an empty one would drop its declared name, description and
+requirements while looking like a skill that simply declared none.
+
 A skill declares what it needs
 ------------------------------
 **A skill has no process, and it can still have a credential.**  A playbook that
@@ -115,6 +123,15 @@ def unresolved(value: str) -> bool:
     return bool(_REFERENCE.fullmatch(value.strip())) or value.startswith("keyring:")
 
 
+class SkillHeaderError(ValueError):
+    """A `SKILL.md` whose header is present but cannot be read.
+
+    A plain `ValueError` because `skills.install` already translates a
+    `ValueError` into the caller's refusal, and because a header this build
+    cannot read is a bad value rather than a missing file (`OSError`).
+    """
+
+
 @dataclass(frozen=True)
 class Requirements:
     """What a skill's own header says it needs before its instructions work.
@@ -151,6 +168,10 @@ class Skill:
     description: str
     directory: Path
     requires: Requirements = field(default_factory=Requirements)
+    #: Why this skill's manifest was refused, when it was.  Empty for a skill
+    #: this build can read; `scan` keeps a damaged one visible (see the module
+    #: docstring) while `document` refuses to serve it.
+    error: str = ""
 
     @property
     def manifest(self) -> Path:
@@ -196,10 +217,13 @@ def split_frontmatter(content: str) -> tuple[str, str]:
 
     The header is returned as *text* rather than as a mapping, because "this
     file has no frontmatter" and "this file has frontmatter that does not
-    parse" are two different facts and only the caller can decide what to do
-    with the second.  An unterminated fence counts as no frontmatter at all, the
-    safe half: whatever follows an unclosed `---` is body, and a body is never
-    wrong to show.
+    parse" are two different facts; `frontmatter` is where the second is
+    refused.
+
+    **An unterminated fence is refused, not read as no frontmatter.**  A file
+    that opened a header and never closed it is damaged: whatever follows the
+    opening `---` was meant to be a header, and handing it to the model as the
+    top of the playbook hides the damage while looking like a prose skill.
     """
     lines = content.split("\n")
     if not lines or lines[0].strip() != _FENCE:
@@ -207,11 +231,52 @@ def split_frontmatter(content: str) -> tuple[str, str]:
     for end in range(1, len(lines)):
         if lines[end].strip() == _FENCE:
             return "\n".join(lines[1:end]), "\n".join(lines[end + 1 :]).strip()
-    return "", content
+    raise SkillHeaderError(
+        "the header's opening `---` has no closing `---`; a `SKILL.md` with a "
+        "header must close it"
+    )
+
+
+def _validate_header(header: Mapping[str, Any]) -> None:
+    """Refuse a header whose declaration this build cannot read.
+
+    **A malformed declaration is damage, and damage is refused.**  `metadata`
+    is the block a publisher writes requirements in; skipping a malformed one
+    would load the skill without the prerequisite it meant to state, which is
+    exactly the silence `requirements` exists to remove.  The checks are shaped
+    as the reader reads: `metadata` is a mapping of host → block, `requires` is
+    a mapping, and `env`/`bins` are a string or a list of strings.
+    """
+    for key in ("name", "description"):
+        value = header.get(key)
+        if value is not None and not isinstance(value, str):
+            raise SkillHeaderError(f"`{key}` is not a string")
+    metadata = header.get("metadata")
+    if metadata is None:
+        return
+    if not isinstance(metadata, Mapping):
+        raise SkillHeaderError("`metadata` is not a mapping")
+    for host, block in metadata.items():
+        if not isinstance(block, Mapping):
+            raise SkillHeaderError(f"`metadata.{host}` is not a mapping")
+        requires = block.get("requires")
+        if requires is None:
+            continue
+        if not isinstance(requires, Mapping):
+            raise SkillHeaderError(f"`metadata.{host}.requires` is not a mapping")
+        for key in ("env", "bins"):
+            value = requires.get(key)
+            if value is None or isinstance(value, str):
+                continue
+            if isinstance(value, list) and all(isinstance(one, str) for one in value):
+                continue
+            raise SkillHeaderError(
+                f"`metadata.{host}.requires.{key}` is not a string or a list of strings"
+            )
 
 
 def frontmatter(content: str) -> dict[str, Any]:
-    """A `SKILL.md`'s header, as a mapping.  Never raises.
+    """A `SKILL.md`'s header, as a mapping.  Raises `SkillHeaderError` on damage.
 
     **Parsed as YAML, not as `key: value` lines.**  Reading it line by line is
     enough right up until a description contains a colon and has to be quoted —
@@ -219,16 +284,13 @@ def frontmatter(content: str) -> dict[str, Any]:
     description.  ruamel is already here for `slife2.yaml`, so the correct
     reading costs nothing.
 
-    **A header that does not parse degrades to no header, and that is a
-    decision registered in SDD Appendix C — not an accident.**  What it does:
-    a header that is not YAML reads as a file with no frontmatter, so `scan`
-    names the skill after its directory and shows its body unread.  What it
-    gives up: the declared `name`, `description` and every `requires`, so a
-    skill whose header is damaged also stops being reported by `readiness` — the
-    half a reader cannot see.  What it does not cover: a header that *is* a
-    mapping, parsed normally, and a body below the fence, returned unread either
-    way.  Where the failure goes: `logger.warning` names the parse error and the
-    file is the only place the lost declaration can be recovered from.
+    **Absent and damaged are different answers.**  A file with no frontmatter
+    is a prose skill and answers `{}`; a file whose header is not YAML, is not a
+    mapping, or declares a malformed `metadata`/`requires` block raises.  The
+    same function is the install gate (`install` calls it before writing) and
+    the load gate (`scan` calls it for every manifest on disk), so the same file
+    is refused for the same reason in both places — SDD Appendix A's "one rule,
+    one place".
     """
     header, _ = split_frontmatter(content)
     if not header.strip():
@@ -236,9 +298,11 @@ def frontmatter(content: str) -> dict[str, Any]:
     try:
         parsed = YAML(typ="safe").load(header)
     except YAMLError as exc:
-        logger.warning("a SKILL.md header is not readable: %s", exc)
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        raise SkillHeaderError(f"the header is not YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SkillHeaderError("the header is not a mapping")
+    _validate_header(parsed)
+    return parsed
 
 
 def requirements(header: Mapping[str, Any]) -> Requirements:
@@ -251,15 +315,12 @@ def requirements(header: Mapping[str, Any]) -> Requirements:
     client, and blindness here is silent: the skill loads, reads perfectly, and
     dies on a missing key three steps later.
 
-    **A malformed `metadata` block is skipped rather than fatal**, which is the
-    same decision as `frontmatter`'s, one level down and registered with it in
-    SDD Appendix C: a declaration that is not a mapping declares nothing, so
-    the skill still loads and reads — and its requirements are simply not
-    reported.  What it gives up: a prerequisite that a malformed block *meant*
-    to state, which `readiness` then cannot warn about.  What it does not cover:
-    a block that is a mapping, read in full.  Where the failure goes: nowhere on
-    its own — the block is in the file, and the skill's header is the only place
-    it can be read from.
+    **A malformed `metadata` block does not reach this function.**  The header
+    parser (`_validate_header`) refuses one before a `Skill` is built, because a
+    declaration that cannot be read is damage and reading it as
+    "declares nothing" is how a skill loads without the prerequisite it meant to
+    state.  The tolerant branches below are the reader's own shape check, kept
+    for callers that hand `requirements` a mapping built somewhere else.
     """
     env: list[str] = []
     bins: list[str] = []
@@ -321,6 +382,7 @@ def scan(directory: Path | None = None) -> list[Skill]:
         manifest = entry / MANIFEST
         if not manifest.is_file():
             continue
+        error = ""
         try:
             content = _read(manifest)
         except OSError as exc:
@@ -328,13 +390,25 @@ def scan(directory: Path | None = None) -> list[Skill]:
             # takes the same path as a manifest with no header.
             logger.warning("skill %s: cannot read %s: %s", entry.name, MANIFEST, exc)
             content = ""
-        header = frontmatter(content)
+            error = str(exc)
+        try:
+            header = frontmatter(content)
+        except SkillHeaderError as exc:
+            # **Kept and refused.**  The folder says a skill is installed, so
+            # hiding it would send a reader looking for a file the operator
+            # believes is there; serving it as a headerless skill would drop
+            # every declaration it wrote.  The error travels on the `Skill`, so
+            # the catalogue row says `error` and `skill_use` refuses it.
+            logger.warning("skill %s: %s: %s", entry.name, MANIFEST, exc)
+            header = {}
+            error = str(exc)
         found.append(
             Skill(
                 name=str(header.get("name") or entry.name),
                 description=str(header.get("description") or ""),
                 directory=entry,
                 requires=requirements(header),
+                error=error,
             )
         )
     return found
@@ -485,10 +559,12 @@ def document(skill: Skill, note: str = "") -> str:
     for.
 
     Raises:
-        OSError: If the manifest cannot be read — the one failure this module
-            has, and the caller's to report, because only the caller knows
-            whether it is answering a model or a person.
+        OSError: If the manifest cannot be read, or its header was refused
+            when the folder was scanned — the caller's to report, because only
+            the caller knows whether it is answering a model or a person.
     """
+    if skill.error:
+        raise OSError(skill.error)
     text = _read(skill.manifest)
     directory = skill.directory.resolve()
     preamble = [
@@ -588,6 +664,21 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
             f"this would install where nothing looks for it, or answer about a "
             f"name nothing matches. Name it as the one directory it is."
         )
+    # **The manifest is parsed before anything is written.**  `scan` will refuse
+    # the same header at load, and the install gate is where the caller can
+    # still change it; writing first and failing later would leave a skill on
+    # disk that looks installed and cannot be used.  The parser is the one
+    # loader `scan` uses — one rule, one place (SDD Appendix A).
+    manifest = next(
+        (one for one in files if str(one.get("path") or "").strip() == MANIFEST),
+        None,
+    )
+    if manifest is None:
+        raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
+    try:
+        frontmatter(str(manifest.get("content") or ""))
+    except SkillHeaderError as exc:
+        raise ValueError(f"{MANIFEST}: {exc}") from exc
     # **The swap's own directories are named from the resolved location**, not
     # from the string the caller gave: the name has to be the directory it lands
     # in (the check above), and deriving them from `final.name` is what keeps
@@ -689,6 +780,7 @@ __all__ = [
     "USE_TOOL",
     "Requirements",
     "Skill",
+    "SkillHeaderError",
     "document",
     "entry_for",
     "find",

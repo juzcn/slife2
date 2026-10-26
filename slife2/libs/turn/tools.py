@@ -8,11 +8,15 @@ alike.  That split is deliberate — `loop.py` imports this module, and the loop
 must not import a server.
 
 The registry's one interesting property is that :meth:`ToolRegistry.execute`
-**never raises**.  A tool that fails produces error *text*, which is handed back
-to the model as the tool's result.  That is deliberate: the model can read
-"unknown tool 'wether'" and correct itself, where an exception would end the
-turn and lose the conversation's thread.  The error path is a feedback channel,
-not a failure mode.
+**never raises a tool failure**.  A tool that fails produces error *text*, which
+is handed back to the model as the tool's result.  That is deliberate: the model
+can read "unknown tool 'wether'" and correct itself, where an exception would
+end the turn and lose the conversation's thread.  The error path is a feedback
+channel, not a failure mode.
+
+**A harness failure is not a tool failure.**  The one thing that does escape is
+`UnreadableAnswer`, the type a hub from another build raises; it must fail the
+turn rather than be read as a tool that said no (SDD Appendix C).
 
 One kind of tool, and four questions
 ------------------------------------
@@ -533,8 +537,11 @@ class ToolRegistry:
     async def execute(self, call: ToolCall) -> tuple[str, bool]:
         """Run a call, returning `(result_text, ok)`.
 
-        Never raises.  An unknown name, bad arguments, or a tool that throws all
-        come back as `ok=False` with a message a model can act on.
+        Never raises a *tool* failure.  An unknown name, bad arguments, or a
+        tool that throws all come back as `ok=False` with a message a model can
+        act on.  The one exception is a harness failure — `UnreadableAnswer`
+        from a hub this build cannot read — which is re-raised because it is not
+        the model's to act on and must fail the turn (SDD Appendix C).
 
         **A call whose arguments could not be read is not run at all.**  It
         carries `error` from the hop that decoded it (`ToolCall.from_wire` or
@@ -581,6 +588,17 @@ class ToolRegistry:
             logger.info("tool %s failed: %s", call.name, exc)
             return f"Error: {exc}", False
         except Exception as exc:  # noqa: BLE001 - a tool failure is a message, never an exception
+            # **A harness failure is not a tool failure.**  `unreadable` is the
+            # distinct type a hub from another build raises; handing it to the
+            # model as tool text would hide a version mismatch as an ordinary
+            # refusal, which is the "harness failures fail the turn" arm of the
+            # register (SDD Appendix C).  Imported here rather than at module
+            # scope so loading the loop does not pull the plugin protocol — and
+            # FastMCP — into the loop's import graph.
+            from slife2.libs.plugin.protocol import UnreadableAnswer
+
+            if isinstance(exc, UnreadableAnswer):
+                raise
             # Includes the exception type: "KeyError: 'e'" tells the model which
             # argument it got wrong, where "tool failed" does not.  **This one
             # keeps its traceback**: the model's text carries the exception's

@@ -273,11 +273,13 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     The hub's `_func_tool_unload` docstring is where that is argued.
 
     A trim that cannot happen is **not** a turn that failed: the turn is over,
-    the answer has been given, and this is bookkeeping that runs after it.  So a
-    hub which does not know the tool — a daemon from a previous build, which
-    answers with a refusal rather than a payload — leaves the list as it was and
-    says so in the log, where the next `list_tools` will make a missing hub
-    impossible to miss.
+    the answer has been given, and this is bookkeeping that runs after it.  But
+    *how* to say that is the caller's, not this helper's: the agent server logs
+    a warning (its next request re-lists the tools and fails loudly on a hub
+    that is really gone), while the agent-task server logs an error (a task runs
+    one turn and has no next request).  So a call that could not be made — a hub
+    from an older build that does not know the tool, or one that is gone —
+    raises here and each caller reports it at its own level.
 
     Returns:
         The hub's payload: `unloaded` (the names that moved), `refused` and
@@ -286,29 +288,9 @@ async def unload_tools(client: Client) -> dict[str, Any]:
         these: the caller reads it with `trim_answer`, which is where the
         refusal belongs.
     """
-    empty: dict[str, Any] = {
-        "unloaded": [],
-        "refused": [],
-        "not_loaded": [],
-        "text": "",
-    }
-    try:
-        payload = tool_payload(
-            await client.call_tool(FUNC_TOOL_UNLOAD, {}, timeout=_T.timeouts.work.hub)
-        )
-    except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
-        logger.warning("the tool list was not trimmed: %s", exc, exc_info=exc)
-        return empty
-    # **`payload or empty` laundered the one case `trim_answer` exists for.**
-    # A hub answering with a shape this build does not know (`tool_payload`'s
-    # `{}`) came back as the well-formed "nothing was unloaded, no sentence"
-    # above, so `trim_answer` read it as an honest no-op and nothing was said —
-    # the exact confusion `trim_answer` was written to remove, and the one the
-    # two servers that trim already have a test for.  `empty` is for the
-    # `except` above: a call that could not be *made* is a trim that did not
-    # happen, and the log line there says so.  An answer that arrived and cannot
-    # be read is damage, and damage is the caller's to refuse.
-    return payload
+    return tool_payload(
+        await client.call_tool(FUNC_TOOL_UNLOAD, {}, timeout=_T.timeouts.work.hub)
+    )
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:

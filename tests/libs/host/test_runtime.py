@@ -213,6 +213,20 @@ def test_registering_a_client_writes_it_atomically() -> None:
     assert not record.path.with_suffix(".tmp").exists()
 
 
+def test_a_client_record_that_cannot_be_written_refuses_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**An uncounted client is not a harmless missing record.**
+
+    A client whose record never landed is invisible to `others_running`; when
+    the next client exits, the count is empty and the shared servers are stopped
+    under a conversation that is still live.  The start fails instead.
+    """
+    monkeypatch.setattr(runtime, "_write_json_atomic", lambda *args, **kwargs: False)
+    with pytest.raises(OSError, match="uncounted"):
+        runtime.register_client("alpha")
+
+
 def test_a_bookkeeping_write_that_failed_is_reported(
     tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

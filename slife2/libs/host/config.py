@@ -151,22 +151,6 @@ class ConfigError(Exception):
     """
 
 
-class WrongKindError(ConfigError):
-    """A reference that resolves, and names something of another kind.
-
-    A subclass rather than a flag because one reader has to tell it apart from
-    every other refusal: `MediaSettings.resolve` falls back to the first model of
-    the kind when the operator's `defaults:` entry has gone *stale* — that is a
-    registered fallback (SDD Appendix C), and its whole scope is "the name no
-    longer resolves".  A name that resolves to a `tts` model where an `image` one
-    was wanted is not stale, it is wrong, and its own docstring says that case is
-    "refused here rather than at the provider, where it costs money".  With one
-    exception type the two were indistinguishable and the fallback swallowed
-    both, so the operator's stated default was discarded in silence and a paid
-    call went to a model named in no `defaults:` line.
-    """
-
-
 #: The tool every model server answers to.  One tool for all of them, because a
 #: backend is a backend whatever protocol it speaks: `api` selects the process,
 #: and the request names the provider whose credentials to use.
@@ -1935,40 +1919,24 @@ class MediaSettings:
         statement than the one before it, so nothing here can override something
         the caller said.
 
-        **The fourth step is also the fifth, and that is a registered
-        fallback**: a `defaults[kind]` whose reference no longer resolves falls
-        through to the first model of the kind rather than stopping the call.
-        It is kept because the failure it prevents is a config that stops
-        answering because one word went stale, and it is visible because the
-        answer carries its own `provider/model`.  *Gives up:* the operator's
-        `defaults:` intent for that kind.  *Does not cover:* a reference that
-        names a model of the wrong kind or an unknown provider, which is refused
-        here.  *Failure goes:* nowhere beyond the answer itself (SDD Appendix C).
+        **A `defaults[kind]` that names nothing is refused, not replaced.**  A
+        default is a name the operator wrote, and a name that no longer resolves
+        is a typo in the file — the same rule `embeddings.active_model` follows.
+        Falling through to the first model of the kind would silently spend a
+        paid call on a model named in no `defaults:` line; the fourth step is
+        for a kind with no default at all, which is a different fact.  The
+        loader refuses such a file before it is ever used (`_media`), and this
+        method refuses a `MediaSettings` built in code the same way.
 
         Raises:
-            ConfigError: If nothing can answer — including the case of a
-                reference that names a model of the wrong kind, which is
-                refused here rather than at the provider, where it costs money.
+            ConfigError: If nothing can answer, or if a default names a model
+                this section does not define.
         """
         if reference:
             return self._named(reference, kind)
         default = self.defaults.get(kind, "")
         if default:
-            try:
-                return self._named(default, kind)
-            except WrongKindError:
-                # ... but not *this* refusal.  A `defaults:` entry that resolves
-                # to another kind is the operator's mistake, and this is where
-                # the docstring says it is refused rather than at the provider:
-                # swallowed here, it was replaced in silence by the first model
-                # of the kind — a paid call to a model nobody had named.
-                raise
-            except ConfigError:
-                # A stale `defaults:` entry falls through to the first model of
-                # the kind rather than stopping the call — the registered
-                # fallback the docstring states, and one the answer's own
-                # `provider/model` makes visible (SDD Appendix C).
-                pass
+            return self._named(default, kind)
         for provider in self.providers.values():
             for entry in provider.models:
                 if entry.kind == kind:
@@ -2012,7 +1980,7 @@ class MediaSettings:
         reference: str,
     ) -> tuple[MediaProviderSettings, MediaModelSettings]:
         if entry.kind != kind:
-            raise WrongKindError(f"{reference!r} is a {entry.kind} model, not {kind}")
+            raise ConfigError(f"{reference!r} is a {entry.kind} model, not {kind}")
         return provider, entry
 
 
@@ -3121,7 +3089,18 @@ def _media(raw: Any, base: MediaSettings) -> MediaSettings:
                 f"media.defaults.{kind}: not a kind of media "
                 f"(known: {', '.join(MEDIA_KINDS)})"
             )
-    return MediaSettings(providers=providers, defaults=defaults)
+    settings = MediaSettings(providers=providers, defaults=defaults)
+    # **A default is a name, and a name that resolves to nothing is refused.**
+    # The loader is the judge (this module's rule), so a stale or wrong-kind
+    # `defaults:` entry fails here, naming the section — not at a provider,
+    # where it would have been silently replaced by the first model of the kind
+    # and paid for.
+    for kind, reference in defaults.items():
+        try:
+            settings._named(reference, kind)
+        except ConfigError as exc:
+            raise ConfigError(f"media.defaults.{kind}: {exc}") from exc
+    return settings
 
 
 def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:

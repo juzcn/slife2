@@ -13,9 +13,11 @@ from pathlib import Path
 import pytest
 
 from slife2.plugins.skills.playbooks import (
+    SkillHeaderError,
     document,
     find,
     frontmatter,
+    install,
     readiness,
     scan,
     split_frontmatter,
@@ -117,10 +119,46 @@ def test_a_manifest_with_a_bom_still_has_its_frontmatter(root: Path) -> None:
     assert found.requires.env == ("SOME_KEY",)
 
 
-def test_a_header_that_does_not_parse_leaves_the_skill_visible(root: Path) -> None:
-    """The skill exists either way; a description is not worth a hidden skill."""
+def test_a_header_that_does_not_parse_is_refused_at_load(root: Path) -> None:
+    """**A damaged header is not a headerless skill.**  The folder says the
+    skill is installed, so it stays visible — as a row that says it cannot be
+    read, the same shape an unreadable manifest has.  Reading it as a skill
+    with no header would lose its name, description and every requirement while
+    looking like a skill that declared none."""
     skill(root, "broken", header="name: [unclosed\n")
-    assert [one.name for one in scan()] == ["broken"]
+    (found,) = scan()
+
+    assert found.error, "the refusal travels with the skill"
+    assert found.name == "broken", "visible by its directory, not hidden"
+    assert found.description == ""
+    with pytest.raises(OSError, match="not YAML"):
+        document(found)
+
+
+def test_an_unterminated_fence_is_refused(root: Path) -> None:
+    """A file that opened a header and never closed it is damage, not a prose
+    skill: the text after the opening `---` was meant to be a header."""
+    (root / "broken" / "SKILL.md").parent.mkdir(parents=True)
+    (root / "broken" / "SKILL.md").write_text(
+        "---\nname: broken\n\n# Body\n", encoding="utf-8"
+    )
+    (found,) = scan()
+
+    assert found.error and "no closing" in found.error
+    with pytest.raises(OSError, match="no closing"):
+        document(found)
+
+
+def test_a_malformed_declaration_is_refused(root: Path) -> None:
+    """`metadata` is how a skill declares its prerequisites; a block this build
+    cannot read is damage, and reading it as "declares nothing" is how a skill
+    loads without the credential it meant to ask for."""
+    skill(root, "one", header='name: one\nmetadata: "not a mapping"\n')
+    (found,) = scan()
+
+    assert found.error and "`metadata`" in found.error
+    with pytest.raises(OSError):
+        document(found)
 
 
 def test_a_manifest_that_cannot_be_read_still_yields_its_skill(
@@ -215,30 +253,27 @@ def test_the_header_is_not_part_of_the_body() -> None:
 
 
 def test_a_file_with_no_fence_has_no_header() -> None:
-    """An unterminated fence included: whatever follows it is body, and a body
-    is never wrong to show."""
+    """A prose skill is a real shape, and absence is not damage."""
     assert frontmatter("# Just a document\n") == {}
-    assert split_frontmatter("---\nname: one\n") == ("", "---\nname: one\n")
+    assert frontmatter("") == {}
 
 
-def test_a_header_that_will_not_parse_is_a_skill_with_no_declarations(
-    root: Path,
-) -> None:
-    """The fallback is a decision, and this pins what it costs.
+def test_an_unterminated_fence_is_split_as_an_error() -> None:
+    """The split itself refuses it; `frontmatter` must not read it as body."""
+    with pytest.raises(SkillHeaderError, match="no closing"):
+        split_frontmatter("---\nname: one\n")
 
-    `frontmatter` degrades to `{}` rather than raising, so the skill still
-    exists and `scan` names it after its directory — but it loses its declared
-    name, its description and every `requires`, which is why a damaged header
-    also stops `readiness` reporting a missing prerequisite.  That is the
-    fallback SDD Appendix C registers; this is the half a reader would
-    otherwise have to infer.
-    """
-    skill(root, "one", header="metadata: [unclosed\n")
-    (found,) = scan()
 
-    assert found.name == "one", "named after its directory, since the header is gone"
-    assert found.description == ""
-    assert not found.requires.declared
+def test_install_refuses_a_header_that_does_not_parse(root: Path) -> None:
+    """**The install gate is the same parser as the load gate.**  Nothing is
+    written: a refusal at install leaves no directory that looks installed."""
+    with pytest.raises(ValueError, match="not YAML"):
+        install(
+            "one",
+            [{"path": "SKILL.md", "content": "---\nname: [unclosed\n---\n\nbody"}],
+        )
+    assert not (root / "one").exists()
+    assert not (root / ".one.installing").exists()
 
 
 # --- what a skill says it needs -----------------------------------------------

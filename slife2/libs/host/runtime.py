@@ -234,8 +234,8 @@ def _read_json_dataclass[RecordT](
         return None
 
 
-def _write_json_atomic(path: Path, obj: Any) -> None:
-    """Serialise `obj`'s dataclass fields to `path`, atomically and quietly.
+def _write_json_atomic(path: Path, obj: Any) -> bool:
+    """Serialise `obj`'s dataclass fields to `path`, atomically; answer whether it landed.
 
     **Written to a temporary file and renamed**, so a reader running
     concurrently — every `status`, or another instance's claim check — can never
@@ -244,14 +244,13 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
     `write_claim` argues what catching the middle would cost, and it is why that
     file of all of them has to come through here.
 
-    **The write is still allowed to fail, but not silently** — a registered
-    fallback.  Raising would turn a full disk into a `status` that crashes and a
-    start that refuses to run, so the caller is not asked to fail over; what it
-    must not do is vanish, because a server that started but whose record never
-    landed is invisible to `stop` and is then orphaned.  *Gives up:* the record,
-    at the moment it was written.  *Does not cover:* nothing — the write is
-    either complete or not attempted.  *Failure goes:* a warning naming the
-    path, so the orphan is findable in the log (SDD Appendix C).
+    **A write that failed is not a write that happened, and the caller decides
+    what that means.**  The attempt is reported — a warning naming the path, so
+    an orphan is findable — and the `False` is the fact the caller acts on.  A
+    server record may be missing (`status`/`stop` report an unmanaged record,
+    and the log names it), but a *client* record that never landed leaves a live
+    client uncounted, and the last count is what stops the shared servers; that
+    caller refuses the start instead (`register_client`).
     """
     tmp = path.with_suffix(".tmp")
     try:
@@ -264,6 +263,8 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
             path,
             exc,
         )
+        return False
+    return True
 
 
 def read_record(url: str) -> ServerRecord | None:
@@ -441,9 +442,21 @@ def register_client(agent: str) -> ClientRecord:
     the third bookkeeping file and the one that decides whether the last client
     out stops the servers, so a reader catching a half-written file would count
     a live client as absent.
+
+    **A register that did not land refuses the start.**  Continuing would leave
+    this process uncounted; when the next client exits, `others_running()` is
+    empty and the shared servers are stopped underneath a conversation that is
+    still live.  A missing server record is an orphan that `stop` can report; a
+    missing *client* record is the count being wrong, which no later read can
+    repair.
     """
     record = ClientRecord.now(agent)
-    _write_json_atomic(record.path, record)
+    if not _write_json_atomic(record.path, record):
+        raise OSError(
+            f"could not register this client at {record.path}; starting now "
+            f"would leave it uncounted, and the last client out would stop the "
+            f"shared servers underneath it"
+        )
     return record
 
 

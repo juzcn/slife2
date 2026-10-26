@@ -118,7 +118,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextvars import ContextVar
 from pathlib import Path
 from typing import NamedTuple
@@ -711,7 +711,20 @@ def forked(agent: str, subagent: str) -> bool:
             exc,
         )
         return False
-    return isinstance(record, dict) and record.get("fork") is True
+    if not isinstance(record, Mapping):
+        # **A file that parsed to nothing is damage too.**  An empty or torn
+        # record loads as `None` (and a hand-written list as a list), which the
+        # old `isinstance(record, dict)` test quietly read as "not a fork" — the
+        # one arm of this function that did not name what it found.  The answer
+        # stays the safe one, but the warning is the trace a person needs.
+        logger.warning(
+            "the record of %s/%s is not a mapping (%r), so it is treated as not a fork",
+            agent,
+            subagent,
+            record,
+        )
+        return False
+    return record.get("fork") is True
 
 
 def subagent_file(agent: str, subagent: str) -> Path:

@@ -1102,6 +1102,34 @@ def test_stop_leaves_a_reused_pid_alone(monkeypatch: pytest.MonkeyPatch) -> None
     assert runtime.read_record(SPEC.url) is None  # the stale record is gone
 
 
+def test_stop_says_ownership_is_unproven_rather_than_calling_it_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**No token is no proof, and the line must say so.**  `same_process` fails
+    closed on a missing token; reporting that as "pid reused" asserts a fact
+    nobody checked.  The safe decision (leave it alone) is unchanged."""
+    from slife2.libs.host import runtime
+
+    runtime.write_record(
+        runtime.ServerRecord(
+            name=SPEC.name,
+            url=SPEC.url,
+            pid=os.getpid(),
+            start_token="",
+        )
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(
+        launcher, "terminate", lambda pid, **k: killed.append(pid) or True
+    )
+
+    outcomes = launcher.stop(_config_with_only_deepseek())
+
+    assert killed == []
+    assert any("could not be proven" in o.detail for o in outcomes)
+    assert not any("pid reused" in o.detail for o in outcomes)
+
+
 def test_stop_calls_a_record_whose_process_is_gone_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

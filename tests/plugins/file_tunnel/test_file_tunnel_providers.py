@@ -549,6 +549,39 @@ def test_the_ssh_binary_option_is_honoured() -> None:
     assert LocalhostRunTunnel({"ssh": "/opt/ssh"})._binary == "/opt/ssh"
 
 
+def test_a_named_binary_that_is_missing_is_not_replaced_by_a_guess(
+    monkeypatch,
+) -> None:
+    """**A named binary is not a default to improve on.**  The guessed install
+    locations exist for the default `ssh`/`cloudflared`; replacing a binary the
+    operator named would run a different program, with only `tunnel_status`'s
+    resolved path as the trace."""
+    seen: dict[str, tuple] = {}
+
+    def which(binary, extra=()):
+        seen["extra"] = extra
+        return None
+
+    monkeypatch.setattr(providers, "_which", which)
+    with pytest.raises(RuntimeError, match=r"ssh client not found \('/opt/ssh'\)"):
+        LocalhostRunTunnel({"binary": "/opt/ssh"}).start(24038)
+    assert seen["extra"] == (), "a named binary was given the guessed locations"
+
+
+def test_the_default_binary_uses_the_guessed_locations(monkeypatch) -> None:
+    """The other half: no `binary:` is the case the guess exists for."""
+    seen: dict[str, tuple] = {}
+
+    def which(binary, extra=()):
+        seen["extra"] = extra
+        return None
+
+    monkeypatch.setattr(providers, "_which", which)
+    with pytest.raises(RuntimeError, match="ssh client not found"):
+        LocalhostRunTunnel().start(24038)
+    assert seen["extra"] == providers._windows_ssh_fallbacks()
+
+
 def test_a_malformed_remote_port_is_refused() -> None:
     """A bad value in a known option is a config mistake like a bad `active:`:
     reading "not a number" as 80 silently forwards a different remote port than

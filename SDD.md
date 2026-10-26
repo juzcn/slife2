@@ -257,6 +257,15 @@ terminal inbox. The smallness is in what each process does, not in how many
 providers it serves, which is why a provider is a configuration row rather than
 a process.
 
+A `SKILL.md` is a manifest this system authors and reads. Its header MUST parse
+to a mapping. `install` parses it before writing anything, and `scan` parses a
+directory somebody copied in with the *same* function — one rule, one place. A
+header that does not parse — not YAML, not a mapping, an unterminated fence, or
+a malformed `metadata`/`requires` block — is refused at both gates: the install
+writes nothing, and the copied-in skill stays visible as an `error` row that
+`skill_use` refuses. A `SKILL.md` with no frontmatter is a prose skill and is
+not damage.
+
 ### 2.7 Key design decisions
 
 | Decision | Choice | Consequence |
@@ -1575,13 +1584,16 @@ are read from that list rather than from separate columns:
 - what was answered is the last assistant message with prose.
 
 There is no migration layer. The tables are created on a file that is not this
-build's. A file this build cannot read is reported and rebuilt, not upgraded in
-place, because an upgrade path is a permanent second way to build the tables.
-A file whose `turn` table lacks a column this build declares is refused at open,
-with the file and the column named; served anyway, it fails later and per row as
-an error that names neither. The startup pass over every known home carries on
-past a file it refuses — the refusal is that file's, and the conversations that
-can be read are not its to take down.
+build's. A file this build cannot read is refused, not upgraded in place,
+because an upgrade path is a permanent second way to build the tables. A file
+whose `turn` table lacks a column this build declares is refused at open, with
+the file and the column named; served anyway, it fails later and per row as an
+error that names neither. A file that still holds the previous schema's `turns`
+table is refused the same way, before any DDL: an empty `turn` table beside it
+would report a history of zero while leaving the old rows invisible. The
+startup pass over every known home carries on past a file it refuses — the
+refusal is that file's, and the conversations that can be read are not its to
+take down.
 
 The live-context list is a row, not a file. It is written in the same transaction
 as the turn that changed it.
@@ -2618,6 +2630,12 @@ A media provider is not a chat provider. Its models are declared per kind:
 image, video, tts, asr. A vendor may serve several kinds, so `kind` is a fact
 about the model and `api:` selects the wire adapter.
 
+`media.defaults:` names a `provider/model` per kind. A name that does not
+resolve — an unknown provider, an unknown model, or one of another kind — is
+refused at load, naming the `media.defaults.<kind>` line. It is not replaced by
+the first model of the kind: a default is the operator's statement, and a typo
+must not spend a paid call on a model nobody named.
+
 Artifacts are written under the conversation's work directory: the agent's
 `media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork writes to
 its maker's. They never go to the process's working directory: the daemon's
@@ -2940,33 +2958,28 @@ The four shapes an undeclared fallback takes:
 |---|---|---|---|---|
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
-| A call had no client to make it | Reconnect and make the first attempt | One round trip | A call that went out and then failed, which is never repeated | The tool's error text |
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
 | The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
 | Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
-| An image is refused by a provider | Drop the pixels, keep the note | The bytes in the live conversation | The record, which never had them | The note and the error |
+| A turn fails with an image attached | Drop every image from the live list, keeping the note | The bytes in the live conversation; a pasted image may have no copy this process can recover | An image attached after the repair, which is an ordinary attachment; the record, which never had the pixels | The note, the dropped-image sentence, and the original error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
 | A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
-| A stored `usage` breakdown will not parse | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
-| A `turn_summarize` call's arguments will not parse | Save the turn without its annotation | The summary and tags | A call whose arguments parse | A warning naming the call |
+| A stored `usage` breakdown will not parse, or is not the four-key shape | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
-| A turn file from the previous schema (only a `turns` table) | Create an empty `turn` table and run | The turns on disk | A file missing a declared `turn` column, which is refused | One `logger.error` naming the file |
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
 | An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | Bad rows, handled per pass | The error naming the path |
 | A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
-| The `qrcode` renderer is not installed | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
-| A bookkeeping write fails | Log and continue | The record | Nothing; the write is attempted or not | A warning naming the path |
+| A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
+| A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start rather than leave a live client uncounted | A warning naming the path |
 | A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
 | A subagent record cannot be read | Treat it as not a fork | The shared work directory a fork uses | A record that parses | A warning naming the record |
 | A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
 | The checkout marker is absent | Use `~/.slife2` | The checkout's data directory | An override, which wins | A missing database or config |
-| A stale `media.defaults:` entry | Use the first model of the kind | The operator's default | A wrong-kind or unknown-provider reference (refused) | The answer's own `provider/model` |
-| A `SKILL.md` header will not parse | Read as a skill with no header | The declared name, description, and requirements | A header that is a mapping | A warning naming the parse error |
-| A CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, or one found nowhere | The resolved path in `tunnel_status` |
+| The default CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, which is refused when not found; a default found nowhere | The resolved path in `tunnel_status` |
 | A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive and its URL as reachable | Telling a broken probe from an outage | A transport the provider proves dead | A debug line and `tunnel_status` |
 | A progress line cannot be read | Drop it; default counts to zero | The difference between unmeasured and zero | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
 | A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
@@ -2978,11 +2991,11 @@ The four shapes an undeclared fallback takes:
 | A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
 | A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
-| The trim tool is missing or unreadable | Answer empty, log the reason | The trim and the names the model would have seen | A trim the hub answers | A warning in the server log |
+| A trim answer cannot be read | Return `{}`; `trim_answer` refuses it | The trim and the names the model would have seen | A call that could not be made, which raises and the caller reports | A refusal in the server log |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | Nothing; a teardown must not replace the caller's work |
 | The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
-| An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
+| An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, or a `.corrupt` that already exists, where mutations refuse and both files stay | A warning naming the path, and the preserved file |
 
 Everything not in this register is a defect. A path that substitutes a weaker
 behaviour and is not here is an undeclared fallback. A fallback that stops being

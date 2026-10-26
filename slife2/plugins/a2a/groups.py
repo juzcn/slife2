@@ -511,9 +511,10 @@ class GroupStore:
         **This is the fallback registered in SDD Appendix C**: *what it does*
         is move the file aside as ``.corrupt`` and answer no groups; *it gives
         up* every group in that file; *it does not cover* a file that cannot be
-        moved aside, where `load_error` refuses every mutation instead; *the
-        failure goes* to the warning naming the path and to the preserved
-        ``.corrupt`` file.
+        moved aside — including a second corruption, because a ``.corrupt`` that
+        already exists is left untouched — where `load_error` refuses every
+        mutation instead; *the failure goes* to the warning naming the path and
+        to the preserved ``.corrupt`` file.
         """
         assert self.path is not None
         logger.warning(
@@ -521,8 +522,19 @@ class GroupStore:
             self.path,
             reason,
         )
+        corrupt = self.path.with_name(self.path.name + ".corrupt")
         try:
-            self.path.replace(self.path.with_name(self.path.name + ".corrupt"))
+            # **One quarantine slot is not a licence to overwrite it.**  A
+            # second corruption would replace the first preserved copy, which
+            # is the one file the person can still recover the older groups
+            # from; leaving this file in place and refusing mutations keeps
+            # both on disk.
+            if corrupt.exists():
+                raise OSError(
+                    f"{corrupt} already holds the copy preserved by an earlier "
+                    f"corruption"
+                )
+            self.path.replace(corrupt)
         except OSError as e:
             self.load_error = (
                 f"{self.path} could not be read ({reason}) and could not be moved "

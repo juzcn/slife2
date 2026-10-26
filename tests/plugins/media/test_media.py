@@ -438,14 +438,19 @@ def test_a_model_of_the_wrong_kind_is_refused_before_the_call() -> None:
         MediaSettings().resolve("asr")
 
 
-def test_a_stale_default_falls_through_to_the_first_of_the_kind() -> None:
-    """A config that stops answering because one word went stale is the failure
-    this prevents; what it allows is visible in the answer's own model."""
-    media = settings(
-        {"defaults": {"image": "test/gone"}, "providers": SECTION["providers"]}
-    )
+def test_a_stale_default_is_refused_rather_than_replaced() -> None:
+    """**A name the config does not define is not the first name it does.**
 
-    assert media.resolve("image")[1].model == "img"
+    A config that stops answering because one word went stale is not fixed by
+    spending a paid call on a model named in no `defaults:` line.  `_media`
+    refuses the section, naming the line; `resolve` refuses a settings object
+    built in code the same way."""
+    with pytest.raises(
+        ConfigError, match=r"media\.defaults\.image: Unknown model 'gone'"
+    ):
+        settings(
+            {"defaults": {"image": "test/gone"}, "providers": SECTION["providers"]}
+        )
 
 
 def test_the_kinds_are_what_a_provider_declares() -> None:

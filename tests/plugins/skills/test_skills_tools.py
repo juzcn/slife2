@@ -122,6 +122,28 @@ async def test_installing_a_skill_writes_the_folder_and_reads_at_once(
 
 
 @pytest.mark.asyncio
+async def test_installing_a_bad_header_is_refused_and_writes_nothing(
+    isolated_runtime: Path,
+) -> None:
+    """**The install gate refuses before the folder exists.**  A skill that the
+    load gate would refuse must not be written, or the answer says success and
+    the next scan says error."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError, match="not YAML"):
+            await client.call_tool(
+                "skill_set",
+                {
+                    "name": "broken",
+                    "files": files("---\nname: [unclosed\n---\n\nbody"),
+                },
+            )
+
+    assert not (isolated_runtime / "skills" / "broken").exists()
+    assert not (isolated_runtime / "skills" / ".broken.installing").exists()
+
+
+@pytest.mark.asyncio
 async def test_a_file_that_leaves_the_skill_directory_is_refused(
     isolated_runtime: Path,
 ) -> None:

@@ -2,9 +2,11 @@
 
 Nothing here is about a particular tool.  The registry is the loop's vocabulary
 for tools, and the one thing it promises is that :meth:`ToolRegistry.execute`
-**never raises**: an unknown name, bad arguments, and a tool that throws all come
-back as text with `ok` false — because the model reads the result and corrects
-itself, where an exception would end the turn and lose the thread.
+**never raises a tool failure**: an unknown name, bad arguments, and a tool that
+throws all come back as text with `ok` false — because the model reads the
+result and corrects itself, where an exception would end the turn and lose the
+thread.  A *harness* failure is the exception: `UnreadableAnswer` is re-raised
+so the turn fails rather than the model being told a foreign hub "said no".
 
 The tools themselves live with the server that serves them, so the tests for
 what they *do* are next to it.  See `tests/test_skills_server.py`.
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from slife2.libs.plugin.protocol import UnreadableAnswer
 from slife2.libs.turn.messages import ToolCall, ToolSpec
 from slife2.libs.turn.tools import Tool, ToolFailed, ToolRegistry
 
@@ -36,18 +39,28 @@ async def _reports(_arguments: dict) -> str:
     raise ToolFailed("the peer said no")
 
 
+async def _unreadable(_arguments: dict) -> str:
+    raise UnreadableAnswer("the toolhub did not return a tool list")
+
+
 def registry() -> ToolRegistry:
     return ToolRegistry(
         [
             Tool(spec=spec("ok"), run=_ok),
             Tool(spec=spec("raises"), run=_raises),
             Tool(spec=spec("reports"), run=_reports),
+            Tool(spec=spec("unreadable"), run=_unreadable),
         ]
     )
 
 
 def test_specs_are_advertised() -> None:
-    assert {s.name for s in registry().specs} == {"ok", "raises", "reports"}
+    assert {s.name for s in registry().specs} == {
+        "ok",
+        "raises",
+        "reports",
+        "unreadable",
+    }
 
 
 @pytest.mark.asyncio
@@ -107,3 +120,13 @@ async def test_a_tool_that_knows_it_failed_is_rendered_bare() -> None:
     """
     text, ok = await registry().execute(ToolCall(id="c1", name="reports"))
     assert (text, ok) == ("Error: the peer said no", False)
+
+
+@pytest.mark.asyncio
+async def test_a_harness_failure_is_not_read_as_a_tool_that_said_no() -> None:
+    """**A hub from another build is not a tool result.**  Reading
+    `UnreadableAnswer` as `ok: false` would tell the model a peer refused, when
+    what happened is that this build cannot read the peer — the version
+    mismatch must fail the turn (SDD Appendix C)."""
+    with pytest.raises(UnreadableAnswer):
+        await registry().execute(ToolCall(id="c1", name="unreadable"))

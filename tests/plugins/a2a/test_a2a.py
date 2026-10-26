@@ -3730,6 +3730,26 @@ def test_a_corrupt_group_file_is_set_aside_not_overwritten(tmp_path: Path) -> No
     )
 
 
+def test_a_second_corruption_does_not_destroy_the_first_preserved_copy(
+    tmp_path: Path,
+) -> None:
+    """**The quarantine is one slot, and it is not overwritten.**  The first
+    `.corrupt` is the only file the older groups can still be recovered from;
+    replacing it with a second damaged copy would destroy that evidence.  Both
+    files stay where they are and mutations refuse."""
+    path = tmp_path / "groups.yaml"
+    corrupt = path.with_name("groups.yaml.corrupt")
+    corrupt.write_text("the first damage", encoding="utf-8")
+    path.write_text("groups: [also broken", encoding="utf-8")
+
+    store = group_store.GroupStore.load(path)
+
+    assert store.groups == {}
+    assert store.load_error, "the refusal is visible to every mutation"
+    assert corrupt.read_text(encoding="utf-8") == "the first damage"
+    assert path.read_text(encoding="utf-8") == "groups: [also broken"
+
+
 def test_a_group_message_teaches_the_group_and_is_delivered() -> None:
     store = group_store.GroupStore()
     event = group_store.GroupEvent(

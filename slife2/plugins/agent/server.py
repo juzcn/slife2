@@ -120,7 +120,7 @@ from slife2.libs.harness.async_tasks import (
 )
 from slife2.libs.harness.dumps import Compress
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
-from slife2.libs.host import configfile
+from slife2.libs.host import configfile, statefile
 from slife2.libs.host.config import (
     AGENT_SERVER_NAME,
     API_BACKENDS,
@@ -4683,12 +4683,14 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     neighbours this file sits beside (`wechat.yaml`, `inbound.yaml`): somebody opening
     an agent's directory should not have to read three formats to see three
     facts.
+
+    **A write is a rename**, through `statefile.write`, so a process that dies
+    mid-write leaves the old record or the new one and never half of either.  A
+    truncated `subagent.yaml` loads as `None`, and `forked` would then read a
+    fork as an ordinary subagent — the damage this atomicity removes at the
+    source.
     """
-    yaml = YAML()
-    yaml.default_flow_style = False
-    path = subagent_file(agent, subagent)
-    with path.open("w", encoding="utf-8") as handle:
-        yaml.dump(record, handle)
+    statefile.write(subagent_file(agent, subagent), record)
 
 
 def _image_url(part: Any) -> str | None:

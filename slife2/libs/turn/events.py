@@ -366,6 +366,40 @@ def encode(event: TurnEvent) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
+#: The four keys `Usage.to_wire()` writes.  A progress payload's breakdown may
+#: omit one (an older build), but a present one must be an int — `Usage` would
+#: otherwise coerce or raise while the line is being read.
+_USAGE_FIELDS = tuple(Usage().to_wire())
+
+
+def _counts_ok(payload: dict[str, Any], *keys: str) -> bool:
+    """Every present count is an int rather than a bool or a string.
+
+    **A readable line with the wrong type is still unreadable.**  Without this,
+    `int(payload["kept"])` raises out of `decode` and into the progress callback,
+    where the registered answer is to drop the line and draw the turn (SDD
+    Appendix C).
+    """
+    return all(
+        key not in payload
+        or (isinstance(payload[key], int) and not isinstance(payload[key], bool))
+        for key in keys
+    )
+
+
+def _usage_ok(raw: Any) -> bool:
+    """A breakdown `Usage.from_wire` can read without inventing a number."""
+    if raw is None:
+        return True
+    if not isinstance(raw, dict):
+        return False
+    return all(
+        raw.get(key) is None
+        or (isinstance(raw[key], int) and not isinstance(raw[key], bool))
+        for key in _USAGE_FIELDS
+    )
+
+
 def decode(message: str) -> TurnEvent | None:
     """Decode a progress notification's `message` back into a turn event.
 
@@ -386,7 +420,7 @@ def decode(message: str) -> TurnEvent | None:
     # `d` is always a string when present; a payload whose `d` is a number is
     # somebody else's message that happens to share our key space.
     match payload.get("t"):
-        case "context":
+        case "context" if _counts_ok(payload, "kept", "recalled"):
             return ContextChosen(
                 kept=int(payload.get("kept") or 0),
                 recalled=int(payload.get("recalled") or 0),
@@ -407,7 +441,9 @@ def decode(message: str) -> TurnEvent | None:
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):
             return ThinkingDelta(text=payload["d"])
-        case "tool_start" if isinstance(payload.get("name"), str):
+        case "tool_start" if isinstance(payload.get("name"), str) and _counts_ok(
+            payload, "iteration", "max_iterations"
+        ):
             arguments = payload.get("args")
             return ToolCallStarted(
                 call_id=str(payload.get("id") or ""),
@@ -425,7 +461,9 @@ def decode(message: str) -> TurnEvent | None:
                 name=payload["name"],
                 arguments=arguments if isinstance(arguments, dict) else {},
             )
-        case "tool_end" if isinstance(payload.get("name"), str):
+        case "tool_end" if isinstance(payload.get("name"), str) and _counts_ok(
+            payload, "n", "ms"
+        ):
             return ToolCallFinished(
                 call_id=str(payload.get("id") or ""),
                 name=payload["name"],
@@ -443,7 +481,11 @@ def decode(message: str) -> TurnEvent | None:
                 channel=str(payload.get("c") or ""),
                 receipt=str(payload.get("r") or ""),
             )
-        case "done":
+        case "done" if (
+            _counts_ok(payload, "iterations")
+            and _usage_ok(payload.get("usage"))
+            and _usage_ok(payload.get("last"))
+        ):
             return TurnFinished(
                 text=str(payload.get("d") or ""),
                 usage=Usage.from_wire(payload.get("usage")),

@@ -781,7 +781,18 @@ def tool_payload(result: Any) -> dict[str, Any]:
     return {}
 
 
-def unreadable(peer: str, what: str, payload: Any) -> ConnectionError:
+class UnreadableAnswer(ConnectionError):
+    """A peer's answer that is not the shape this build reads.
+
+    A `ConnectionError`, because every caller that already treats a dead or
+    foreign peer as one keeps working.  A *distinct* type, because the tool
+    registry must not turn a harness failure into a tool result the model reads:
+    "a failure is not a verdict" cuts both ways, and a hub from another build is
+    not a tool that said no (SDD Appendix C).
+    """
+
+
+def unreadable(peer: str, what: str, payload: Any) -> UnreadableAnswer:
     """The loud failure a peer's answer that is not its shape raises, worded once.
 
     **One sentence, written out in eight places until this function existed** —
@@ -806,7 +817,7 @@ def unreadable(peer: str, what: str, payload: Any) -> ConnectionError:
     SDD Appendix C forbids: a conversation rebuilt from an unreadable answer is
     a conversation quietly missing what the answer held.
     """
-    return ConnectionError(
+    return UnreadableAnswer(
         f"{peer} did not {what} (it said {payload!r}); a daemon from another "
         f"build does this — try `slife2 down`"
     )

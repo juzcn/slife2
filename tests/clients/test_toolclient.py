@@ -29,6 +29,7 @@ from slife2.clients.toolclient import (
 )
 from slife2.libs.host.config import Config, ToolServerSettings, default_config
 from slife2.libs.host.paths import DATA_ENV_VAR
+from slife2.libs.plugin.protocol import UnreadableAnswer
 from slife2.libs.turn.messages import ToolCall
 from slife2.libs.turn.tools import ToolRegistry
 from slife2.plugins.context.server import build_server as build_context
@@ -242,12 +243,11 @@ async def test_a_listed_tool_without_a_name_fails_the_list() -> None:
 async def test_a_call_this_build_cannot_read_is_a_version_mismatch(junk: Any) -> None:
     """**The call path says what the list path says, and not "the tool said no".**
 
-    An answer `tool_payload` cannot read comes back as an empty mapping, and
-    treating that as a refusal renders a hub from another build as a tool that
-    failed — a diagnosis pointing at the tool, when the hub is what is wrong.
-    The registry never raises, so the model reads the difference in the text:
-    the same sentence `remote_tools` raises, naming the build and `slife2 down`,
-    rather than "fake__echo failed without saying why".
+    An answer `tool_payload` cannot read is `UnreadableAnswer`, the same
+    sentence `remote_tools` raises, naming the build and `slife2 down`.  The
+    registry re-raises it rather than rendering "fake__echo failed without
+    saying why" — a hub from another build is a harness failure, not a tool that
+    refused, and it must fail the turn (SDD Appendix C).
     """
 
     class Unreadable(FakeHub):
@@ -257,14 +257,13 @@ async def test_a_call_this_build_cannot_read_is_a_version_mismatch(junk: Any) ->
             return await super().call_tool(name, arguments)
 
     tool = (await remote_tools(Unreadable()))[0]
-    with pytest.raises(ConnectionError, match="slife2 down"):
+    with pytest.raises(UnreadableAnswer, match="slife2 down"):
         await tool.run({})
 
-    text, ok = await ToolRegistry(await remote_tools(Unreadable())).execute(
-        ToolCall(id="c1", name="fake__echo")
-    )
-    assert ok is False
-    assert "slife2 down" in text
+    with pytest.raises(UnreadableAnswer, match="slife2 down"):
+        await ToolRegistry(await remote_tools(Unreadable())).execute(
+            ToolCall(id="c1", name="fake__echo")
+        )
 
 
 # --- the two halves, against each other --------------------------------------
@@ -444,25 +443,19 @@ async def test_the_trim_is_one_tool_with_two_callers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_trim_that_cannot_happen_does_not_fail_the_turn() -> None:
-    """Bookkeeping runs after the answer, so it cannot be what fails it.
-
-    A hub from an older build has no such tool and answers with a refusal; a hub
-    that is gone cannot answer at all.  Either way the turn is over — and the
-    list is asked for again before the next model call, which is where a missing
-    hub becomes impossible to miss.
-    """
+async def test_a_trim_that_cannot_happen_is_the_callers_to_report() -> None:
+    """**The helper does not decide the log level.**  Bookkeeping runs after the
+    answer, so it cannot be what fails the turn — but the agent server's next
+    request re-lists and a task has no next request, so one caller warns and the
+    other errors.  Swallowing here made both paths a warning and defeated the
+    task's error."""
 
     class Refuses:
         async def call_tool(self, *_: object, **__: object) -> object:
             raise ToolError("Unknown tool: '_func_tool_unload'")
 
-    assert await unload_tools(Refuses()) == {
-        "unloaded": [],
-        "refused": [],
-        "not_loaded": [],
-        "text": "",
-    }
+    with pytest.raises(ToolError, match="Unknown tool"):
+        await unload_tools(Refuses())
 
 
 @pytest.mark.asyncio

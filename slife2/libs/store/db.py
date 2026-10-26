@@ -844,8 +844,8 @@ class TurnStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             self._refuse_old_schema(connection)
+            self._refuse_legacy_file(connection)
             connection.executescript(_SCHEMA)
-            self._report_legacy_file(connection)
 
     def _refuse_old_schema(self, connection: sqlite3.Connection) -> None:
         """Refuse a file whose `turn` table is older than this build's columns.
@@ -887,37 +887,35 @@ class TurnStore:
             logger.error("%s", message)
         raise StaleSchema(message)
 
-    def _report_legacy_file(self, connection: sqlite3.Connection) -> None:
-        """Say so when this file keeps the previous schema's `turns` table.
+    def _refuse_legacy_file(self, connection: sqlite3.Connection) -> None:
+        """Refuse a file that keeps the previous schema's `turns` table.
 
-        A file from before the `turn` table keeps its `turns` table and gains an
-        empty `turn` beside it, so every read thereafter honestly reports no
-        history: turns on disk and invisible, which is worse than turns that are
-        gone because nothing looks wrong.
+        **Refused, not rebuilt beside itself.**  Creating an empty `turn` table
+        in that file would leave the old rows on disk and every read afterwards
+        honestly reporting no history — turns invisible while nothing looks
+        wrong, which is worse than turns that are gone.  It also contradicts the
+        rule this store states for a missing column: there is no migration, and
+        the file is not this build's to half-use.  The startup pass over every
+        home carries on past a refused file (SDD §8.1).
 
-        This one is **reported rather than refused**, which is the one way it
-        differs from a file missing a column (`_refuse_old_schema`): the file
-        answers every call it is given — with a history of zero — so it is
-        usable, just not the history the person remembers.  A missing column is
-        not usable at all.
-
-        Reported once per process per file.  The store is built on every call,
-        so the alternative is the same complaint on every turn, which is the
-        kind of log nobody reads.
+        Checked before the DDL, so a refused file is left exactly as it was
+        found.  Reported once per process per file; the raise happens every
+        time, like `_refuse_old_schema`.
         """
-        if self.path in _legacy_reported:
-            return
-        _legacy_reported.add(self.path)
         legacy = connection.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turns'"
         ).fetchone()[0]
-        if legacy:
-            logger.error(
-                "%s holds the previous schema's `turns` table, which this version "
-                "does not read; there is no migration — delete the file and its "
-                "turns are recorded afresh",
-                self.path,
-            )
+        if not legacy:
+            return
+        message = (
+            f"{self.path} holds the previous schema's `turns` table, which this "
+            f"version does not read; there is no migration — delete the file and "
+            f"its turns are recorded afresh"
+        )
+        if self.path not in _legacy_reported:
+            _legacy_reported.add(self.path)
+            logger.error("%s", message)
+        raise StaleSchema(message)
 
     async def save_turn(
         self,
@@ -2013,6 +2011,13 @@ def _row_to_record(row: sqlite3.Row) -> TurnRecord:
     )
 
 
+#: The four keys `Usage.to_wire()` writes, derived from the writer rather than
+#: copied.  A stored breakdown missing one of these reads as `0` through
+#: `Usage.from_wire`, which is a number nobody measured — a wrong fact, not an
+#: absent one.
+_USAGE_KEYS = tuple(Usage().to_wire())
+
+
 def _usage(raw: Any, *, what: str) -> Usage | None:
     """The stored breakdown, or None when this row carries none.
 
@@ -2020,6 +2025,11 @@ def _usage(raw: Any, *, what: str) -> Usage | None:
     existed, and a value that will not read as one.  The totals beside it are
     still the row's own, so a damaged breakdown costs the split and not the
     bill — the same field-not-structure rule `_messages` follows.
+
+    **A foreign object that parses is damage too.**  `Usage.from_wire` coerces
+    every missing key to zero, so `{"prompt": 10}` would read as an honest
+    all-zero split — a measurement nobody made.  The shape is checked against
+    the keys the writer writes, and the split is dropped with the warning.
 
     **The damaged half is the fallback registered in SDD Appendix C**: *it
     gives up* the token split for that turn, *it does not cover* the messages,
@@ -2033,6 +2043,16 @@ def _usage(raw: Any, *, what: str) -> Usage | None:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("usage is not a JSON object")
+        broken = [
+            key
+            for key in _USAGE_KEYS
+            if not isinstance(parsed.get(key), int) or isinstance(parsed.get(key), bool)
+        ]
+        if broken:
+            raise ValueError(
+                f"usage has no readable {', '.join(broken)} — it is not this "
+                f"build's breakdown"
+            )
         return Usage.from_wire(parsed)
     except (TypeError, ValueError) as exc:
         logger.warning("%s: %s; the totals are kept", what, exc)

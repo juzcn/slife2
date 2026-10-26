@@ -304,7 +304,7 @@ def image_note(part: dict[str, Any]) -> str:
 DROPPED_IMAGES = (
     "The turn failed, so the attached image(s) were dropped from the "
     "conversation — a picture the provider refuses is refused by every turn "
-    "after it. Naming the file again in a new message attaches it again."
+    "after it. Send the picture again in a new message to attach it again."
 )
 
 
@@ -312,9 +312,10 @@ def drop(messages: MutableSequence[Any]) -> int:
     """Replace every attached image in *messages* with a note.  `how many went`.
 
     **In place, which is the caller's need rather than a convenience.**  This runs
-    when a turn has died at the provider, and what it repairs is the live list the
-    *next* turn runs on — a copy would leave the poisoned parts exactly where they
-    were.  `slife2.libs.store.db.strip_images` answers the same question for a list on its way
+    when a turn has failed, and what it repairs is the live list the *next* turn
+    runs on — a copy would leave the poisoned parts exactly where they were.  The
+    failure need not be the provider's: a hub or transport failure can take the
+    picture with it, which is the deliberate trade `repaired_error` states.  `slife2.libs.store.db.strip_images` answers the same question for a list on its way
     to disk and it copies instead, because its caller's conversation may still be
     reasoning about the picture; that is the whole of the difference between them,
     and the note they leave is `image_note`.
