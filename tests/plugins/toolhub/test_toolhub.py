@@ -1604,21 +1604,22 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
     assert "results" in answer["text"], "naming what was wrong"
 
 
-def test_a_schema_that_will_not_parse_is_a_tool_with_no_arguments() -> None:
-    """**The tolerance is the store's spelling of "nothing to declare", kept on
-    purpose.**  The schema column holds a JSON document *or* a sentinel this
-    process deliberately does not claim to spell (`_row_of`), so a value that
-    will not parse becomes "no arguments" rather than failing the whole list.
+def test_an_empty_schema_is_no_arguments_and_a_damaged_one_is_not() -> None:
+    """**Absence is the empty string; everything else has to parse.**
 
-    What that gives up is registered rather than hidden: a row whose *real*
-    schema was damaged is handed to the model as a tool with no arguments, so
-    the model reads the tool's own error several frames from the cause
-    (SDD Appendix C).  Failing the row instead would need this half to tell the
-    sentinel from the damage, which is the opinion it must not have.
+    The empty string is the row's own spelling of "nothing to declare"
+    (`_row_of`), so it is read as no arguments without a sentinel to know.  A
+    value that will not parse, or one that parses to something other than an
+    object, is damage: it fails the whole list instead of being handed to the
+    model as a tool with no arguments, which would send it to the tool's own
+    error several frames from the cause (SDD §7.2).
     """
-    assert _parameters("n/a") == {}, "the store's sentinel is not damage"
+    assert _parameters("") == {}
     assert _parameters('{"type": "object"}') == {"type": "object"}
-    assert _parameters("[1, 2]") == {}, "a schema that is not a mapping"
+    with pytest.raises(ValueError):
+        _parameters('{"type": "object"')
+    with pytest.raises(ValueError):
+        _parameters("[1, 2]")
 
 
 @pytest.mark.asyncio
@@ -2749,6 +2750,36 @@ async def test_a_catalogue_answer_without_tools_fails_the_list(
 
     async with Client(hub_for()) as hub:
         with pytest.raises(ToolError, match="without a tool list"):
+            await hub.call_tool("list_tools", {})
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_schema_fails_the_list_rather_than_reading_as_no_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A schema nobody can read is not a tool with no arguments.**
+
+    Serving it as `{}` would send the model to the tool's own error with its
+    arguments silently dropped — a value that cannot be read read as a value
+    that is absent (SDD Appendix C).  The list is refused instead, naming the
+    row, for the rule `advertised` states: a hub that cannot read its answer
+    refuses to list anything.
+    """
+    row = {
+        "name": "arxiv__search",
+        "description": "Find papers.",
+        "category": "mcp",
+        "source_id": "arxiv",
+        "remote_name": "search",
+        "schema": '{"type": "object"',
+        "returns": "",
+        "status": "enabled",
+        "load_status": "loaded",
+    }
+    monkeypatch.setattr(ToolStore, "injectable", lambda self, sources: {"tools": [row]})
+
+    async with Client(hub_for()) as hub:
+        with pytest.raises(ToolError, match="cannot read"):
             await hub.call_tool("list_tools", {})
 
 

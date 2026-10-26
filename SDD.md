@@ -1383,7 +1383,10 @@ of the docstring travels in `_meta` under `slife2/returns` (`DeclareReturns` in
 description whenever it parses the arguments. The hub stores it in the
 catalogue's `returns` column beside the input schema. An external server may
 state the same key; the hub reads it there too, and a tool that says nothing
-gets the catalogue's absence sentinel rather than an empty answer.
+gets an empty `returns` string. The `schema` and `returns` columns spell absence
+as the empty string — `'n/a'` is a load state, not an absence — and a value that
+will not parse is damage: the hub refuses the list rather than serving the tool
+with no arguments.
 
 ### 7.3 Naming
 
@@ -2949,7 +2952,6 @@ The four shapes an undeclared fallback takes:
 | A `turn_summarize` call's arguments will not parse | Save the turn without its annotation | The summary and tags | A call whose arguments parse | A warning naming the call |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
 | A turn file from the previous schema (only a `turns` table) | Create an empty `turn` table and run | The turns on disk | A file missing a declared `turn` column, which is refused | One `logger.error` naming the file |
-| A stored tool schema will not parse | Serve the tool with no arguments | The arguments | A schema that parses | The tool's own error |
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
 | An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | Bad rows, handled per pass | The error naming the path |

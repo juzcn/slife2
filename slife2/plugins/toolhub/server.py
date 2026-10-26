@@ -2356,8 +2356,8 @@ def _row_of(tool: UpstreamTool) -> dict[str, Any]:
     reads and indexes: a prefix repeated in every result is noise in the text a
     model searches by, and the row already says which source it came from.
 
-    An empty `schema` means "nothing to declare" and the store turns it into its
-    own sentinel — the hub has no opinion about how a store spells absence.
+    An empty `schema` means "nothing to declare", and the catalogue keeps it
+    empty: absence is the empty string there, and only a real schema is text.
 
     **`returns` is the tool's `Returns:` prose**, which the plugin put on
     `_meta` (`slife2.libs.plugin.protocol.DeclareReturns`).  Empty is the same
@@ -2390,12 +2390,21 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
     """
     server = str(row.get("source_id") or "")
     description = str(row.get("description") or "")
+    name = str(row.get("name") or "")
+    raw_schema = str(row.get("schema") or "")
+    try:
+        parameters = _parameters(raw_schema)
+    except ValueError as exc:
+        raise ConnectionError(
+            f"the tool catalogue's row for {name!r} carries a schema it cannot "
+            f"read: {raw_schema[:200]!r}"
+        ) from exc
     return UpstreamTool(
-        name=str(row.get("name") or ""),
+        name=name,
         server=server,
-        tool=str(row.get("remote_name") or row.get("name") or ""),
+        tool=str(row.get("remote_name") or name),
         description=f"[{server}] {description}".strip() if server else description,
-        parameters=_parameters(str(row.get("schema") or "")),
+        parameters=parameters,
         returns=str(row.get("returns") or ""),
     )
 
@@ -2403,25 +2412,20 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
 def _parameters(schema: str) -> dict[str, Any]:
     """A stored schema, as the parameter mapping the model's tool list takes.
 
-    Tolerant on purpose, and the tolerance is a decision rather than an accident:
-    the column holds a JSON document *or* a sentinel a store chose for "nothing
-    to declare", and this process deliberately has no opinion about how absence
-    is spelled (`_row_of`).  So a value that will not parse becomes "no
-    arguments" rather than a reason to fail the whole list.
-
-    **What it costs is registered, not argued away.**  A row whose *real* schema
-    was damaged is handed to the model as a tool with no arguments, so the model
-    calls it with none and reads the tool's own error several frames from the
-    cause — the weaker path standing in for a value nobody could read (SDD Appendix C).
-    Failing the row instead would need this half to tell the sentinel from the
-    damage, which is the opinion it must not have; SDD Appendix C carries it
-    for that reason.
+    **The empty string is the one spelling of "nothing to declare"** (`_row_of`),
+    and anything else has to be a JSON object.  A value that will not parse, or
+    one that parses to something other than an object, is damage — it fails the
+    whole list rather than being served as a tool with no arguments, which
+    would send the model to the tool's own error several frames from the cause
+    (SDD §7.2).  There is nothing to tell apart before the parse: absence was
+    settled by the empty string.
     """
-    try:
-        found = json.loads(schema)
-    except ValueError:
+    if not schema:
         return {}
-    return found if isinstance(found, dict) else {}
+    found = json.loads(schema)
+    if not isinstance(found, dict):
+        raise ValueError(f"a tool schema is not a JSON object: {schema[:200]!r}")
+    return found
 
 
 def plugin_settings(config: Config, name: str) -> ToolServerSettings:

@@ -130,11 +130,12 @@ STATUSES = frozenset({STATUS_ENABLED, STATUS_DISABLED, STATUS_ERROR})
 LOADED = "loaded"
 UNLOADED = "unloaded"
 
-#: The stored spelling of "not applicable" — the same literal for every column
-#: that would otherwise be NULL: no owner, no schema, no load state.  One value
-#: per absence rather than NULL, so that no read point needs an `IS NULL` branch
-#: and a forgotten one cannot silently return an empty set.
-NA = "n/a"
+#: The third `load_status`, and **a state rather than an absence**: a skill and
+#: an installed command have no load concept at all, so neither `loaded` nor
+#: `unloaded` is true of them.  It is spelled out because the model reads it in
+#: a `tool_search` result; the free-text columns do not use it — their absence
+#: is the empty string, which every reader already treats as "nothing here".
+NOT_APPLICABLE = "n/a"
 
 #: The `_`-prefixed names that are still injected: the harness tools, which are
 #: in the model's list *because* their pairs are written into its history.  A
@@ -184,7 +185,7 @@ _TOOL_COLUMNS = frozenset(
 _CHECKED_DOMAINS: dict[str, frozenset[str] | set[str]] = {
     "category": CATEGORIES,
     "status": STATUSES,
-    "load_status": {LOADED, UNLOADED, NA},
+    "load_status": {LOADED, UNLOADED, NOT_APPLICABLE},
 }
 
 
@@ -259,8 +260,9 @@ _TOOL_SCHEMA = f"""
 -- derived `type` column, because every question one would answer ("does this
 -- row have a load state?") is a membership test over FUNCTION_CATEGORIES.
 --
--- Every column carries a default and none is nullable: "local", "no schema" and
--- "no load state" are real values ('n/a'), so no reader needs an IS NULL arm.
+-- Every column carries a default and none is nullable: an empty string is "no
+-- text", and `'n/a'` is the load state of a tool that has none, so no reader
+-- needs an IS NULL arm.
 --
 -- Two stamps, and they answer two different questions.  `last_loaded` is when
 -- the row entered the model's list — the operator's `tool_load.autoload`, or the
@@ -273,10 +275,10 @@ CREATE TABLE IF NOT EXISTS tool (
     name        TEXT PRIMARY KEY NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     category    TEXT NOT NULL CHECK (category IN ({_CATEGORY_CHECK})),
-    source_id   TEXT NOT NULL DEFAULT 'n/a',
-    remote_name TEXT NOT NULL DEFAULT 'n/a',
-    schema      TEXT NOT NULL DEFAULT 'n/a',
-    returns     TEXT NOT NULL DEFAULT 'n/a',
+    source_id   TEXT NOT NULL DEFAULT '',
+    remote_name TEXT NOT NULL DEFAULT '',
+    schema      TEXT NOT NULL DEFAULT '',
+    returns     TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'enabled'
                 CHECK (status IN ('enabled','disabled','error')),
     load_status TEXT NOT NULL DEFAULT 'unloaded'
@@ -337,18 +339,6 @@ def _in_list(values: Any) -> str:
     return ",".join(f"'{value}'" for value in sorted(values))
 
 
-def _indexable(value: Any) -> str:
-    """One column's contribution to the keyword document.
-
-    **A sentinel is a value in the column, not a word in the document.**  `'n/a'`
-    means "this tool has no schema" — indexing it would make a search for `n/a`
-    match every tool that declares nothing, and the row would be found by text
-    that was never about it.
-    """
-    text = str(value or "")
-    return "" if text == NA else text
-
-
 #: The version of the text a tool's vector is made of — **the catalogue's own
 #: text contract, beside `textindex.RULES_VERSION`'s shared one.**
 #:
@@ -399,10 +389,10 @@ def tool_document(row: Mapping[str, Any]) -> str:
     argument list.  A name is never empty, so the document never is either.
     """
     parts = [str(row.get("name") or ""), str(row.get("description") or "").strip()]
-    returned = _indexable(row.get("returns"))
+    returned = str(row.get("returns") or "")
     if returned.strip():
         parts.append(returned)
-    schema = _indexable(row.get("schema"))
+    schema = str(row.get("schema") or "")
     if schema.strip():
         parts.append(schema)
     return storable("\n\n".join(part for part in parts if part))
@@ -466,7 +456,11 @@ def _search_dict(
     """
     found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
     schema = str(row["schema"] or "")
-    found["schema_bytes"] = 0 if schema in ("", NA) else len(schema)
+    # `n/a` is the spelling this column carried before absence became the empty
+    # string.  A search can still reach a row whose source has not answered
+    # since, so it still reads as "no schema"; the model's list cannot see one,
+    # because a row there was merged by this build and its schema is `''`.
+    found["schema_bytes"] = 0 if schema in ("", "n/a") else len(schema)
     if similarity is not None:
         found["similarity"] = similarity
     if matched_in is not None:
@@ -785,8 +779,8 @@ class ToolStore:
                     "category": category,
                     "source_id": source,
                     "remote_name": str(row.get("remote_name") or name),
-                    "schema": str(row.get("schema") or NA) or NA,
-                    "returns": str(row.get("returns") or NA) or NA,
+                    "schema": str(row.get("schema") or ""),
+                    "returns": str(row.get("returns") or ""),
                 }
                 # **A row may carry its own verdict.**  Every other row's status
                 # is the *runtime's* — `source_state` is the only writer, because
@@ -980,7 +974,7 @@ class ToolStore:
             # column's documentation both say these two carry.  It is also what
             # keeps them out of the model's list: the gate is the function
             # categories, so a row can be findable without being callable.
-            return NA
+            return NOT_APPLICABLE
         return LOADED if name in self.autoload else UNLOADED
 
     def _index(
@@ -1004,7 +998,7 @@ class ToolStore:
             (
                 rowid,
                 *(
-                    textindex.normalize(_indexable(fields.get(field, "")))
+                    textindex.normalize(str(fields.get(field) or ""))
                     for field in _FTS_FIELDS
                 ),
             ),

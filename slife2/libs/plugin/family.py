@@ -295,8 +295,8 @@ class Link:
             "remote_name": str(getattr(tool, "name", "")),
             "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
             # Somebody else's server may say what its answer holds, in the same
-            # `_meta` key ours does.  It is kept when it is there and is the
-            # store's absence sentinel when it is not.
+            # `_meta` key ours does.  It is kept when it is there and is empty
+            # when it is not — absence is the empty string in the catalogue.
             "returns": str((getattr(tool, "meta", None) or {}).get(RETURNS) or ""),
         }
 

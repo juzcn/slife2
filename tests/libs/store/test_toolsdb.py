@@ -23,7 +23,7 @@ import pytest
 from slife2.libs.store import textindex
 from slife2.libs.store.catalogue import (
     LOADED,
-    NA,
+    NOT_APPLICABLE,
     STATUS_DISABLED,
     STATUS_ENABLED,
     STATUS_ERROR,
@@ -382,7 +382,7 @@ def test_a_skill_row_carries_no_load_state(tmp_path) -> None:
     store = store_at(tmp_path)
     merge(store, "skills", "skill", [tool("skill:browser-harness")])
 
-    assert rows_in(store) == [("skill:browser-harness", STATUS_ENABLED, NA)]
+    assert rows_in(store) == [("skill:browser-harness", STATUS_ENABLED, NOT_APPLICABLE)]
 
 
 def test_a_move_that_is_not_the_document_does_not_re_embed(tmp_path) -> None:
@@ -836,7 +836,7 @@ def test_a_reconnect_never_touches_what_the_model_decided(tmp_path) -> None:
     assert rows_in(store)[0][2] == LOADED
 
 
-def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
+def test_a_tools_returns_text_is_a_row_and_absence_is_the_empty_string(
     tmp_path,
 ) -> None:
     """The `Returns:` prose a tool declared, stored beside its input schema.
@@ -844,8 +844,8 @@ def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
     **It is not in the description**, because FastMCP drops the section when it
     has parameters to parse; the plugin reads it from the docstring and puts it
     on `_meta`, and this is where the hub keeps it.  A tool that says nothing
-    gets the same absence sentinel the schema uses — an empty string would be a
-    value nobody wrote.
+    gets the empty string, which is the column's own default and the spelling
+    every reader already treats as "nothing here".
     """
     store = store_at(tmp_path)
     merge(
@@ -859,7 +859,7 @@ def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
     with sqlite3.connect(store.path) as connection:
         stored = dict(connection.execute("SELECT name, returns FROM tool"))
     assert stored == {
-        "arxiv__search": NA,
+        "arxiv__search": "",
         "turn_list": "`entries` — one per turn.\n`total` — how many.",
     }
     assert store.route("turn_list")["returns"].startswith("`entries`")
@@ -868,8 +868,8 @@ def test_a_tools_returns_text_is_a_row_and_absence_is_its_own_value(
     document = tool_document(store.route("turn_list"))
     assert "`entries` — one per turn." in document
     absent = tool_document(store.route("arxiv__search"))
-    assert NA not in absent, "the absence sentinel is not text to embed"
-    assert absent.startswith("arxiv__search")
+    assert absent == "arxiv__search\n\nDoes a thing.", "absence adds no text"
+    assert "n/a" not in absent
 
 
 # --- loading and the budget ---------------------------------------------------
@@ -1360,7 +1360,7 @@ def test_a_second_question_does_not_demote_what_the_first_one_found(tmp_path) ->
 
 
 def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None:
-    """The sentinel is a value in a column, not a document to index or embed.
+    """Absence is not a document to index or embed.
 
     A tool that declares no parameters is not thereby unfindable — the keyword
     leg reads its name and description — and it does not get a vector made of
