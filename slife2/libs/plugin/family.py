@@ -57,7 +57,7 @@ from slife2.libs.host.config import (
     ToolServerSettings,
     for_the_call,
 )
-from slife2.libs.host.paths import home as home_dir
+from slife2.libs.host.paths import home_key
 from slife2.libs.plugin.audience import forwarded_client, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -171,6 +171,16 @@ class Link:
         #: "no rows" and "no rows *yet*" are the same thing to the hub, which is
         #: told `up: false` either way and marks the source rather than merging.
         self.rows: list[dict[str, Any]] | None = None
+        #: **One edit or teardown at a time.**  Two management calls for one
+        #: entry are two conversations on a shared plugin — an `mcp_set` from a
+        #: turn and one from a task — and `reconfigure` is a read (the current
+        #: connection), an await (`close`), and a write (the new one).  Two that
+        #: interleave both read the same old connection and both replace it, so
+        #: one of the two replacements is dropped without its `close` ever being
+        #: called.  The lock covers the swap and the close, not the connect
+        #: attempt, because the attempt belongs to `Connection` and is awaited
+        #: by the caller that asked.
+        self._lock = asyncio.Lock()
         self.connection = self._connect(settings, directory, transport, client_factory)
 
     def _connect(
@@ -213,12 +223,30 @@ class Link:
         The new connection is in place *before* the old one is awaited, which is
         `Family.put`'s rule one level down: a call landing in between must not find
         this link without a connection to make it on.
+
+        **And the swap is one step.**  Two homes can hold one entry, so two
+        management calls can reach this link together; both would read the same
+        `previous`, both would replace it, and one of the two replacements would
+        be dropped without its `close` ever being called.
         """
-        previous = self.connection
-        self.settings = settings
-        self.rows = None
-        self.connection = self._connect(settings, directory, transport, client_factory)
-        await previous.close()
+        async with self._lock:
+            previous = self.connection
+            self.settings = settings
+            self.rows = None
+            self.connection = self._connect(
+                settings, directory, transport, client_factory
+            )
+            await previous.close()
+
+    async def close(self) -> None:
+        """Close this link's connection, serialised with a reconfigure.
+
+        The other half of the same lock: a home letting go of the last hold
+        while another reconfigures the entry must not close a connection the
+        reconfigure has just built (`Links.release`).
+        """
+        async with self._lock:
+            await self.connection.close()
 
     async def _listed(self, tools: list[Any]) -> None:
         self.rows = [self._row(tool) for tool in tools]
@@ -348,7 +376,7 @@ class Links:
         if link.holders:
             return
         self._links.pop((link.category, link.settings.name), None)
-        await link.connection.close()
+        await link.close()
 
 
 class Held:
@@ -556,12 +584,20 @@ class Family:
         #: entry's process gets when its own `cwd` is left out.  One string,
         #: because a family is built inside the call that first needed it
         #: (`Homes`), so the ambient home is already the right one.
-        self._home = str(home_dir())
+        self._home = home_key()
         self._directory = self._home
         self._links = links
         self._transports = dict(transports or {})
         self._client_factory = client_factory
         self._held = {entry.name: self._hold(entry) for entry in entries}
+        #: **One management call at a time for this home.**  The map is the
+        #: family's own state, and every write to it is an upsert or a
+        #: replace — `put` reads the entry it is replacing, so two `mcp_set`
+        #: calls can both see the same previous entry and release one link the
+        #: other just took (`Family.put` and `Held.release`).  One home, one
+        #: lock; two homes editing one entry are serialised one level down, on
+        #: the link.
+        self._manage = asyncio.Lock()
 
     def _hold(self, settings: ToolServerSettings) -> Held:
         """A `Held` for one entry: this home's settings over the machine's link."""
@@ -578,6 +614,18 @@ class Family:
     # --- what a management tool changes --------------------------------------
 
     async def put(self, settings: ToolServerSettings) -> Held:
+        """Hold *settings*, replacing whatever was held under that name — serialised.
+
+        Two conversations on one shared plugin can call a management tool at the
+        same time; `_put` is the read-and-swap that must not overlap with itself
+        (its docstring says why), and this is the lock around it.  `set_enabled`
+        calls `_put` under the same lock rather than this method, because
+        `asyncio.Lock` is not reentrant.
+        """
+        async with self._manage:
+            return await self._put(settings)
+
+    async def _put(self, settings: ToolServerSettings) -> Held:
         """Hold *settings*, replacing whatever was held under that name.
 
         **The new entry is in the map before anything is awaited, and in the
@@ -649,11 +697,16 @@ class Family:
         `put` states — except that here the disappearance is the point, and the
         hub deleting the rows is the outcome being asked for.  The *server* goes
         only if this was the last home holding it (`Links.release`).
+
+        Under the family's lock, for the reason `put` states: the pop and the
+        release are two halves of one edit, and a `put` landing between them
+        would leave a held entry pointing at a link this call has just closed.
         """
-        one = self._held.pop(name, None)
-        if one is not None:
-            await one.release()
-        return one
+        async with self._manage:
+            one = self._held.pop(name, None)
+            if one is not None:
+                await one.release()
+            return one
 
     async def set_enabled(self, name: str, enabled: bool) -> Held | None:
         """Switch one held entry on or off.  `None` if it is not held.
@@ -662,11 +715,15 @@ class Family:
         link and a disabled one does not, so this is `remove` and `put` and
         there is no third state where the settings say one thing and the
         connection is doing another.
+
+        Takes the family's lock and calls `_put` directly, because `put` would
+        try to take the same non-reentrant lock.
         """
-        one = self._held.get(name)
-        if one is None or one.settings.enabled == enabled:
-            return one
-        return await self.put(replace(one.settings, enabled=enabled))
+        async with self._manage:
+            one = self._held.get(name)
+            if one is None or one.settings.enabled == enabled:
+                return one
+            return await self._put(replace(one.settings, enabled=enabled))
 
     def held(self, name: str) -> Held | None:
         """One held entry, for a tool answering about it."""
@@ -1323,7 +1380,7 @@ class Homes[T]:
 
     def current(self) -> T:
         """This home's, built and started on the way out of the first ask."""
-        key = str(home_dir())
+        key = home_key()
         held = self._held.get(key)
         if held is None:
             held = self._build(for_the_call(self._source, self._injected))

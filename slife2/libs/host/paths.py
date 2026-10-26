@@ -295,6 +295,37 @@ def home() -> Path:
     return override if override is not None else data_dir()
 
 
+def home_key(root: str | Path | None = None) -> str:
+    """One home's **canonical spelling — the first half of an identity**, not a path.
+
+    Every per-home thing a shared process holds is a dictionary keyed by a home:
+    an agent's loop, a tool catalogue, a family's section, an A2A mesh, a login.
+    Those keys are asserted on, never opened, so the question is equality — and
+    two spellings of one directory are not equal while being the same home.
+
+    **A spelling is what a call carries.**  A client sends its `data_dir` exactly
+    as it was named (`slife2.libs.plugin.audience.client_meta`), and the daemon
+    that started with the same directory may have been handed the resolved
+    spelling by the launcher (`launcher._argv`).  `D:\\Dev\\...` against
+    `d:\\DEV\\...`, a junction, a symlink, a trailing `..`: each is one directory
+    to the filesystem and two keys to a dict — so the second one builds a
+    second loop, a second catalogue, a second mesh for one home.  What that
+    costs is not a stale value but duplicate writers: two poll loops delivering
+    one login's messages, two meshes holding one MQTT name and kicking each
+    other off, a tool loaded into one catalogue and searched in another.
+
+    Resolved at the *receiving* end and only for the key.  The path itself keeps
+    the caller's spelling, because resolving a symlinked home would rewrite where
+    an operator chose to point it; what this fixes is deciding whether two
+    spellings are one thing.
+
+    `None` (or `""`) is the ambient home, which is what a call that named none
+    is served from.  This is not a path to hand to `open`: `home()` is that.
+    """
+    found = Path(root) if root else home()
+    return str(found.resolve())
+
+
 def agents_dir() -> Path:
     """Where every agent's own files live, in the home being served.
 

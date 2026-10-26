@@ -1114,6 +1114,82 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> None:
+    """**A rebuild is a model call between a read and a write, and the writers
+    are in different processes.**
+
+    The agent server's turn and an agent task of the same agent both rebuild one
+    conversation; the turn also saves while the task is deciding.  The decision
+    is composed against the list `restore` answered with, so writing it
+    unconditionally after the save erased the new turn from the live context —
+    the row stayed in the log and the next restore no longer knew it, which is
+    the silent loss `append_context` prevents on the save path.
+
+    `expected` is the snapshot, and the write is a compare-and-set: the newer
+    list stands and the caller keeps what it holds.  What is asserted here is
+    both halves — the decision did not overwrite, and the turn saved while it ran
+    is still in the context.
+    """
+    parked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def deciding(
+        agent: str, subagent: str, model: str, messages: list, prompt: str
+    ) -> str:
+        parked.set()
+        await release.wait()
+        return '{"context": [1]}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=deciding)
+    ) as client:
+        ids = await _seed(client, "jack", ("zero", "0"), ("one", "1"))
+        answer = asyncio.create_task(
+            client.call_tool(
+                "rebuild",
+                {
+                    "agent": "jack",
+                    "messages": [
+                        SYSTEM,
+                        {"role": "user", "content": "zero"},
+                        {"role": "assistant", "content": "0"},
+                        {"role": "user", "content": "one"},
+                        {"role": "assistant", "content": "1"},
+                    ],
+                    "turn_ids": ids,
+                    # What `restore` answered and what the store held when this
+                    # caller took its snapshot; the write matches only while
+                    # the conversation still holds exactly this.
+                    "expected": ids,
+                    "prompt": "and then?",
+                },
+            )
+        )
+        await asyncio.wait_for(parked.wait(), timeout=5)
+        # The other writer: a turn of the agent's own, saved while the
+        # discriminator is deciding.  The store appends it in its own
+        # transaction.
+        saved = await client.call_tool(
+            "remember",
+            {"agent": "jack", "messages": _exchange("two", "2")},
+        )
+        release.set()
+        rebuilt = await answer
+
+    assert rebuilt.data["changed"] is True, "the newer store list is what it adopted"
+    assert rebuilt.data["turn_ids"] == [ids[0], ids[1], saved.data["turn_id"]]
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [
+        ids[0],
+        ids[1],
+        saved.data["turn_id"],
+    ], "the turn saved while the decision ran is still the conversation"
+    said = [
+        message["content"] for message in rebuilt.data["messages"] if message["role"] == "user"
+    ]
+    assert said[-1].startswith("two"), "the turn it had not seen is in its context"
+
+
+@pytest.mark.asyncio
 async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> None:
     """A query with no indexable term used to be turned into no query at all.
 

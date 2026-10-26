@@ -138,7 +138,31 @@ def test_one_conversation_is_keyed_by_the_three_things_that_identify_it(
     """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "mine"))
 
-    assert client_key("jack") == (str(tmp_path / "mine"), "jack", "")
+    # The key is the **directory**, not the spelling the call carried: the two
+    # assertions below are the same path written two ways and must be one key.
+    mine = str((tmp_path / "mine").resolve())
+    theirs = str((tmp_path / "theirs").resolve())
+    assert client_key("jack") == (mine, "jack", "")
     with in_home(tmp_path / "theirs"):
-        assert client_key("jack") == (str(tmp_path / "theirs"), "jack", "")
+        assert client_key("jack") == (theirs, "jack", "")
         assert client_key("jack", "worker")[2] == "worker"
+
+
+def test_two_spellings_of_one_home_are_one_key(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A key is the directory, not the string a call wrote it with.**
+
+    A client sends its `data_dir` exactly as it was named while the daemon may
+    hold the launcher's resolved spelling, so `D:\\x` and `D:\\x\\..\\x` — one
+    directory, two strings — would be two conversations to a table keyed by the
+    string.  Two loops for one agent is not a stale read: it is two writers of
+    one conversation.  `paths.home_key` resolves, and `client_key` is what uses
+    it; this is the assertion that keeps the two from drifting apart.
+    """
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path))
+    canonical = client_key("jack")[0]
+
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / ".." / tmp_path.name))
+    assert client_key("jack")[0] == canonical
+    assert canonical == str(tmp_path.resolve())

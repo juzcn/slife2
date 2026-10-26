@@ -86,7 +86,7 @@ from slife2.libs.host.config import (
     Config,
     load_cached,
 )
-from slife2.libs.host.paths import home as home_dir
+from slife2.libs.host.paths import home_key
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_key
 from slife2.libs.plugin.protocol import (
@@ -619,6 +619,12 @@ def build_server(
                     "subagent": task.identity[1],
                     "messages": [message.to_wire() for message in messages],
                     "turn_ids": list(turn_ids),
+                    # The list this task's `restore` answered with.  A turn of
+                    # the agent's own may be saved while the discriminator runs
+                    # — the two writers are in different processes — and the
+                    # store's compare-and-set is what keeps this decision from
+                    # erasing it (`context.rebuild`'s `expected`).
+                    "expected": list(turn_ids),
                     "prompt": prompt,
                     "model": reference,
                     "carried": carried,
@@ -922,7 +928,7 @@ def build_server(
             1
             for task in tasks.values()
             if task.agent == agent
-            and task.home == str(home_dir())
+            and task.home == home_key()
             and task.status == RUNNING
         )
 
@@ -1029,7 +1035,7 @@ def build_server(
             # The home this call came in on, read *here*, at the only moment it
             # is the caller's (`slife2.libs.plugin.audience.client_key` explains why
             # the object keeps it rather than asking again later).
-            home=str(home_dir()),
+            home=home_key(),
         )
         tasks[task.key] = task
         # Detached from the call that starts it, which is the whole of what
@@ -1072,7 +1078,7 @@ def build_server(
         # caller who could then neither inspect nor stop any of them, because
         # `agent_task_status` and `agent_task_cancel` do go through the key and
         # answer `unknown` for those very rows.
-        here = str(home_dir())
+        here = home_key()
         mine = [
             task for task in tasks.values() if task.agent == agent and task.home == here
         ]

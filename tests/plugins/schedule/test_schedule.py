@@ -164,6 +164,15 @@ class Tasks:
     asked: list[str] = field(default_factory=list)
     #: The home each `agent_task_list` ask arrived in, in the same order.
     asked_home: list[str] = field(default_factory=list)
+    #: Park an in-flight start here, and say when one has arrived.  The race
+    #: these exist for is between the first start and its `attach`: without the
+    #: gate every call finishes before the second one reads, and the test would
+    #: pass whichever code ran.  `starting` is what a second start sees while
+    #: the first is parked, which is what the real agent-task plugin's
+    #: "already running" refusal reads.
+    park: asyncio.Event | None = None
+    entered: asyncio.Event | None = None
+    starting: bool = False
 
     def __post_init__(self) -> None:
         self.mcp: FastMCP = FastMCP("tasks")
@@ -178,6 +187,13 @@ class Tasks:
         ) -> dict[str, Any]:
             if self.refuse:
                 raise ToolError(f"an agent task named {name!r} is already running")
+            if self.starting or self.started:
+                raise ToolError(f"an agent task named {name!r} is already running")
+            self.starting = True
+            if self.entered is not None:
+                self.entered.set()
+            if self.park is not None:
+                await self.park.wait()
             self.started.append(
                 {
                     "agent": who(ctx),
@@ -189,6 +205,7 @@ class Tasks:
                     "home": str(paths.home()),
                 }
             )
+            self.starting = False
             answer = {
                 "name": name,
                 "status": TASK_RUNNING,
@@ -481,6 +498,39 @@ async def test_switching_a_task_off_and_on_again_does_not_report_a_gap() -> None
         # The anchor is fresh: nothing between the two writes can be read as a
         # fire that was missed.
         assert after.last_due >= before.updated_at
+
+
+async def test_an_older_fire_does_not_move_the_anchor_backwards() -> None:
+    """**The anchor is a compare-and-set, not a snapshot comparison.**
+
+    Two fires of one task can be recorded at once — a maker and its subagent
+    share a ledger, and `schedule_run_now` is a call either of them can make.
+    Both read the same `last_due`; the older one then writes after the newer
+    one.  The check in front of the update compares against the *caller's*
+    snapshot, so it passes, and the anchor moves backwards: the poll
+    re-considers a fire that has already been recorded, which on a fall-back
+    hour is a fire that can happen twice.
+
+    A stale `Task` value is what a second caller holds, so that is what this
+    passes.  The update's own `WHERE` is the thing that decides.
+    """
+    async with Client(build()) as client:
+        await write(client)
+
+    store = ledger()
+    stale = store.task("daily")
+    assert stale is not None
+    moment = datetime.fromisoformat(now())
+    newer = (moment + timedelta(hours=2)).isoformat()
+    older = (moment + timedelta(hours=1)).isoformat()
+    store.advance(stale, newer)
+    # The same snapshot, with the older fire: the Python check passes because
+    # the caller never saw the newer write.
+    store.advance(stale, older)
+
+    after = store.task("daily")
+    assert after is not None
+    assert after.last_due == newer
 
 
 async def test_a_cron_that_can_never_fire_is_refused() -> None:
@@ -827,6 +877,50 @@ async def test_a_run_already_in_flight_is_not_started_twice(tasks: Tasks) -> Non
 
     assert again["agent_task_id"] == first["agent_task_id"]
     assert len(tasks.started) == 1
+
+
+async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
+    """**One ledger, and a maker and its subagent both answer the same trigger.**
+
+    `schedule_run_now` is a read — is this run in flight? — and then a dispatch
+    whose first step is a call to another process.  The read is made before the
+    id is attached, so a second call in that window reads "no task yet" and
+    dispatches too.  The agent-task plugin refuses the second start (one name,
+    one running task), and that refusal used to *settle the first call's run
+    failed* while the work went on — a ledger saying the run did not happen
+    beside an answer on its way to the conversation.
+
+    `RunLocks` is one lock per task for the process that serves every agent: the
+    second call waits for the first's attach and then finds the run in flight.
+    The recorder parks the first start so the window is held open rather than
+    hoped for.
+    """
+    tasks.park = asyncio.Event()
+    tasks.entered = asyncio.Event()
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        # The run the trigger names, written before either call.  Both are
+        # answers to it — a retried trigger, or a maker and its subagent both
+        # handed the same one — so both pass the same `due_at`.
+        stamp = open_a_run()
+        first = asyncio.create_task(
+            ask(client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": stamp})
+        )
+        await asyncio.wait_for(tasks.entered.wait(), timeout=5)
+        second = asyncio.create_task(
+            ask(client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": stamp})
+        )
+        # Long enough for a second dispatch to reach the peer if it were
+        # allowed to; the lock is what keeps it from getting there.
+        await asyncio.sleep(0.05)
+        tasks.park.set()
+        answered = await asyncio.gather(first, second)
+
+    assert len(tasks.started) == 1, "the second call started a second task"
+    assert answered[0]["agent_task_id"] == answered[1]["agent_task_id"]
+    run = ledger().newest("daily")
+    assert run is not None and run.status == PENDING, "the work in flight was closed"
+    assert run.agent_task_id == "agent-task:daily"
 
 
 async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(

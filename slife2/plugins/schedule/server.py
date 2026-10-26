@@ -74,7 +74,7 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -92,7 +92,7 @@ from slife2.libs.host.config import (
     Config,
     load_cached,
 )
-from slife2.libs.host.paths import in_home, schedule_dbs
+from slife2.libs.host.paths import home_key, in_home, schedule_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.protocol import (
     agent_reader,
@@ -256,6 +256,67 @@ def channel_for(name: str) -> str:
     reach the window, which draws a bubble from the channel alone.
     """
     return f"{CHANNEL}:{name}"
+
+
+class RunLocks:
+    """One lock per scheduled task, for the length of this process.
+
+    **A ledger is one file per agent, and this one process serves every agent
+    and every home** — so a maker and its subagent, a turn and its own
+    background task, are all callers of the same run.  Every one of the three
+    operations that changes a run is a read, a decision and a write with a model
+    call or a hand-over between them (`fire`'s `record → hand_over`,
+    `schedule_run_now`'s `reopen → dispatch`, `schedule_run_skip`'s
+    `find → settle`).  Two callers in that window both see "no task yet" and
+    both dispatch: the second start is refused by the agent-task plugin (one
+    name, one running task), and the refusal settles the *first* call's run
+    `failed` while the work goes on.  The ledger then says the run did not
+    happen while its answer is on its way.
+
+    **Keyed by the task and not by the run**, because an empty `due_at` is
+    "decide one now" and the moment it resolves to is what the operation is
+    computing.  The map is bounded by the schedule tasks anybody has named —
+    a handful — not by fires, which are unbounded.
+
+    **The store's own writes are still guarded one level down** (`advance`,
+    `settle`, `reopen`, `attach` are compare-and-sets): this lock is what makes
+    a whole decision atomic, and the store's guards are what keep a write from
+    two decisions that were never inside one lock from undoing each other.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+    def for_task(self, store: ScheduleStore, name: str) -> asyncio.Lock:
+        """This task's lock, made on the first ask.
+
+        The key is `home_key`'s canonical spelling rather than the caller's: a
+        tool call and a poll resolve the same ledger through two spellings of
+        one directory, and two locks for one task is the race this class is.
+        """
+        key = (home_key(store.home), store.agent, name)
+        found = self._locks.get(key)
+        if found is None:
+            found = asyncio.Lock()
+            self._locks[key] = found
+        return found
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def held(
+        locks: RunLocks | None, store: ScheduleStore, name: str
+    ) -> AsyncIterator[None]:
+        """Hold this task's lock, or nothing when the caller has no registry.
+
+        A caller with no registry is a test's direct `poll_once`; production
+        builds the registry in `build_server`, which is the one place that owns
+        the process's state.
+        """
+        if locks is None:
+            yield
+            return
+        async with locks.for_task(store, name):
+            yield
 
 
 # ── the ledgers ──────────────────────────────────────────────────────────────
@@ -485,6 +546,21 @@ async def dispatch(
         )
     attached = store.attach(task.name, due_at, started)
     assert attached is not None  # the run was read a moment ago
+    if attached.agent_task_id != started:
+        # **The run was settled while the task was starting, and the task is
+        # still running.**  `attach` is a compare-and-set, so it refused to put
+        # an id on a row that is no longer `pending` — a skip landed between the
+        # record and this write.  The answer still arrives through the
+        # agent-task plugin, and the ledger keeps the decision that won; what
+        # cannot happen is a second line here claiming the work is in flight.
+        logger.warning(
+            "the run of %s due at %s was closed while its task was starting; "
+            "the task %s is still running",
+            task.name,
+            due_at,
+            started,
+        )
+        return attached
     logger.info(
         "scheduled run of %s started for %s as %s", task.name, store.agent, started
     )
@@ -613,6 +689,7 @@ async def poll_once(
     window_client: Client | None = None,
     tasks_client: Client | None = None,
     reference: datetime | None = None,
+    locks: RunLocks | None = None,
 ) -> list[str]:
     """One pass of the clock over every agent's ledger.
 
@@ -661,35 +738,40 @@ async def poll_once(
                 # (`ScheduleStore.tasks`).
                 enabled, _ = store.tasks(enabled_only=True)
                 for task in enabled:
-                    verdict = due(task, reference)
-                    if verdict is None:
-                        continue
-                    kind, due_at = verdict
-                    if kind == "missed":
-                        run = store.record(task, due_at)
-                        if run.status == PENDING:
-                            # Recorded and immediately closed: the moment is kept
-                            # because the *gap* is the fact worth keeping, and
-                            # "missed" is what says slife2 was not running rather
-                            # than that it failed.
-                            store.settle(
-                                task.name,
-                                due_at,
-                                MISSED,
-                                error="slife2 was not running when this was due",
-                            )
-                        did.append(f"{store.agent}: {task.name} missed {due_at}")
-                        continue
-                    run = await fire(
-                        config,
-                        store,
-                        task,
-                        due_at,
-                        window_client=window_client,
-                    )
-                    did.append(
-                        f"{store.agent}: {task.name} due {due_at} -> {run.status}"
-                    )
+                    # **The fire and a tool call for the same task are one
+                    # decision** (`RunLocks`): a `schedule_run_now` landing in
+                    # the hand-over would otherwise record and dispatch the same
+                    # run a second time.
+                    async with RunLocks.held(locks, store, task.name):
+                        verdict = due(task, reference)
+                        if verdict is None:
+                            continue
+                        kind, due_at = verdict
+                        if kind == "missed":
+                            run = store.record(task, due_at)
+                            if run.status == PENDING:
+                                # Recorded and immediately closed: the moment is kept
+                                # because the *gap* is the fact worth keeping, and
+                                # "missed" is what says slife2 was not running rather
+                                # than that it failed.
+                                store.settle(
+                                    task.name,
+                                    due_at,
+                                    MISSED,
+                                    error="slife2 was not running when this was due",
+                                )
+                            did.append(f"{store.agent}: {task.name} missed {due_at}")
+                            continue
+                        run = await fire(
+                            config,
+                            store,
+                            task,
+                            due_at,
+                            window_client=window_client,
+                        )
+                        did.append(
+                            f"{store.agent}: {task.name} due {due_at} -> {run.status}"
+                        )
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
             logger.exception("%s: this ledger was skipped for this pass", store.path)
             continue
@@ -730,6 +812,7 @@ async def poll_forever(
     *,
     window_client: Client | None = None,
     tasks_client: Client | None = None,
+    locks: RunLocks | None = None,
 ) -> None:
     """The loop: sweep once, then ask the clock every `_T.timeouts.pacing.schedule_poll`.
 
@@ -766,6 +849,7 @@ async def poll_forever(
                 config(),
                 window_client=window_client,
                 tasks_client=tasks_client,
+                locks=locks,
             ):
                 logger.info("%s", line)
         except asyncio.CancelledError:
@@ -801,15 +885,23 @@ def build_server(
     """
     live: Callable[[], Config] = source or load_cached
     clock: asyncio.Task[None] | None = None
+    #: This process's per-task locks (`RunLocks`).  Built here rather than at
+    #: module level so two servers in one test do not share state, and handed to
+    #: the clock as well as used by the tools — they are the same decisions.
+    locks = RunLocks()
 
     def store_for(agent: str) -> ScheduleStore:
         return ScheduleStore.open(agent)
 
     agent_of = agent_reader("agent whose schedule it could be", "a schedule")
 
-    def task_of(agent: str, name: str) -> Task:
-        """One task, or a refusal naming what is missing."""
-        found = store_for(agent).task(name)
+    def task_of(store: ScheduleStore, name: str) -> Task:
+        """One task, or a refusal naming what is missing.
+
+        Takes the store rather than reopening one, because every caller is
+        inside the task's lock (`RunLocks`) and the store is what names it.
+        """
+        found = store.task(name)
         if found is None:
             raise ToolError(
                 f"there is no scheduled task called {name!r} for this agent; "
@@ -850,6 +942,7 @@ def build_server(
                     live,
                     window_client=window_client,
                     tasks_client=tasks_client,
+                    locks=locks,
                 )
             )
         try:
@@ -932,7 +1025,13 @@ def build_server(
         when the task is not a thing any more; switch it off when it is.
         """
         agent = agent_of(ctx)
-        removed = store_for(agent).remove_task(name.strip())
+        store = store_for(agent)
+        # Under the task's lock: a removal between a fire's record and its
+        # hand-over would leave a run whose task no longer exists, and a
+        # removal between `run_now`'s lookup and its dispatch would do the same
+        # while a background task started for it.
+        async with RunLocks.held(locks, store, name.strip()):
+            removed = store.remove_task(name.strip())
         if not removed:
             raise ToolError(f"there is no scheduled task called {name!r}.")
         logger.info("scheduled task %s removed for %s", name, agent)
@@ -1030,41 +1129,49 @@ def build_server(
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        task = task_of(agent, name.strip())
-        # **A finished run of this task is settled before another starts.**
-        # `agent_task_start` names a task after the schedule task, and that name
-        # is its id, so a still-`pending` predecessor would share the id with
-        # this run.  The poll does the same before its fires; this is the manual
-        # path, and it owes the same order.
-        await _reconcile_one(config, store, tasks_client=tasks_client)
-        stamp = due_at.strip()
-        if stamp:
-            stamp = _key_of(store, task.name, stamp)
-            reopened = store.reopen(task.name, stamp)
-            assert reopened is not None
-            if reopened.status != PENDING:
-                raise ToolError(
-                    f"the run of {task.name!r} due at {stamp!r} is already "
-                    f"{reopened.status}, and a run that has ended is not run "
-                    f"again."
+        name = name.strip()
+        # **One decision at a time for this task** (`RunLocks`).  Everything
+        # below is the run's state, and the same three steps are reached by a
+        # maker and its subagent, by a trigger and the model's own call.
+        # `_reconcile_one`, the reopen, the in-flight check and the dispatch are
+        # one sequence here because a second caller between any two of them
+        # reads "no task yet" and dispatches again.
+        async with RunLocks.held(locks, store, name):
+            task = task_of(store, name)
+            # **A finished run of this task is settled before another starts.**
+            # `agent_task_start` names a task after the schedule task, and that
+            # name is its id, so a still-`pending` predecessor would share the
+            # id with this run.  The poll does the same before its fires; this
+            # is the manual path, and it owes the same order.
+            await _reconcile_one(config, store, tasks_client=tasks_client)
+            stamp = due_at.strip()
+            if stamp:
+                stamp = _key_of(store, task.name, stamp)
+                reopened = store.reopen(task.name, stamp)
+                assert reopened is not None
+                if reopened.status != PENDING:
+                    raise ToolError(
+                        f"the run of {task.name!r} due at {stamp!r} is already "
+                        f"{reopened.status}, and a run that has ended is not run "
+                        f"again."
+                    )
+            else:
+                stamp = now()
+            # A run already in flight is left alone rather than started twice:
+            # the row carries the task doing it, and two calls for one due time
+            # is a conversation retrying rather than a second run.
+            found = store.run(task.name, stamp)
+            if found is not None and found.agent_task_id and found.status == PENDING:
+                logger.info(
+                    "the run of %s due at %s is already in flight for %s",
+                    task.name,
+                    stamp,
+                    agent,
                 )
-        else:
-            stamp = now()
-        # A run already in flight is left alone rather than started twice: the
-        # row carries the task doing it, and two calls for one due time is a
-        # conversation retrying rather than a second run.
-        found = store.run(task.name, stamp)
-        if found is not None and found.agent_task_id and found.status == PENDING:
-            logger.info(
-                "the run of %s due at %s is already in flight for %s",
-                task.name,
-                stamp,
-                agent,
-            )
-            return found.row()
-        return (
-            await dispatch(config, store, task, stamp, tasks_client=tasks_client)
-        ).row()
+                return found.row()
+            return (
+                await dispatch(config, store, task, stamp, tasks_client=tasks_client)
+            ).row()
 
     @mcp.tool(name=SCHEDULE_RUN_SKIP, meta=FOR_THE_MODEL)
     async def schedule_run_skip(
@@ -1091,10 +1198,20 @@ def build_server(
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        task = task_of(agent, name.strip())
-        stamp = due_at.strip()
-        stamp = _key_of(store, task.name, stamp) if stamp else _newest_open(store, task)
-        settled = store.settle(task.name, stamp, SKIPPED, note=note.strip())
+        name = name.strip()
+        # Under the task's lock: a skip that lands between a dispatch's record
+        # and its attach would close a run whose background task is starting;
+        # `attach` refuses the write, and the work would run with the ledger
+        # saying it did not.
+        async with RunLocks.held(locks, store, name):
+            task = task_of(store, name)
+            stamp = due_at.strip()
+            stamp = (
+                _key_of(store, task.name, stamp)
+                if stamp
+                else _newest_open(store, task)
+            )
+            settled = store.settle(task.name, stamp, SKIPPED, note=note.strip())
         assert settled is not None  # the run was read a moment ago
         # `settle` refuses this one — a `skipped` row would claim a run did not
         # happen while a background task went on producing an answer — and the

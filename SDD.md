@@ -2932,6 +2932,7 @@ The four shapes an undeclared fallback takes:
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | A call had no client to make it | Reconnect and make the first attempt | One round trip | A call that went out and then failed, which is never repeated | The tool's error text |
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
+| The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
 | Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | Remembered once per process |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
 | A model's per-call timeout is not a positive, finite number | Treat the call as one nobody bounded | The bound the model asked for; the call may run unbounded | A positive, finite number, which is honoured | A debug line naming the value |

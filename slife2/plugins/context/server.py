@@ -674,13 +674,18 @@ def build_server(
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
-        Four of `rebuild`'s five exits are this one outcome — a discriminator
+        **Four of `rebuild`'s exits are this one outcome** — a discriminator
         that decided nothing, a decision that asks for nothing, a decision that
         equals what is held, and a selection that cannot be fetched — and they
-        are one dict because they are one thing: nothing was fetched, nothing was
-        written, and the caller's list stands.  Spelled out four times they were
-        four chances to describe that differently, and four places to add a key
-        to.
+        are one dict because they are one thing: nothing was fetched, nothing
+        was written, and the caller's list stands.  Spelled out four times they
+        were four chances to describe that differently, and four places to add a
+        key to.
+
+        A compare-and-set that lost is the fifth exit and **not** this answer:
+        the store holds a different conversation, so `_adopt_stored` fetches it
+        and hands that to the caller; it falls back here only when the store's
+        list has turned out to be the caller's after all.
 
         It used to name a fifth exit that does not exist, "the switch is off":
         `ContextSettings` has no switch, and nothing here reads one, so a reader
@@ -698,6 +703,55 @@ def build_server(
             "turn_ids": list(turn_ids),
             "changed": False,
             "kept": len(turn_ids),
+            "recalled": 0,
+        }
+
+    async def _adopt_stored(
+        store: TurnStore,
+        messages: list[dict[str, Any]],
+        carried: int,
+        stale_ids: Sequence[int],
+    ) -> dict[str, Any]:
+        """The conversation **as the store holds it**, for a rebuild that lost.
+
+        The plugin is the list's owner, and a compare-and-set that lost means
+        the caller's snapshot is no longer it.  Returning the snapshot (the
+        `unfetchable` answer) would leave the caller one step behind the store
+        for ever: its `expected` would mismatch on every later turn, so no
+        rebuild could ever publish again, and a task's decision would silently
+        disable the agent's recall until a restart.  So the stored list is
+        fetched and rendered here instead — the caller adopts it, the turn runs
+        on the conversation it is really part of, and the next snapshot matches.
+
+        The two halves of `rebuild`'s contract are kept: the head comes from
+        the caller (it is not a turn), and the carried tail is re-appended
+        verbatim (it has no turn to be rebuilt from).  What is not kept is the
+        decision — the model's answer was composed against a conversation that
+        has moved, and applying it would be the very overwrite the guard
+        refused.  `kept` is the list now in hand and `recalled` is zero because
+        this rebuild fetched no recall of its own.
+
+        A stored id with no row is the damaged-log case `restore` already
+        handles by dropping it; the caller keeps its own list rather than
+        adopting a context assembled from part of a selection.
+        """
+        current = await off_loop(store.context_turns)
+        if list(current) == list(stale_ids):
+            return _in_hand(messages, stale_ids)
+        rows = await off_loop(_rows, store, current) if current else []
+        if len(rows) != len(current):
+            logger.warning("recall_abandoned reason=stored_list_damaged")
+            return _in_hand(messages, stale_ids)
+        rebuilt = decisions.consistent(
+            decisions.messages_from_turns(rows, head=_head(messages))
+        )
+        if carried > 0:
+            rebuilt.extend(dict(message) for message in messages[-carried:])
+        return {
+            "messages": rebuilt,
+            "turn_ids": list(current),
+            "changed": True,
+            "kept": len(current),
             "recalled": 0,
         }
 
@@ -852,6 +906,7 @@ def build_server(
         subagent: str = "",
         model: str = "",
         carried: int = 0,
+        expected: list[int] | None = None,
     ) -> dict[str, Any]:
         """Decide what the next turn runs on: keep ∪ recall.
 
@@ -898,6 +953,14 @@ def build_server(
                 A count rather than a list, because the caller is the party that
                 knows what it appended and a list of messages sent twice is a
                 second copy to keep in step.
+            expected: The live-context list the caller last read — `restore`'s
+                `turn_ids`, as they stood when these messages were taken.  The
+                two callers that run a conversation's pre-turn work are separate
+                processes, so a turn can be saved between one's `restore` and
+                its `rebuild`; with this the write is a compare-and-set, and
+                `changed` is false when the conversation moved in a way this
+                decision cannot account for.  Omitted — a direct call, a test —
+                the write is the old unconditional one.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
@@ -994,7 +1057,21 @@ def build_server(
         # of `rebuild` regardless); refusing it is the honest half, and the
         # caller that cannot have the write is told rather than handed a context
         # the log will not have on the next start.
-        await off_loop(store.set_context_turns, target)
+        #
+        # **A write that lost the conversation is not that failure.**  With
+        # `expected` the store answers `None` when the list is no longer the one
+        # the caller read — a turn saved, a reset, another rebuild — and then
+        # this decision applies to nothing.  But the caller's snapshot is not
+        # the answer either: the store holds the conversation as it is now, and
+        # returning the stale list would leave the caller's `expected` behind
+        # the store on *every* later turn, refusing every rebuild for the life
+        # of the loop.  So the authoritative list is fetched and rendered here,
+        # and the caller adopts it: the turn runs on the conversation it is
+        # really part of, and the next rebuild's snapshot matches again.
+        written = await off_loop(store.set_context_turns, target, expected=expected)
+        if written is None:
+            logger.warning("recall_abandoned reason=context_moved")
+            return await _adopt_stored(store, messages, carried, turn_ids)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d",
             len(target),

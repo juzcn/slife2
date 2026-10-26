@@ -2296,6 +2296,13 @@ def build_server(
                     "subagent": loop.subagent,
                     "messages": [message.to_wire() for message in loop.messages],
                     "turn_ids": list(loop.turn_ids),
+                    # The list this turn's snapshot came from.  `rebuild` is a
+                    # model call, and an agent task of the same agent rebuilds
+                    # the same conversation from another process — so a turn
+                    # saved while the decision ran, or that task's newer
+                    # decision, must not be erased by this write
+                    # (`context.rebuild`'s `expected`).
+                    "expected": list(loop.turn_ids),
                     "prompt": prompt,
                     "model": loop.model,
                     "carried": carried,

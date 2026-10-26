@@ -206,8 +206,7 @@ from slife2.libs.host.config import (
     for_the_call,
     load_cached,
 )
-from slife2.libs.host.paths import catalogue_db, data_dir, in_home
-from slife2.libs.host.paths import home as home_dir
+from slife2.libs.host.paths import catalogue_db, data_dir, home_key, in_home
 from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
 from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
@@ -527,7 +526,7 @@ class Catalogue:
         """
         return "; ".join(
             f"{source}: {reason}"
-            for source, reason in self._failed.get(str(home_dir()), {}).items()
+            for source, reason in self._failed.get(home_key(), {}).items()
         )
 
     async def store(self) -> ToolStore:
@@ -560,7 +559,7 @@ class Catalogue:
         a fan-out cannot run while the lock is held, so one that has not seen
         this file has already left its rows in `_held` for `seed` to write.
         """
-        key = str(home_dir())
+        key = home_key()
         found = self._stores.get(key)
         if found is None:
             async with self._opening:
@@ -594,7 +593,7 @@ class Catalogue:
         namespace.
         """
         store = await self.store()
-        return await self._write(str(home_dir()), store, source, category, tools)
+        return await self._write(home_key(), store, source, category, tools)
 
     async def remember(
         self,
@@ -637,7 +636,7 @@ class Catalogue:
         below and `seed`, which is the other half of that handoff.
         """
         rows = list(tools)
-        here = str(home_dir())
+        here = home_key()
         found = await self._write(
             here,
             await self.store(),
@@ -784,7 +783,7 @@ class Catalogue:
         not take it keeps the reason for its own `list_tools` rather than
         stopping the rest (`_write`'s rule, and `seed`'s).
         """
-        here = str(home_dir())
+        here = home_key()
         await off_loop((await self.store()).set_source_state, source, state)
         async with self._opening:
             for key, store in list(self._stores.items()):
@@ -822,7 +821,7 @@ class Catalogue:
         the rows are in that home's file — so the entry forgotten is this home's
         too.
         """
-        self._failed.get(str(home_dir()), {}).pop(source, None)
+        self._failed.get(home_key(), {}).pop(source, None)
         return [
             str(name)
             for name in await off_loop((await self.store()).forget_source, source)
@@ -1495,7 +1494,7 @@ class Upstream:
         # for and the home these rows are in (`_declared`): comparing against a
         # set shared with the process would compute the difference across two
         # sections, and the row it deletes would be one of this home's.
-        here = str(home_dir())
+        here = home_key()
         last = self._declared.get(here, set())
         for source in sorted(last - {one.name for one in declared}):
             gone = await self._catalogue.forget_source(source)
@@ -2604,7 +2603,7 @@ def build_server(
         # asked for: a store is only ever opened from inside the call that wanted
         # it.  The sync below may therefore use the ambient embedder, and the
         # fan-out inside a `remember` may not — there it is another home's file.
-        await catalogue.seed(str(home_dir()), store)
+        await catalogue.seed(home_key(), store)
         status = await store.sync_indexes(await embedder_of_call())
         logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
         return store
@@ -2621,10 +2620,10 @@ def build_server(
     embeddings: dict[str, EmbedderConnection] = {}
 
     def embedding_for() -> EmbedderConnection:
-        found = embeddings.get(str(home_dir()))
+        found = embeddings.get(home_key())
         if found is None:
             found = EmbedderConnection(current(), embedder=embedder)
-            embeddings[str(home_dir())] = found
+            embeddings[home_key()] = found
         return found
 
     async def embedder_of_call() -> Embedder:
@@ -2676,7 +2675,7 @@ def build_server(
 
     def declarations() -> Declarations:
         """This home's address book, made on the first ask."""
-        key = str(home_dir())
+        key = home_key()
         found = declared.get(key)
         if found is None:
             found = Declarations()

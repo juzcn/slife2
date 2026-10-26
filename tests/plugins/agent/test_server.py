@@ -2562,6 +2562,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
         model: str,
         carried: int = 0,
         subagent: str = "",
+        expected: list[int] | None = None,
     ) -> dict[str, Any]:
         return {
             "messages": messages,

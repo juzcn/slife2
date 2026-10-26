@@ -412,6 +412,17 @@ class ScheduleStore:
         Compared as moments rather than as strings: `slife2.helpers.clock` writes local
         time *with its offset*, and two rows either side of a DST change are two
         offsets — where one string being greater than another says nothing.
+
+        **The comparison is made by the database, not by the snapshot the caller
+        holds.**  Two fires can be recorded at once — a maker and a subagent
+        share one ledger, and `schedule_run_now` is a model call either of them
+        can make — and both read the same `last_due` before either writes.  The
+        snapshot check would pass for the older one after the newer had landed,
+        moving the anchor *backwards*; then the poll re-considers a fire it has
+        already recorded, and a DST fall-back pays for it twice.  The `WHERE`
+        makes the update itself monotonic, which is what the docstring has always
+        claimed.  A damaged anchor (`julianday` is NULL) is replaced rather than
+        frozen, because otherwise nothing could ever move it again.
         """
         if not due_at:
             return
@@ -419,8 +430,11 @@ class ScheduleStore:
             return
         with self._connect() as connection:
             connection.execute(
-                "UPDATE scheduled_tasks SET last_due = ? WHERE id = ?",
-                (due_at, task.id),
+                "UPDATE scheduled_tasks SET last_due = ? WHERE id = ?"
+                " AND (last_due = ''"
+                "      OR julianday(last_due) IS NULL"
+                "      OR julianday(last_due) < julianday(?))",
+                (due_at, task.id, due_at),
             )
 
     # ── runs ─────────────────────────────────────────────────────────────
@@ -569,17 +583,34 @@ class ScheduleStore:
             return found
         if status == SKIPPED and found.status == PENDING and found.agent_task_id:
             return found
+        # **The guard is in the `UPDATE`, not in the read above it.**  The read
+        # and the write are two calls, and a second settler can land between
+        # them: the reconcile loop and a `schedule_run_skip` call answer to
+        # different callers, and the window is a peer round trip.  Written as a
+        # plain update, the later of the two overwrote the earlier — a run that
+        # had just been recorded `ran` became `skipped`, which is precisely the
+        # "history is a function of the last thing anybody said" this function
+        # exists to prevent.  `status IN (UNSETTLED)` is the same rule the read
+        # applies, and `NOT (...)` is the in-flight rule, both answered by the
+        # row as it is when the write runs.
+        params: list[Any] = [
+            status,
+            (when or now()) if status == RAN else "",
+            note,
+            error,
+            found.id,
+            *UNSETTLED,
+        ]
+        guard = ""
+        if status == SKIPPED:
+            guard = " AND NOT (status = ? AND agent_task_id <> '')"
+            params.extend([PENDING])
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = ?, note = ?, "
-                "error = ? WHERE id = ?",
-                (
-                    status,
-                    (when or now()) if status == RAN else "",
-                    note,
-                    error,
-                    found.id,
-                ),
+                f"error = ? WHERE id = ? AND status IN ({','.join('?' * len(UNSETTLED))})"
+                f"{guard}",
+                params,
             )
         return self.run(name, due_at)
 
@@ -614,10 +645,15 @@ class ScheduleStore:
             return found
         task_id = found.agent_task_id if found.status == PENDING else ""
         with self._connect() as connection:
+            # The `IN (UNSETTLED)` guard is the read above, asked of the row at
+            # the moment of the write: a second reopen can land between them,
+            # and a run that has ended since must not be reopened by the older
+            # caller's decision (see `settle`, which states the same rule).
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = '', note = ?, "
-                "error = '', agent_task_id = ? WHERE id = ?",
-                (PENDING, note, task_id, found.id),
+                "error = '', agent_task_id = ? WHERE id = ?"
+                f" AND status IN ({','.join('?' * len(UNSETTLED))})",
+                (PENDING, note, task_id, found.id, *UNSETTLED),
             )
         return self.run(name, due_at)
 
@@ -633,10 +669,17 @@ class ScheduleStore:
         if task is None:
             return None
         with self._connect() as connection:
+            # **Only a run still waiting for its task takes one.**  `status`
+            # and the empty column are the state this write is *claiming*, and
+            # reading them first would be a check with a hand-over inside it:
+            # a skip can settle the run while the peer is starting the work,
+            # and an unconditional attach then made a `skipped` row name a
+            # background task that was really running.
             connection.execute(
                 "UPDATE scheduled_runs SET agent_task_id = ? "
-                "WHERE task_id = ? AND due_at = ?",
-                (agent_task_id, task.id, due_at),
+                "WHERE task_id = ? AND due_at = ? AND status = ?"
+                " AND agent_task_id = ''",
+                (agent_task_id, task.id, due_at, PENDING),
             )
         return self.run(name, due_at)
 

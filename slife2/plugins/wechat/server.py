@@ -77,7 +77,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host import statefile
 from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
-from slife2.libs.host.paths import agent_dir, in_home, known_homes
+from slife2.libs.host.paths import agent_dir, home_key, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
 from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
@@ -461,31 +461,13 @@ def format_link_line(state: str) -> str:
 
 
 def _home_key(root: str | Path) -> str:
-    """One home's canonical spelling — the first half of a session's key.
+    """One home's canonical spelling, for the session key.
 
-    **A key is an identity, so it is the directory and not the string somebody
-    wrote it with.**  `Wechat.session` is asked for a login by two callers who
-    spell one home differently.  A tool call carries the client's own
-    `data_dir`, which is a spelling and not a directory: `client_meta` sends the
-    home "exactly as written", and `_for_the_wire` leaves an absolute path
-    alone on purpose (a symlinked home is "a spelling the operator chose"), so
-    what arrives in the ambient home (`ServeTheCallersHome` → `in_home`) is the
-    client's string.  `_resume_login` keys by the directory `known_homes`
-    answered with, which is `Path.resolve()`d.  Both read the *same file* —
-    `agent_dir` resolves the two to one directory — so the mismatch is invisible
-    everywhere except in the key, and what it bought was a second `Session` for
-    one login: a second `ready()` → `_adopt` → `try_restore_session` on the same
-    token and then a second `watch()`, so two poll loops, each with its own
-    cursor and its own `seen` window, handed every inbound message to the
-    conversation twice.  Any home whose spelling is not canonical splits them —
-    `--data-dir d:\\DEV\\…` under a directory whose real name is `D:\\Dev\\…`, or
-    a symlinked or junctioned one — which is the class of name `AGENT_KEY`
-    exists for, one level up.
-
-    Resolved, because that is the spelling one of the two ends already answers
-    with and only one of them can move.
+    `slife2.libs.host.paths.home_key` is the rule now, because every plugin that
+    keys state by home had the same bug — see its docstring.  The long note that
+    used to live here is there; the reason it is called at all is `Wechat.session`.
     """
-    return str(Path(root).resolve())
+    return home_key(root)
 
 
 class Wechat:

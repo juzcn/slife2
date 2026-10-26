@@ -189,12 +189,14 @@ def client_key(agent: str, subagent: str = "") -> tuple[str, str, str]:
     the wrong conversation — a turn written into somebody else's history, or a
     tool list built for a config that is not the caller's.
 
-    Read from `slife2.libs.host.paths.home` rather than passed, and every caller is
-    inside a call where that is already the caller's home
-    (`slife2.libs.plugin.protocol.serve`).  A caller *outside* a call — an idle
-    sweep — must not build a key at all: it iterates the ones already there.
+    **A spelling is not an identity.**  A caller sends its `data_dir` as it was
+    named, while the daemon may hold a differently-spelled path to the same
+    directory — a different case on Windows, a symlink or a junction, one the
+    launcher resolved.  A key made from the spelling splits one home into two:
+    two loops, two catalogues, two meshes for one conversation.  `paths.home_key`
+    is the canonical answer, and it is the only thing this key is made from.
     """
-    return (str(paths.home()), agent, subagent)
+    return (paths.home_key(), agent, subagent)
 
 
 def home_of(meta: Mapping[str, Any] | None) -> str:

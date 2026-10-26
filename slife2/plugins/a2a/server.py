@@ -105,7 +105,7 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import forked, home, in_home, subagent_dirs
+from slife2.libs.host.paths import forked, home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -1240,7 +1240,13 @@ def build_server(
         publishing (`place_for`).
         """
         where = root or home()
-        found = sessions.get((str(where), agent, subagent))
+        # The key is the *directory*, not the spelling a call happened to
+        # carry; `home_key` is the one place that is decided, and both callers
+        # here and `forget` use it or one home becomes two meshes — two MQTT
+        # identities for one agent.  The path itself stays as written: what a
+        # key fixes is equality, and what `in_home` needs is a directory.
+        key = (home_key(where), agent, subagent)
+        found = sessions.get(key)
         if found is None:
             # Both of these resolve a home's own files — the mesh opens the
             # member's ledger at `agents/<agent>/<ledger>`, or one level in for a
@@ -1261,7 +1267,7 @@ def build_server(
                 )
             _wire(found)
             found.writer = asyncio.create_task(writer_in(where, found))
-            sessions[(str(where), agent, subagent)] = found
+            sessions[key] = found
         return found
 
     async def drop_session(session: Session, key: tuple[str, str, str]) -> None:
@@ -1685,10 +1691,12 @@ def build_server(
             subagent: The member's own name.  Empty is the agent itself, which
                 only the remote network has a session for.
         """
-        found = sessions.get((str(home()), agent, subagent))
+        where = str(home())
+        key = (home_key(where), agent, subagent)
+        found = sessions.get(key)
         if found is None:
             return {"agent": agent, "subagent": subagent, "forgotten": False}
-        await drop_session(found, (str(home()), agent, subagent))
+        await drop_session(found, key)
         logger.info("a2a_member_forgotten agent=%s", describe((agent, subagent)))
         return {"agent": agent, "subagent": subagent, "forgotten": True}
 
