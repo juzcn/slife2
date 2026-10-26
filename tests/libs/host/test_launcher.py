@@ -653,10 +653,9 @@ def test_a_spawned_server_is_told_where_the_data_directory_is(
 
     The child is spawned with its working directory moved off the checkout, so
     one left to work it out for itself decides it is an installation, looks in
-    `~/.slife2`, finds no config, and runs on the built-in defaults — while the
-    parent, which read the config it was pointed at, believes otherwise.  The
-    symptom is a server that starts cleanly and immediately reports a config it
-    does not have:
+    `~/.slife2`, and finds no config there — while the parent, which read the
+    config it was pointed at, believes otherwise.  The symptom is a server that
+    refuses to start over a file its parent has just read:
 
         slife2-llm-anthropic: this config has no anthropic-messages provider
 

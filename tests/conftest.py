@@ -195,15 +195,28 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
     running stack is using — so a suite that did not redirect it would write
     records, claims and locks into the real one, and a test that passed here
     would be one that fails on a machine with nothing running.
+
+    **And the home is given its `slife2.yaml`**, because a home without one is
+    refused (`load`, SDD §4.1).  A test that is about that refusal removes the
+    file; every other test reads a config the same way a running slife2 does.
     """
-    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "data"))
+    data = tmp_path / "data"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(data))
     monkeypatch.setenv("SLIFE2_RUNTIME_DIR", str(tmp_path / "runtime"))
+    # The file says nothing, so every section keeps the built-in default the
+    # suite has always run on; a test about the refusal removes it, or points
+    # `--data-dir` at a directory of its own.
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "slife2.yaml").write_text(
+        "# This home's configuration; the sections it leaves out take their defaults.\n",
+        encoding="utf-8",
+    )
     # The platform rule shifts ports on WSL in mirrored mode; a test asserts the
     # config it names, not the networking mode of the machine it runs on.
     import slife2.libs.host.config as config_module
 
     monkeypatch.setattr(config_module, "_wsl_mirrored", lambda: False)
-    return tmp_path / "data"
+    return data
 
 
 @pytest.fixture(autouse=True)

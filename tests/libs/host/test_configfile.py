@@ -495,12 +495,14 @@ def test_a_section_edit_refuses_when_there_is_no_config_to_edit(
 ) -> None:
     """**A missing file is refused, not created.**
 
-    slife2 runs with no config at all — one built-in provider — so a write that
-    created the file would replace that fallback with a file holding only the
-    section being edited: the next start would have no models, over an edit that
-    reported success.  The message has to say what to do instead.
+    A home runs on its config and `load` refuses one without it (SDD §4.1), so
+    a write that created the file would invent the home's whole description from
+    the single section being edited — an edit that reported success over a home
+    its operator never described.  The message has to say what to do instead,
+    and it is the loader's own sentence.
     """
     missing = isolated_runtime / "slife2.yaml"
+    missing.unlink()
     assert not missing.exists()
 
     with pytest.raises(ConfigError) as raised:

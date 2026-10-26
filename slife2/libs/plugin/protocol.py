@@ -67,7 +67,6 @@ import os
 import sys
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -85,7 +84,13 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2 import __version__
-from slife2.libs.host.config import Config, ServerSettings, find_config_path, load
+from slife2.libs.host.config import (
+    Config,
+    ConfigError,
+    ServerSettings,
+    find_config_path,
+    load,
+)
 from slife2.libs.host.paths import (
     add_data_dir_argument,
     apply_data_dir,
@@ -1160,16 +1165,17 @@ def serve_plugin(
     a half-formatted line.  `logger` is the caller's, so a line still lands
     under the name of the server that wrote it rather than this module's.
 
-    **`require` is what a server cannot serve without, and it is the one way
-    this function can refuse.**  It returns a sentence saying what is missing —
-    a model protocol no provider in this config speaks is the whole of it — and
-    this writes `"<server>: <sentence>"` to **stderr** and returns 2, which is
+    **Two things stop a start here, and both are configuration answers.**  The
+    config itself may be missing or unusable (`ConfigError` from `find_config_path`
+    or `load`), and `require` may say what this server cannot serve without —
+    a model protocol no provider in the config speaks is the whole of that.
+    Both are written as `"<server>: <sentence>"` to **stderr**, returning 2 —
     the same answer `slife2` gives a server that would not come up: two lines
     and no stack, because nothing has been drawn yet and the fix is an edit to
     the file the sentence names.  Said rather than raised, and the reason is
-    that this is a *configuration* answer rather than a fault: a config that
-    names no provider for a protocol is a config that does not need this
-    process, and the correct behaviour is to not start, loudly.
+    that these are *configuration* answers rather than faults: a missing file,
+    or a config that names no provider for a protocol, is a machine that cannot
+    be what was asked, and the correct behaviour is to not start, loudly.
 
     Note where the answer does **not** go: stdout.  `configure_logging` states
     why nothing in this system prints model output, and the same argument covers
@@ -1179,8 +1185,12 @@ def serve_plugin(
     """
     args = parse_serve_args(argv, server_name)
     configure_logging()
-    config_path: Path | None = find_config_path()
-    config = load()
+    try:
+        config_path = find_config_path()
+        config = load()
+    except ConfigError as exc:
+        print(f"{server_name}: {exc}", file=sys.stderr)
+        return 2
 
     address = config.server(config_key)
     if require is not None and (missing := require(config)):
@@ -1201,7 +1211,7 @@ def serve_plugin(
         f" ({note(config)})" if note is not None else "",
         os.getpid(),
         data_dir(),
-        f", config {config_path}" if config_path else "",
+        f", config {config_path}",
     )
     serve(
         build(config),

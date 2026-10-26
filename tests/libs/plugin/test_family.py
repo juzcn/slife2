@@ -98,11 +98,11 @@ async def test_a_config_handed_in_is_the_config_every_home_gets(
     """**The injected config wins**, and this is the half that keeps the suite
     honest.
 
-    Every test in this repo builds its server with a config object — no file, no
-    home, and nothing on disk to read — so a builder that went looking for a file
-    instead would be a test reading the developer's own `slife2.yaml`, or
-    answering with the built-in defaults.  What `source=None` means is "there is
-    nothing live here": one config, for every home.
+    Every test in this repo builds its server with a config object, so a builder
+    that went looking for a file instead would be a test reading a home's own
+    `slife2.yaml` — or the developer's — rather than the config it was handed.
+    What `source=None` means is "there is nothing live here": one config, for
+    every home.
     """
     mine, theirs = tmp_path / "mine", tmp_path / "theirs"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))

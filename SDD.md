@@ -525,9 +525,12 @@ separately. `Config.plugins()` answers what this machine runs:
 A protocol no provider speaks is not started. A provider is a row in a backend's
 configuration, not a process of its own.
 
-A malformed file is fatal. A missing file is not: built-in defaults are used. A
-file that exists and cannot be read stops the start with a one-line message
-naming the file.
+A missing file is fatal, and so is a malformed one. The file is the machine's
+description and there is no default machine: a home without `slife2.yaml` stops
+the start with a one-line message naming the directory that was searched, and a
+file that exists and cannot be read stops it naming the file and the mistake.
+The configuration a process runs on is one it read from a file, never one this
+build supplied in the file's place.
 
 `libs/host/configfile.py` is the single writer for edits made by plugins. It
 performs a document edit under a cross-process lock, preserves comments, and
@@ -2927,7 +2930,6 @@ The four shapes an undeclared fallback takes:
 
 | Situation | Fallback | Gives up | Does not cover | Failure goes to |
 |---|---|---|---|---|
-| No `slife2.yaml` | Built-in default configuration | The operator's sections | A file that exists and does not parse (refused) | `status` prints the model in use |
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | A call had no client to make it | Reconnect and make the first attempt | One round trip | A call that went out and then failed, which is never repeated | The tool's error text |

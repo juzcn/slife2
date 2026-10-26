@@ -568,35 +568,14 @@ def test_an_empty_providers_section_is_refused(tmp_path) -> None:
     with pytest.raises(ConfigError, match="at least one provider"):
         load(write(tmp_path, "providers: {}\n"))
 
-    # Absent is still the defaults, which is what a fresh checkout starts with —
-    # and the invariant is the *table*, not "some provider": a loader that
-    # answered with one stray entry would satisfy a bare truthiness test while
-    # having lost the built-in provider a config-less machine runs on.
+    # Absent is still the built-in provider — a section a file leaves out, not a
+    # file that is not there (SDD §4.1 refuses that) — and the invariant is the
+    # *table*, not "some provider": a loader that answered with one stray entry
+    # would satisfy a bare truthiness test while having lost the built-in
+    # provider a file leaving the section out runs on.
     config = load(write(tmp_path, "# nothing here\n"))
     assert set(config.providers) == {"deepseek"}
     assert config.default == "deepseek/deepseek-flash"
-
-
-def test_the_defaults_are_one_object_while_there_is_no_file(
-    tmp_path, monkeypatch
-) -> None:
-    """**Identity is promised to config-less installs too.**
-
-    `load_cached`'s whole contract is that an unchanged file hands back the
-    *same* `Config`, so a reader asks "did an edit happen" with `is`.  With no
-    file it returned a fresh `default_config()` per call, and `LiveProviders`
-    compares with `is` — so a machine with no `slife2.yaml`, which is every
-    fresh checkout, rebuilt the provider table and every cached SDK client on
-    every model call.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    monkeypatch.setattr(slife2.libs.host.config, "_latest", {})
-
-    assert load_cached() is load_cached()
-
-    # And a file appearing is still picked up rather than cached past.
-    write(tmp_path, "agent:\n  max_iterations: 7\n")
-    assert load_cached().agent.max_iterations == 7
 
 
 def test_an_unknown_api_is_refused(tmp_path) -> None:
@@ -678,22 +657,34 @@ providers:
 # --- file discovery ----------------------------------------------------------
 
 
-def test_missing_config_is_not_an_error(
+def test_a_missing_config_is_an_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**Two claims, one behaviour — and it was two tests with one body.**
-
-    A data directory with no `slife2.yaml` in it is the shipped configuration: a
-    fresh checkout starts exactly here.  So the absence is a normal answer from
-    `find_config_path` rather than a failure, and `load` answers the built-in
-    defaults rather than refusing.  Written once because it is one path through
-    the loader; written twice, the second copy was a name with no assertion of
-    its own to make.
+    """**A home without its file is not a home.**  There is no built-in
+    configuration to run on (SDD §4.1), so `find_config_path`, `load` and
+    `load_cached` all refuse — and the sentence names the directory that was
+    searched, because that is what the operator has to fix.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
 
-    assert find_config_path() is None
-    assert load() == default_config()
+    for find in (find_config_path, load, load_cached):
+        with pytest.raises(ConfigError) as raised:
+            find()
+        assert "no slife2.yaml" in str(raised.value)
+        assert str(tmp_path) in str(raised.value)
+
+
+def test_a_directory_named_like_the_config_is_not_an_absent_one(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A value that cannot be read is not a value that is absent**
+    (SDD Appendix C): the thing is there, and it is the wrong kind of thing.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    (tmp_path / "slife2.yaml").mkdir()
+
+    with pytest.raises(ConfigError, match="not a file"):
+        load()
 
 
 def test_missing_named_config_is_an_error(tmp_path) -> None:
@@ -1621,10 +1612,6 @@ def test_load_cached_does_not_answer_one_file_for_another(tmp_path) -> None:
     assert load_cached(str(second)).default == "local/big"
 
 
-def test_load_cached_with_no_file_is_the_defaults() -> None:
-    assert load_cached().default == default_config().default
-
-
 def test_two_homes_keep_two_cached_configs(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1744,15 +1731,15 @@ media:
     assert entry.model == "a-image"
 
 
-def test_a_named_config_that_is_not_there_is_not_the_defaults(tmp_path) -> None:
-    """**`load_cached` answered a typo with the built-in config.**
+def test_a_named_config_that_is_not_there_is_refused(tmp_path) -> None:
+    """**A caller that names a file is asking about *that* file.**
 
-    Its cache slot is the "this installation has no config at all" state and is
-    keyed on nothing but `None`, so once a config-less start had filled it,
-    `load_cached("<any path>")` returned that object while
-    `load("<any path>")` raised `config file not found`.  Today's two callers
-    pass no argument, so it was latent; a caller asking about a named file is
-    asking about *that* file.
+    `load_cached` used to answer a typo with the built-in config: its cache had
+    a "this installation has no config at all" slot keyed on nothing but `None`,
+    so `load_cached("<any path>")` returned that object while
+    `load("<any path>")` raised `config file not found`.  The slot is gone —
+    there is no config-less state any more — and naming a file that is not
+    there is the same refusal in both readers (SDD Appendix C).
     """
     missing = tmp_path / "typo.yaml"
     with pytest.raises(ConfigError, match="config file not found"):

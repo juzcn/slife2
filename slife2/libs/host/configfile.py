@@ -201,20 +201,14 @@ def config_path() -> Path:
     """`slife2.yaml`, or the reason there is nothing to edit.
 
     **A missing file is refused rather than created**, and that is the whole of
-    what this function is for.  slife2 runs with no config at all — it falls back
-    to `slife2.libs.host.config.default_config`, one built-in OpenAI-compatible provider —
-    so writing a fresh file holding only the section being edited would replace
-    that fallback with a file that has no providers in it.  The next start would
-    then have no models, over an edit that reported success.
+    what this function is for.  A home runs on its config and `load` refuses one
+    without it (SDD Appendix C), so a file invented here to hold the single
+    section an edit names would be a config this process made up: everything
+    the home's operator had said would be missing from it, over an edit that
+    reported success.  The answer is the loader's own sentence — the file is
+    named, and so is what to do about it.
     """
-    found = find_config_path()
-    if found is None:
-        raise ConfigError(
-            "there is no slife2.yaml to write to — slife2 is running on its "
-            "built-in default config, and a section written into a new file "
-            "would take the place of the whole of it. Create the file first."
-        )
-    return found
+    return find_config_path()
 
 
 def _section(

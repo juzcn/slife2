@@ -913,6 +913,14 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
     assert not any("OPTIONAL_KEY" in line or "SSH_BINARY" in line for line in lines)
 
 
+def test_requirements_refuse_a_home_with_no_config(tmp_path: Path) -> None:
+    """A home without its file is not a home, and the installer says so."""
+    result = _requirements(tmp_path)
+
+    assert result.returncode == 2
+    assert "no slife2.yaml" in result.stderr
+
+
 def test_requirements_refuse_a_malformed_config(tmp_path: Path) -> None:
     (tmp_path / "slife2.yaml").write_text("foo: [unclosed\n", encoding="utf-8")
     result = _requirements(tmp_path)

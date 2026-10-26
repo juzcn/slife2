@@ -122,6 +122,11 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
     conversation, and what it writes lands in the maker's cabinet beside it.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    # A home of its own needs its configuration (SDD §4.1), exactly as a real
+    # one does; the file says nothing, so every section takes its default.
+    (tmp_path / "slife2.yaml").write_text(
+        "# this home's configuration\n", encoding="utf-8"
+    )
     researcher = agent_dir("jack", "researcher")
     record = subagent_file("jack", "researcher")
 

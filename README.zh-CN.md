@@ -167,8 +167,8 @@ uv run credstore set DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY=...
 ```
 
-`slife2.yaml` 是可选的：配置文件尚未创建时，slife2 使用内置默认值，其中包括
-一个 OpenAI 兼容 provider。
+`slife2.yaml` 是必需的：slife2 没有可在缺少该文件时运行的内置配置。安装器会把
+随附的配置文件写入新的 home；源码目录则使用代码旁边的 `slife2.yaml`。
 
 ### Docker
 
@@ -430,13 +430,13 @@ Windows 与 WSL 的 loopback 合二为一，WSL 如果继续用默认端口，�
 
 ## 配置
 
-### 位置与默认值
+### 位置
 
 配置文件是数据目录中的 `slife2.yaml`。从代码检出运行时，数据目录就是检出目录；
 否则是 `~/.slife2`。使用 `--data-dir DIR` 或 `SLIFE2_DATA_DIR` 覆盖它。
 
-缺少配置文件不是错误：会使用内置默认值。文件存在但无法加载时，启动会以一行
-错误停止，并点名文件和错误原因。
+配置文件是必需的。缺少配置文件时，启动会以一行错误停止，并点名搜索过的目录；
+文件存在但无法加载时同样如此，并点名文件和错误原因。
 
 安装器可能会在已有配置旁边写入 `slife2-default.yaml` 作为参考。slife2 只读取
 `slife2.yaml`；参考文件供人比较和合并。
@@ -985,7 +985,7 @@ subagent:
 
 ```text
 <data>/
-  slife2.yaml                  配置；不存在时使用内置默认值
+  slife2.yaml                  配置；必需
   skills/                      <name>/SKILL.md playbook
   agents/
     tools.db                   此 home 共享的工具目录

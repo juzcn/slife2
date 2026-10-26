@@ -53,8 +53,8 @@ def seed(source: Path, home: Path, dry_run: bool) -> int:
     """
     if not source.is_file():
         _warn(
-            f"no shipped configuration at {source}; slife2 will use its "
-            "built-in defaults."
+            f"no shipped configuration at {source}; the home gets no "
+            f"{CONFIG_NAME}, and slife2 will not start without one."
         )
         return 0
 
@@ -220,10 +220,8 @@ def require(home: Path) -> int:
     """
     os.environ["SLIFE2_DATA_DIR"] = str(home)
 
-    from slife2.libs.host.config import ConfigError, find_config_path, load
+    from slife2.libs.host.config import ConfigError, load
 
-    if find_config_path() is None:
-        _warn(f"no {CONFIG_NAME} in {home}; using the built-in defaults.")
     try:
         config = load()
     except ConfigError as exc:

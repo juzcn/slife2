@@ -177,8 +177,9 @@ uv run credstore set DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY=...
 ```
 
-`slife2.yaml` is optional: before the file exists, slife2 uses built-in defaults,
-including a single OpenAI-compatible provider.
+`slife2.yaml` is required: slife2 has no built-in configuration to run without
+one. The installer seeds the shipped file into a new home, and a checkout uses
+the `slife2.yaml` beside its code.
 
 ### Docker
 
@@ -476,15 +477,15 @@ it and says so; that turn's row is note-only.
 
 ## Configuration
 
-### Location and defaults
+### Location
 
 The configuration file is `slife2.yaml` inside the data directory. A data
 directory is the checkout when running from a checkout, otherwise
 `~/.slife2`. Use `--data-dir DIR` or `SLIFE2_DATA_DIR` to override it.
 
-A missing configuration file is not an error: built-in defaults are used. A file
-that exists but cannot be loaded stops the start with a one-line error naming
-the file and the mistake.
+The file is required. A missing configuration file stops the start with a
+one-line error naming the directory that was searched, and so does a file that
+exists but cannot be loaded, naming the file and the mistake.
 
 The installer may write `slife2-default.yaml` beside an existing configuration
 as a reference. slife2 reads only `slife2.yaml`; the reference is for a person
@@ -1107,7 +1108,7 @@ A data directory (a **home**) contains:
 
 ```text
 <data>/
-  slife2.yaml                  configuration; absent means built-in defaults
+  slife2.yaml                  configuration; required
   skills/                      <name>/SKILL.md playbooks
   agents/
     tools.db                   the shared tool catalogue for this home

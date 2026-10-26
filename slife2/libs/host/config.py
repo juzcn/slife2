@@ -117,6 +117,7 @@ import logging
 import os
 import platform
 import re
+import stat as _stat
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -139,11 +140,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
-    """A config file was found and could not be used.
+    """`slife2.yaml` is missing, unreadable, or says something this build refuses.
 
-    A *missing* file is not an error — the defaults are the config — but a
-    malformed one is fatal, because silently ignoring a file the user wrote is
-    the worst of the three possible behaviours.
+    **A missing file is an error like any other.**  The file is the machine's
+    description — which providers, which servers, which tools — and this build
+    has none to substitute for it: a home without one is refused before anything
+    starts, naming the path it looked in (SDD Appendix C).  A file that is there
+    is judged the same way, because silently ignoring a value the operator wrote
+    is the worst of the possible behaviours.
     """
 
 
@@ -2341,7 +2345,12 @@ class Config:
 
 
 def default_config() -> Config:
-    """The config used when no file is found.
+    """The base every file is built on: what a section the file leaves out says.
+
+    **Not a configuration a home may run without.**  `load` refuses a missing
+    file (SDD Appendix C), so this object is only ever the starting point the
+    loader fills from a file — and, for a test that is about something other
+    than a file, the configuration it hands in.
 
     Deliberately a single OpenAI-compatible provider: it is the shape the
     project is developed against, and a second provider nobody has credentials
@@ -2511,7 +2520,7 @@ def _with_port_offset(config: Config, offset: int) -> Config:
     )
 
 
-def find_config_path(explicit: str | Path | None = None) -> Path | None:
+def find_config_path(explicit: str | Path | None = None) -> Path:
     """The config file, which lives *inside* the data directory.
 
     The directory is the knob — `--data-dir`, or `SLIFE2_DATA_DIR` — because
@@ -2519,6 +2528,12 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
     run and the agents whose data it describes.  Naming the config separately
     would mean two answers to "where is this installation?", and the data
     directory would still have to be found another way.
+
+    **A file must be there.**  The config is the machine's description and this
+    build has none to substitute for it, so a home without one is refused here,
+    naming the directory that was searched, rather than answered with built-in
+    defaults (SDD Appendix C).  A path named explicitly is held to the same
+    rule, and its own sentence names the path that was asked for.
 
     **The home's while a call is being served, and this process's otherwise**
     (`slife2.libs.host.paths.home`), which is the difference between the two readers
@@ -2531,25 +2546,44 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
     wanted.
     """
     if explicit is not None:
-        return Path(explicit)
-    candidate = home() / DEFAULT_CONFIG_NAME
-    return candidate if candidate.is_file() else None
+        path = Path(explicit)
+        return _config_file(path, f"config file not found: {path}")
+    return _config_file(
+        home() / DEFAULT_CONFIG_NAME,
+        f"no {DEFAULT_CONFIG_NAME} in {home()}: slife2 reads its configuration "
+        "from this file and has none built in. Create it — the installer seeds "
+        "a home with the shipped one — or point --data-dir at a home that has one.",
+    )
+
+
+def _config_file(path: Path, missing: str) -> Path:
+    """*path* if it is a regular file, or the `ConfigError` saying why not.
+
+    **A value that cannot be read is not a value that is absent.**  Only "no
+    such file" answers *missing*; a directory sitting where the config should
+    be, a stat refused for permission, or a mount that is not answering says
+    the thing is there and cannot be read, and is named as that rather than read
+    as a home without a config (SDD Appendix C).
+    """
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        raise ConfigError(missing) from None
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    if not _stat.S_ISREG(mode):
+        raise ConfigError(f"cannot read {path}: it is not a file")
+    return path
 
 
 def load(explicit: str | Path | None = None) -> Config:
-    """Load the config, falling back to :func:`default_config`.
+    """Load the config a home runs on.
 
-    A named path that does not exist *is* an error (the user asked for that
-    file); an unnamed one that does not exist is not.
+    A missing file is a `ConfigError` — there is no built-in configuration to
+    fall back to (SDD Appendix C) — and so is one that cannot be read or does
+    not hold a mapping.
     """
     path = find_config_path(explicit)
-
-    if path is None or not path.is_file():
-        if explicit is not None:
-            raise ConfigError(f"config file not found: {path}")
-        # No config is not an error: the defaults are a working single-provider
-        # setup, and a fresh data directory has nothing in it yet.
-        return _with_port_offset(default_config(), port_offset())
 
     yaml = YAML(typ="safe")
     try:
@@ -2576,10 +2610,9 @@ def load(explicit: str | Path | None = None) -> Config:
 #: provider table, its cached SDK clients, and the model a new conversation starts
 #: on, every single turn.
 #:
-#: A `None` key is the *no file at all* state, which is not per home: two homes
-#: with no config have the same built-in defaults, and they are one object because
-#: they are one answer.
-_latest: dict[Path | None, tuple[tuple[int, int] | None, Config]] = {}
+#: There is no "no file" slot, because there is no config-less state to cache:
+#: `load_cached` refuses a home without its file exactly as `load` does.
+_latest: dict[Path, tuple[tuple[int, int], Config]] = {}
 
 
 def load_cached(explicit: str | Path | None = None) -> Config:
@@ -2594,16 +2627,13 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     way, which is the point of caching on the file rather than on a call.
 
     A stat on the common path and a parse only when something changed.  A
-    missing file is the built-in defaults, exactly as in `load` — and **the same
-    object**, which is the half that used to be missing: a config-less install
-    was handed a fresh `Config` per call, so `LiveProviders`, whose whole
-    staleness test is `config is not self._config`, rebuilt the provider table
-    and every cached SDK client on every model call.  That is the state a fresh
-    checkout starts in, so it was the common case rather than a corner.
+    missing file is a `ConfigError`, exactly as in `load`: there is no
+    built-in configuration a home may run on (SDD Appendix C), so there is no
+    config-less state for this cache to hold.
 
-    A file that is there but cannot be *stat'd* is neither: it raises, naming
-    the path, rather than being read as "changed" and quietly answered with a
-    fresh object (SDD Appendix C).
+    A file that is there but cannot be *stat'd* raises too, naming the path,
+    rather than being read as "changed" and quietly answered with a fresh
+    object (SDD Appendix C).
 
     **And the answer follows the caller's home, like every other read a shared
     plugin makes.**  `find_config_path` resolves in `slife2.libs.host.paths.home`,
@@ -2614,25 +2644,6 @@ def load_cached(explicit: str | Path | None = None) -> Config:
     """
     global _latest
     path = find_config_path(explicit)
-    if path is None or not path.is_file():
-        if explicit is not None:
-            # **A *named* file that is not there is an error here too.**  The
-            # cache slot below is the "this installation has no config at all"
-            # state, and it is keyed on nothing but `None`: once a config-less
-            # start had filled it, `load_cached("/tmp/typo.yaml")` answered with
-            # the built-in defaults while `load("/tmp/typo.yaml")` raised
-            # `config file not found`.  A caller that named a file is asking
-            # about *that* file, and answering with a different configuration is
-            # the silent fallback `load` refuses (SDD Appendix C).
-            return load(explicit)
-        # The `None` key is the "there was no file" state, so a file appearing
-        # afterwards takes the reload path below rather than being missed.
-        cached = _latest.get(None)
-        if cached is not None:
-            return cached[1]
-        config = load(explicit)
-        _latest[None] = (None, config)
-        return config
     try:
         stat = path.stat()
     except OSError as exc:

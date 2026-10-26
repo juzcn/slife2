@@ -10,6 +10,7 @@ nothing has started yet and the fix is in the file being named.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -26,6 +27,17 @@ from slife2.libs.host.config import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def a_home(path: Path) -> None:
+    """Give a directory the `slife2.yaml` every home must have (SDD §4.1).
+
+    The file says nothing: an absent *section* still takes its built-in
+    default.  These tests drive `--data-dir` at a directory of their own, which
+    the autouse fixture's home is not, so they make it a home themselves.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "slife2.yaml").write_text("# this home's configuration\n", encoding="utf-8")
 
 
 def test_version_is_exposed() -> None:
@@ -57,15 +69,25 @@ def test_package_import_does_not_pull_in_textual() -> None:
 
 
 def test_a_malformed_config_is_reported_not_raised(tmp_path) -> None:
-    """A file the user wrote and got wrong is worth naming once.
-
-    Note what is *not* here any more: a test for "the config file you named does
-    not exist".  There is no such case — the command line names a folder, and a
-    folder with no config in it is a fresh installation rather than a mistake.
-    """
+    """A file the user wrote and got wrong is worth naming once."""
     (tmp_path / "slife2.yaml").write_text("agent: [unclosed\n", encoding="utf-8")
     code = main(["--data-dir", str(tmp_path)])
     assert code == 2
+
+
+def test_a_missing_config_is_reported_not_raised(tmp_path, capsys) -> None:
+    """**A home without its file does not start on anything built in.**
+
+    The sentence names the directory that was searched, because that is what
+    the operator has to fix — and it is two lines, not a traceback, because at
+    this point nothing has started yet.
+    """
+    code = main(["--data-dir", str(tmp_path)])
+
+    assert code == 2
+    told = capsys.readouterr().out
+    assert "no slife2.yaml" in told
+    assert str(tmp_path) in told
 
 
 def test_help_exits_cleanly(capsys) -> None:
@@ -780,6 +802,7 @@ def test_headless_reaches_the_driver_and_the_claim(
 
     # `--keep-servers`, so the last-instance-out take-down does not run against
     # a data directory with nothing in it.
+    a_home(tmp_path)
     code = main(
         ["--data-dir", str(tmp_path), "--agent", agent, "--headless", "--keep-servers"]
     )
@@ -834,6 +857,7 @@ def test_the_home_is_made_before_the_window_opens(
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
     # `--keep-servers`, so the last-instance-out take-down does not run.
+    a_home(tmp_path)
     code = main(
         [
             "--data-dir",
@@ -882,6 +906,7 @@ def test_a_catalogue_that_cannot_be_built_does_not_open_a_window(
     monkeypatch.setattr(launcher, "open_catalogue", refuse)
     monkeypatch.setattr(app_module, "SlifeApp", RecordingApp)
 
+    a_home(tmp_path)
     code = main(
         [
             "--data-dir",

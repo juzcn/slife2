@@ -13,7 +13,7 @@ everything describing a running server is a fact about the machine, and it gets 
 root of its own rather than a copy per home.
 
     <data>/                     one home
-      slife2.yaml   the config; absent means the built-in defaults
+      slife2.yaml   the config; a home requires it
       skills/       <name>/SKILL.md — the playbooks the model may read
       agents/       everything that belongs to one agent, one directory each
         tools.db      the tool catalogue — one file for the home, and the

@@ -378,10 +378,9 @@ def _argv(spec: ServerSpec) -> list[str]:
     # The *resolved* directory, not the environment variable.  A child is
     # spawned with its working directory set away from the checkout, so one left
     # to work it out for itself would decide it is an installation, look in
-    # `~/.slife2`, find no config there, and run on the built-in defaults — while
-    # this process, which read the config it was pointed at, believes otherwise.
-    # The symptom is a server that starts fine and immediately reports a config
-    # it does not have.
+    # `~/.slife2`, and find no config there — while this process, which read the
+    # config it was pointed at, believes otherwise.  The symptom is a server
+    # that refuses to start over a file its parent has just read.
     # `.resolve()` is the load-bearing half of "the resolved directory".  The
     # child is spawned with its working directory set to `<data>/runtime`, so a
     # relative `--data-dir rel/chk` — from the flag or from `SLIFE2_DATA_DIR` —
