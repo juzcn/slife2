@@ -608,6 +608,22 @@ def test_a_probe_that_could_not_reach_the_peer_stays_at_debug(
     assert not any(one.levelno >= logging.WARNING for one in caplog.records)
 
 
+def test_a_server_that_is_not_listening_is_not_a_probe_defect(
+    caplog: pytest.LogCaptureFixture, real_dialer: Any
+) -> None:
+    """**The ordinary "nothing is there" is not our bug.**  fastmcp raises a
+    bare `RuntimeError("Client failed to connect…")` from `__aenter__`; reading
+    that as a probe defect logged a warning and a traceback for every server
+    that was simply down.  The probe goes through `open_server`, which asks the
+    port first and raises `ConnectionError` — the debug path."""
+    real_dialer("slife2.libs.host.launcher")
+    closed = replace(SPEC, url="http://127.0.0.1:1/mcp", port=1)
+    with caplog.at_level(logging.DEBUG, logger="slife2.libs.host.launcher"):
+        assert launcher.probe(closed, timeout=0.2) is False  # timeouts: the test's own
+
+    assert not any(one.levelno >= logging.WARNING for one in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_open_catalogue_refuses_to_run_inside_an_event_loop() -> None:
     """`probe`'s rule, for the other thing a client does before it has a loop.

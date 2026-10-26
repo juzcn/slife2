@@ -31,8 +31,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from fastmcp import Client
-
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import LIST_TOOLS, ToolCounts, remote_catalogue
 from slife2.libs.host.config import (
@@ -69,7 +67,7 @@ from slife2.libs.host.runtime import (
     unregister_client,
     write_claim,
 )
-from slife2.libs.plugin.protocol import close_server, identifies, open_server
+from slife2.libs.plugin.protocol import close_server, open_server
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +223,23 @@ def specs(config: Config) -> list[ServerSpec]:
 
 
 async def _probe_async(spec: ServerSpec, timeout: float) -> bool:
-    client: Client = Client(spec.url, timeout=timeout)
-    await client.__aenter__()
-    try:
-        return await identifies(
-            client, spec.expected_name, fallback_tool=spec.expected_tool
-        )
-    finally:
-        await client.__aexit__(None, None, None)
+    """Ask the same door every caller uses, and answer "ours and up".
+
+    **One connection path.**  `open_server` asks the port before building a
+    client, wraps an enter failure as a `ConnectionError`, and checks the
+    identity — so a server that is simply down comes back as an ordinary
+    connection refusal, not as the transport's own `RuntimeError` that a probe
+    logging by exception type mistook for a defect in the probe.  A second
+    client construction here would be a second answer to the same question.
+    """
+    client = await open_server(
+        spec.url,
+        name=spec.expected_name,
+        fallback_tool=spec.expected_tool,
+        timeout=timeout,
+    )
+    await close_server(client)
+    return True
 
 
 def probe(spec: ServerSpec, *, timeout: float | None = None) -> bool:
