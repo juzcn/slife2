@@ -52,11 +52,14 @@ from slife2.libs.turn import tokens
 #:   * `handover` — the window, and one road only: a delivery that finds no
 #:     window is a hard failure.  A subagent's road is not this module's — it is
 #:     the a2a plugin's own, and it is the second entry added below.
-#:   * `launcher` — the hub, and only for `open_catalogue`: the ask that makes a
-#:     home's `agents/tools.db` exist.  It writes no conversation, but the file it
-#:     makes is *a home's*, so a test that reached a live hub would build a live
+#:   * `launcher` — two dials, and both reach a home: the readiness probe
+#:     `ensure` waits on, and `open_catalogue`'s ask that makes a home's
+#:     `agents/tools.db` exist.  The second writes a file, but the file it makes
+#:     is *a home's*, so a test that reached a live hub would build a live
 #:     directory's catalogue out of a `tmp_path` config — and would leave a real
-#:     `tools.db` behind for the next run to find.
+#:     `tools.db` behind for the next run to find.  `test_a_turn_over_the_real_stack`
+#:     asks for this one back (`real_dialer`): the servers its launcher probes
+#:     are its own, started on ports it picked.
 #:   * `agent_task_server` — the hub, the context store and the model for a
 #:     task's own turn.  A forgotten `backend=` is a live, paid call.
 #:   * `schedule_server` — the agent-task plugin it dispatches a run to.

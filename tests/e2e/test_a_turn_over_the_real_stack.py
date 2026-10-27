@@ -450,7 +450,9 @@ default: stub/small
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[dict]:
+async def stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dialer: Any
+) -> AsyncIterator[dict]:
     """The whole stack, up: a stub provider, a config, every daemon, and a client.
 
     Torn down in the reverse order it came up, and *stopped* rather than left to
@@ -458,6 +460,17 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
     `tmp_path`, and a test that leaked them would leave eighteen processes
     holding ports for the rest of the session.
     """
+    # **The launcher's own probe is a real dial, and the guard has to be told.**
+    # `no_live_stack` replaces `open_server` in every module that dials, the
+    # launcher among them, so a test cannot reach this machine's running stack.
+    # `_wait_ready` probes through exactly that name — and every server it is
+    # waiting for is one *this fixture just started*, on a port this test
+    # picked, so the danger the guard exists for is not here.  Without this,
+    # every probe of a daemon that is already serving is refused with the
+    # guard's `RuntimeError`, `probe` reports it as "the probe itself failed",
+    # and the stack never finishes starting: the 180 s faulthandler kills the
+    # worker and the lane reports a crash that names no server at all.
+    real_dialer("slife2.libs.host.launcher")
     provider = StubProvider()
     provider.start()
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
