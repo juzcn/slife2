@@ -116,7 +116,11 @@ async def test_a_job_set_is_a_tool_the_catalogue_can_call(
         True,
     )
     (row,) = source["rows"]
-    assert (row["name"], row["status"]) == ("slugify", "enabled")
+    assert (row["name"], row["remote_name"], row["status"]) == (
+        "job__slugify",
+        "slugify",
+        "enabled",
+    )
     schema = json.loads(row["schema"])
     assert set(schema["properties"]) == {"title", "sep"}
     assert listed["jobs"][0]["tool"] == "job__slugify"
@@ -230,7 +234,11 @@ async def test_a_file_that_does_not_load_stays_visible_and_is_not_callable(
             await client.call_tool("job_run", {"name": "broken"})
 
     (row,) = source["rows"]
-    assert (row["name"], row["status"], row["schema"]) == ("broken", "error", "")
+    assert (row["name"], row["status"], row["schema"]) == (
+        "job__broken",
+        "error",
+        "",
+    )
     assert listed["jobs"][0]["status"] == "error"
     assert read["code"] == "def broken(:\n"
     assert read["file"].endswith("broken.py") and read["error"]

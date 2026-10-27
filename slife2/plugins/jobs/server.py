@@ -178,7 +178,13 @@ class Registry:
                 description = job.description
             rows.append(
                 {
-                    "name": job.name,
+                    # **The model-facing name is the row's name.**  A declared
+                    # source names its own rows — the hub merges them as they
+                    # are — so the `job__` prefix has to be here, not left to a
+                    # naming rule the hub applies to its own connections.  The
+                    # hub routes a call back by `remote_name`, which is the bare
+                    # function name `call_source` receives.
+                    "name": _exposed(job.name),
                     "description": description,
                     "remote_name": job.name,
                     "schema": job.schema if job.ok else "",

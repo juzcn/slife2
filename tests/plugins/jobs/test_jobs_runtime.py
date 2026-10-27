@@ -18,11 +18,7 @@ import slife2.job as job
 from slife2.libs.host.config import default_config
 from slife2.libs.store.catalogue import CATEGORIES, FUNCTION_CATEGORIES, JOB
 from slife2.plugins.jobs import registry
-from slife2.plugins.toolhub.server import (
-    DECLARABLE_CATEGORIES,
-    JOB_SOURCE,
-    model_name,
-)
+from slife2.plugins.toolhub.server import DECLARABLE_CATEGORIES
 from slife2.plugins.toolhub.server import (
     JOB as HUB_JOB,
 )
@@ -101,14 +97,15 @@ def test_result_text_reads_content_then_structured() -> None:
 # ── the category ──────────────────────────────────────────────────────
 
 
-def test_a_job_is_a_function_category_named_after_its_source() -> None:
-    """The catalogue has to accept the category, and the hub has to name the
-    row the way the model calls it.  Both are one fact each, and both are here
-    so adding the family cannot half-land."""
+def test_a_job_is_a_function_category_the_hub_accepts() -> None:
+    """The catalogue has to accept the category, and the hub has to let a plugin
+    declare it.  Both are one fact each, and both are here so adding the family
+    cannot half-land.  The model-facing name (`job__slugify`) is the *row's*,
+    set by the jobs plugin; the hub merges a declared row under the name it was
+    given."""
     assert JOB in FUNCTION_CATEGORIES
     assert JOB in CATEGORIES
     assert HUB_JOB in DECLARABLE_CATEGORIES
-    assert model_name(JOB_SOURCE, "slugify", HUB_JOB) == "job__slugify"
 
 
 # ── the handles ───────────────────────────────────────────────────────

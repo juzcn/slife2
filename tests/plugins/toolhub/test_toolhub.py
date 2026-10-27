@@ -640,6 +640,39 @@ async def test_a_skill_is_served_by_its_own_plugin(isolated_runtime: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_job_the_model_writes_is_a_tool_the_hub_calls(
+    isolated_runtime: Path,
+) -> None:
+    """**The whole point of the job family.**  A file written through the hub
+    becomes a catalogue row the hub routes — not a document, not a name only a
+    plugin knows.  The rows are the jobs plugin's `list_sources`; the call comes
+    back through its `call_source`; the model calls `job__slugify` exactly as it
+    calls any other tool."""
+    from slife2.plugins.jobs.server import build_server as build_jobs
+
+    code = (
+        "def slugify(title: str) -> str:\n"
+        '    """Make a URL slug.\n'
+        "\n"
+        "    Args:\n"
+        "        title: The title to slugify.\n"
+        '    """\n'
+        "    import re\n"
+        '    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")\n'
+    )
+    jobs = build_jobs(default_config())
+    async with Client(hub_for(connected={"job-server": lambda settings: jobs})) as hub:
+        wrote = await call(hub, "job_set", {"name": "slugify", "code": code})
+        hits = await found(hub, "slugify")
+        ran = await call(hub, "job__slugify", {"title": "Hello, World!"})
+
+    assert wrote["ok"] is True
+    assert "job__slugify" in hits
+    assert ran["ok"] is True
+    assert ran["text"].strip() == "hello-world"
+
+
+@pytest.mark.asyncio
 async def test_a_local_tool_that_says_no_is_a_refusal(isolated_runtime: Path) -> None:
     """`ok` false and text the model can act on — the same contract an upstream
     that refused gets, because the model cannot tell the two apart and should
