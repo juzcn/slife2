@@ -4,12 +4,12 @@ The tool descriptions are the authority on each tool. This page is what no singl
 
 - Tools catalogue: built-in tools (bare names like `turn_read`), external MCP and REST tools (`{server}__{tool}`), jobs (`job__<name>`), harness tools (`_`-prefixed), skills (`skill:<name>`) and CLI entries (`cli:<name>`).
 - Every function tool also takes `_timeout`, `_async` and `_approve`; the harness strips them before dispatch. With `_async` the result arrives later — never wait for it; end the turn. `_approve` asks only when someone can answer.
-- Prefer a dedicated tool over a shell command or ad-hoc code. Read a refusal and correct the call. Answer with the result, not a narration of tool use.
+- Prefer a dedicated tool over a shell command or ad-hoc code. Read a refusal and correct the call. 
 
 ## Finding and loading
 
 - The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable. Search before concluding a capability is missing.
-- A tool can answer "not in the catalogue yet" while the catalogue is still starting. That is not a missing capability: retry it in a few seconds.
+- A tool can answer "not in the catalogue yet" while the catalogue is still starting. 
 
 ## The turn you are in
 
