@@ -169,9 +169,12 @@ classifiers = [
     "Topic :: Terminals",
 ]
 
-# One console script per plugin, rather than one script with subcommands, so
-# a process manager can start any plugin without passing it an argument.
-# Each of these is a process that speaks MCP; `slife2` is the only client.
+# One console script per plugin process started by name, rather than one script
+# with subcommands, so a process manager can start any plugin without passing it
+# an argument.  The subagent network is the one process with no script of its
+# own: it is the second entry point of the a2a module
+# (`python -m slife2.plugins.a2a.local_server`).  Each of these is a process
+# that speaks MCP; `slife2` is the only client.
 [project.scripts]
 slife2 = "slife2:main"
 slife2-agent = "slife2.plugins.agent.server:main"
@@ -181,6 +184,7 @@ slife2-a2a = "slife2.plugins.a2a.server:main"
 slife2-context = "slife2.plugins.context.server:main"
 slife2-skills = "slife2.plugins.skills.server:main"
 slife2-cli = "slife2.plugins.cli.server:main"
+slife2-jobs = "slife2.plugins.jobs.server:main"
 slife2-mcp-tools = "slife2.plugins.mcp_tools.server:main"
 slife2-restapi-tools = "slife2.plugins.restapi.server:main"
 slife2-toolhub = "slife2.plugins.toolhub.server:main"

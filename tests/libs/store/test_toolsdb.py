@@ -63,8 +63,9 @@ def tool(
 ) -> dict:
     """One row of a source's tool list, in the shape the hub sends.
 
-    `extra` is for the two document families, whose rows may carry a `status`:
-    nothing else has a verdict of its own to send (`slife2.libs.store.catalogue._plan`).
+    `extra` is for the families with no connection, whose rows may carry a
+    `status`: a connected source's verdict is the runtime's to write
+    (`slife2.libs.store.catalogue._plan`).
     """
     return {
         "name": name,

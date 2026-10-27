@@ -841,12 +841,12 @@ class ToolStore:
                 }
                 # **A row may carry its own verdict.**  Every other row's status
                 # is the *runtime's* — `source_state` is the only writer, because
-                # whether a server is up is not something a config can say.  The
-                # two document families are the exception and the reason is the
-                # same fact twice: there is no connection to have a state, so
-                # the mirror is the authority.  A `cli:` entry that is switched
-                # off mirrors `disabled`; a `SKILL.md` that cannot be read
-                # mirrors `error`.
+                # whether a server is up is not something a config can say.  A
+                # family with no connection is the exception: there is no state
+                # to read off a link, so the declaration is the authority.  A
+                # `cli:` entry that is switched off mirrors `disabled`; a
+                # `SKILL.md` that cannot be read mirrors `error`; a job that will
+                # not load mirrors `error`.
                 verdict = str(row.get("status") or "")
                 own_verdict = verdict in STATUSES
                 if own_verdict:
@@ -886,10 +886,10 @@ class ToolStore:
                     if moved.keys() & {"description", "schema", "returns"}:
                         documents.append((name, tool_document(fields)))
                 # Except a row that stated its own: a merge re-enables what an
-                # older *config* switched off, and for these two families the
-                # config is the thing that just spoke — so re-enabling a
-                # `cli:` entry the operator has switched off would undo the
-                # setting on every search.
+                # older *config* switched off, and for a family with no
+                # connection the declaration is the thing that just spoke — so
+                # re-enabling a `cli:` entry the operator has switched off would
+                # undo the setting on every search.
                 if previous["status"] != STATUS_ENABLED and not own_verdict:
                     reconnected.append(name)
                 if not moved and previous["status"] == STATUS_ENABLED:

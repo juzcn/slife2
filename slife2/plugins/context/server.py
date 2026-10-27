@@ -79,8 +79,9 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import agents_dir, turn_dbs
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
+    client_reader,
     close_server,
     describe,
     house_server,
@@ -414,17 +415,12 @@ def build_server(
         same `ToolError` (FastMCP wraps what a handler raises) while being the
         one refusal in this system that was not written in the shared words.
         """
-        found = request_client(ctx)
-        if found is None:
-            raise ToolError(
-                unaddressed(
-                    "memory to read",
-                    "the memory",
-                    why="it is reached through the toolhub, which forwards the "
-                    "caller's identity (`slife2.libs.plugin.audience`)",
-                )
-            )
-        return found
+        return client_reader(
+            "memory to read",
+            "the memory",
+            why="it is reached through the toolhub, which forwards the "
+            "caller's identity (`slife2.libs.plugin.audience`)",
+        )(ctx)
 
     # This docstring is the model's description, so it says what the tool
     # answers and nothing about why it is shaped this way.  The two arguments

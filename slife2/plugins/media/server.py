@@ -46,8 +46,8 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
-from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.protocol import client_reader, house_server, serve_plugin
 from slife2.libs.turn.tokens import clip_to_tokens
 from slife2.plugins.media.adapters import (
     MediaAdapter,
@@ -58,6 +58,10 @@ from slife2.plugins.media.adapters import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Whose directory a call writes into, refused rather than guessed.  One
+#: process serves every agent, so the conversation is a fact only the caller has.
+client_of = client_reader("agent directory to write into", "the directory")
 
 SERVER_NAME = MEDIA_SERVER_NAME
 
@@ -153,13 +157,9 @@ class Media:
         something only the caller can say — and a call that does not say is
         refused rather than written under somebody else's name.
         """
-        found = request_client(ctx)
-        if not found or not found[0]:
-            raise ToolError(
-                unaddressed("agent directory to write into", "the directory")
-            )
+        agent, subagent = client_of(ctx)
         try:
-            return media_dir(found[0], found[1], folder)
+            return media_dir(agent, subagent, folder)
         except MediaAdapterError as exc:
             raise ToolError(str(exc)) from exc
 

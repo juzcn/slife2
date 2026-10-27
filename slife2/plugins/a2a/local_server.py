@@ -30,6 +30,11 @@ from slife2.plugins.a2a.server import main as a2a_main
 #: the name it answers as without having to follow that argument.
 SERVER_NAME = LOCAL.server_name
 
+#: The `servers:` key this process is started by, declared for the same reason
+#: `SERVER_NAME` is: this module is a plugin even though its `main` is the other
+#: network's, and the row is where both names come from.
+CONFIG_KEY = LOCAL.plugin_key
+
 
 def main(argv: list[str] | None = None) -> int:
     """Serve the local network.  `slife2.libs.host.launcher` starts this."""

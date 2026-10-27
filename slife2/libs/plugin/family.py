@@ -1,4 +1,5 @@
-"""A plugin that holds somebody else's MCP servers, and declares them.
+"""A family plugin's shared half: connections for the families that hold them,
+declarations for the families that do not.
 
 **This is where a connection lives now.**  Until this module existed, the toolhub
 opened one link per configured entry, merged what each offered, and was therefore
@@ -980,12 +981,12 @@ def refusal(config: Config, name: str) -> str | None:
     for one: a `mcp:` entry called `agent` would be declared, dropped by
     `refresh_declared` as a name this hub is already connected under, and
     reported to the model as added — with no tools, and nothing anywhere saying
-    why.  The same from the other side for `skills` and `cli`, which are the
-    names those two families file their own rows under; a source's verdict is
+    why.  The same from the other side for `skills`, `cli` and `job`, which are
+    the names those families file their own rows under; a source's verdict is
     written across every row it owns, so sharing one would mark somebody else's
     playbooks broken.
 
-    Two names and not every reserved word: the rest of what a source may not be
+    Three names and not every reserved word: the rest of what a source may not be
     called — the plugin's own name, a category the hub owns — the hub refuses
     loudly at declaration time (`Upstream._record`), and duplicating that list
     here would be a second copy to keep in step.

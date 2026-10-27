@@ -30,13 +30,13 @@ MCP server。
 |---|---|
 | **plugin** | slife2 自己的一个 MCP server，由 launcher 启动并共享，实现 plugin 契约。外部 MCP server 不是 plugin。 |
 | **agent** | 由 `--agent NAME` 命名的身份。一个名字在一台机器上只能有一个活着的持有者。 |
-| **client id** | `(agent, subagent)`：一次调用所代表的身份。每个 server 都按它保存状态。 |
+| **client id** | `(agent, subagent)`：一次调用所代表的身份。一个 server 服务多个 home 时，会在状态键里加上调用方的 home。 |
 | **conversation** | 一个 client id 的历史。 |
 | **turn** | 一次交换：输入、模型的回答以及它发起的工具调用，作为一行存储。 |
 | **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>`、`async-tool:<name>` 或 `schedule:<name>`。本地网络中 `agent:` 是创建者、`subagent:` 是 subagent，这样 subagent 能分清在回答谁的消息。 |
 | **marker** | channel 在投递消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。marker 随消息存储，只在显示时移除。 |
-| **family** | 拥有一个配置节并声明该节所描述行的 plugin。 |
-| **source** | plugin 持有的一个条目，例如 `mcp:` server、playbook、job 或命令。 |
+| **family** | 拥有一个配置节或文件夹，并向 hub 声明其所含行的 plugin。 |
+| **source** | plugin 给行归档所用的名字：一个 `mcp:` server、一个 `rest-api:` 文档，或整个 `skills`、`cli`、`job` 集合。 |
 | **catalogue** | 模型可以发现的所有工具、playbook、job 和命令的机器可读清单。 |
 | **job** | 模型为 home 写的代码：`jobs/` 里的一个 Python 函数，暴露为工具 `job__<name>`。 |
 | **dump** | 因为对对话而言过大而完整保存在文件柜中的工具输出。 |
@@ -574,9 +574,9 @@ skills:
 
 ### 编辑配置
 
-配置既可以手写，也可以由模型编辑。每个 family 为自己的配置节提供工具：
+配置既可以手写，也可以由模型编辑。每个配置节或文件夹都有自己的工具：
 
-| family | 工具 |
+| 配置节或文件夹 | 工具 |
 |---|---|
 | `mcp:` | `mcp_set`、`mcp_list`、`mcp_list_tools`、`mcp_remove`、`mcp_set_enabled` |
 | `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |

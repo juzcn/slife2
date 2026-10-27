@@ -136,7 +136,8 @@ def test_every_plugin_row_describes_a_real_server() -> None:
     cannot check about itself: that the module path is a module, and that the
     module agrees about the name it puts on the wire (`FastMCP(name)`), which is
     what a client compares against to prove it reached the server it meant
-    (`slife2.libs.plugin.protocol.identifies`).
+    (`slife2.libs.plugin.protocol.identifies`), and about the `servers:` key its
+    address is filed under.
 
     Importing a server module is safe *here* and nowhere else in this file's
     neighbourhood: the rule the names exist for is that the TUI and the agent
@@ -147,10 +148,39 @@ def test_every_plugin_row_describes_a_real_server() -> None:
     for one in PLUGINS:
         module = importlib.import_module(one.module)
         assert module.SERVER_NAME == one.name, one.key
+        # A model backend's wire protocol is also its `servers:` key, so its
+        # module binds the same fact as `API` rather than `CONFIG_KEY`.
+        key = getattr(module, "CONFIG_KEY", None) or getattr(module, "API", None)
+        assert key == one.key, one.key
         assert one.module.startswith("slife2.plugins."), one.key
         assert 0 < one.port < 65536, one.key
     assert len({one.key for one in PLUGINS}) == len(PLUGINS)
     assert len({one.name for one in PLUGINS}) == len(PLUGINS)
+
+
+def test_every_plugin_that_starts_by_name_has_a_console_script() -> None:
+    """The launcher starts a row's module; a person starts the same server by name.
+
+    Every row but the local network's has a console script, because the README
+    documents each one as a command a process manager or a person can run.  The
+    local network is the one exception, and it is documented as one: its module
+    is the second entry point into the a2a process
+    (`slife2.plugins.a2a.local_server`), started with `python -m`.  A script
+    missing here is a documented command that does not exist — which is how
+    `slife2-jobs` was one until this test.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[3]
+    table = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = table["project"]["scripts"]
+    missing = [
+        one.name
+        for one in PLUGINS
+        if one.module != "slife2.plugins.a2a.local_server" and one.name not in scripts
+    ]
+
+    assert not missing, f"documented executables that are not installed: {missing}"
 
 
 def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:

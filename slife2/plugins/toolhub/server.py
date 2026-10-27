@@ -295,19 +295,20 @@ FUNC_TOOL_LOAD = "func_tool_load"
 #: still the hub's: not letting the model throw it away (see `ALWAYS_LOADED`).
 SKILL_USE = "skill_use"
 
-#: The two **source** names the document families file their rows under, which
-#: are `slife2.plugins.skills.server.SOURCE` and `slife2.plugins.cli.server.SOURCE` — spelled
-#: here for the reason above, and held together with those two in
-#: `tests/test_config.py`.  The catalogue files a document under these, and the
-#: boot pass has to be able to name them without asking anybody (see
-#: `configured_sources`), which is the one thing this process needs them for.
+#: The three **source** names the families file their rows under: `skills` and
+#: `cli` are documents, `job` is callable code.  They are defined in
+#: `slife2.libs.plugin.protocol` and re-exported here, so this process can name
+#: a source without importing a plugin and the declaring plugins read the same
+#: constant; `tests/libs/host/test_config.py` holds the aliases together.  The
+#: catalogue files every row under its source, and the boot pass has to name
+#: one without asking anybody (see `configured_sources`), which is the one thing
+#: this process needs them for.
 #:
 #: `CLI_SOURCE` and `CLI` are the same word and stay two names: a *source* is
 #: what a row is filed under, and a *category* is what it is — and for `cli:`
 #: entries the operator's section happens to be called the same thing twice.
-#: Re-exported rather than defined here: the two declaring plugins and the
-#: two family plugins need these names too, and a plugin reaching into this
-#: one for a string is how `slife2-mcp-tools` came to import the whole hub.
+#: Re-exported rather than defined here: a plugin reaching into this one for a
+#: string is how `slife2-mcp-tools` came to import the whole hub.
 #: See `slife2.libs.plugin.protocol.SKILLS_SOURCE`.
 SKILLS_SOURCE = _SKILLS_SOURCE
 CLI_SOURCE = _CLI_SOURCE
@@ -3492,7 +3493,7 @@ def build_server(
             because it is not a source of tools but the file they live in.
 
             `servers`: one row per source of tools — `name`, `kind` (`mcp`,
-            `rest` or `plugin`), `transport`, `state` (`ready`, `connecting`,
+            `rest`, `job` or `plugin`), `transport`, `state` (`ready`, `connecting`,
             `failed`, `idle` or `off`), how many `tools` it last offered, how
             many of them are `loaded` (which is what the model has now, so a
             source that is not live is `0` whatever its rows say), the
@@ -3540,12 +3541,14 @@ def build_server(
                     for upstream in upstreams
                 ),
                 # One kind of declared source is not reported, and it is not a
-                # gap: one with no transport has nothing to connect to at all —
-                # a folder of playbooks is a source of rows, not a server, and
-                # this answer is about servers.  A *switched-off* one is here,
-                # saying `off`: it is a configured server, and the operator
-                # turning it off is the answer to "why is my tool missing" more
-                # often than a fault is.
+                # gap: a document source has no transport and nothing to connect
+                # to — skills and commands are rows, not servers, and this
+                # answer is about servers.  A job source is here (`local`):
+                # its rows are callable tools, so its count and load state
+                # belong to "why is my tool missing" too.  A *switched-off* one
+                # is here, saying `off`: it is a configured server, and the
+                # operator turning it off is the answer to "why is my tool
+                # missing" more often than a fault is.
                 *(
                     one.snapshot(counts.get(one.name))
                     for one in declarations().held.values()

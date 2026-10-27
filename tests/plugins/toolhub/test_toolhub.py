@@ -1953,8 +1953,8 @@ def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
     the real catalogue, 239 rows per restart, logged as `0 added, 239 changed`
     about a config nobody edited.
 
-    Only the two document families carry a status, because neither has a
-    connection a verdict could come from — the other side of this is
+    Only a family with no connection carries a status, because it has no link a
+    verdict could come from — the other side of this is
     `test_a_document_row_carries_its_own_verdict`, and
     `test_a_source_that_answers_again_is_re_enabled_without_rewriting_the_row`
     is the store half of the same rule.

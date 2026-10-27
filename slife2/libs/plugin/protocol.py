@@ -6,25 +6,25 @@ transport: a plugin answers the same JSON-RPC as any MCP server does, and the
 `arxiv` entry under `mcp:` speaks the same wire.  Two things separate the
 words.  A *plugin* is started by slife2 and shared by every instance, which is
 what makes it required — the hub refuses to list anything when one is missing
-(SDD §7.1) — while an entry under `mcp:` is somebody else's process that
+(SDD §7.2) — while an entry under `mcp:` is somebody else's process that
 may be slow, paid or down.  And a plugin honours the contract below, which is
 the part that is ours: what follows is not the protocol, it is what this project
 puts on top of it.
 
-Every one of our servers is an MCP server — the agent loop, the hub, the two
-families that declare rows, the two that hold somebody else's servers, and one
-process per wire protocol — and they agree about more than they disagree about.  What they agree on lives here rather than in whichever server
-was written first: how a server is started, how it records that it is here, and
-the two options that are pinned because flipping either is *silent*.
+Every one of our servers is an MCP server — the agent loop, the hub, every
+family and capability process beside them, and one process per wire protocol —
+and they agree about more than they disagree about.  What they agree on lives
+here rather than in whichever server was written first: how a server is
+started, how it records that it is here, and the two options that are pinned
+because flipping either is *silent*.
 
 It also holds the client half of the same question — :func:`identifies` and
 :func:`open_server` — because "is this server the one I think it is", "is it
 there at all", and "what does it mean to be one of our servers" are the same
 piece of protocol knowledge, and splitting them is how the halves drift.
 
-Nothing here is LLM-specific.  That is the point of the module: the db
-server and the agent server used to reach into `slife2.plugins.llm` for this, which put
-the serving scaffold of a non-LLM plugin inside the LLM package.
+Nothing here is LLM-specific.  That is the point of the module: the serving
+scaffold every plugin shares does not belong inside the LLM package.
 
 ## The contract: a server keys its state by client id
 
@@ -32,7 +32,10 @@ the serving scaffold of a non-LLM plugin inside the LLM package.
 carries state on a server's behalf.**  The id is `(agent, subagent)` — which
 agent is talking, and which of that agent's conversations, empty for the one a
 person is watching and a name for a worker it is running — and it travels with
-every call, at every hop, including the ones that key nothing on it.
+every call, at every hop, including the ones that key nothing on it.  A
+process that outlives one home's calls adds the home to the key it stores
+under (`slife2.libs.plugin.audience.client_key`), so two homes' same-named
+agents do not share state.
 
 Three things follow, and each is a property the whole system has rather than a
 rule each server remembers:
@@ -43,7 +46,8 @@ rule each server remembers:
   may drop the state underneath; the next call simply starts it again, and the
   caller cannot tell.
 * **Isolation is the key.**  Two agents cannot reach each other's state because
-  their ids differ, not because a query remembered a `WHERE`.
+  their ids differ, not because a query remembered a `WHERE` — and neither can
+  two homes' agents of one name, because the home is in that key too.
 * **A hop is never anonymous.**  Even a server with no state to key receives the
   id, so any log line or future accounting can say whose call it served.
 
@@ -118,9 +122,10 @@ from slife2.libs.plugin.audience import (
 
 logger = logging.getLogger(__name__)
 
-#: The client id every server keys its state by: which agent is talking, and
-#: which of that agent's conversations.  See the module docstring for the
-#: contract; this is only its shape.
+#: The client id every call names: which agent is talking, and which of that
+#: agent's conversations.  A process serving more than one home adds the home to
+#: the key it stores state under (`slife2.libs.plugin.audience.client_key`); see
+#: the module docstring for the contract, this is only its shape.
 ClientId = tuple[str, str]
 
 #: The tool a plugin serves when it holds **sources** of its own — the ones it
@@ -229,6 +234,37 @@ def unknown_name(
     )
 
 
+def client_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], ClientId]:
+    """The `client_of(ctx)` a plugin binds its own refusal words to: the pair.
+
+    **The raising idiom in its full form, and what :func:`agent_reader` is made
+    from.**  A tool that needs only the agent asks the agent question; one that
+    resolves a store or a directory against both halves — the cabinet, and the
+    directory media writes into — asks this and gets `(agent, subagent)`.  Both
+    read the same `_meta` (`slife2.libs.plugin.audience.client_of`) and refuse
+    with the same sentence (`slife2.libs.plugin.audience.unaddressed`), so the
+    two shapes differ by what they return and nothing else.
+
+    **A factory rather than a function**, for the reason `agent_reader` states:
+    every caller already had a one-argument `client_of(ctx)` it called from a
+    dozen tool bodies, and the words are the only part that varies.
+
+    **The condition is `None` *or* an empty agent**, and both halves matter: a
+    call with no `_meta` at all and a call whose `_meta` names nobody are the
+    same situation to a server that has to know whose state it is looking at,
+    and `client_of` already answers `None` for the second.
+    """
+
+    def client_of(ctx: Any) -> ClientId:
+        """The conversation this call is on behalf of, refused rather than guessed."""
+        found = request_client(ctx)
+        if found is None or not found[0]:
+            raise ToolError(unaddressed(what, own, why=why))
+        return found
+
+    return client_of
+
+
 def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
     """The `agent_of(ctx)` a plugin binds its own refusal words to.
 
@@ -248,20 +284,16 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
 
     The sentence is `slife2.libs.plugin.audience.unaddressed` either way, which is the
     half that matters, and :func:`agent_or_blank` is the question a server asks
-    when the *blank* is the answer rather than the raise.
-
-    **The condition is `None` *or* an empty agent**, and both halves matter: a
-    call with no `_meta` at all and a call whose `_meta` names nobody are the
-    same situation to a server that has to know whose state it is looking at,
-    and `client_of` already answers `None` for the second.
+    when the *blank* is the answer rather than the raise.  :func:`client_reader`
+    is the pair-returning form this builds on, which is what the cabinet and
+    media ask for because their state is keyed by both halves.
     """
+
+    read = client_reader(what, own, why=why)
 
     def agent_of(ctx: Any) -> str:
         """The agent this call is on behalf of, refused rather than guessed."""
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(unaddressed(what, own, why=why))
-        return found[0]
+        return read(ctx)[0]
 
     return agent_of
 
@@ -272,8 +304,8 @@ def agent_or_blank(ctx: Any) -> str:
     **The second of the two idioms, and each has one caller.**  Every
     model-facing tool *raises* now — a refusal is a `ToolError`, so that the
     call's status and its text agree (`SDD` §7.6) — which is what
-    `agent_reader` builds and what the mesh, the task server, the clock and the
-    cabinet use.  This is the other shape: a plugin that asks the question in a
+    `agent_reader` and `client_reader` build and what the mesh, the context
+    store, the task server, the clock, the cabinet and media use.  This is the other shape: a plugin that asks the question in a
     *class* whose tool bodies decide what to do with the blank, which is the
     login's (`slife2.plugins.wechat.server.Wechat.who`), and whose `unaddressed`
     method exists so the wording stays with the class that owns it.
@@ -709,7 +741,7 @@ async def open_server(
 
     That convention lives here, in one function, because it had four
     implementations and one of them was its own opposite.  The LLM backend and
-    the TUI each connected and probed and raised; the agent server's db
+    the TUI each connected and probed and raised; the agent server's turn-store
     client swallowed the failure and latched itself off, so that the same
     situation was fatal at startup and silent at runtime.
 
@@ -724,7 +756,7 @@ async def open_server(
     # Ask the port before asking the protocol.  A refused TCP connect comes back
     # at once, where building an MCP client against nothing spends a couple of
     # seconds inside the transport's own retries — measured here at 0.27s
-    # against 2.29s.  It used to be worth this only for the db server, whose
+    # against 2.29s.  It used to be worth this only for the turn store, whose
     # absence was the one that could be discovered on the first turn of a
     # session; now that any missing peer fails the turn, it is worth it for all
     # of them, and it costs a quarter of a second only when something is
@@ -1053,9 +1085,9 @@ def serve(
             # **No banner, for two reasons.**  It is ~20 lines of ASCII art at
             # every server start, in a file whose first useful line is ours; and
             # `log_server_banner` calls `check_for_newer_version`, so every start
-            # of every one of the nineteen servers made an outbound request to
-            # PyPI — a network dependency in a stack that otherwise starts
-            # offline.  The server's name and address are on our own line above.
+            # of every server made an outbound request to PyPI — a network
+            # dependency in a stack that otherwise starts offline.  The
+            # server's name and address are on our own line above.
             show_banner=False,
             json_response=False,
             stateless_http=True,
@@ -1120,7 +1152,7 @@ def _log_level() -> tuple[int, str]:
     project is written at DEBUG and none of them could be reached: the level was
     a constant, so seeing one meant editing the code and restarting the stack.
     `SLIFE2_LOG_LEVEL` is the lever — read per process, so one noisy server can
-    be raised without turning DEBUG on for all nineteen.
+    be raised without turning DEBUG on for every server.
 
     An unreadable value is not a reason to refuse to start: the server logs at
     INFO and says the value was not a level (the second half of the pair, so the
@@ -1227,7 +1259,7 @@ def serve_plugin(
     to spell these eleven lines out one at a time, and the count of copies was
     itself the bug: eleven lines is enough to drift, and a copy that drifted was
     a server that started differently from every other one for no reason anyone
-    had chosen.  Today the only two callers that are not this function are the
+    had chosen.  Today the only servers that do not call this directly are the
     three model backends, through `slife2.plugins.llm.server_common.serve_backend`,
     which is a wrapper over this and not a second implementation.
 

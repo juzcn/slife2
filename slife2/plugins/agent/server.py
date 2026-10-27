@@ -150,10 +150,10 @@ from slife2.libs.plugin.audience import (
     client_key,
     client_meta,
     request_client,
-    unaddressed,
 )
 from slife2.libs.plugin.protocol import (
     ClientId,
+    client_reader,
     close_server,
     describe,
     house_server,
@@ -4338,10 +4338,7 @@ def build_server(
             `name`, `model`, `role`, `fork`, and `created`: whether this call
             was the one that made it.
         """
-        who = request_client(ctx)
-        if who is None or not who[0]:
-            raise ToolError(unaddressed("agent to make a subagent for", "a subagent"))
-        maker, mine = who
+        maker, mine = client_reader("agent to make a subagent for", "a subagent")(ctx)
         if mine:
             # The tree, and it stops at one level — not because a second level is
             # unthinkable, but because nothing would hold a place for it: the
@@ -4424,9 +4421,7 @@ def build_server(
         Returns:
             `name`, and `removed`: whether there was one here to remove.
         """
-        who = request_client(ctx)
-        if who is None or not who[0]:
-            raise ToolError(unaddressed("agent to remove a subagent of", "a subagent"))
+        who = client_reader("agent to remove a subagent of", "a subagent")(ctx)
         maker, mine = who
         if mine:
             raise ToolError(

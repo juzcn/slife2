@@ -78,12 +78,8 @@ from fastmcp.exceptions import ToolError
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
-from slife2.libs.plugin.audience import (
-    FOR_THE_MODEL,
-    request_client,
-    unaddressed,
-)
-from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.plugin.audience import FOR_THE_MODEL
+from slife2.libs.plugin.protocol import client_reader, house_server, serve_plugin
 from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
 from slife2.libs.turn.tokens import estimate_lines_tokens, estimate_text_tokens
@@ -321,11 +317,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: caller has — so a call that says nothing is refused rather than answered
     #: with somebody else's diary.  The pair is the client id: a non-fork
     #: subagent resolves to its own cabinet, and a fork to its maker's.
-    def client_of(ctx: Context) -> tuple[str, str]:
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(unaddressed("cabinet to act on", "the cabinet"))
-        return found
+    client_of = client_reader("cabinet to act on", "the cabinet")
 
     async def cabinet(ctx: Context) -> CabinetStore:
         """The cabinet this call is about, with its index up to date."""

@@ -31,13 +31,13 @@ decisions, and the measurements behind them — is in [SDD.md](SDD.md).
 |---|---|
 | **Plugin** | One of slife2's own MCP servers. It is started and shared by the launcher and implements the plugin contract. An external MCP server is not a plugin. |
 | **Agent** | An identity named by `--agent NAME`. One name has one live holder on a machine. |
-| **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. Every server keys its state by it. |
+| **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. A server adds the caller's home to the key when it serves more than one. |
 | **Conversation** | One client id's history. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made, stored as one row. |
 | **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. On the local network `agent:` names the maker and `subagent:` a subagent, so a subagent can tell whose message it is answering. |
 | **Marker** | The machine-readable prefix a channel adds to a delivered message, e.g. `[Wechat:{…}]`. Markers are stored with the message and removed only for display. |
-| **Family** | A plugin that owns a configuration section and declares the rows that section describes. |
-| **Source** | One entry a plugin holds, such as an `mcp:` server, a playbook, a job, or a command. |
+| **Family** | A plugin that owns one configuration section or folder and declares the rows it holds to the hub. |
+| **Source** | The name a plugin files rows under: an `mcp:` server, a `rest-api:` document, or the whole of a `skills`, `cli`, or `job` collection. |
 | **Catalogue** | The machine-readable list of every tool, playbook, job, and command the model may discover. |
 | **Job** | Code the model wrote for the home: one Python function in `jobs/`, exposed as the tool `job__<name>`. |
 | **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
@@ -638,10 +638,10 @@ key.
 
 ### Editing the configuration
 
-The configuration is edited by hand or by the model. Each family serves tools
-for its own section:
+The configuration is edited by hand or by the model. Each section or folder has
+its own tools:
 
-| Family | Tools |
+| Section or folder | Tools |
 |---|---|
 | `mcp:` | `mcp_set`, `mcp_list`, `mcp_list_tools`, `mcp_remove`, `mcp_set_enabled` |
 | `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |

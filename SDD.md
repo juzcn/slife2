@@ -86,8 +86,8 @@ providers, and the WeChat bridge.
 | **Client id** | The pair `(agent, subagent)` identifying the conversation a call is made on behalf of. A subagent component is empty for an agent's own conversation. |
 | **Home** | A data directory containing `slife2.yaml`, `AGENTS.md`, `skills/`, `jobs/`, and `agents/`. A home may contain several agents. |
 | **Plugin** | One of slife2's own MCP servers. It implements the plugin contract and is started and shared by the launcher. An external MCP server is not a plugin. |
-| **Family** | A plugin that owns one configuration section and declares the rows that section describes. |
-| **Source** | One entry a plugin holds, such as an `mcp:` server, a `rest-api:` document, a playbook, a job, or a command. |
+| **Family** | A plugin that owns one configuration section or folder and declares the rows it holds to the hub. |
+| **Source** | The name a plugin files rows under: an `mcp:` server, a `rest-api:` document, or the whole of a `skills`, `cli`, or `job` collection. |
 | **Catalogue** | The tool catalogue: one SQLite file per home holding every row the model may discover. |
 | **Conversation** | One client id's history, stored by the context plugin. |
 | **Turn** | One exchange: input, model output, and tool calls, stored as one row. |
@@ -250,7 +250,8 @@ Each plugin has one job: `agent` runs the conversation loops; `context` keeps
 the turn log and decides the context; `toolhub` owns the tool set; each
 `slife2-llm-*` speaks one wire protocol; `mcp-tools` and `restapi-tools` hold
 outward connections; `skills` serves playbooks; `cli` holds the command
-registry; `cabinet` holds documents and dumps; `media` renders, speaks, and
+registry; `jobs` makes the home's Python functions callable tools; `cabinet`
+holds documents and dumps; `media` renders, speaks, and
 transcribes; `file-tunnel` publishes a local file; `wechat` holds one login per
 agent; `agent-task` runs background loops; `schedule` owns timers and the run
 ledger; `a2a` and `subagent` run the peer and local networks; `tui` is the
@@ -335,8 +336,7 @@ A plugin is an MCP server over Streamable HTTP. It MUST:
 - put its MCP name on the wire so a client can identify it;
 - serve a probe tool whose presence identifies the server;
 - start through the shared scaffold `serve_plugin`;
-- accept the common flags (`--data-dir`, `--host`, `--port`, and any section
-  flag defined by the protocol module);
+- accept the common flags (`--data-dir`, `--host`, `--port`);
 - resolve its own address from the configuration or the default.
 
 The shared scaffold `libs/plugin/protocol.py` owns argument parsing, logging,
@@ -358,8 +358,9 @@ or `serve` directly. A test enforces this rule by name.
 ### 3.2 State keyed by client id
 
 Every server that holds per-conversation state MUST key that state by the client
-id `(agent, subagent)`. No client carries a session handle on the server's
-behalf.
+id `(agent, subagent)`, and by the caller's home when one process serves more
+than one (`audience.client_key`). No client carries a session handle on the
+server's behalf.
 
 **Why a name, not a handle.** MCP at the 2026-07-28 revision has no
 protocol-level sessions. Measured against the installed library, `session_id`
@@ -378,7 +379,8 @@ Consequences:
   and a key never goes stale.
 - An idle sweep MAY drop state; the next call recreates it, and the caller
   cannot observe the difference.
-- Isolation follows from the key: two agents cannot reach each other's state.
+- Isolation follows from the key: two agents cannot reach each other's state,
+  and neither can two homes' agents of one name.
 - Every call is traceable, because every call carries the id even if the server
   holds no state.
 
@@ -388,8 +390,8 @@ conversation is refused. A plugin's internal tools MAY take it as an ordinary
 argument when the caller already knows the conversation — the context store's
 `remember`, `restore`, and `rebuild` do, because the agent server owns the
 conversation. The home travels with the same identity: a shared server resolves a
-call's files against the caller's home, not against the directory it was started
-in.
+call's files against the caller's home, and keys state that outlives the call by
+that home (`audience.client_key`), not against the directory it was started in.
 
 ### 3.3 Audience and authorization
 
@@ -413,25 +415,31 @@ different client id; the server reads it from `_meta`.
 
 ### 3.4 Family plugins
 
-A family plugin owns one configuration section and declares the rows that
-section describes. `libs/plugin/family.py` provides the shared behavior:
+A family plugin owns one configuration section or folder and declares the rows
+it holds to the hub. `libs/plugin/family.py` provides the shared half:
 
-- hold each entry's connection;
-- declare what each entry offers;
-- route a call back to the holder;
-- build the management tools' answers from the section's own words
-  (`FamilyWords`).
+- the two connection families (`mcp:`, `rest-api:`) hold each entry's
+  connection, declare what each entry offers, route a call back to the holder,
+  and build the management tools' answers from the family's own words
+  (`FamilyWords`);
+- the two document families (`skills:`, `cli:`) hold the home's mirror of the
+  section and declare its rows (`Documents`);
+- the job family shares the declaration envelope and the page builders
+  (`Homes`, `listed`); its rows are callable, so the hub routes them like any
+  other function tool.
 
 The families are:
 
-| Family | Configuration section | Holds |
+| Family | Section or folder | Holds |
 |---|---|---|
 | `mcp-tools` | `mcp:` | External MCP servers |
 | `restapi-tools` | `rest-api:` | OpenAPI documents served by an MCP proxy |
 | `cli-server` | `cli:` | Commands already installed |
 | `skills-server` | `skills:` | Playbooks under `skills/` |
-| `job-server` | none (`jobs/`) | Code-defined tools under `jobs/` |
-| `cabinet` | none | Documents and saved files |
+| `job-server` | `jobs/` | Code-defined tools under `jobs/` |
+
+Other plugins — the cabinet, media, the terminal's inbox, and the rest — hold
+no collection and serve their own tools; they are plugins, not families.
 
 An entry has one `state` field, read from the file before the link is consulted.
 A switched-off entry is `off`, not the `idle` of a connection nobody started. An
@@ -465,11 +473,12 @@ Everything else is derived:
 - the launcher's specs;
 - the probe a client uses.
 
-A plugin reads its own name from its row. Adding a plugin is writing the module
-and adding a row. Removing one is deleting both. The table is data, not imports:
-every module field is a string, because importing a server to read its name would
-pull provider SDKs into the terminal and the agent loop. One test imports each
-row's module and checks that it binds the name the row claims.
+A plugin reads its own name from its row; its `servers:` key is the same fact
+under a second name, and one test imports each row's module and checks both.
+Adding a plugin is writing the module and adding a row; a console script makes
+it startable by name. Removing one deletes the module and the row. The table is
+data, not imports: every module field is a string, because importing a server to
+read its name would pull provider SDKs into the terminal and the agent loop.
 
 Two rows may share a module. `peer_agent` and `subagent` are served by
 `plugins/a2a/server.py`; the second row is a three-line entry point
@@ -483,11 +492,9 @@ Appendix B says where the registry lives.
 A client MUST prove which server it reached before believing anything the server
 says.
 
-`identifies` compares:
-
-- the connected server's `server_info`;
-- the name the caller expected;
-- the server's own probe tool.
+`identifies` compares the connected server's `server_info.name` against the
+name the caller expected. When the server reports no name, it falls back to the
+server's own probe tool.
 
 `open_server` is the single place a client connects to one of our servers. It
 raises, naming what could not be reached, rather than returning a client that
@@ -505,11 +512,13 @@ correctly and being mistaken for the intended server.
   conversation it is for.
 - **A raised `ToolError`** is the refusal a model reads. It carries one sentence
   saying what is wrong and what to do instead.
-- **`protocol.agent_reader`** is the raising idiom for a tool server.
+- **`protocol.agent_reader`** is the raising idiom for a tool server that needs
+  the agent; **`protocol.client_reader`** is its pair-returning form for a tool
+  that needs the conversation as well.
 - **`audience.unaddressed`** is the sentence-returning idiom for a plugin's own
   internal API.
 - **`protocol.agent_or_blank`** answers "the agent this call is on behalf of, or
-  the empty string". It is the shared question behind both idioms.
+  the empty string". It is the shared question behind both raising idioms.
 
 There is no `[refused]` marker. A refusal is the call's status, not a word in its
 text.
@@ -1421,14 +1430,15 @@ without a timer, and the terminal's status bar shows it.
 
 ### 7.2 Sources and declarations
 
-A plugin that owns a configuration section holds the connections that section
-names and declares what each entry offers. The hub merges the declarations into
-rows and routes calls back to the declaring plugin.
+A family plugin owns one configuration section or folder and declares its rows
+to the hub. The two connection families hold the connections their sections
+name. The hub merges every declaration into rows and routes calls back to the
+declaring plugin.
 
 This is the other half of credential isolation: the process that starts a child
 needing `SERPER_API_KEY` reads that key; the hub holds none.
 
-A plugin is a **required** source. If one of ours cannot be reached, the listing
+Every plugin is **required**. If one of ours cannot be reached, the listing
 refuses rather than serving a shorter list. An external entry that cannot be
 reached is reported and left out; the model simply has fewer tools.
 
@@ -2824,7 +2834,7 @@ lanes end up disagreeing about the shape of a double.
 | Fast | `uv run pytest` | Unit and integration tests, every module, across cores. Excludes `e2e`. No API key, no running server, no fixed port. |
 | Unit | `uv run pytest -m unit` | Fast, isolated unit tests. |
 | Integration | `uv run pytest -m integration` | Tests that bind a socket or spawn a process. Each binds an ephemeral port. |
-| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: eighteen daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
+| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: nineteen daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
 
 The fast lane drives servers over FastMCP's in-memory transport: real MCP
 messages and real progress notifications, with no port bound.

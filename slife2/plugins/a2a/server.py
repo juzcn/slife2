@@ -106,8 +106,9 @@ from slife2.libs.host.config import (
     net_settings,
 )
 from slife2.libs.host.paths import forked, home, home_key, in_home, subagent_dirs
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client, unaddressed
+from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
+    client_reader,
     close_server,
     describe,
     house_server,
@@ -1390,17 +1391,12 @@ def build_server(
         remote peer sees an agent name, a subagent is not an instance and never
         claimed one (SDD §3.5), so its maker is the name anybody out there knows.
         """
-        found = request_client(ctx)
-        if found is None or not found[0]:
-            raise ToolError(
-                unaddressed(
-                    "mesh it could be sent from",
-                    "",
-                    why="one process serves every agent, and the agent name is "
-                    "the identity a peer sees",
-                )
-            )
-        agent, subagent = found
+        agent, subagent = client_reader(
+            "mesh it could be sent from",
+            "",
+            why="one process serves every agent, and the agent name is "
+            "the identity a peer sees",
+        )(ctx)
         return agent, (subagent if net is LOCAL else "")
 
     def membership(agent: str) -> set[str]:
