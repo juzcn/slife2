@@ -93,9 +93,11 @@ SECTION = "skills"
 
 INSTRUCTIONS = (
     "The playbooks kept in this machine's skills folder, and the `skill_*` tools "
-    "that install, remove and switch one. `skill_use` reads one; the catalogue "
-    "rows a search finds are the same documents, so a skill can be found by what "
-    "it is for without knowing its name."
+    "that author, install, change, remove and switch one. `skill_use` reads one; "
+    "`skill_draft` turns a workflow into a `SKILL.md` for `skill_set` or "
+    "`skill_edit` to write; the catalogue rows a search finds are the same "
+    "documents, so a skill can be found by what it is for without knowing its "
+    "name."
 )
 
 
@@ -280,11 +282,59 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             raise ToolError(text)
         return text
 
+    @mcp.tool(name="skill_draft", meta=FOR_THE_MODEL)
+    async def skill_draft(
+        name: str,
+        description: str,
+        steps: list[str],
+        notes: list[str] | None = None,
+        requires: dict[str, list[str]] | None = None,
+    ) -> dict[str, Any]:
+        """Draft a skill from a workflow: turn a procedure you just followed into a playbook.
+
+        Nothing is written. The answer is the `files` argument `skill_set` or
+        `skill_edit` takes, so saving a workflow is: `skill_draft`, read the
+        document it returns, then `skill_set` if the skill is new or
+        `skill_edit` if it is already installed. Use it when a job is one you
+        will have to do again; do not save a one-off. The steps are what worked,
+        in order — commands exactly as they ran — and `notes` is what was easy
+        to get wrong.
+
+        Args:
+            name: The directory it will live in — what `skill_use` takes.
+            description: One line saying what job the skill is for. This is
+                what a search finds it by and what `skill_list` shows, so name
+                the task, not the technology.
+            steps: The procedure, in order. Each string is one step; a command
+                belongs in the step it was run in.
+            notes: What is easy to get wrong, or how to tell it worked. Omit
+                for a procedure that has nothing to add.
+            requires: What the steps need before they work, as `env` names and
+                `bins` programs — e.g. `{"env": ["API_KEY"], "bins": ["curl"]}`.
+                It is declared in the header, so `skill_use` reports a missing
+                value before the steps run.
+
+        Returns:
+            `name`, and `files` — the install's argument, whose `SKILL.md` is
+            the drafted document. Pass both to `skill_set` or `skill_edit`.
+        """
+        try:
+            return skills.draft(
+                name,
+                description,
+                steps,
+                notes=notes or (),
+                requires=requires,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
     # ── The management tools ─────────────────────────────────────────────
     # The `skill_*` set, and the half SDD §14.2 named as next: a skill is a
     # directory, so installing one is writing files — which is the only thing in
     # this system that writes anywhere but the config, and the only one whose
-    # paths a model chooses.
+    # paths a model chooses.  `skill_draft` is the authoring half and writes
+    # nothing; `skill_set` and `skill_edit` are the two writes, whole and part.
 
     def _settings(name: str, skill: skills.Skill | None) -> SkillSettings | None:
         """The `skills:` entry for a skill, under either of its two names."""
@@ -368,7 +418,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         you write lands beside it. Write the procedure for one kind of job — the
         commands, the order, the steps that are easy to get wrong — with paths
         relative to the skill's directory. A skill of the same name is replaced
-        in one step.
+        in one step; to change part of an installed skill without replacing the
+        rest, use `skill_edit`.
 
         `env` is the `skills:` entry the playbook is given: the names its
         scripts read, each a `${VAR}` or `keyring:` reference or a literal
@@ -474,6 +525,39 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             )
         else:
             mirror.forgotten(key)
+
+    @mcp.tool(name="skill_edit", meta=FOR_THE_MODEL)
+    async def skill_edit(name: str, files: list[dict[str, str]]) -> dict[str, Any]:
+        """Change part of an installed skill, keeping every file you do not name.
+
+        Use this to fix a step, tighten a description or add a script to a skill
+        that is already installed. Read it first with `skill_use`, change what
+        needs changing, and write only the files you changed: anything you leave
+        out stays as it is — unlike `skill_set`, which replaces the whole skill.
+        The `skills:` entry's `env` and switch are not touched; those are
+        `skill_set` and `skill_set_enabled`.
+
+        Args:
+            name: The skill to change — the name `skill_list` shows, or its
+                directory's.
+            files: The files to write, each `{"path": "SKILL.md", "content":
+                "..."}`. Paths are relative to the skill's own directory, and
+                one that leaves it is refused. `SKILL.md` is optional.
+
+        Returns:
+            `name` and `files`, how many were written. A refused edit raises
+            instead, and the installed skill is left as it was.
+        """
+        if not name.strip():
+            raise ToolError("a skill needs a name")
+        try:
+            changed = skills.edit(name.strip(), files)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        except OSError as exc:
+            raise ToolError(f"could not write {name!r}: {exc}") from exc
+        logger.info("skill_edit name=%s dir=%s files=%d", name, changed, len(files))
+        return {"name": name, "files": len(files)}
 
     @mcp.tool(name="skill_remove", meta=FOR_THE_MODEL)
     async def skill_remove(name: str) -> dict[str, Any]:

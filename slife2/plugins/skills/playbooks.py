@@ -61,9 +61,18 @@ module only reads the *declaration* and reports it; the resolution is
 `slife2.libs.host.config`'s, and injecting what it resolved is the business of whatever
 runs a skill's scripts (`SDD` §14.2 — nothing does yet).
 
+Authoring one
+-------------
+**A workflow becomes a playbook through a draft, and the draft writes nothing.**
+`draft` renders the `SKILL.md` a procedure needs and hands back the
+`files` argument `install` or `edit` takes — so the name's rules, the header's
+parser and the folder stay in one place, and a model sees the document before it
+exists.
+
 Why this is a module rather than part of the server
 ---------------------------------------------------
-It is the reading half and nothing else: no FastMCP, no transport, no `_meta`,
+It is everything that knows what a skill is — the folder, the manifest, its
+reading and its writing — and nothing else: no FastMCP, no transport, no `_meta`,
 no idea that a tool list exists.  `slife2.plugins.skills.server` turns what is here into
 a tool and into catalogue rows — this file could be used by a `slife2 skills`
 listing tomorrow without a line changing, and a server is free to be wrong about
@@ -74,6 +83,7 @@ in this file would change if the tool were reached some other way.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -596,48 +606,40 @@ def _within(base: Path, name: str) -> Path:
     return target
 
 
-def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
-    """Write a skill — its `SKILL.md` and anything beside it — and return where.
+def _location(name: str, root: Path | None = None) -> Path:
+    """The one directory *name* installs into; every other spelling is refused.
 
-    **Whole or not at all, and never outside its own directory.**  The files are
-    written into a staging directory beside the real one and the real one is
-    swapped in afterwards, so a skill that was interrupted half-written never
-    exists: a model reading a playbook that stops in the middle of a command is
-    worse off than one told the skill is not installed.  A name that resolves
-    outside `<data>/skills/`, or a file whose path does, is refused before
-    anything is created.
-
-    **The manifest is required**, because the folder's rule is that the manifest
-    is what makes a directory a skill (`scan`): writing three files and no
-    `SKILL.md` would be an install that reports success and installs nothing
-    anything can find.
-
-    **And the name is one directory, spelled as itself.**  Everything below is
-    keyed on the name, and two spellings of it are two different things to every
-    reader afterwards: `scan` lists the *direct* children of `skills/`, so a name
+    **The name is one directory directly under `skills/`, and it is that
+    directory's own.**  Everything an install or an edit does is keyed on the
+    name, and two spellings of it are two different things to every reader
+    afterwards: `scan` lists the *direct* children of `skills/`, so a name
     carrying a separator installs where nothing looks, and a name that is not the
     directory it lands in (`one/`) answers about a skill `skill_use` cannot find
-    — both of which reported success.  Refused here, before anything is created,
-    where the caller is still the party that can change it.
+    — both of which reported success.  `a/./b` and `a/b` are one refusal, and
+    the location decides it rather than the string.
+
+    **The dot rule is about where a name lands, not about how it is spelled.**
+    `_write` stages into `.{name}.installing` and moves the old copy to
+    `.{name}.replacing`, so the leading dot is reserved for the swap's own
+    directories — and `scan` refuses to list one so that a `SIGKILL` in that
+    window cannot become a catalogue row for a name nobody installed.  A skill
+    that lands in one would therefore install, report success and be unfindable:
+    no row, no `skill_list` line, and `skill_use` answering that no such skill
+    exists.  Checked on the resolved path, because `a/../.notes` and
+    `sub/./../.notes` reach the same `.notes` a plain name does.
+
+    **A refusal leaves nothing behind**, because it happens before anything is
+    created, where the name is still the caller's to change.  `draft` asks this
+    same question so a draft cannot hand `install` a name it will refuse.
+
+    `root` is the folder the name lands in — `skills_dir()` in production, and a
+    test's folder when one calls the module directly.
     """
-    root = skills_dir()
-    final = _within(root, name)
-    if final == root.resolve():
+    base = skills_dir() if root is None else root
+    final = _within(base, name)
+    if final == base.resolve():
         raise ValueError("a skill needs a name")
-    # **The dot rule is about where a name lands, not about how it is spelled.**
-    # `install` stages into `.{name}.installing` and moves the old copy to
-    # `.{name}.replacing`, so the leading dot is reserved for the swap's own
-    # directories — and `scan` refuses to list one so that a `SIGKILL` in that
-    # window cannot become a catalogue row for a name nobody installed.  A skill
-    # that lands in one would therefore install, report success and be
-    # unfindable: no row, no `skill_list` line, and `skill_use` answering that no
-    # such skill exists.  Checked on `final`, because a spelling is not a
-    # location: `a/../.notes` and `sub/./../.notes` reach the same `.notes` a
-    # plain name does, and the check on the raw string passed them — this was the
-    # one guard here not put through the resolution `_within` argues for.
-    # Refused before anything is created, where the name is still the caller's to
-    # change.
-    inside = final.relative_to(root.resolve())
+    inside = final.relative_to(base.resolve())
     if any(part.startswith(".") for part in inside.parts):
         raise ValueError(
             f"{name!r} installs into {inside.as_posix()!r}, and a dot-directory "
@@ -645,18 +647,6 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
             f"never lists one, so this would be a skill nothing could find. Name "
             f"it without a dot."
         )
-    # **A skill is one directory directly under `skills/`, and its name is that
-    # directory's own.**  Same failure as the dot rule, two other spellings, and
-    # both used to install.  `scan` walks the *direct children*, so `a/b` landed
-    # at `skills/a/b` — the per-file `mkdir(parents=True)` made `skills/a` on the
-    # way — and the tool answered "`a/b` is installed … a search finds it from
-    # your next one", while there was no `skill_list` line, no catalogue row, and
-    # `skill_use("a/b")` answered that no skill was called that.  And a trailing
-    # separator staged through `skills/.one`, which nothing removed: the name
-    # landed in `one`, but the answer named `one/`, a spelling no reader of the
-    # folder ever matches.  Checked on `inside`, so it is the location that
-    # decides — `a/./b` and `a/b` are refused alike — and before anything is
-    # created, so a refusal leaves no directory behind at all.
     if len(inside.parts) != 1 or inside.as_posix() != name:
         raise ValueError(
             f"{name!r} does not name one skill directory: a skill lives at "
@@ -664,21 +654,56 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
             f"this would install where nothing looks for it, or answer about a "
             f"name nothing matches. Name it as the one directory it is."
         )
-    # **The manifest is parsed before anything is written.**  `scan` will refuse
-    # the same header at load, and the install gate is where the caller can
-    # still change it; writing first and failing later would leave a skill on
-    # disk that looks installed and cannot be used.  The parser is the one
-    # loader `scan` uses — one rule, one place (SDD Appendix A).
+    return final
+
+
+def _write(
+    name: str,
+    files: Sequence[Mapping[str, Any]],
+    *,
+    base: Path | None = None,
+) -> Path:
+    """Write *files* as a skill and return where; *base* is what it starts from.
+
+    **Whole or not at all, and never outside its own directory.**  The files are
+    written into a staging directory beside the real one and the real one is
+    swapped in afterwards, so a skill that was interrupted half-written never
+    exists: a model reading a playbook that stops in the middle of a command is
+    worse off than one told the skill is not installed.  A file whose path leaves
+    the skill's directory is refused before anything is created.
+
+    **`base` is the difference between creating and editing.**  `None` writes a
+    new skill from exactly *files*; a directory copies that skill first, so an
+    edit lands over the files it names and leaves every other one — the scripts
+    beside the manifest are not silently deleted by a change to the prose.  The
+    copy is staged and parsed before the swap for the same reason a create is:
+    an edit that would leave a `SKILL.md` the loader refuses must not reach the
+    live folder.
+
+    **The manifest is parsed before the swap.**  `scan` will refuse the same
+    header at load, and this gate is where the caller can still change it;
+    writing first and failing later would leave a skill on disk that looks
+    installed and cannot be used.  The parser is the one loader `scan` uses —
+    one rule, one place (SDD Appendix A).
+    """
+    root = skills_dir()
+    final = _location(name, root)
     manifest = next(
         (one for one in files if str(one.get("path") or "").strip() == MANIFEST),
         None,
     )
-    if manifest is None:
-        raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
-    try:
-        frontmatter(str(manifest.get("content") or ""))
-    except SkillHeaderError as exc:
-        raise ValueError(f"{MANIFEST}: {exc}") from exc
+    if base is None:
+        # **A create needs its manifest in the argument, before anything is
+        # created**, because the folder's rule is that the manifest is what makes
+        # a directory a skill (`scan`): writing three files and no `SKILL.md`
+        # would be an install that reports success and installs nothing anything
+        # can find.
+        if manifest is None:
+            raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
+        try:
+            frontmatter(str(manifest.get("content") or ""))
+        except SkillHeaderError as exc:
+            raise ValueError(f"{MANIFEST}: {exc}") from exc
     # **The swap's own directories are named from the resolved location**, not
     # from the string the caller gave: the name has to be the directory it lands
     # in (the check above), and deriving them from `final.name` is what keeps
@@ -689,6 +714,12 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
     previous = root / f".{final.name}.replacing"
     shutil.rmtree(staging, ignore_errors=True)
     try:
+        if base is not None:
+            # **Symlinks are copied as links, not followed.**  A skill's folder
+            # is the operator's (a copied-in playbook may have one pointing
+            # somewhere else); resolving it here would copy the target into a
+            # skill that then holds a document it never declared.
+            shutil.copytree(base, staging, symlinks=True)
         for one in files:
             relative = str(one.get("path") or "").strip()
             if not relative:
@@ -698,6 +729,17 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
             target.write_text(str(one.get("content") or ""), encoding="utf-8")
         if not (staging / MANIFEST).is_file():
             raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
+        if base is not None:
+            # **The effective manifest is the staged one**, because an edit may
+            # have replaced it or may have left the skill's damaged one in
+            # place.  `_read` is the loader's own read, so a BOM or a non-UTF-8
+            # file is judged exactly where `scan` judges it.
+            try:
+                frontmatter(_read(staging / MANIFEST))
+            except OSError as exc:
+                raise ValueError(f"{MANIFEST}: {exc}") from exc
+            except SkillHeaderError as exc:
+                raise ValueError(f"{MANIFEST}: {exc}") from exc
         # The swap: the live one moves aside, the new one takes its place, and a
         # failure puts the old one back.  `os.replace` cannot do this for a
         # non-empty directory — a rename onto one is refused rather than merged.
@@ -714,6 +756,214 @@ def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return final
+
+
+def install(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
+    """Write a skill — its `SKILL.md` and anything beside it — and return where.
+
+    The create half of `_write`: *files* are the whole skill, so anything the
+    folder held before is gone after the swap.  `edit` is the other half — a
+    change that keeps what it does not name.
+    """
+    return _write(name, files)
+
+
+def edit(name: str, files: Sequence[Mapping[str, Any]]) -> Path:
+    """Change part of an installed skill, keeping every file *files* does not name.
+
+    The edit half of `_write`, and the reason it is a different function from
+    `install`: replacement is right for a draft and wrong for a one-line fix — a
+    model that read a playbook with `skill_use`, changed a step and installed it
+    again would delete the scripts the playbook tells it to run, and nothing in
+    the answer would say so.
+
+    **A name that is not installed is refused**, because an edit that created a
+    skill would be an install wearing the wrong verb: the answer would say a
+    change happened where there was nothing to change.
+
+    `SKILL.md` is not required in *files*, because an edit to a script is a real
+    edit; the manifest the swap would leave behind is parsed either way, so a
+    skill whose header is damaged cannot be half-edited into looking healthy.
+    """
+    skill = find(name)
+    if skill is None:
+        raise ValueError(
+            f"{name!r} is not installed — `install` creates a skill and `edit` "
+            f"changes one; see `scan`."
+        )
+    if not files:
+        raise ValueError("an edit needs at least one file")
+    return _write(skill.directory.name, files, base=skill.directory)
+
+
+#: The host namespace a drafted playbook declares its needs under.  The reader
+#: takes any namespace (`requirements`), so this is not a protocol name; it is
+#: the honest one for a skill written by this system for this system.
+_NAMESPACE = "slife2"
+
+
+def _yaml_scalar(value: str) -> str:
+    """A string as YAML reads it back unchanged.
+
+    JSON is YAML's scalar syntax, so `json.dumps` is the quoting rule: a
+    description with a colon, a quote or a newline is a plain string to the
+    parser rather than a header that stops being a mapping.  `ensure_ascii`
+    stays off so a Chinese description is the same text in the file a person
+    opens.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _requirement_names(raw: Any, key: str) -> list[str]:
+    """One `requires` list: blanks dropped, the wrong shape refused.
+
+    The shape is `_validate_header`'s — a string is one name and a list holds
+    names — so a draft cannot render a declaration the load gate would refuse.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not all(isinstance(one, str) for one in raw):
+        raise ValueError(f"`requires.{key}` is not a string or a list of strings")
+    return [one.strip() for one in raw if one.strip()]
+
+
+def _declared_requirements(
+    requires: Mapping[str, Any] | None,
+) -> dict[str, list[str]]:
+    """`requires` as the header's declaration, or `{}` for none.
+
+    **A key this build does not read is refused, not dropped.**  A typo such as
+    `bin` for `bins` would otherwise render a playbook that declares nothing
+    about the program its steps run — the silence `Requirements` exists to
+    remove, introduced by the tool that was supposed to prevent it.
+    """
+    if not requires:
+        return {}
+    if not isinstance(requires, Mapping):
+        raise ValueError("`requires` is a mapping of `env` and `bins`")
+    unknown = sorted(set(requires) - {"env", "bins"})
+    if unknown:
+        raise ValueError(
+            f"`requires` has {unknown[0]!r}, which no reader knows — a playbook "
+            f"declares `env` names and `bins` programs"
+        )
+    declared: dict[str, list[str]] = {}
+    for key in ("env", "bins"):
+        names = _requirement_names(requires.get(key), key)
+        if names:
+            declared[key] = names
+    return declared
+
+
+def _item(prefix: str, text: str, indent: str) -> list[str]:
+    """One Markdown list item, with its continuation lines kept inside it.
+
+    A step may be a command with a fenced block under it.  A continuation stays
+    in the item only when it is indented to the marker's content, so every line
+    after the first is indented — a step whose second line is a command is then
+    still that step rather than a paragraph that ended the list.
+    """
+    first, *rest = text.splitlines()
+    return [
+        f"{prefix}{first}",
+        *(f"{indent}{line}" if line else "" for line in rest),
+    ]
+
+
+def _render(
+    name: str,
+    description: str,
+    steps: Sequence[str],
+    notes: Sequence[str],
+    requires: Mapping[str, Sequence[str]],
+) -> str:
+    """The `SKILL.md` a workflow becomes."""
+    lines = [
+        _FENCE,
+        f"name: {_yaml_scalar(name)}",
+        f"description: {_yaml_scalar(description)}",
+    ]
+    if requires:
+        block = {key: list(value) for key, value in requires.items()}
+        metadata = {_NAMESPACE: {"requires": block}}
+        lines.append(f"metadata: {json.dumps(metadata, ensure_ascii=False)}")
+    lines += [
+        _FENCE,
+        "",
+        f"# {name}",
+        "",
+        description,
+        "",
+        "## Steps",
+    ]
+    for number, step in enumerate(steps, start=1):
+        lines += _item(f"{number}. ", step, "   ")
+    if notes:
+        lines += ["", "## Notes"]
+        for note in notes:
+            lines += _item("- ", note, "  ")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def draft(
+    name: str,
+    description: str,
+    steps: Sequence[str],
+    notes: Sequence[str] = (),
+    requires: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A workflow as a playbook: the `files` argument `install` takes.
+
+    **The answer is a draft, and this writes nothing.**  The writer is `_write`,
+    reached through `install`/`edit` and their tools; a second route to the
+    folder would be a second place where the name's rules and the header's
+    parser could disagree.  What this adds is the half that is not a file
+    operation: the manifest a model would otherwise have to spell from memory —
+    the fence, a YAML-safe description, the `requires` declaration — rendered
+    from fields the tool asks for by name.
+
+    **The fields are the ones a reader will need.**  `description` is what a
+    search ranks and `skill_list` prints, so it is required: a playbook with
+    none is one nothing looks for.  `steps` is the workflow itself.  `notes` is
+    the half a procedure loses when it is written down — the order that is easy
+    to get wrong, the check that says it worked.  `requires` is what the steps
+    assume is already present, rendered into the header where `readiness` finds
+    it.
+
+    **The rendered text goes through the install gate's own parser**
+    (`frontmatter`), so a draft is either a `SKILL.md` `install` would accept or
+    a refusal here — never a file that looks installed and cannot be read.
+
+    Raises:
+        ValueError: If the name would install where nothing looks, the
+            description or a step is empty, or `requires` is not a shape a
+            header can declare.
+    """
+    name = name.strip()
+    # The name's rules are `_location`'s, not a second copy: a draft that
+    # accepted a name the install would refuse is a round trip wasted at the
+    # second call.
+    _location(name)
+    description = description.strip()
+    if not description:
+        raise ValueError(
+            "a skill needs a description — it is the line a search finds the "
+            "playbook by, and a `SKILL.md` without one is one nothing looks for"
+        )
+    procedure = [str(step).strip() for step in steps]
+    if not procedure:
+        raise ValueError("a workflow needs at least one step")
+    if any(not step for step in procedure):
+        raise ValueError("every step must say something")
+    remarks = [str(note).strip() for note in notes if str(note).strip()]
+    declared = _declared_requirements(requires)
+    text = _render(name, description, procedure, remarks, declared)
+    # The install gate's parser, before the caller can hand this to `install`:
+    # a renderer bug is then a failed draft, not a skill that scans as damaged.
+    frontmatter(text)
+    return {"name": name, "files": [{"path": MANIFEST, "content": text}]}
 
 
 def remove(name: str) -> bool:
@@ -782,6 +1032,8 @@ __all__ = [
     "Skill",
     "SkillHeaderError",
     "document",
+    "draft",
+    "edit",
     "entry_for",
     "find",
     "frontmatter",

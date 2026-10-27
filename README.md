@@ -619,7 +619,7 @@ for its own section:
 | `mcp:` | `mcp_set`, `mcp_list`, `mcp_list_tools`, `mcp_remove`, `mcp_set_enabled` |
 | `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |
 | `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
-| `skills:` | `skill_set`, `skill_list`, `skill_remove`, `skill_set_enabled` |
+| `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
 | `providers:` and `default:` | `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
@@ -730,6 +730,13 @@ the `skills:` section, resolved through the same chain as any other secret.
 depends on it. `skill_set` writes that entry's `env:` when it is given one —
 omit it on a reinstall to keep what is there — and `skill_remove` deletes the
 entry along with the folder.
+
+`skill_draft` turns a workflow into a `SKILL.md` without writing anything: its
+answer is the `files` argument `skill_set` or `skill_edit` takes, so a procedure
+the model just followed can be saved, read back and corrected before it is
+installed. A new skill is `skill_set`; a change to one already installed is
+`skill_edit`, which writes only the files it names and keeps the rest — the safe
+way to fix a step without deleting the scripts beside it.
 
 `cli:` entries describe programs already installed on the machine. Every entry is
 a catalogue row (`cli:yt-dlp`), so `tool_search` can find it by what it does.

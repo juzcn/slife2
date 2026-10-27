@@ -15,6 +15,8 @@ import pytest
 from slife2.plugins.skills.playbooks import (
     SkillHeaderError,
     document,
+    draft,
+    edit,
     find,
     frontmatter,
     install,
@@ -274,6 +276,149 @@ def test_install_refuses_a_header_that_does_not_parse(root: Path) -> None:
         )
     assert not (root / "one").exists()
     assert not (root / ".one.installing").exists()
+
+
+# --- drafting a playbook from a workflow --------------------------------------
+
+
+def test_a_workflow_drafts_a_manifest_the_install_gate_accepts(root: Path) -> None:
+    """**The draft's answer is the `files` install takes, and its header is the
+    one the loader reads.**  A description with a colon is the case the header's
+    quoting exists for; a draft that broke it would be refused at install."""
+    drafted = draft(
+        "note-taking",
+        "Keep notes: one file per idea.",
+        ["Write the note.", "Save it."],
+        notes=["Use the same name as the idea."],
+    )
+    text = drafted["files"][0]["content"]
+    header = frontmatter(text)
+
+    assert drafted["files"][0]["path"] == "SKILL.md"
+    assert header["name"] == "note-taking"
+    assert header["description"] == "Keep notes: one file per idea."
+    assert "1. Write the note." in text
+    assert "2. Save it." in text
+    assert "## Notes" in text and "same name as the idea" in text
+    assert not (root / "note-taking").exists(), "a draft writes nothing"
+
+
+def test_a_draft_declares_its_requirements_where_the_reader_finds_them(
+    root: Path,
+) -> None:
+    """The declaration is not prose: it goes into the header's `metadata`, so
+    `scan` and `readiness` see it — the same place a published skill puts it."""
+    drafted = draft(
+        "search",
+        "Search with the key.",
+        ["Run the search."],
+        requires={"env": ["SEARCH_KEY"], "bins": ["python3"]},
+    )
+    install("search", drafted["files"])
+
+    needs = scan()[0].requires
+    assert needs.env == ("SEARCH_KEY",)
+    assert needs.bins == ("python3",)
+
+
+def test_a_draft_refuses_a_name_the_install_would_refuse(root: Path) -> None:
+    with pytest.raises(ValueError, match="outside"):
+        draft("../outside", "For a job.", ["Step."])
+    with pytest.raises(ValueError, match="dot"):
+        draft(".notes", "For a job.", ["Step."])
+
+
+def test_a_draft_needs_a_description_and_a_step(root: Path) -> None:
+    with pytest.raises(ValueError, match="description"):
+        draft("one", "  ", ["Step."])
+    with pytest.raises(ValueError, match="at least one step"):
+        draft("one", "For a job.", [])
+    with pytest.raises(ValueError, match="every step"):
+        draft("one", "For a job.", ["Step.", "  "])
+
+
+def test_a_mistyped_requirement_is_refused_not_dropped(root: Path) -> None:
+    """`bin` for `bins` would render a playbook that declares nothing about the
+    program its steps run — the silence `Requirements` exists to remove."""
+    with pytest.raises(ValueError, match="no reader knows"):
+        draft("one", "For a job.", ["Step."], requires={"bin": ["curl"]})
+
+
+# --- editing one ---------------------------------------------------------------
+
+
+def test_an_edit_keeps_every_file_it_does_not_name(root: Path) -> None:
+    """**The difference from `install`.**  A model that fixes a step must not
+    delete the scripts the playbook tells it to run; the edit copies the live
+    folder forward and overwrites only what it was given."""
+    install(
+        "search",
+        [
+            {"path": "SKILL.md", "content": manifest_text("search")},
+            {"path": "scripts/search.py", "content": "print('found')\n"},
+        ],
+    )
+    edit(
+        "search",
+        [{"path": "SKILL.md", "content": manifest_text("search", "New.")}],
+    )
+
+    folder = root / "search"
+    assert (folder / "scripts" / "search.py").read_text(encoding="utf-8") == (
+        "print('found')\n"
+    )
+    assert "New." in (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert scan()[0].description == "New."
+
+
+def test_an_edit_can_change_a_script_and_leave_the_manifest_alone(root: Path) -> None:
+    install(
+        "search",
+        [
+            {"path": "SKILL.md", "content": manifest_text("search")},
+            {"path": "scripts/search.py", "content": "print('old')\n"},
+        ],
+    )
+    edit("search", [{"path": "scripts/search.py", "content": "print('new')\n"}])
+
+    assert "Step." in (root / "search" / "SKILL.md").read_text(encoding="utf-8")
+    assert "new" in (root / "search" / "scripts" / "search.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_an_edit_refuses_a_skill_that_is_not_installed(root: Path) -> None:
+    """An edit that created one would be an install wearing the wrong verb."""
+    with pytest.raises(ValueError, match="not installed"):
+        edit("nothing", [{"path": "SKILL.md", "content": manifest_text("nothing")}])
+    assert not (root / "nothing").exists()
+
+
+def test_an_edit_cannot_half_fix_a_damaged_skill(root: Path) -> None:
+    """**The staged manifest is parsed before the swap.**  Editing a script of a
+    skill whose header is damaged must not report success: the result would
+    still be unreadable, and the live folder is left as it was."""
+    skill(root, "damaged", header="name: [unclosed\n")
+    with pytest.raises(ValueError, match="not YAML"):
+        edit("damaged", [{"path": "scripts/run.py", "content": "print('x')\n"}])
+
+    assert not (root / "damaged" / "scripts").exists()
+    assert not (root / ".damaged.installing").exists()
+
+
+def test_an_edit_can_repair_a_damaged_skill(root: Path) -> None:
+    """The same parse, seen from the other side: replacing the manifest is the
+    edit that makes the skill readable again."""
+    skill(root, "damaged", header="name: [unclosed\n")
+    edit("damaged", [{"path": "SKILL.md", "content": manifest_text("damaged")}])
+
+    (found,) = scan()
+    assert (found.name, found.error) == ("damaged", "")
+
+
+def manifest_text(name: str, description: str = "what it is for") -> str:
+    """The smallest `SKILL.md` these tests write."""
+    return f"---\nname: {name}\ndescription: {description}\n---\n\nStep.\n"
 
 
 # --- what a skill says it needs -----------------------------------------------

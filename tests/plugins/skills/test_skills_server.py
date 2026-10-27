@@ -81,11 +81,11 @@ async def test_the_reader_is_the_one_marked_tool_and_the_declaration_is_not(
     """**The audience mark decides what the model may call**, and it is the only
     thing that does.
 
-    `skill_use` is the model's, and so are the four tools that install, remove
-    and switch playbooks.  `list_sources` is the hub's, and it has to stay out of
-    the model's list for the reason the whole gate exists: a tool that declares
-    rows is a tool that could declare a category — and a plugin able to name its
-    own category could offer the model `remember`.
+    `skill_use` is the model's, and so are the tools that draft, install,
+    change, remove and switch playbooks.  `list_sources` is the hub's, and it
+    has to stay out of the model's list for the reason the whole gate exists: a
+    tool that declares rows is a tool that could declare a category — and a
+    plugin able to name its own category could offer the model `remember`.
     """
     skill(isolated_runtime, "one")
     async with Client(build_server(default_config())) as client:
@@ -93,8 +93,10 @@ async def test_the_reader_is_the_one_marked_tool_and_the_declaration_is_not(
 
     assert set(listed) == {
         USE_TOOL,
+        "skill_draft",
         "skill_list",
         "skill_set",
+        "skill_edit",
         "skill_remove",
         "skill_set_enabled",
         LIST_SOURCES,
@@ -234,8 +236,7 @@ async def test_the_two_names_read_one_entry_and_agree(
     )
     path = isolated_runtime / "slife2.yaml"
     path.write_text(
-        REQUIRED
-        + "skills:\n"
+        REQUIRED + "skills:\n"
         "  the-name:\n"
         "    env: {SOME_KEY: a-real-key}\n"
         "  the-folder:\n"

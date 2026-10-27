@@ -560,7 +560,7 @@ skills:
 | `mcp:` | `mcp_set`、`mcp_list`、`mcp_list_tools`、`mcp_remove`、`mcp_set_enabled` |
 | `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |
 | `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
-| `skills:` | `skill_set`、`skill_list`、`skill_remove`、`skill_set_enabled` |
+| `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
 | `providers:` 与 `default:` | `model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），并在跨进程锁下执行。
@@ -654,6 +654,12 @@ Skill 可以在头部声明环境变量要求。值来自 `skills:` 配置节，
 链解析。如果缺少 key，`skill_use` 会在模型执行依赖它的指令之前报告。`skill_set`
 在收到 `env:` 时写入该条目的环境变量（重装时省略则保留原值），`skill_remove`
 则连同目录一起删除该条目。
+
+`skill_draft` 把一段 workflow 变成 `SKILL.md`，但不写盘：它的返回值就是
+`skill_set` 或 `skill_edit` 接收的 `files`。模型刚做过一遍的流程因此可以先落成
+文档、读一遍、改好，再安装。新 skill 用 `skill_set`；已安装的 skill 用
+`skill_edit`——它只写你点名的文件，其余原样保留，所以改一步不会把旁边的脚本
+一起删掉。
 
 `cli:` 条目描述本机已经安装的程序。每个条目都是目录中的一行（`cli:yt-dlp`），
 因此 `tool_search` 可以按功能找到它。该行不是可调用工具，也没有加载状态。目前

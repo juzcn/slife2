@@ -1,4 +1,5 @@
-"""`slife2-skills`' tools that write the folder: install, remove, switch.
+"""`slife2-skills`' tools that author and change the folder: draft, install,
+edit, remove, switch.
 
 The one family whose install is *files* rather than a config line, and the only
 place in this system where a model names paths on the operator's machine.  What
@@ -570,3 +571,147 @@ async def test_the_listing_says_what_each_skill_is_for_and_what_it_needs(
     assert row["state"] == "on"
     assert row["description"] == "Needs a key."
     assert "SOME_KEY" in row["requirements"], "and whether it has been supplied"
+
+
+# --- drafting a workflow, and changing what it wrote --------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_workflow_drafts_files_the_install_takes_and_reads_at_once(
+    isolated_runtime: Path,
+) -> None:
+    """**The pair, end to end.**  `skill_draft` writes nothing; its answer is
+    exactly the `files` argument `skill_set` takes, and the installed skill is
+    readable and catalogued from the same moment."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        drafted = await ask(
+            client,
+            "skill_draft",
+            name="browser-setup",
+            description="Set up the browser harness and check it drives Chrome.",
+            steps=[
+                "Run `browser-harness --doctor`.",
+                "Enable remote debugging if it says so.",
+            ],
+            notes=["The CDP target order is not the visible tab order."],
+            requires={"bins": ["browser-harness"], "env": ["CDP_URL"]},
+        )
+        assert not (isolated_runtime / "skills" / "browser-setup").exists()
+
+        installed = await ask(
+            client, "skill_set", name=drafted["name"], files=drafted["files"]
+        )
+        read = await ask_text(client, USE_TOOL, name="browser-setup")
+
+    assert installed == {"name": "browser-setup", "state": "on", "files": 1}
+    assert "1. Run `browser-harness --doctor`." in read
+    assert "CDP target order" in read
+    assert "CDP_URL" in read, "the declaration is in the document the reader gets"
+
+
+@pytest.mark.asyncio
+async def test_a_draft_refuses_a_name_the_install_would_refuse(
+    isolated_runtime: Path,
+) -> None:
+    """The draft asks `install`'s question, so a refused name is refused before
+    the caller has spent the install call on it."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError) as raised:
+            await client.call_tool(
+                "skill_draft",
+                {
+                    "name": "../outside",
+                    "description": "For a job.",
+                    "steps": ["Do it."],
+                },
+            )
+
+    assert "outside" in str(raised.value)
+    assert not (isolated_runtime / "outside").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_changes_only_what_it_names(isolated_runtime: Path) -> None:
+    """**The difference from `skill_set` is what makes a re-edit safe.**  The
+    script stays when the prose changes, and the tool answers with what it wrote
+    rather than with a whole-skill replacement the caller did not ask for."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        await ask(
+            client,
+            "skill_set",
+            name="search",
+            files=files(
+                manifest("search", description="Old."),
+                **{"scripts/search.py": "print('old')\n"},
+            ),
+        )
+        changed = await ask(
+            client,
+            "skill_edit",
+            name="search",
+            files=[
+                {"path": "SKILL.md", "content": manifest("search", description="New.")}
+            ],
+        )
+        read = await ask_text(client, USE_TOOL, name="search")
+
+    folder = isolated_runtime / "skills" / "search"
+    assert changed == {"name": "search", "files": 1}
+    assert (folder / "scripts" / "search.py").read_text(encoding="utf-8") == (
+        "print('old')\n"
+    )
+    assert "New." in read
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_skill_that_is_not_there_is_refused(
+    isolated_runtime: Path,
+) -> None:
+    """An edit that created one would be an install wearing the wrong verb."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError, match="not installed"):
+            await client.call_tool(
+                "skill_edit",
+                {
+                    "name": "nothing",
+                    "files": [{"path": "SKILL.md", "content": manifest("nothing")}],
+                },
+            )
+
+    assert not (isolated_runtime / "skills" / "nothing").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_cannot_write_outside_the_skill_either(
+    isolated_runtime: Path,
+) -> None:
+    """The same boundary as `skill_set`, on the other write path: a refused edit
+    leaves the installed skill exactly as it was."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        await ask(
+            client,
+            "skill_set",
+            name="search",
+            files=files(manifest("search")),
+        )
+        before = (isolated_runtime / "skills" / "search" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        with pytest.raises(ToolError, match="outside"):
+            await client.call_tool(
+                "skill_edit",
+                {
+                    "name": "search",
+                    "files": [{"path": "../escape.txt", "content": "no"}],
+                },
+            )
+
+    assert not (isolated_runtime / "escape.txt").exists()
+    assert (isolated_runtime / "skills" / "search" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == before

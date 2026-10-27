@@ -266,6 +266,16 @@ writes nothing, and the copied-in skill stays visible as an `error` row that
 `skill_use` refuses. A `SKILL.md` with no frontmatter is a prose skill and is
 not damage.
 
+`skill_draft` renders a playbook from a workflow and runs the same parser before
+it answers, so a draft is either a `SKILL.md` `install` would accept or a
+refusal; it writes nothing and its answer is the `files` argument the writes
+take. `install` (through `skill_set`) replaces a skill whole — the files it is
+given are the whole skill — while `edit` (through `skill_edit`) copies the
+installed folder forward and writes only the files it names, then parses the
+manifest the swap would leave behind before swapping. `remove` deletes the
+folder and its `skills:` entry. A skill is therefore authored, re-edited and
+deleted through the same folder rules, with one writer staging and swapping.
+
 ### 2.7 Key design decisions
 
 | Decision | Choice | Consequence |
