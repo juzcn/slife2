@@ -9,6 +9,12 @@ The tool descriptions are the authority on each tool. This page is what no singl
 ## Finding and loading
 
 - The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable. Search before concluding a capability is missing.
+- A tool can answer "not in the catalogue yet" while the catalogue is still starting. That is not a missing capability: retry it in a few seconds.
+
+## The turn you are in
+
+- Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now` and `token-usage`.
+- A `[TURN:{…}]` footnote records when a past turn ran.
 
 ## Built-in tools
 

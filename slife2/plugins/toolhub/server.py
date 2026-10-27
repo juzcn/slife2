@@ -1092,8 +1092,9 @@ class DeclaredSource:
     description: str
     transport: str
 
-    def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
-        """This source's row in `servers()`.
+    @property
+    def state(self) -> str:
+        """One word for this source's link, and `snapshot` reports it.
 
         **`off` is the fourth word, and the one that keeps a switched-off source
         reportable.**  Without it the other three all lie about it: nothing was
@@ -1105,20 +1106,22 @@ class DeclaredSource:
         had to be added rather than the row dropped.
         """
         if not self.enabled:
-            state = "off"
-        elif self.up:
-            state = "ready"
-        elif self.error:
-            state = "failed"
-        else:
-            # Declared, enabled and not answering, with nothing to say about it:
-            # an entry whose plugin has it but has not reached it yet.
-            state = "connecting"
+            return "off"
+        if self.up:
+            return "ready"
+        if self.error:
+            return "failed"
+        # Declared, enabled and not answering, with nothing to say about it: an
+        # entry whose plugin has it but has not reached it yet.
+        return "connecting"
+
+    def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
+        """This source's row in `servers()`; `state` is the property beside this."""
         return _server_row(
             name=self.name,
             kind=self.category,
             transport=self.transport,
-            state=state,
+            state=self.state,
             counts=counts,
             description=self.description,
             error=self.error,
@@ -1226,6 +1229,16 @@ class Upstream:
         """
         return self._connection.usable
 
+    @property
+    def state(self) -> str:
+        """One word for this link, in `Connection.state`'s vocabulary.
+
+        A property rather than reading `snapshot()["state"]` in the one caller
+        that needs the word alone: building a report to ask a yes/no question is
+        a second shape for the same fact (`catalogue_starting`).
+        """
+        return self._connection.state
+
     def snapshot(self, counts: Mapping[str, int] | None = None) -> dict[str, Any]:
         """This server's row in `servers()`, and in a log line.
 
@@ -1238,7 +1251,7 @@ class Upstream:
             name=self.settings.name,
             kind=self.settings.kind,
             transport=self.settings.transport,
-            state=self._connection.state,
+            state=self.state,
             counts=counts,
             description=self.settings.description,
             error=self._connection.error,
@@ -3404,6 +3417,32 @@ def build_server(
             absent="in the catalogue",
         )
 
+    def catalogue_starting() -> bool:
+        """Whether a missing row may still arrive — the transient half of `tool_exists`.
+
+        **A row is written by a merge, and a merge takes time.**  The hub's
+        start-up pass connects every source and writes each one's tools in turn,
+        so a session's first turn can ask for a tool whose server has already
+        answered and whose row has not been written yet.  `tool_exists` answered
+        `exists: false` there, and the registry turned that into "no such tool" —
+        true about the file, false about the machine, and the reason a model went
+        searching for a tool it was about to have.
+
+        Three states are that window, and each is a fact this process already
+        holds: a refresh is running (the declaration lock, or the background
+        task); a direct source is still connecting, so its list is not in hand;
+        or a declared source is enabled, not up and not failed — the
+        `connecting` word its own `state` reports.  A source that failed is not
+        one of them: nothing is going to write its rows until somebody fixes it.
+        """
+        if declarations().lock.locked():
+            return True
+        if refreshing is not None and not refreshing.done():
+            return True
+        if any(one.state == "connecting" for one in upstreams):
+            return True
+        return any(one.state == "connecting" for one in declarations().held.values())
+
     @mcp.tool(name="tool_exists")
     async def tool_exists(name: str) -> dict[str, Any]:
         """Whether the catalogue holds a tool under this name — the agent's question.
@@ -3415,8 +3454,24 @@ def build_server(
         not have, and only the catalogue can tell them apart: "not in your list"
         is not "not a tool", and a hint that treats the two alike sends the model
         searching for a name it already holds.
+
+        **A missing row is two answers, and the second is why this is not a
+        boolean.**  A name no source is going to write is a capability this
+        machine does not have; a name whose row is being written — the start-up
+        merge is a pass over every source, and a first turn can arrive inside it
+        — is one the model should retry rather than replace.  `starting` is that
+        second fact, and it is only meaningful when `exists` is false.
+
+        Returns:
+            `exists` — whether the catalogue holds a row under this name, loaded
+            or not; `starting` — whether the catalogue is still being written,
+            so a missing row may arrive without anything being wrong.
         """
-        return {"exists": await catalogue.route(name) is not None}
+        found = await catalogue.route(name)
+        return {
+            "exists": found is not None,
+            "starting": found is None and catalogue_starting(),
+        }
 
     @mcp.tool
     async def _func_tool_unload(names: list[str] | None = None) -> dict[str, Any]:

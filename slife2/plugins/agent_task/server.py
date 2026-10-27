@@ -100,10 +100,11 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
+from slife2.libs.turn.context import context_usage, turn_prompt_note, with_lead
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import render_instruction, render_system_prompt
-from slife2.libs.turn.tools import ToolRegistry
+from slife2.libs.turn.tools import CatalogueAnswer, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -480,8 +481,8 @@ def build_server(
         the hub advertises.
         """
 
-        async def catalogue_has(name: str) -> bool:
-            """Whether the catalogue holds a name outside this request's list."""
+        async def catalogue_has(name: str) -> CatalogueAnswer:
+            """What the catalogue says about a name outside this request's list."""
             return await tool_exists(await hub(), name)
 
         return ToolRegistry(
@@ -560,7 +561,7 @@ def build_server(
 
     async def restore(
         task: AgentTask, head: list[Message]
-    ) -> tuple[list[Message], list[int], int]:
+    ) -> tuple[list[Message], list[int], int, int]:
         """Put the conversation back on the context it had when it last stopped.
 
         **The agent's conversation, under the agent's key.**  A task starts from
@@ -568,6 +569,13 @@ def build_server(
         whole difference between a task and a stranger.  Called once, when the
         loop is built, which is the moment the agent server calls it too — and
         `covered` is every message, since a task has no carried tail.
+
+        The fourth value is the last restored turn's `context_tokens` — the
+        figure the agent's status bar would show, and what the task's
+        `[TURN-PROMPT:]` marker reports.  Zero for a conversation that has never
+        run a turn, and for a row from before the column existed; a value of
+        another type is read the same way, as a display fact rather than a
+        reason to fail the restore.
         """
         payload = tool_payload(
             await (await memory()).call_tool(
@@ -580,7 +588,15 @@ def build_server(
             )
         )
         messages, turn_ids = adopt(payload)
-        return messages, turn_ids, len(messages)
+        context_tokens = 0
+        turns = payload.get("turns")
+        if isinstance(turns, list) and turns:
+            last = turns[-1]
+            if isinstance(last, dict):
+                found = last.get("context_tokens")
+                if isinstance(found, int) and not isinstance(found, bool):
+                    context_tokens = found
+        return messages, turn_ids, len(messages), context_tokens
 
     async def rebuild(
         task: AgentTask,
@@ -694,7 +710,7 @@ def build_server(
         # has moved.  Held here rather than inside `restore`/`rebuild` because
         # they are one step — the second reads what the first answered.
         async with conversation(task):
-            messages, turn_ids, covered = await restore(task, head)
+            messages, turn_ids, covered, context_tokens = await restore(task, head)
             messages, covered = await rebuild(
                 task,
                 messages,
@@ -721,6 +737,17 @@ def build_server(
             # The background-call tools are still in the list like every other
             # model tool; there is simply no task id here for them to answer.
         )
+        # **The task's prompt marker, and no strip after it.**  A task's messages
+        # are not recorded — the answer is what the conversation gains — so
+        # there is no row to keep the marker out of; it is prompt text for this
+        # one turn and goes out of scope with the task.  The context figure is
+        # the restored conversation's last turn, which is the number the agent's
+        # status bar would have shown when the task started.
+        facts: dict[str, Any] = {"now": now()}
+        usage, _used = context_usage(context_tokens, settings.context_window)
+        if usage:
+            facts["token-usage"] = usage
+        opening = with_lead(opening, turn_prompt_note(facts))
         result = await loop.run_turn(messages, opening)
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the

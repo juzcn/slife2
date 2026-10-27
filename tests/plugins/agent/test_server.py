@@ -26,6 +26,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,6 +46,7 @@ from fastmcp.exceptions import ToolError
 from ruamel.yaml import YAML
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import (
     DEFAULT_AGENT,
     LOCAL_AGENT,
@@ -57,7 +59,12 @@ from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
-from slife2.libs.turn.context import TURN_PREFIX, TURN_SUFFIX, turn_footnote
+from slife2.libs.turn.context import (
+    TURN_PREFIX,
+    TURN_PROMPT_PREFIX,
+    TURN_SUFFIX,
+    turn_footnote,
+)
 from slife2.libs.turn.events import (
     MessageCutIn,
     TextDelta,
@@ -267,8 +274,34 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
+def without_prompt(content: Any) -> Any:
+    """One message's content with the per-turn prompt marker taken off the front.
+
+    `[TURN-PROMPT:{…}]` is added to the live user message after the recall and
+    removed before the turn is saved, so a model call in between is its only
+    reader.  Every assertion about what a turn *said* strips it the way it strips
+    the footnote: the marker is the turn's clock, not its words, and leaving it
+    in would make each expectation depend on the minute the test ran.
+
+    A list's marker is its leading text part, which is the shape a message with
+    an attachment has.
+    """
+    if isinstance(content, str):
+        return strip_marker(content, TURN_PROMPT_PREFIX)
+    if isinstance(content, list) and content and content[0].get("type") == "text":
+        text = str(content[0].get("text", ""))
+        stripped = strip_marker(text, TURN_PROMPT_PREFIX)
+        if stripped != text:
+            return (
+                content[1:]
+                if not stripped
+                else [{**content[0], "text": stripped}, *content[1:]]
+            )
+    return content
+
+
 def without_footnote(content: Any) -> Any:
-    """One message's content with the turn footnote taken off the end.
+    """One message's content with the turn prompt and footnote taken off.
 
     A `[TURN:{…}]` footnote is on every user message after its turn is saved,
     so leaving it in would make every assertion about *which turns are in hand*
@@ -280,6 +313,7 @@ def without_footnote(content: Any) -> Any:
     legitimately contain the literal marker in prose, and the footnote is always
     a suffix.  That is the rule the envelope itself follows, for the same reason.
     """
+    content = without_prompt(content)
     if not isinstance(content, str) or not content.endswith(TURN_SUFFIX):
         return content
     start = content.rfind(TURN_PREFIX)
@@ -466,7 +500,11 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
 
     def stream(messages, tools):
         as_sent.append(
-            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+            [
+                f"{m.role}:{without_prompt(m.content)}"
+                for m in messages
+                if m.role != "system"
+            ]
         )
         return inner(messages, tools)
 
@@ -495,6 +533,70 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
 
 
 @pytest.mark.asyncio
+async def test_each_turn_opens_with_its_own_clock_and_context_figure(
+    context, hub
+) -> None:
+    """**The prompt marker is for the turn running, and the row never sees it.**
+
+    `[TURN-PROMPT:{…}]` carries the clock and the status bar's context figure.
+    It is added after the recall and removed before the save, so the first call
+    sees it on the current message, the next call sees the first turn as the row
+    holds it — words and the `[TURN:]` footnote, no prompt marker — and the
+    stored rows are the person's words only.  That is also what keeps it out of
+    search, recall and a later rebuild.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="first",
+                usage=Usage(prompt_tokens=140_000, completion_tokens=127),
+            )
+        ),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    # **Copied at call time**, because the marker is removed from the live
+    # message before the turn is saved: a later read of `backend.calls` sees the
+    # cleaned message, which is the row's shape and not what the model read.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append([str(m.content) for m in messages if m.role == "user"])
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(
+        default_config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    await send(server, "one")
+    await send(server, "two")
+
+    first = as_sent[0][0]
+    assert first.startswith(TURN_PROMPT_PREFIX)
+    end = first.index("] ")
+    facts = json.loads(first[len(TURN_PROMPT_PREFIX) : end])
+    assert datetime.fromisoformat(facts["now"])  # a real clock reading
+    assert facts["token-usage"] == "0 (0.0%)", "no turn had run before this one"
+    assert first[end + 2 :] == "one"
+
+    previous, current = as_sent[1]
+    assert TURN_PROMPT_PREFIX not in previous
+    assert previous.startswith("one [TURN:")
+    assert current.startswith(TURN_PROMPT_PREFIX)
+    end = current.index("] ")
+    second = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
+    assert second["token-usage"] == "140,127 (14.0%)", "the status bar's figure"
+    assert current[end + 2 :] == "two"
+
+    # ...and the record holds no marker.
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    stored = [turn["messages"][0]["content"] for turn in answer.data["turns"]]
+    assert stored == ["one", "two"]
+
+
+@pytest.mark.asyncio
 async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     context, hub
 ) -> None:
@@ -515,12 +617,18 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     # `backend.calls` holds the loop's own Message objects, and the annotation
     # that arrives after the call would otherwise be read back into it.
     as_sent: list[list[str]] = []
+    raw: list[list[str]] = []
     inner = backend.stream
 
     def stream(messages, tools):
         as_sent.append(
-            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+            [
+                f"{m.role}:{without_prompt(m.content)}"
+                for m in messages
+                if m.role != "system"
+            ]
         )
+        raw.append([f"{m.role}:{m.content}" for m in messages if m.role != "system"])
         return inner(messages, tools)
 
     backend.stream = stream  # type: ignore[method-assign]
@@ -530,6 +638,10 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     await send(server, "one", subagent="researcher", channel=inbound)
     await send(server, "two", subagent="researcher", channel=inbound)
 
+    # A subagent gets the same per-turn prompt its maker does, and it is gone
+    # from the turn the next call sees.
+    assert raw[0][0].startswith(f"user:{TURN_PROMPT_PREFIX}")
+    assert TURN_PROMPT_PREFIX not in raw[1][0]
     # A turn's own call cannot see its own footnote — it has no id until it is
     # saved, which is after that call — and the call after it must.
     assert as_sent[0] == ["user:one"]
@@ -845,7 +957,10 @@ async def test_one_server_serves_two_loops_without_mixing_them(context, hub) -> 
         name = "echo"
 
         def stream(self, messages, tools):
-            prompt = messages[-1].content or ""
+            # The per-turn prompt marker is not part of what this test is
+            # echoing: it is about a prompt reaching the right loop, and the
+            # clock would make every reply differ for a reason that is not mixing.
+            prompt = without_prompt(messages[-1].content or "")
 
             async def chunks():
                 yield Chunk(text=f"reply to {prompt}")
@@ -1608,7 +1723,11 @@ async def test_a_failed_turn_is_annotated_when_the_next_turn_settles_its_id(
 
     def stream(messages, tools):
         as_sent.append(
-            [f"{m.role}:{m.content}" for m in messages if m.role != "system"]
+            [
+                f"{m.role}:{without_prompt(m.content)}"
+                for m in messages
+                if m.role != "system"
+            ]
         )
         return inner(messages, tools)
 
@@ -2189,9 +2308,10 @@ async def test_images_reach_the_model_as_content_parts(context, hub, cabinet) ->
     await send(server, "what is this?", images=["data:image/png;base64,AAAA"])
 
     sent = next(m for m in backend.calls[0][0] if m.role == "user")
-    assert isinstance(sent.content, list)
-    assert sent.content[0] == {"type": "text", "text": "what is this?"}
-    assert sent.content[1]["image_url"]["url"].endswith("AAAA")
+    parts = without_prompt(sent.content)
+    assert isinstance(parts, list)
+    assert parts[0] == {"type": "text", "text": "what is this?"}
+    assert parts[1]["image_url"]["url"].endswith("AAAA")
     # **And it is the last message**: nothing the harness adds follows it now
     # that the attachment is the model's own call.  The reply names what was
     # attached, which is what a later turn keeps when the pixels are gone.
@@ -2249,8 +2369,10 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
     # asked for cannot tell by itself.
     asked = next(m for m in backend.calls[0][0] if m.role == "user")
     assert isinstance(asked.content, str)
-    assert asked.content.startswith("look")
-    assert "data:image" not in asked.content
+    text = without_prompt(asked.content)
+    assert isinstance(text, str)
+    assert text.startswith("look")
+    assert "data:image" not in text
 
 
 def carries_an_image(messages) -> bool:

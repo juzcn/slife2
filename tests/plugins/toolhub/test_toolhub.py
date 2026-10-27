@@ -578,7 +578,30 @@ async def test_tool_exists_answers_for_a_catalogued_name_even_unloaded() -> None
 
     assert "turn_search" not in {tool["name"] for tool in listed.data["tools"]}
     assert unloaded.data["exists"] is True
+    assert unloaded.data["starting"] is False, "a row is a row, whatever its state"
     assert missing.data["exists"] is False
+    assert missing.data["starting"] is False, (
+        "every source answered; nothing is pending"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_exists_says_starting_while_a_source_is_connecting() -> None:
+    """**A row that is still being written is not a capability the machine lacks.**
+
+    The start-up merge writes one source's tools at a time, so a first turn can
+    ask for a name whose server has answered and whose row has not landed yet.
+    `starting` is the answer that keeps the model retrying instead of searching
+    for a tool it is about to have; `test_an_uncounted_source_says_not_counted_rather_than_zero`
+    is the `servers()` half of the same state.
+    """
+    answer = one_source(
+        name="nowhere", category="mcp", up=False, rows=None, transport="stdio"
+    )
+    async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        missing = await hub.call_tool("tool_exists", {"name": "somewhere__tool"})
+
+    assert missing.data == {"exists": False, "starting": True}
 
 
 @pytest.mark.asyncio

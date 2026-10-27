@@ -18,7 +18,15 @@ import pytest
 
 from slife2.libs.plugin.protocol import UnreadableAnswer
 from slife2.libs.turn.messages import ToolCall, ToolSpec
-from slife2.libs.turn.tools import Tool, ToolFailed, ToolRegistry
+from slife2.libs.turn.tools import (
+    CATALOGUE_MISSING,
+    CATALOGUE_PRESENT,
+    CATALOGUE_STARTING,
+    CatalogueAnswer,
+    Tool,
+    ToolFailed,
+    ToolRegistry,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -112,8 +120,8 @@ async def test_an_unloaded_tool_is_told_to_load_not_to_search() -> None:
     helps.
     """
 
-    async def known(_name: str) -> bool:
-        return True
+    async def known(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_PRESENT
 
     found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=known)
     text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
@@ -128,8 +136,8 @@ async def test_an_unloaded_tool_is_told_to_load_not_to_search() -> None:
 async def test_a_name_the_catalogue_does_not_hold_is_told_to_search() -> None:
     """The other half: no row anywhere, so searching for *the name* is a dead end."""
 
-    async def missing(_name: str) -> bool:
-        return False
+    async def missing(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_MISSING
 
     found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=missing)
     text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
@@ -141,10 +149,33 @@ async def test_a_name_the_catalogue_does_not_hold_is_told_to_search() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_catalogue_still_starting_is_told_to_retry() -> None:
+    """**A row that is still being written is not a capability the machine lacks.**
+
+    The hub merges one source's tools at a time, and a session's first turn can
+    land inside that pass: the tool's server has answered and its row has not
+    been written yet.  Answering "no such tool" there sends the model searching
+    for a name it is about to have; the next move is to ask again.
+    """
+
+    async def starting(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_STARTING
+
+    found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=starting)
+    text, ok = await found.execute(ToolCall(id="c1", name="deepseek-search__webSearch"))
+
+    assert ok is False
+    assert "not in the catalogue yet" in text
+    assert "retry" in text.lower()
+    assert "does not exist" not in text
+    assert "tool_search" in text, "the fallback if it is still missing"
+
+
+@pytest.mark.asyncio
 async def test_a_catalogue_that_cannot_answer_leaves_the_both_cases_sentence() -> None:
     """A diagnostic may not turn the model's failed call into a failed turn."""
 
-    async def broken(_name: str) -> bool:
+    async def broken(_name: str) -> CatalogueAnswer:
         raise RuntimeError("the hub is gone")
 
     found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=broken)

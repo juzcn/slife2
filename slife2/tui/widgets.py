@@ -64,6 +64,7 @@ from slife2.libs.harness.markers import strip as strip_marker
 # the *shape* rather than any one name, so a third channel is a line here and
 # nothing at all in that module.
 from slife2.libs.host.config import LOCAL, LOCAL_AGENT, REMOTE
+from slife2.libs.turn.context import context_usage
 from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
 from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
@@ -1997,11 +1998,9 @@ class StatusBar(Static):
         # something to say is one nobody knows is there, and the window is a
         # fact about the model rather than about the turn.
         if context_window:
-            used = context_tokens / context_window * 100
+            text, used = context_usage(context_tokens, context_window)
             colour = PALETTE["amber"] if used >= 80 else PALETTE["dim"]
-            parts.append(
-                f"[{colour}]{GLYPHS['up']} {context_tokens:,} ({used:.1f}%)[/]"
-            )
+            parts.append(f"[{colour}]{GLYPHS['up']} {text}[/]")
         elif context_tokens:
             # No window is configured for this model, and inventing one would
             # render a percentage that means nothing.

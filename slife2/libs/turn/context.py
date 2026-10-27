@@ -24,6 +24,17 @@ nothing is the base — where an overriding selection would have discarded the
 context it replaced, so a query that merely failed to match would empty it and
 the turn would be answered from the system prompt alone.  Clearing is only ever
 the explicit clear.
+
+**Two annotations, one for a turn that ran and one for the turn running.**
+`turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
+a row every time a list is built and never stored.  `turn_prompt_note` is
+`[TURN-PROMPT:{…}]`, the clock and the context size at the start of the turn
+about to run: it is added to the user's message *after* the recall has chosen
+the conversation and removed before the turn is saved, so it never reaches the
+row, the index or a rebuild.  The second is the only place a per-turn fact can
+live without becoming a fact about the turn for ever — and its payload is a
+mapping for exactly that reason: what a turn needs to know can grow without
+giving the past a copy of it.
 """
 
 from __future__ import annotations
@@ -106,9 +117,9 @@ KEEP_NONE = "clear"
 #: this envelope with one occupant — and an envelope with one occupant can say
 #: what it holds.  `TURN` is what it holds: the turn this message opened.
 #:
-#: **A name in capitals, a colon, and the payload hard against it.**  Both
+#: **A name in capitals, a colon, and the payload hard against it.**  These
 #: markers have this shape, so the case is what tells them apart — by convention,
-#: and convention is the whole of it: no code reads the case, and the two are
+#: and convention is the whole of it: no code reads the case, and they are
 #: never compared.  What the capitals are meant to say is where the marker lives.
 #: This one is the harness's own annotation, derived every time a message list is
 #: built and never stored, while `[Wechat:{…}]`'s name reads as a word because
@@ -119,6 +130,14 @@ KEEP_NONE = "clear"
 #: to copy wrong.  The space that sets a marker off from the text beside it is
 #: outside the bracket, and it belongs to whoever joins the two.
 TURN_PREFIX = "[TURN:"
+#: The per-turn prompt marker: the clock and the context size at the start of
+#: the turn the model is about to answer.  **A second capitals marker, and the
+#: one that is not derived from a row**: `[TURN:]` is a record of a turn that
+#: ran, while this is a prompt for the turn about to run — added to the user's
+#: message after the recall has chosen the conversation, and removed before the
+#: turn is saved.  It is therefore never stored, never rebuilt, and never seen
+#: by a screen; its only reader is the model that is answering.
+TURN_PROMPT_PREFIX = "[TURN-PROMPT:"
 TURN_SUFFIX = "]"
 
 
@@ -516,6 +535,47 @@ def turn_footnote(
     return json.dumps(payload, ensure_ascii=False)
 
 
+def context_usage(tokens: int, window: int) -> tuple[str, float]:
+    """The status bar's context figure, as text and as a percentage.
+
+    **One formatter, because the bar and the model read the same number.**  The
+    TUI's status bar and the per-turn prompt marker both answer "how full is
+    this conversation", and two `f"{tokens:,} ({used:.1f}%)"` spellings would be
+    two chances to round differently.  `(text, percentage)` because the bar
+    colours the figure by the percentage and the marker only prints it.
+
+    A model with no declared window answers the count alone: a percentage of a
+    window nobody declared is a number that means nothing (`StatusBar` says the
+    same in its own branch).  `""` for zero tokens and no window: there is no
+    figure to show.
+    """
+    if window > 0:
+        used = tokens / window * 100
+        return f"{tokens:,} ({used:.1f}%)", used
+    return (f"{tokens:,}" if tokens else ""), 0.0
+
+
+def turn_prompt_note(facts: Mapping[str, Any]) -> str:
+    """The prompt a turn opens with, built from the facts its caller has.
+
+    **A prompt for the turn about to run, not a record of one.**  It is added to
+    the user's message after the recall has chosen the conversation and removed
+    before the turn is saved, so it never enters the row, the index or a
+    rebuild — the `[TURN:]` footnote is what a later reader sees.
+
+    `facts` is the whole payload, and a mapping rather than a fixed argument
+    list because this is where a per-turn fact belongs as it appears: today
+    `now` and `token-usage`, tomorrow whatever the turn needs and no later turn
+    should remember.  The caller omits what it does not know; a missing key is
+    silence, not a zero.
+    """
+    return (
+        f"{TURN_PROMPT_PREFIX}"
+        f"{json.dumps(dict(facts), ensure_ascii=False)}"
+        f"{TURN_SUFFIX}"
+    )
+
+
 def turn_note(
     turn_id: int,
     created_at: str,
@@ -565,6 +625,44 @@ def with_note(content: Any, note: str) -> Any:
     if isinstance(content, list):
         return [*content, {"type": "text", "text": note}]
     return note
+
+
+def with_lead(content: Any, note: str) -> Any:
+    """A message's content with a leading note — the inverse of `without_lead`.
+
+    Two shapes for `with_note`'s reason, and one rule of its own: the note is
+    joined by a single space that `without_lead` takes back, so the person's own
+    leading whitespace survives the round trip.  A prefix rather than a suffix
+    because the turn's prompt is read before the user's words, while the
+    `[TURN:]` footnote is a record read after them.
+    """
+    if isinstance(content, str):
+        return f"{note} {content}" if content.strip() else note
+    if isinstance(content, list):
+        return [{"type": "text", "text": note}, *content]
+    return note
+
+
+def without_lead(content: Any, note: str) -> Any:
+    """`with_lead`'s inverse, and the reason it is a pair rather than a strip.
+
+    **Exactly the note and its one joining space**, not `lstrip`: the person's
+    text is not trimmed (`with_note`'s rule), and `markers.strip` is a display
+    function that strips the whitespace after a marker.  A content that does not
+    start with the note is returned unchanged — a turn may have been folded or
+    repaired before this ran, and removing something that is not there is the
+    one way this could eat a message.
+    """
+    if isinstance(content, str):
+        if content == note:
+            return ""
+        lead = f"{note} "
+        return content[len(lead) :] if content.startswith(lead) else content
+    if isinstance(content, list):
+        if content and content[0] == {"type": "text", "text": note}:
+            return content[1:]
+        return content
+    return content
 
 
 def messages_from_turns(

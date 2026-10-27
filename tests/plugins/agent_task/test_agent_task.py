@@ -40,8 +40,10 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
 from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -388,6 +390,10 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     assert len(users) == 1
     opening = users[0].content
     assert isinstance(opening, str)
+    # A task gets the same per-turn prompt every other conversation does, and
+    # the rendered template follows it.
+    assert opening.startswith(TURN_PROMPT_PREFIX)
+    opening = strip_marker(opening, TURN_PROMPT_PREFIX)
     assert opening.startswith("▸ Agent task: research")
     assert DESCRIPTION in opening
     assert "nobody can answer a question" in opening

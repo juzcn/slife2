@@ -1152,6 +1152,17 @@ Rules:
   newest turn is annotated after it is saved with the same timestamps and
   channel, so the live and rebuilt spelling are byte-identical; a difference
   would cost a prompt-cache miss on every rebuild.
+- **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
+  (`turn_prompt_note`) is added to the live user message *after* the recall has
+  chosen the conversation and removed before the turn is saved
+  (`without_lead`), so it never reaches the row, the index or a rebuild. Its
+  payload is a mapping — today `now` and `token-usage` — because a per-turn
+  fact can grow without giving the past a copy of it. Removing it before
+  `annotate_turn` is what
+  keeps the live and rebuilt messages byte-identical and the marker out of
+  search and recall. The agent, its subagents and an agent task all carry it;
+  a fork's turns are never recorded, so its marker lives only in memory and
+  the same strip removes it there too.
 - **The turn-to-messages builder is one function** (`messages_from_turns`), shared
   by restore and rebuild. Two builders would drift into two conversations.
 
@@ -1526,6 +1537,16 @@ refused call — before returning the answer, so the stamp cannot land after the
 trim. The default of 100 has not been re-measured against a real twenty-server
 configuration; on-demand loading is the mechanism, and the observation that
 would move the number has not been taken.
+
+A call naming a tool outside the request's list is answered by the registry's
+error path, which asks the hub (`tool_exists`). The answer has three values,
+not two: `present` (a row exists; load it with `func_tool_load`), `missing` (no
+row, and nothing is in flight that could write one; `tool_search` finds what
+does the job), and `starting` (the catalogue is still being written — a source
+is connecting or a declaration refresh is running — so retry the call). The
+third exists because the hub merges sources one at a time and a first turn can
+land inside that pass; without it a transient absence read as a capability the
+machine lacks, and the model went searching for a tool it was about to have.
 
 ### 7.5 Catalogue search
 

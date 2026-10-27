@@ -50,8 +50,17 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.plugin.protocol import tool_payload, unreadable
 from slife2.libs.turn.messages import ToolSpec
-from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
-from slife2.libs.turn.tools import Tool, ToolFailed
+from slife2.libs.turn.tools import (
+    CATALOGUE_MISSING,
+    CATALOGUE_PRESENT,
+    CATALOGUE_STARTING,
+    CatalogueAnswer,
+    Tool,
+    ToolFailed,
+)
+from slife2.libs.turn.tools import (
+    FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -296,14 +305,21 @@ async def unload_tools(client: Client) -> dict[str, Any]:
 TOOL_EXISTS = "tool_exists"
 
 
-async def tool_exists(client: Client, name: str) -> bool:
-    """Whether the hub's catalogue holds a tool under this name.
+async def tool_exists(client: Client, name: str) -> CatalogueAnswer:
+    """What the hub's catalogue says about this name.
 
     **The harness's error path**, for a model call that named a tool outside the
     request's list: a catalogued name was unloaded (`func_tool_load` puts it
-    back), and one with no row is a capability this machine does not have
-    (`tool_search` finds what it can do).  The registry cannot tell which from
-    its own list, and the two next steps are different.
+    back), one with no row is a capability this machine does not have
+    (`tool_search` finds what it can do), and one whose row is still being
+    written is a name to ask for again — see `CatalogueAnswer`.  The registry
+    cannot tell which from its own list, and the three next steps are different.
+
+    **The two booleans are one answer here.**  `exists` is the row; `starting`
+    is the catalogue still being written, and it is only meaningful when the row
+    is absent.  An older hub answers `exists` alone, and its `false` is its
+    whole answer — reading an absent `starting` as `false` keeps that hint
+    working; a value of the wrong type is damage and raises.
 
     A hub that cannot be read raises `UnreadableAnswer`; the registry catches it,
     because the call has already failed and its explanation may not turn that
@@ -317,7 +333,14 @@ async def tool_exists(client: Client, name: str) -> bool:
     exists = answer.get("exists")
     if not isinstance(exists, bool):
         raise unreadable("the toolhub", "say whether it holds a tool", answer)
-    return exists
+    if exists:
+        return CATALOGUE_PRESENT
+    starting = answer.get("starting")
+    if starting is None:
+        return CATALOGUE_MISSING
+    if not isinstance(starting, bool):
+        raise unreadable("the toolhub", "say whether it is still starting", answer)
+    return CATALOGUE_STARTING if starting else CATALOGUE_MISSING
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:

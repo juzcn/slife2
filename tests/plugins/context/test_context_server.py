@@ -1455,6 +1455,74 @@ def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:
     assert with_note("", "[TURN:{}]") == "[TURN:{}]"
 
 
+def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
+    """**A prompt for the turn running, not a record of one.**
+
+    `[TURN-PROMPT:{…}]` carries the two facts a turn needs and no later turn
+    should remember: the clock (a restored footnote is history, not now) and the
+    context figure the status bar shows.  The figure is `context_usage`'s, the
+    same function `StatusBar` calls, so the marker cannot round differently from
+    the bar it mirrors.
+    """
+    from slife2.libs.turn.context import (
+        TURN_PROMPT_PREFIX,
+        context_usage,
+        turn_prompt_note,
+    )
+
+    text, used = context_usage(140_127, 1_000_000)
+    assert text == "140,127 (14.0%)"
+    assert round(used, 1) == 14.0
+    # No declared window: the count alone, and nothing for an empty one.
+    assert context_usage(140_127, 0) == ("140,127", 0.0)
+    assert context_usage(0, 0) == ("", 0.0)
+
+    note = turn_prompt_note({"now": "2026-10-27T20:40:34+08:00", "token-usage": text})
+    assert note.startswith(TURN_PROMPT_PREFIX)
+    assert note.endswith("]")
+    payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
+    assert payload == {
+        "now": "2026-10-27T20:40:34+08:00",
+        "token-usage": "140,127 (14.0%)",
+    }
+
+    # A fact the caller does not have is absent, not empty.
+    only_time = turn_prompt_note({"now": "2026-10-27T20:40:34+08:00"})
+    assert json.loads(only_time[len(TURN_PROMPT_PREFIX) : -1]) == {
+        "now": "2026-10-27T20:40:34+08:00"
+    }
+
+
+def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
+    """**The lead's inverse is exact**, so the person's text arrives as written.
+
+    The marker is a prefix on the live user message; `without_lead` takes back
+    exactly the marker and its single joining space, not `lstrip` — a turn that
+    opened with an indented block survives the round trip.  The pair is what
+    keeps the marker out of the row without altering the words it rode in on.
+    """
+    from slife2.libs.turn.context import with_lead, without_lead
+
+    note = '[TURN-PROMPT:{"now":"2026-10-27T20:40:34+08:00"}]'
+    content = "    indented\nsecond line"
+    assert with_lead(content, note) == f"{note} {content}"
+    assert without_lead(with_lead(content, note), note) == content
+    assert with_lead("", note) == note
+    assert without_lead(note, note) == ""
+
+    parts = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+    ]
+    assert with_lead(parts, note)[0] == {"type": "text", "text": note}
+    assert without_lead(with_lead(parts, note), note) == parts
+
+    # A message that does not start with this note is left alone — a turn may
+    # have been folded or repaired before the strip runs.
+    assert without_lead("no marker here", note) == "no marker here"
+    assert without_lead(parts, note) == parts
+
+
 def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
     """**The one source `normalise_ids` exists for, and `parse` refused it.**
 

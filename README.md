@@ -679,10 +679,13 @@ with `since`/`until` accepting an ISO date or a phrase such as `yesterday`,
 filter. None of the tools takes an agent argument: the call carries the
 conversation, so a model reads its own history only.
 
-Each turn in a rebuilt context carries a `[TURN:{…}]` footnote naming its id,
-channel, and span. Capitalized markers are harness annotations; a marker that
-reads as a word, such as `[Wechat:{…}]`, was written by a sender and is stored
-with the message.
+Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and
+`token-usage`; it is prompt text for the turn being answered and is not
+stored. Each turn in a rebuilt context also carries a `[TURN:{…}]` footnote
+naming its id, channel, and span — a record of when that turn ran, so its date
+can be older than today. Capitalized markers are harness annotations; a marker
+that reads as a word, such as `[Wechat:{…}]`, was written by a sender and is
+stored with the message.
 
 The status bar reports the context size left by the last model call and its
 fraction of the model's window. Before each turn, a note names what the context
@@ -710,6 +713,10 @@ loading is what keeps it in the list sent with every request.
 calls them — a plugin's bare name (`turn_read`) or an external server's
 `{server}__{tool}`. Everything else is discovered with `tool_search` and loaded
 with `func_tool_load`.
+
+A call for a tool whose catalogue is still starting answers "not in the
+catalogue yet"; retry it in a few seconds rather than searching for a
+replacement.
 
 The loaded list is bounded by `tool_load.threshold` (default 100). Over the
 limit, the least recently called tools are unloaded; nothing in

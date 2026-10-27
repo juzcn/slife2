@@ -163,7 +163,14 @@ from slife2.libs.plugin.protocol import (
     unreadable,
 )
 from slife2.libs.turn import attachments
-from slife2.libs.turn.context import turn_note, with_note
+from slife2.libs.turn.context import (
+    context_usage,
+    turn_note,
+    turn_prompt_note,
+    with_lead,
+    with_note,
+    without_lead,
+)
 from slife2.libs.turn.events import (
     ContextChosen,
     ToolApprovalRequested,
@@ -176,7 +183,12 @@ from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolFailed, ToolRegistry
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    CatalogueAnswer,
+    ToolFailed,
+    ToolRegistry,
+)
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -861,6 +873,18 @@ class Loop:
     api: str = ""
     model_id: str = ""
     accepts_images: bool = True
+    #: The model's token window, for the per-turn prompt marker's percentage.
+    #: Held with the rest of how this conversation reaches its model (see
+    #: `accepts_images`): a model switch moves it, and a conversation whose
+    #: model left the config keeps the window it started on.
+    context_window: int = 0
+    #: The last turn's last model call, in tokens — the figure the status bar
+    #: shows and the next turn's `[TURN-PROMPT:]` marker reports.  Set from the
+    #: restored last turn and after every turn; 0 for a conversation that has
+    #: not run one.  Not estimated from `messages`: what the bar shows is the
+    #: provider's count, and an estimate of the same list would be a second
+    #: figure that disagrees with it.
+    context_tokens: int = 0
     #: The `_approve` calls this conversation is holding for an answer, by call
     #: id.  On the loop because a turn is what fills and empties it, and the
     #: answer arrives on a *different* call (`answer_approval`) that must not
@@ -1448,12 +1472,13 @@ def build_server(
         from: a clean pair (events.py says why).
         """
 
-        async def catalogue_has(name: str) -> bool:
-            """Whether the catalogue holds a name outside this request's list.
+        async def catalogue_has(name: str) -> CatalogueAnswer:
+            """What the catalogue says about a name outside this request's list.
 
             The registry's error path asks, so a name the budget unloaded is
-            told to load and a name the machine does not have is told to search
-            — the two sentences `ToolRegistry._unknown` keeps apart.
+            told to load, a name the machine does not have is told to search,
+            and a name the catalogue is still being written for is told to retry
+            — the three sentences `ToolRegistry._unknown` keeps apart.
             """
             return await tool_exists(await hub(), name)
 
@@ -1837,6 +1862,7 @@ def build_server(
                 api=provider.api,
                 model_id=settings.model,
                 accepts_images=settings.accepts_images,
+                context_window=settings.context_window,
                 max_iterations=live.agent.max_iterations,
                 messages=messages,
                 lock=asyncio.Lock(),
@@ -2170,6 +2196,20 @@ def build_server(
             )
         )
         _adopt(loop, payload, carried=0)
+        # **The status bar's figure, taken from the turn it restored.**  A window
+        # that has only restored has run no turn of its own, so `context_tokens`
+        # would otherwise be 0 while the bar (which reads the same column,
+        # `tui.app.context_of`) shows the last stored turn's size.  A row from
+        # before the column existed answers 0, which is the bar's own rule for a
+        # size nobody measured; a value of another type is damage and is read
+        # the same way rather than failing a restore over a display fact.
+        turns = payload.get("turns")
+        if isinstance(turns, list) and turns:
+            last = turns[-1]
+            if isinstance(last, dict):
+                tokens = last.get("context_tokens")
+                if isinstance(tokens, int) and not isinstance(tokens, bool):
+                    loop.context_tokens = tokens
         if loop.turn_ids:
             logger.info(
                 "restored %d turn(s) for %s",
@@ -2263,6 +2303,10 @@ def build_server(
         # rebuild; the number is kept in step anyway rather than left to say
         # something untrue.
         loop.covered = len(loop.messages)
+        # The copy is the maker's conversation, so its size is the maker's
+        # figure too: a fork that started its first marker at `0 (0.0%)` would
+        # be reporting a fact about the wrong list.
+        loop.context_tokens = maker.context_tokens
         logger.info(
             "forked %s from %s: %d message(s)",
             describe((loop.agent, loop.subagent)),
@@ -2633,6 +2677,18 @@ def build_server(
             if pairs
             else item.prompt
         )
+        # **The turn's prompt, added after the recall.**  `rebuild_into` has
+        # already chosen the conversation this turn runs on; the marker is
+        # added here so the discriminator never sees it, and removed in the
+        # `finally` below so the row, the next turn's rebuild and the `[TURN:]`
+        # footnote never see it either.  It is a prompt for this turn, not a
+        # record of it.
+        facts: dict[str, Any] = {"now": now()}
+        usage, _used = context_usage(loop.context_tokens, loop.context_window)
+        if usage:
+            facts["token-usage"] = usage
+        lead = turn_prompt_note(facts)
+        user = with_lead(user, lead)
         for refusal in refusals:
             # **Reported, never dropped in silence**: to the caller in the reply
             # below, because a call whose pictures were fewer than it asked for
@@ -2843,6 +2899,20 @@ def build_server(
                 # path where no result exists.
                 outcome.usage = agent_loop.usage
                 outcome.last_usage = agent_loop.last_usage
+                # **The marker leaves as the turn ends**, before the record and
+                # the footnote: it was prompt text for this turn only, and the
+                # message it rode is the one `annotate_turn` appends `[TURN:]`
+                # to after the save.  Leaving it would put the marker in the
+                # row (and so in search and recall), and would make the live
+                # message differ from the one a rebuild produces.
+                if outcome.messages and outcome.messages[0].role == "user":
+                    outcome.messages[0].content = without_lead(
+                        outcome.messages[0].content, lead
+                    )
+                # The number the status bar will show, and the one the next
+                # turn's marker reports — the last call this turn made, not a
+                # sum over the turn (`TurnRecord.context_tokens`).
+                loop.context_tokens = outcome.last_usage.total_tokens
 
     def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
         """What a turn that died at the provider leaves behind, and what it says.
@@ -3599,6 +3669,7 @@ def build_server(
             loop.api = endpoint.api
             loop.model_id = settings.model
             loop.accepts_images = settings.accepts_images
+            loop.context_window = settings.context_window
 
         return {"default": reference, "previous": old or None, "moved": len(mine)}
 

@@ -98,7 +98,7 @@ import logging
 import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from slife2.libs.turn.messages import ToolCall, ToolSpec
 
@@ -115,6 +115,31 @@ logger = logging.getLogger(__name__)
 #: asked is a *failure* the transcript and the window both branch on, and text
 #: returned as if it were an answer is a success they would have to un-believe.
 ToolFunc = Callable[[dict[str, Any]], Awaitable[str | dict[str, Any]]]
+
+#: What the catalogue says about a name a request did not carry.
+#:
+#: **Three answers, because "not in the list" is not "not on the machine".**  A
+#: name can be absent for a reason that heals by itself: the hub merges each
+#: source's tools into the catalogue in turn, and a session's first turn can run
+#: while that pass is still writing.  A boolean made that case look like a
+#: capability this machine lacks, and the model went searching for a tool it was
+#: about to have — `starting` is the answer that says "ask again".
+#:
+#: The words are the registry's, not the wire's: the hub answers
+#: `{"exists": bool, "starting": bool}`, because an older hub still answers the
+#: first field alone, and `slife2.clients.toolclient` is where the pair becomes
+#: this one value.
+CatalogueAnswer = Literal["present", "missing", "starting"]
+
+#: The catalogue holds a row under the name — loaded or not; loading is what
+#: `func_tool_load` is for.
+CATALOGUE_PRESENT: CatalogueAnswer = "present"
+#: No row, and nothing in flight that could add one: this machine does not offer
+#: the name.
+CATALOGUE_MISSING: CatalogueAnswer = "missing"
+#: No row *yet* — a source is connecting or the catalogue is being written, so
+#: the same call may succeed a second later.
+CATALOGUE_STARTING: CatalogueAnswer = "starting"
 
 
 def as_tool_text(answer: Any) -> str:
@@ -502,13 +527,13 @@ class ToolRegistry:
         self,
         tools: list[Tool] | None = None,
         *,
-        exists: Callable[[str], Awaitable[bool]] | None = None,
+        exists: Callable[[str], Awaitable[CatalogueAnswer]] | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {t.spec.name: t for t in tools or []}
-        #: Whether the catalogue holds a name outside this request's list — the
-        #: hub's answer, asked only when the model calls such a name.  `None` is
-        #: a caller with no hub (a unit test), which keeps the sentence that
-        #: covers both causes.
+        #: How to ask the catalogue about a name outside this request's list —
+        #: the hub's answer, asked only when the model calls such a name.  `None`
+        #: is a caller with no hub (a unit test), which keeps the sentence that
+        #: covers every cause.
         self._exists = exists
         #: Built once, because `specs` is read at the top of every step of every
         #: turn: augmenting sixty schemas per request would be paying the
@@ -601,12 +626,17 @@ class ToolRegistry:
     async def _unknown(self, name: str) -> tuple[str, bool]:
         """The sentence for a call outside the request's list, and `ok=False`.
 
-        **Two causes, two next steps.**  A name the catalogue holds was unloaded
-        from this request — the budget's doing, and `func_tool_load` puts it
-        back.  A name the catalogue does not hold is a capability this machine
-        lacks, and searching for *it* is a dead end: `tool_search` finds a tool
-        that does the job instead.  The registry cannot tell them apart from its
-        own list, so it asks the hub (`exists`).
+        **Three causes, three next steps.**  A name the catalogue holds was
+        unloaded from this request — the budget's doing, and `func_tool_load`
+        puts it back.  A name the catalogue does not hold is a capability this
+        machine lacks, and searching for *it* is a dead end: `tool_search` finds
+        a tool that does the job instead.  And a name whose row is still being
+        written — the hub merges one source at a time, and a session's first
+        turn can land inside that pass — is one to ask for again in a moment:
+        telling the model it does not exist there sends it searching for a name
+        it is about to have.  The registry cannot tell them apart from its own
+        list, so it asks the hub (`exists`), and the hub's three answers are
+        `CatalogueAnswer`'s.
 
         **The way back, not the whole list.**  The error is a feedback channel:
         naming the loaded set put up to a hundred names into a result the model
@@ -623,13 +653,21 @@ class ToolRegistry:
             except Exception as exc:  # noqa: BLE001 - a hint, not the call
                 logger.info("could not ask the catalogue about %r: %s", name, exc)
                 found = None
-            if found is True:
+            if found == CATALOGUE_PRESENT:
                 return (
                     f"Error: tool {name!r} is in the catalogue but not in your "
                     f"list. Load it with func_tool_load, then call it.",
                     False,
                 )
-            if found is False:
+            if found == CATALOGUE_STARTING:
+                return (
+                    f"Error: tool {name!r} is not in the catalogue yet — the "
+                    f"catalogue is still loading. Retry this call in a few "
+                    f"seconds; if it is still missing, use tool_search to find "
+                    f"a tool that does this.",
+                    False,
+                )
+            if found == CATALOGUE_MISSING:
                 return (
                     f"Error: no tool named {name!r} exists in the catalogue. "
                     f"Use tool_search to find a tool that does this, then load "

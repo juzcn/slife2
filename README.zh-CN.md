@@ -610,7 +610,9 @@ skills:
 `query` 词把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受 agent
 参数：调用本身携带对话身份，因此模型只能读取自己的历史。
 
-被重建进上下文的每一轮都带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。
+每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now` 和 `token-usage`；它是正在回答的
+这一轮的提示文本，不会存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，
+写明它的 id、channel 和跨度，记录的是那一轮*当时*运行的时间，可能早于今天。
 大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
 是发送者写的，会随消息一起存储。
 
@@ -636,6 +638,9 @@ hub 提供三个集合级工具：
 书写——plugin 工具的裸名（`turn_read`），或外部 server 的
 `{server}__{tool}`。其他一切通过 `tool_search` 发现，再用 `func_tool_load`
 加载。
+
+调用一个目录仍在启动的工具时，会回答 "not in the catalogue yet"；几秒后重试即可，
+不必马上去搜索替代品。
 
 已加载清单由 `tool_load.threshold` 限制（默认 100）。超过限制时，最近最少被
 调用的工具会被卸载；`tool_load.autoload` 中的名字永远不会被卸载。裁剪发生在
