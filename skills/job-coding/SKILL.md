@@ -260,8 +260,15 @@ nothing is holding the tool environment.
   the slife2 venv) and re-check.
 - **Formatting** — run the formatter, or make the same change by hand.
 
-If you have **no shell/terminal capability**, say so in your answer and rely on
-the runtime gate plus the checklist above; do not claim the static check ran.
+**A check you cannot run is a step to search for, not a verdict.** If the
+commands are not immediately available, `tool_search` for a terminal/command
+capability (`sentences=["run a shell command"]`, `keywords=["shell"]`),
+`func_tool_load` it, and run them. The same goes for the executable: the
+project venv, `uv run --with ruff`, or the installed slife2 environment are all
+valid routes. Only when the catalogue really has no such capability, say
+precisely which check was skipped and why; the runtime gate and the checklist
+above still apply. Do not claim the static check ran, and do not stop at "I
+cannot check" before searching.
 
 ## Determinism and trust
 

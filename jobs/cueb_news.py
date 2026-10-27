@@ -15,28 +15,76 @@
 2. 模型只评了部分条目 → 缺的用启发式补齐，同样标注。
 """
 
+from __future__ import annotations
+
 import json
 import re
 from datetime import datetime
 from difflib import SequenceMatcher
+from typing import Any
 
 from slife2.job import call, call_tool
 
 _OFFICIAL = ("cueb.edu.cn", "cueb.edu")
 _MAJOR = (
-    "people.com.cn", "xinhuanet.com", "news.cn", "gmw.cn", "chinadaily.com.cn",
-    "jyb.cn", "eol.cn", "thepaper.cn", "caixin.com", "yicai.com", "21jingji.com",
-    "ce.cn", "cnr.cn", "cctv.com", "chinanews.com.cn", "stcn.com", "cs.com.cn",
+    "people.com.cn",
+    "xinhuanet.com",
+    "news.cn",
+    "gmw.cn",
+    "chinadaily.com.cn",
+    "jyb.cn",
+    "eol.cn",
+    "thepaper.cn",
+    "caixin.com",
+    "yicai.com",
+    "21jingji.com",
+    "ce.cn",
+    "cnr.cn",
+    "cctv.com",
+    "chinanews.com.cn",
+    "stcn.com",
+    "cs.com.cn",
 )
 _PORTAL = (
-    "sina.com.cn", "sina.cn", "sohu.com", "163.com", "qq.com", "ifeng.com",
-    "baidu.com", "toutiao.com", "zhihu.com", "douyin.com", "bilibili.com",
+    "sina.com.cn",
+    "sina.cn",
+    "sohu.com",
+    "163.com",
+    "qq.com",
+    "ifeng.com",
+    "baidu.com",
+    "toutiao.com",
+    "zhihu.com",
+    "douyin.com",
+    "bilibili.com",
 )
 _ALIASES = ("首都经济贸易大学", "首经贸", "CUEB", "cueb")
 _EVENT_WORDS = (
-    "举行", "召开", "举办", "发布", "揭牌", "签约", "启动", "开幕", "闭幕",
-    "入选", "获奖", "荣获", "获批", "成立", "共建", "大会", "论坛", "峰会",
-    "研讨", "讲座", "调研", "座谈", "交流", "合作", "周年",
+    "举行",
+    "召开",
+    "举办",
+    "发布",
+    "揭牌",
+    "签约",
+    "启动",
+    "开幕",
+    "闭幕",
+    "入选",
+    "获奖",
+    "荣获",
+    "获批",
+    "成立",
+    "共建",
+    "大会",
+    "论坛",
+    "峰会",
+    "研讨",
+    "讲座",
+    "调研",
+    "座谈",
+    "交流",
+    "合作",
+    "周年",
 )
 _NON_ARTICLE_PATH = re.compile(
     r"(/(index|default|main)\.(?:html?|php|aspx?|jsp)$)|(/(zzjs|szmpx|zsxx|rcpy|xygk|xkgk)/)",
@@ -87,7 +135,7 @@ def _is_article(link: str, title: str) -> bool:
     return True
 
 
-def _parse_date(text: str):
+def _parse_date(text: str) -> datetime | None:
     if not text:
         return None
     text = text.strip()
@@ -109,7 +157,7 @@ def _fingerprint(title: str) -> str:
     return re.sub(r"[\s\W_]+", "", (title or ""))[:40].lower()
 
 
-def _same_event(a: dict, b: dict) -> bool:
+def _same_event(a: dict[str, Any], b: dict[str, Any]) -> bool:
     fa, fb = _fingerprint(a["title"]), _fingerprint(b["title"])
     if fa and fa == fb:
         return True
@@ -119,7 +167,9 @@ def _same_event(a: dict, b: dict) -> bool:
     return False
 
 
-def _heuristic(link: str, title: str, snippet: str, date_text: str, reports: int) -> int:
+def _heuristic(
+    link: str, title: str, snippet: str, date_text: str, reports: int
+) -> int:
     d = _domain(link)
     if any(d.endswith(x) for x in _OFFICIAL):
         src = 20.0
@@ -130,17 +180,26 @@ def _heuristic(link: str, title: str, snippet: str, date_text: str, reports: int
     else:
         src = 7.0
     published = _parse_date(date_text)
-    fresh = 15.0 if published is None else max(0.0, 15.0 - (datetime.now() - published).days)
+    fresh = (
+        15.0
+        if published is None
+        else max(0.0, 15.0 - (datetime.now() - published).days)
+    )
     keyword = 20.0 if any(a in (title or "") for a in _ALIASES) else 5.0
-    event = min(20.0, sum(1 for w in _EVENT_WORDS if w in (title or "") + " " + (snippet or "")) * 7.0)
+    event = min(
+        20.0,
+        sum(1 for w in _EVENT_WORDS if w in (title or "") + " " + (snippet or ""))
+        * 7.0,
+    )
     spread = min(25.0, 10.0 * max(0, reports - 1))
     return int(max(0, min(100, round(src + fresh + keyword + event + spread))))
 
 
-async def _fetch(keyword: str) -> tuple:
-    warnings, raw = [], []
+async def _fetch(keyword: str) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    raw: list[dict[str, Any]] = []
 
-    async def serper(q):
+    async def serper(q: str) -> None:
         result = await call_tool(
             "serper__google_search", {"q": q, "gl": "cn", "hl": "zh-cn", "num": 8}
         )
@@ -149,16 +208,28 @@ async def _fetch(keyword: str) -> tuple:
             return
         try:
             payload = json.loads(result.text)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             warnings.append("serper: 返回不是合法 JSON")
             return
-        for item in payload.get("organic") or []:
-            raw.append({
-                "title": item.get("title") or "",
-                "url": item.get("link") or "",
-                "snippet": re.sub(r"\s+", " ", item.get("snippet") or "")[:180],
-                "date": item.get("date") or "",
-            })
+        if not isinstance(payload, dict):
+            warnings.append("serper: 返回不是对象")
+            return
+        organic = payload.get("organic")
+        if not isinstance(organic, list):
+            return
+        for item in organic:
+            if not isinstance(item, dict):
+                continue
+            raw.append(
+                {
+                    "title": str(item.get("title") or ""),
+                    "url": str(item.get("link") or ""),
+                    "snippet": re.sub(r"\s+", " ", str(item.get("snippet") or ""))[
+                        :180
+                    ],
+                    "date": str(item.get("date") or ""),
+                }
+            )
 
     for q in (f"{keyword} 新闻", f"{keyword} 最新动态", f"{keyword} site:cueb.edu.cn"):
         await serper(q)
@@ -182,18 +253,23 @@ async def _fetch(keyword: str) -> tuple:
                 d = re.search(r"发布于\s*([\d年月日\-/.]+)", meta.group(1))
                 if d:
                     date_text = d.group(1)
-            raw.append({
-                "title": title.group(1).strip(),
-                "url": link.group(1).strip(),
-                "snippet": re.sub(r"\s+", " ", body)[:180],
-                "date": date_text,
-            })
+            raw.append(
+                {
+                    "title": title.group(1).strip(),
+                    "url": link.group(1).strip(),
+                    "snippet": re.sub(r"\s+", " ", body)[:180],
+                    "date": date_text,
+                }
+            )
     return raw, warnings
 
 
-def _collect(raw: list, days: int) -> tuple:
-    dropped_page = dropped_old = 0
-    bucket = []
+def _collect(
+    raw: list[dict[str, Any]], days: int
+) -> tuple[list[dict[str, Any]], int, int]:
+    dropped_page = 0
+    dropped_old = 0
+    bucket: list[dict[str, Any]] = []
     for item in raw:
         title, link = item.get("title", ""), item.get("url", "")
         if not title or not link:
@@ -205,7 +281,7 @@ def _collect(raw: list, days: int) -> tuple:
         if published is not None and (datetime.now() - published).days > days:
             dropped_old += 1
             continue
-        entry = {
+        entry: dict[str, Any] = {
             "title": title,
             "url": link,
             "snippet": item.get("snippet", ""),
@@ -216,7 +292,6 @@ def _collect(raw: list, days: int) -> tuple:
         for kept in bucket:
             if _same_event(kept, entry):
                 kept["reports"] += 1
-                # 换一条更有信息量的摘要/更好的来源
                 if len(entry["snippet"]) > len(kept["snippet"]):
                     kept["snippet"] = entry["snippet"]
                 break
@@ -225,31 +300,34 @@ def _collect(raw: list, days: int) -> tuple:
     return bucket, dropped_page, dropped_old
 
 
-def _extract_json(text: str):
+def _extract_json(text: str) -> list[Any] | None:
     t = (text or "").strip()
     t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.MULTILINE).strip()
+
     start, end = t.find("["), t.rfind("]")
     if start != -1 and end > start:
         try:
-            parsed = json.loads(t[start:end + 1])
-            if isinstance(parsed, list):
-                return parsed
-        except Exception:
-            pass
+            parsed: Any = json.loads(t[start : end + 1])
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, list):
+            return parsed
+
     start, end = t.find("{"), t.rfind("}")
     if start != -1 and end > start:
         try:
-            parsed = json.loads(t[start:end + 1])
-            if isinstance(parsed, dict):
-                for key in ("items", "data", "results", "news"):
-                    if isinstance(parsed.get(key), list):
-                        return parsed[key]
-        except Exception:
-            pass
+            obj: Any = json.loads(t[start : end + 1])
+        except (json.JSONDecodeError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            for key in ("items", "data", "results", "news"):
+                value = obj.get(key)
+                if isinstance(value, list):
+                    return value
     return None
 
 
-async def _judge(items: list) -> tuple:
+async def _judge(items: list[dict[str, Any]]) -> tuple[dict[int, tuple[int, str]], str]:
     listing = []
     for i, item in enumerate(items):
         spread = f"，{item['reports']} 家报道" if item["reports"] > 1 else ""
@@ -258,7 +336,11 @@ async def _judge(items: list) -> tuple:
             f"    来源：{item['source'] or '未知'}｜日期：{item['date'] or '未标注'}{spread}\n"
             f"    摘要：{item['snippet'][:120] or '（无）'}"
         )
-    prompt = "候选新闻如下：\n\n" + "\n\n".join(listing) + "\n\n按细则逐条打分，只给 JSON 数组。"
+    prompt = (
+        "候选新闻如下：\n\n"
+        + "\n\n".join(listing)
+        + "\n\n按细则逐条打分，只给 JSON 数组。"
+    )
 
     try:
         result = await call(
@@ -274,7 +356,7 @@ async def _judge(items: list) -> tuple:
                 "tools": [],
             },
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — 句柄任何故障都要降级，不能中断整个 job
         return {}, f"模型调用异常：{exc}"
 
     if not result.ok:
@@ -284,24 +366,33 @@ async def _judge(items: list) -> tuple:
     if parsed is None:
         return {}, "模型返回无法解析为 JSON"
 
-    scored = {}
+    scored: dict[int, tuple[int, str]] = {}
     for row in parsed:
         if not isinstance(row, dict):
             continue
+        raw_id = row.get("id")
+        raw_score = row.get("score")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)):
+            continue
+        if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+            continue
         try:
-            idx = int(row.get("id"))
-            score = float(row.get("score"))
-        except (TypeError, ValueError):
+            idx = int(raw_id)
+        except ValueError:
             continue
         if not (0 <= idx < len(items)):
             continue
         why = str(row.get("why") or "").strip()[:60]
-        scored[idx] = (int(max(0, min(100, round(score)))), why)
+        scored[idx] = (int(max(0, min(100, round(float(raw_score))))), why)
     return scored, ""
 
 
-async def cueb_news(keyword: str = "首都经济贸易大学", days: int = 30, top: int = 10,
-                    use_model: bool = True) -> str:
+async def cueb_news(
+    keyword: str = "首都经济贸易大学",
+    days: int = 30,
+    top: int = 10,
+    use_model: bool = True,
+) -> str:
     """查找首都经济贸易大学（首经贸）的近期新闻，重要性由大模型判断后排序返回。
 
     Args:
@@ -317,8 +408,8 @@ async def cueb_news(keyword: str = "首都经济贸易大学", days: int = 30, t
         detail = "；".join(warnings) if warnings else "两条检索通道都没返回可用条目"
         return f"没有取到“{keyword}”的近期新闻。原因：{detail}"
 
-    notes = []
-    judged, err = ({}, "")
+    notes: list[str] = []
+    judged: dict[int, tuple[int, str]] = {}
     if use_model:
         judged, err = await _judge(items)
         if err:
@@ -328,13 +419,18 @@ async def cueb_news(keyword: str = "首都经济贸易大学", days: int = 30, t
     else:
         notes.append("按参数关闭模型判断，使用启发式打分")
 
-    ranked = []
+    ranked: list[dict[str, Any]] = []
     for idx, item in enumerate(items):
         if idx in judged:
             score, why, judge = judged[idx][0], judged[idx][1], "模型"
         else:
-            score = _heuristic(item["url"], item["title"], item["snippet"],
-                               item["date"], item["reports"])
+            score = _heuristic(
+                item["url"],
+                item["title"],
+                item["snippet"],
+                item["date"],
+                item["reports"],
+            )
             why, judge = "来源+时效+关键词+事件+报道面", "启发式"
         ranked.append({**item, "score": score, "why": why, "judge": judge})
 

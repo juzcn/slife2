@@ -223,7 +223,11 @@ async def call(
     try:
         url = context.config.server(server).url
     except ConfigError as exc:
-        raise RuntimeError(f"{server!r} has no address in this config: {exc}") from exc
+        raise RuntimeError(
+            f"{server!r} has no address in this config: {exc}. Add its "
+            f"`servers:` row (or call another server; `servers()` lists them) "
+            f"and run the job again."
+        ) from exc
 
     async def invoke(client: Any) -> Any:
         return await client.call_tool(

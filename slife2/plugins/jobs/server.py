@@ -29,7 +29,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +49,10 @@ from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     JOB_SOURCE,
     LIST_SOURCES,
+    close_names,
     house_server,
     serve_plugin,
+    unknown_name,
 )
 from slife2.plugins.jobs import registry as jobs
 
@@ -128,6 +130,35 @@ def _exposed(name: str) -> str:
 def _bare(name: str) -> str:
     """The job name behind an exposed one; *name* unchanged when it is bare."""
     return name.removeprefix(f"{CATEGORY}__")
+
+
+def _unknown_job(name: str, known: Sequence[str]) -> str:
+    """A missing job: a misspelling and an absence lead to different steps.
+
+    A typo is corrected from the suggestion; a job that is not there is one to
+    create — or one that was removed — and `job_list` says which names exist.
+    One sentence for both would send the reader back to search.
+    """
+    return unknown_name(
+        close_names(name, known),
+        missing=f"no job called {name!r}",
+        finder="`job_set` creates one; `job_list` shows what is installed",
+        absent="installed",
+    )
+
+
+def _not_loaded(job: jobs.Job) -> str:
+    """A broken job, and the way out — never the exception alone.
+
+    **This failure is self-healable**, and the sentence says so: the file is
+    still on disk, `job_use` reads it, and `job_set` replaces it.  A message
+    that stopped at the exception would make a person search for whether the
+    job is worth rescuing; the next step is the answer to that question.
+    """
+    return (
+        f"job {job.name!r} is not loaded: {job.error} — read it with "
+        f"`job_use`, fix the code and call `job_set` again"
+    )
 
 
 class Registry:
@@ -226,7 +257,7 @@ class Registry:
         model, and the sentence it reads is how it learns what went wrong.
         """
         if not job.ok:
-            return f"job {job.name!r} is not loaded: {job.error}", False
+            return _not_loaded(job), False
         context = runtime.RunContext(
             config=self.config,
             agent=agent,
@@ -292,11 +323,7 @@ def build_server(
         registry = homes.current()
         job = registry.find(tool)
         if job is None:
-            installed = ", ".join(registry.names()) or "(none)"
-            return {
-                "text": f"no job called {tool!r}. Installed: {installed}",
-                "ok": False,
-            }
+            return {"text": _unknown_job(tool, registry.names()), "ok": False}
         client = request_client(ctx) or ("", "")
         text, ok = await registry.run(
             job, arguments, agent=client[0], subagent=client[1]
@@ -312,8 +339,7 @@ def build_server(
         registry = _home()
         job = registry.find(name)
         if job is None:
-            installed = ", ".join(registry.names()) or "(none)"
-            raise ToolError(f"no job called {name!r} — installed: {installed}")
+            raise ToolError(_unknown_job(name, registry.names()))
         return job
 
     @mcp.tool(name="job_list", meta=FOR_THE_MODEL)
@@ -367,7 +393,10 @@ def build_server(
         try:
             code = job.path.read_text(encoding="utf-8-sig")
         except OSError as exc:
-            raise ToolError(f"could not read {job.path}: {exc}") from exc
+            raise ToolError(
+                f"could not read {job.path}: {exc} — close whatever holds the "
+                f"file and try `job_use` again"
+            ) from exc
         return {
             "name": job.name,
             "file": str(job.path),
@@ -414,7 +443,10 @@ def build_server(
             try:
                 previous = final.read_text(encoding="utf-8")
             except OSError as exc:
-                raise ToolError(f"could not read {final}: {exc}") from exc
+                raise ToolError(
+                    f"could not read {final}: {exc} — close whatever holds the "
+                    f"file and try `job_set` again"
+                ) from exc
         # **Written through a temporary file and then swapped in**, so a crash
         # or a full disk never leaves half a job where a whole one was.  The
         # load happens against the live name, which keeps the traceback and the
@@ -425,7 +457,10 @@ def build_server(
             os.replace(staging, final)
         except OSError as exc:
             staging.unlink(missing_ok=True)
-            raise ToolError(f"could not write {name!r}: {exc}") from exc
+            raise ToolError(
+                f"could not write {name!r}: {exc} — close whatever holds the "
+                f"file (an editor, another slife2) and try `job_set` again"
+            ) from exc
         loaded = jobs.load_job(final, name=name)
         if not loaded.ok:
             try:
@@ -439,6 +474,7 @@ def build_server(
             raise ToolError(
                 f"{name!r} was not installed — {loaded.error}"
                 + ("; the previous version was restored" if exists else "")
+                + ". Fix the code and call `job_set` again"
             )
         registry.put(loaded)
         logger.info("job_set name=%s file=%s", name, final)
@@ -462,7 +498,10 @@ def build_server(
         try:
             job.path.unlink(missing_ok=True)
         except OSError as exc:
-            raise ToolError(f"could not remove {job.path}: {exc}") from exc
+            raise ToolError(
+                f"could not remove {job.path}: {exc} — close whatever holds the "
+                f"file and try `job_remove` again"
+            ) from exc
         _home().forget(job.name)
         logger.info("job_removed name=%s", job.name)
         return {"name": job.name, "removed": True}
@@ -492,7 +531,7 @@ def build_server(
         """
         job = _refused(name)
         if not job.ok:
-            raise ToolError(f"job {job.name!r} is not loaded: {job.error}")
+            raise ToolError(_not_loaded(job))
         client = request_client(ctx) or ("", "")
         text, ok = await _home().run(
             job, arguments or {}, agent=client[0], subagent=client[1]

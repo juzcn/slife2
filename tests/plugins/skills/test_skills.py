@@ -661,3 +661,21 @@ async def test_use_wants_a_name() -> None:
     text, ok = await use("")
     assert not ok
     assert "name" in text
+
+
+@pytest.mark.asyncio
+async def test_use_suggests_a_nearby_skill_name(root: Path) -> None:
+    """A typo gets a correction; the absence gets the list and says nothing is
+    close, so the reader is not left to search for the difference."""
+    skill(root, "one", header="name: one\n")
+    text, ok = await use("on")
+    assert not ok
+    assert "did you mean" in text and "'one'" in text
+
+
+@pytest.mark.asyncio
+async def test_use_says_when_nothing_is_close(root: Path) -> None:
+    skill(root, "one", header="name: one\n")
+    text, ok = await use("two")
+    assert not ok
+    assert "nothing close is installed" in text

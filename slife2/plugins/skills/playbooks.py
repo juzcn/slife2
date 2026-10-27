@@ -83,6 +83,7 @@ in this file would change if the tool were reached some other way.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -1009,8 +1010,25 @@ async def use(
 
     skill = find(name)
     if skill is None:
-        installed = ", ".join(one.name for one in scan()) or "(none installed)"
-        return f"no skill called {name!r}. Installed: {installed}", False
+        names = [one.name for one in scan()]
+        if not names:
+            return f"no skill called {name!r}. (none installed)", False
+        # **A typo and an absence are two answers**, and the reader needs to
+        # know which one this is: a suggestion is the correction, an explicit
+        # "nothing close" is the cue to look elsewhere.
+        close = difflib.get_close_matches(name, names, n=3, cutoff=0.6)
+        if close:
+            return (
+                f"no skill called {name!r} — did you mean "
+                f"{', '.join(repr(one) for one in close)}? "
+                f"Installed: {', '.join(names)}",
+                False,
+            )
+        return (
+            f"no skill called {name!r}, and nothing close is installed. "
+            f"Installed: {', '.join(names)}",
+            False,
+        )
 
     # Which `skills:` entry supplies this skill is a single question with a
     # single answer (`entry_for`), shared with the catalogue row and the switch

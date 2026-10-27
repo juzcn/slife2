@@ -252,8 +252,10 @@ async def test_a_missing_job_is_a_refusal_not_an_empty_answer(
 ) -> None:
     config_on_disk(isolated_runtime)
     async with Client(build_server(load())) as client:
-        with pytest.raises(ToolError, match="no job called"):
+        with pytest.raises(ToolError, match="no job called") as raised:
             await client.call_tool("job_run", {"name": "nothing"})
+        assert "nothing close is installed" in str(raised.value)
+        assert "job_set" in str(raised.value)
         with pytest.raises(ToolError, match="no job called"):
             await client.call_tool("job_use", {"name": "nothing"})
         with pytest.raises(ToolError, match="no job called"):
@@ -262,3 +264,25 @@ async def test_a_missing_job_is_a_refusal_not_an_empty_answer(
 
 def test_the_plugin_is_named_where_a_client_can_find_it() -> None:
     assert SERVER_NAME == "slife2-jobs"
+
+
+@pytest.mark.asyncio
+async def test_a_misspelled_job_suggests_the_one_it_meant(
+    isolated_runtime: Path,
+) -> None:
+    """A typo and an absence are different answers.  The close name is the
+    correction; the per-job tool's refusal carries the same suggestion."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        await ask(client, "job_set", name="slugify", code=SLUGIFY)
+        with pytest.raises(ToolError, match="did you mean") as raised:
+            await client.call_tool("job_use", {"name": "slugifi"})
+        called = await client.call_tool(
+            CALL_SOURCE,
+            {"source": SOURCE, "tool": "slugifi", "arguments": {}},
+        )
+
+    assert "'slugify'" in str(raised.value)
+    assert called.data["ok"] is False
+    assert "did you mean" in called.data["text"]
+    assert "slugify" in called.data["text"]

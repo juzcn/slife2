@@ -59,12 +59,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import inspect
 import json
 import logging
 import os
 import sys
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
@@ -178,6 +179,54 @@ def describe(client: ClientId) -> str:
     """
     agent, subagent = client
     return f"{agent}/{subagent}" if subagent else agent
+
+
+def close_names(name: str, known: Iterable[str], *, limit: int = 3) -> list[str]:
+    """The names close to *name* — a misspelling, not an absence.
+
+    **Case is folded, the original spelling is returned**, because the original
+    is the name to call.  `difflib`'s ratio is the tool for the question: a
+    dropped or swapped character is a high ratio, an unrelated name is not.
+    """
+    lookup: dict[str, str] = {}
+    for one in known:
+        if one:
+            lookup.setdefault(one.casefold(), one)
+    matches = difflib.get_close_matches(
+        name.casefold(), list(lookup), n=limit, cutoff=0.6
+    )
+    return [lookup[one] for one in matches]
+
+
+def unknown_name(
+    close: Sequence[str],
+    *,
+    missing: str,
+    finder: str,
+    absent: str,
+) -> str:
+    """A missing name, told apart from a misspelling — and what to do next.
+
+    **A reader cannot tell a typo from a capability that is not installed**, and
+    the two have different next steps: a typo is corrected from the suggestion;
+    an absence is investigated (which sources are answering, whether the entry
+    is configured, what is installed).  A hint that only says "search" makes
+    the reader search again to discover which case it is, which is the same
+    sentence for two different problems.
+
+    `missing` is the family's own phrase for the miss (`unknown tool 'x'`,
+    `no job called 'x'`); `close` is `close_names`' answer, and empty means
+    nothing close was found — the sentence says so rather than leaving the
+    reader to infer it.  `finder` is the next step, and `absent` says where the
+    search for a close name happened (`in the catalogue`, `installed`).
+    """
+    if close:
+        suggestions = ", ".join(repr(one) for one in close)
+        return f"{missing} — did you mean {suggestions}? {finder}"
+    return (
+        f"{missing}, and nothing close is {absent} — it may not be installed or "
+        f"configured. {finder}"
+    )
 
 
 def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:

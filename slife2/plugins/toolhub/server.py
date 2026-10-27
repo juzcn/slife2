@@ -213,8 +213,10 @@ from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     LIST_SOURCES,
     RETURNS,
+    close_names,
     house_server,
     serve_plugin,
+    unknown_name,
 )
 from slife2.libs.plugin.protocol import (
     CLI_SOURCE as _CLI_SOURCE,
@@ -879,6 +881,14 @@ class Catalogue:
         is the query and the argument.
         """
         return await off_loop((await self.store()).count)
+
+    async def names(self) -> list[str]:
+        """Every catalogued name, for telling a typo from an absence.
+
+        Asked only on an unknown-name path; the ratio logic is
+        `slife2.libs.plugin.protocol.close_names`.
+        """
+        return await off_loop((await self.store()).names)
 
     async def search(self, **arguments: Any) -> dict[str, Any]:
         """Both legs of a tool search, fused.  See `ToolStore.search`.
@@ -1900,7 +1910,12 @@ def local_tools(
         failed: list[dict[str, str]] = []
         for name in names:
             answer = await catalogue.set_load(name, "loaded")
-            reason = _load_refusal(name, answer)
+            close = (
+                close_names(name, await catalogue.names())
+                if answer.get("outcome") == "unknown"
+                else ()
+            )
+            reason = _load_refusal(name, answer, close)
             if reason:
                 failed.append({"name": name, "reason": reason})
             else:
@@ -2284,7 +2299,9 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     )
 
 
-def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
+def _load_refusal(
+    name: str, answer: Mapping[str, Any], close: Sequence[str] = ()
+) -> str:
     """Why one load did not end up in the model's list, or `""` when it did.
 
     **One sentence per outcome, and the outcome is a fact the catalogue gave us** —
@@ -2303,9 +2320,14 @@ def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
     if outcome in ("loaded", "already"):
         return ""
     if outcome == "unknown":
-        return (
-            f"unknown tool {name!r} — find it with tool_search, which reports "
-            f"names exactly as they are called"
+        return unknown_name(
+            close,
+            missing=f"unknown tool {name!r}",
+            finder=(
+                "`tool_search` searches by what a tool does; `servers` says "
+                "which sources are answering"
+            ),
+            absent="in the catalogue",
         )
     if outcome == "no_load_state":
         if name.startswith(f"{SKILL}:"):
@@ -3227,7 +3249,7 @@ def build_server(
             await refresh()
             row = await catalogue.route(name)
         if row is None:
-            return {"text": unknown_tool(name), "ok": False}
+            return {"text": await unknown_tool(name), "ok": False}
 
         if str(row.get("category") or "") in (SKILL, CLI):
             # A row a search can find and a call cannot reach, which is the
@@ -3315,20 +3337,27 @@ def build_server(
         await catalogue.touch(name)
         return {"text": text, "ok": ok}
 
-    def unknown_tool(name: str) -> str:
-        """Why a name resolves to nothing, and the two tools that answer it.
+    async def unknown_tool(name: str) -> str:
+        """Why a name resolves to nothing, and whether it was a typo.
 
         **The way back, not the whole list.**  The error path is a feedback
         channel, and what the model can act on is how to find the name it meant:
         `tool_search` searches the catalogue by what a tool does, and
         `func_tool_load` puts the found tool in the list sent with the next
-        request.  The loaded set used to be enumerated here — up to the budget's
-        hundred names, carried in the conversation for the rest of the turn —
-        which answered a question no model asked.
+        request.  The name is not "not in your list" — a name found by search is
+        callable without being loaded — it is not in the *catalogue*, so the
+        close matches decide whether this is a typo or a capability that is not
+        configured.
         """
-        return (
-            f"unknown tool {name!r} — not in your tool list. Find it with "
-            f"tool_search, then load it with func_tool_load."
+        return unknown_name(
+            close_names(name, await catalogue.names()),
+            missing=f"unknown tool {name!r}",
+            finder=(
+                "`tool_search` searches by what it does, then `func_tool_load` "
+                "puts the one you meant in your list; `servers` says which "
+                "sources are answering"
+            ),
+            absent="in the catalogue",
         )
 
     @mcp.tool

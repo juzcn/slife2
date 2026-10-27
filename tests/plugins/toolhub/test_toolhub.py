@@ -3483,3 +3483,21 @@ async def test_a_verdict_is_written_into_every_homes_catalogue(
 
     assert status(mine) == "error"
     assert status(theirs) == "error", "the other home still reads that tool as up"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_tool_says_whether_it_is_a_typo_or_absent() -> None:
+    """**The two cases have different next steps**, so one hint cannot serve
+    both: a typo is corrected from the suggestion; an absence is a capability
+    that is not in the catalogue, and `servers` is where to look."""
+    async with Client(hub_for()) as hub:
+        typo = await call(hub, "func_tool_load", {"names": ["skill_us"]})
+        far = await call(hub, "func_tool_load", {"names": ["zzzzzz"]})
+        direct = await call(hub, "skill_us", {})
+
+    typo_reason = _load_reason(typo)
+    far_reason = _load_reason(far)
+    assert "did you mean" in typo_reason and "skill_use" in typo_reason
+    assert "nothing close is in the catalogue" in far_reason
+    assert direct["ok"] is False
+    assert "did you mean" in direct["text"] and "skill_use" in direct["text"]

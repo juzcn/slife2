@@ -1080,3 +1080,29 @@ def test_seed_dry_run_does_not_touch_the_trees(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert live.read_text(encoding="utf-8") == "old\n"
     assert "would copy" in result.stdout
+
+
+def test_seed_trees_failure_is_a_warning_not_a_fatal_install(
+    tmp_path: Path,
+) -> None:
+    """**A retryable content failure does not abort the install.**  The config
+    and programs are in place; a locked skill or job is fixed by closing
+    whatever holds it and running the installer again — so the seed says that
+    and returns 0, rather than `die`-ing and leaving the user to search."""
+    root = tmp_path / "repo"
+    (root / "skills" / "one").mkdir(parents=True)
+    (root / "skills" / "one" / "SKILL.md").write_text("bundled\n", encoding="utf-8")
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    # A file where the skills directory should go makes the copy fail.
+    (home / "skills").write_text("not a directory\n", encoding="utf-8")
+
+    result = _seed(source, home)
+
+    assert result.returncode == 0, result.stderr
+    assert "run the installer again" in result.stderr
+    assert (home / "slife2.yaml").is_file(), "the config still landed"
+    assert (home / "skills").read_text(encoding="utf-8") == "not a directory\n"

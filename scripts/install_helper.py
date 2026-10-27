@@ -121,6 +121,12 @@ def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
     simpler — the bundle is the authority, and editing a seeded file is editing
     a copy.
 
+    **A copy that fails is a warning, not a fatal install.**  The configuration
+    is in place and the install continues; a file held open by an editor or
+    another slife2 is the common failure on Windows, and the fix is to close it
+    and run the installer again.  Aborting the whole install over retryable
+    content is exactly how a self-healing problem becomes a dead end.
+
     A checkout whose home is the checkout itself is a no-op: the source *is*
     the destination, so there is no update to make.  A home pointed elsewhere
     from a checkout is seeded like any other.
@@ -150,8 +156,15 @@ def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
             _say(f"{name}: seeded {dst}; same names overwritten.")
         return 0
     except OSError as exc:
-        print(f"skills/jobs: {exc}", file=sys.stderr)
-        return 1
+        print(
+            f"skills/jobs: {exc}\n"
+            "  the configuration is in place and the install continues; only "
+            "the bundled skills/jobs could not be copied. Close whatever holds "
+            "the file (an editor, another slife2) and run the installer again "
+            "to finish seeding.",
+            file=sys.stderr,
+        )
+        return 0
 
 
 def seed(source: Path, home: Path, dry_run: bool) -> int:

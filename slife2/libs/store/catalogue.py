@@ -1448,6 +1448,20 @@ class ToolStore:
             ).fetchone()
         return _tool_dict(row) if row else None
 
+    def names(self) -> list[str]:
+        """Every catalogued name, ordered — the error path's misspelling search.
+
+        **Not a listing for a model** (`tool_search` is), and not paged: it is
+        only asked when a name missed, where the answer is a suggestion or the
+        fact that none is close.  The caller has the ratio logic
+        (`slife2.libs.plugin.protocol.close_names`); this is the rows it runs over.
+        """
+        with self._connect() as connection:
+            return [
+                str(row[0])
+                for row in connection.execute("SELECT name FROM tool ORDER BY name")
+            ]
+
     def count(self) -> int:
         """How many tools this catalogue holds — **every category, every source**.
 

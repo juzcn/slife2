@@ -246,10 +246,10 @@ sync_checkout() {
 seed_config() {
     if [ "$MODE" = checkout ]; then
         "$PY" "$HELPER" seed --source "$SOURCE/slife2.yaml" --home "$HOME_DIR" >/dev/null \
-            || die "the configuration or bundled skills/jobs could not be prepared"
+            || die "the configuration could not be prepared"
     else
         "$PY" "$HELPER" seed --source "$SOURCE/slife2.yaml" --home "$HOME_DIR" \
-            || die "the configuration or bundled skills/jobs could not be prepared"
+            || die "the configuration could not be prepared"
     fi
 }
 
