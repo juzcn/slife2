@@ -717,8 +717,8 @@ No answer is intended to exceed `tool_result.tokens`. Listings that can grow use
 
 #### Tool call options
 
-Every tool accepts three meta-parameters. They are added to every advertised
-schema and stripped before dispatch, so no tool server sees them.
+Every function tool accepts three meta-parameters. They are added to every
+advertised schema and stripped before dispatch, so no tool server sees them.
 
 | Parameter | Effect |
 |---|---|

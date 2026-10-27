@@ -201,11 +201,12 @@ def is_harness(name: str) -> bool:
 
 # ── The three per-call meta-parameters ────────────────────────────────────────
 #
-# **Every tool takes three arguments it does not declare.**  `_timeout` says how
-# long this one call may take, `_async` says to run it in the background, and
-# `_approve` says to ask the operator first.  They are schema fields rather than
-# a system-prompt contract; the section below states why, and the three are
-# optional everywhere so nothing a tool declares has to change.
+# **Every function tool takes three arguments it does not declare.**  `_timeout`
+# says how long this one call may take, `_async` says to run it in the
+# background, and `_approve` says to ask the operator first.  They are schema
+# fields so a model reading one tool's arguments finds them; the shipped prompt
+# states the shared rules once, and the section below says why both halves are
+# short.
 #
 # **They are reserved names, and they are read off every call.**  A tool that
 # genuinely wanted an argument called `_timeout` cannot have one — the loop
@@ -237,42 +238,33 @@ APPROVE_PARAM = "_approve"
 #: All three, for the one place that strips them.
 META_PARAMS = (TIMEOUT_PARAM, BACKGROUND_PARAM, APPROVE_PARAM)
 
-#: What the three look like **on the schema of every tool the model is handed**.
+#: What the three look like **on the schema of every function tool the model is
+#: handed**.
 #:
-#: **Schema rather than prompt.**  The tax is real — re-describing three
-#: parameters on sixty schemas is the largest per-request context cost the system
-#: pays — and it is paid for what the alternative would cost: the prompt is the
-#: *operator's file* (`config.agents[x].system_prompt`), so a block the harness
-#: appended there would be one more thing an operator's own prompt has to be kept
-#: in step with — and a tool's contract belongs next to the tool, where a model
-#: reading *that* tool's arguments finds it.  The three are optional everywhere,
-#: so nothing a tool declares has to change, and the loop strips all three before
-#: dispatch (`split_meta`).
+#: **Short, because the shipped prompt says the shared rules once.**  These
+#: descriptions ride on every loaded tool's schema, so they are the largest
+#: repeated text a request carries; the prompt's tool guide carries the
+#: cross-tool semantics, and each schema keeps only what a reader of that tool's
+#: arguments needs.  They still state what a call can trip on — a positive,
+#: finite number of seconds, the task id a background call answers with —
+#: because an operator's own `system_prompt` may not include the guide.  The
+#: three are optional everywhere, so nothing a tool declares has to change, and
+#: the loop strips all three before dispatch (`split_meta`).
 META_PROPERTIES: dict[str, Any] = {
     TIMEOUT_PARAM: {
         "type": "number",
-        "description": (
-            "Seconds this one call may take: a positive, finite number. It "
-            "overrides the tool's own default; omit it to keep that default. "
-            "Any other value fails the call."
-        ),
+        "description": "Seconds this call may take; a positive, finite number.",
     },
     BACKGROUND_PARAM: {
         "type": "boolean",
         "description": (
-            "Run this call in the background and answer a task_id instead of a "
-            "result. Its result is handed back to the conversation when it is "
-            "done, wearing [AgentToolResult:{...}] with the call id, tool, "
-            "task_id and status; check_async reports status, cancel_async "
-            "abandons it. Unbounded unless _timeout is given too."
+            "Run this call in the background; the call answers with a task_id "
+            "and the result arrives later."
         ),
     },
     APPROVE_PARAM: {
         "type": "boolean",
-        "description": (
-            "Ask the user to confirm before this call runs. Where nobody is "
-            "watching, the call runs without asking."
-        ),
+        "description": "Ask before running this call.",
     },
 }
 
@@ -282,9 +274,10 @@ def advertised(spec: ToolSpec) -> ToolSpec:
 
     **Kept apart from `Tool.spec` rather than merged into it**, and the split is
     load-bearing: `declares_timeout` reads the tool's *own* declaration to decide
-    who enforces a deadline, so a `_timeout` hiding in that view would make every
-    tool look like one that declares its own bound.  One view is what the tool
-    says about itself; this one is what every tool is also offered.
+    who enforces a deadline, so a `_timeout` hiding in that view would make
+    every function tool look like one that declares its own bound.  One view is
+    what the tool says about itself; this one is what every function tool is
+    also offered.
     """
     parameters = dict(spec.parameters)
     properties = dict(parameters.get("properties") or {})
@@ -516,10 +509,10 @@ class ToolRegistry:
 
     @property
     def specs(self) -> list[ToolSpec]:
-        """What to advertise to the model — every tool, with the three.
+        """What to advertise to the model — every function tool, with the three.
 
         See :func:`advertised`: what a tool *declares* is `Tool.spec`, and this
-        is that plus the meta-parameters every tool accepts.
+        is that plus the meta-parameters every function tool accepts.
         """
         return list(self._advertised)
 

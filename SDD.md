@@ -1594,9 +1594,9 @@ model using an answer without inspecting it first.
 
 ### 7.7 Meta-parameters
 
-Every tool accepts three meta-parameters. They are added to every advertised
-schema (`libs/turn/tools.advertised`) and stripped before dispatch, so no tool
-server sees them.
+Every function tool accepts three meta-parameters. They are added to every
+advertised schema (`libs/turn/tools.advertised`) and stripped before dispatch,
+so no tool server sees them.
 
 | Parameter | Semantics |
 |---|---|
