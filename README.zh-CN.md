@@ -36,10 +36,11 @@ MCP server。
 | **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>`、`async-tool:<name>` 或 `schedule:<name>`。本地网络中 `agent:` 是创建者、`subagent:` 是 subagent，这样 subagent 能分清在回答谁的消息。 |
 | **marker** | channel 在投递消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。marker 随消息存储，只在显示时移除。 |
 | **family** | 拥有一个配置节并声明该节所描述行的 plugin。 |
-| **source** | plugin 持有的一个条目，例如 `mcp:` server、playbook 或命令。 |
-| **catalogue** | 模型可以发现的所有工具、playbook 和命令的机器可读清单。 |
+| **source** | plugin 持有的一个条目，例如 `mcp:` server、playbook、job 或命令。 |
+| **catalogue** | 模型可以发现的所有工具、playbook、job 和命令的机器可读清单。 |
+| **job** | 模型为 home 写的代码：`jobs/` 里的一个 Python 函数，暴露为工具 `job__<name>`。 |
 | **dump** | 因为对对话而言过大而完整保存在文件柜中的工具输出。 |
-| **home** | 一个数据目录：配置、skills、agent 及其文件。 |
+| **home** | 一个数据目录：配置、skills、jobs、agent 及其文件。 |
 | **runtime 目录** | 共享 server 在整台机器范围内的记录、锁和日志。 |
 
 ## 环境要求
@@ -610,7 +611,8 @@ skills:
 hub 提供三个集合级工具：
 
 - `tool_search` 按关键词和语义搜索整个目录。传 `unloaded_only` 可排除已经在
-  清单中的工具；skill 和 CLI 条目没有加载状态，仍然包含在内。
+  清单中的工具；skill 和 CLI 条目没有加载状态，未加载的 job 也还没进清单，所以
+  它们仍然包含在内。
 - `func_tool_load` 将一个或多个工具放入模型看到的清单。
 - `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
 
@@ -1026,6 +1028,7 @@ subagent:
 <data>/
   slife2.yaml                  配置；必需
   skills/                      <name>/SKILL.md playbook
+  jobs/                        <name>.py 代码定义的工具
   agents/
     tools.db                   此 home 共享的工具目录
     <agent>/

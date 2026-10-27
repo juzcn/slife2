@@ -37,10 +37,11 @@ decisions, and the measurements behind them — is in [SDD.md](SDD.md).
 | **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. On the local network `agent:` names the maker and `subagent:` a subagent, so a subagent can tell whose message it is answering. |
 | **Marker** | The machine-readable prefix a channel adds to a delivered message, e.g. `[Wechat:{…}]`. Markers are stored with the message and removed only for display. |
 | **Family** | A plugin that owns a configuration section and declares the rows that section describes. |
-| **Source** | One entry a plugin holds, such as an `mcp:` server, a playbook, or a command. |
-| **Catalogue** | The machine-readable list of every tool, playbook, and command the model may discover. |
+| **Source** | One entry a plugin holds, such as an `mcp:` server, a playbook, a job, or a command. |
+| **Catalogue** | The machine-readable list of every tool, playbook, job, and command the model may discover. |
+| **Job** | Code the model wrote for the home: one Python function in `jobs/`, exposed as the tool `job__<name>`. |
 | **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
-| **Home** | A data directory: configuration, skills, agents, and their files. |
+| **Home** | A data directory: configuration, skills, jobs, agents, and their files. |
 | **Runtime directory** | The machine-wide records, locks, and logs of the shared servers. |
 
 ## Requirements
@@ -453,9 +454,9 @@ its fraction of the model's window. Before each turn, a note names what the
 context decision kept and what it recalled from the turn log.
 
 It reports `tools 26/358` as well: what the hub's loaded set holds, then how
-many entries the catalogue has. The total includes every category, so skills and
-CLI entries are counted and so are the tools of a server that is down, while the
-loaded half is what the next request carries. Both numbers come from the same
+many entries the catalogue has. The total includes every category, so skills,
+jobs and CLI entries are counted and so are the tools of a server that is down,
+while the loaded half is what the next request carries. Both numbers come from the same
 ask, so they are as current as the last model call, and the start-up line names
 the same pair before the window opens.
 
@@ -677,7 +678,8 @@ The hub serves three set-level tools:
 
 - `tool_search` searches the whole catalogue by keyword and by meaning. Pass
   `unloaded_only` to leave out the tools already in the list; skills and CLI
-  entries have no load state and are still included.
+  entries have no load state, and an unloaded job is not loaded yet, so all of
+  them are still included.
 - `func_tool_load` puts one or more tools into the list shown to the model.
 - `_func_tool_unload` removes tools from that list. The harness also calls it
   at a turn boundary to enforce the budget.

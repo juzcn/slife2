@@ -84,10 +84,10 @@ providers, and the WeChat bridge.
 |---|---|
 | **Agent** | An identity named by `--agent NAME`. It is claimed once per machine and is not a process, a port, or a data directory. |
 | **Client id** | The pair `(agent, subagent)` identifying the conversation a call is made on behalf of. A subagent component is empty for an agent's own conversation. |
-| **Home** | A data directory containing `slife2.yaml`, `skills/`, and `agents/`. A home may contain several agents. |
+| **Home** | A data directory containing `slife2.yaml`, `skills/`, `jobs/`, and `agents/`. A home may contain several agents. |
 | **Plugin** | One of slife2's own MCP servers. It implements the plugin contract and is started and shared by the launcher. An external MCP server is not a plugin. |
 | **Family** | A plugin that owns one configuration section and declares the rows that section describes. |
-| **Source** | One entry a plugin holds, such as an `mcp:` server, a `rest-api:` document, a playbook, or a command. |
+| **Source** | One entry a plugin holds, such as an `mcp:` server, a `rest-api:` document, a playbook, a job, or a command. |
 | **Catalogue** | The tool catalogue: one SQLite file per home holding every row the model may discover. |
 | **Conversation** | One client id's history, stored by the context plugin. |
 | **Turn** | One exchange: input, model output, and tool calls, stored as one row. |
@@ -1402,8 +1402,9 @@ hub. The hub is its only writer. One SQLite file per home
 
 `list_tools` answers two numbers: `tools`, the list the model is holding, and
 `total`, the size of the catalogue. They are different facts. `total` counts
-every category — a skill and a CLI entry are rows with no load state — and every
-source, including one that is down and keeps its rows on purpose. It is read on
+every category — a skill and a CLI entry are rows with no load state, and a job
+is a callable row with one — and every source, including one that is down and
+keeps its rows on purpose. It is read on
 the ask that already refreshes the declarations, which is what makes it current
 without a timer, and the terminal's status bar shows it.
 
@@ -1554,7 +1555,7 @@ first would drop rows the filter would have kept.
 
 `unloaded_only` is the one filter that is not an equality: it means
 `load_status != 'loaded'`, so a skill or a CLI entry — which has no load state
-and is never in the model's list — is still found. The default stays the whole
+and is never in the model's list — and an unloaded job are still found. The default stays the whole
 catalogue: the best answer may be a tool the model already holds, and `loaded`
 on the row says so.
 
@@ -2454,6 +2455,7 @@ A home is a data directory:
 
 - `slife2.yaml`;
 - `skills/`;
+- `jobs/`;
 - `agents/`, one directory per agent;
 - `agents/tools.db`, the shared catalogue.
 
@@ -2520,7 +2522,8 @@ Everything a plugin derives per home is kept per home:
 - the model list it resolves.
 
 A home is created when an agent starts in it. The client records the directory,
-creates `agents/` and `skills/`, and asks the hub for the home's tool list. That
+creates `agents/`, `skills/` and `jobs/`, and asks the hub for the home's tool
+list. That
 call creates `agents/tools.db`, because the hub is the file's only writer. A hub
 that cannot answer fails the start.
 
