@@ -1456,3 +1456,37 @@ def test_a_keyword_search_narrows_by_its_filters(tmp_path) -> None:
         store.search(embedder=EMBEDDER, keywords=["papers"], source_id="nobody")
     )
     assert nothing["results"] == []
+
+
+# --- the model's own code, as a callable category ----------------------------
+
+
+def test_a_job_is_a_callable_row_with_a_load_state(tmp_path) -> None:
+    """**A job is a function category, not a document one.**  The model wrote
+    the code behind the row, but at the catalogue it behaves exactly like a
+    tool from an external server: it can be loaded, injected and called.  Its
+    row's `status` is still the source's own verdict, because a file that did
+    not load is a fact about the file rather than about a connection."""
+    store = store_at(tmp_path, autoload=("job__slugify",))
+    merge(store, "job", "job", [tool("job__slugify", "Make a slug.")])
+
+    assert rows_in(store) == [("job__slugify", STATUS_ENABLED, LOADED)]
+    again = merge(store, "job", "job", [tool("job__slugify", "Make a slug.")])
+    assert again["inserted"] == [] and again["updated"] == []
+    held = store.injectable(["job"])
+    assert [row["name"] for row in held["tools"]] == ["job__slugify"]
+
+
+def test_a_job_that_did_not_load_keeps_its_row_and_cannot_be_injected(
+    tmp_path,
+) -> None:
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "job",
+        "job",
+        [tool("job__broken", "broken: not loaded", status=STATUS_ERROR)],
+    )
+
+    assert rows_in(store) == [("job__broken", STATUS_ERROR, UNLOADED)]
+    assert store.injectable(["job"])["tools"] == []

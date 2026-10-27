@@ -601,6 +601,18 @@ PLUGINS: tuple[Plugin, ...] = (
         probe="list_sources",
         port=24032,
     ),
+    # Code the model writes for itself: one Python function per file in
+    # `<data>/jobs/`, each exposed as a tool named `job__<name>`.  A plugin for
+    # the reason the two above are — it owns a folder and serves the tools that
+    # folder defines — and its identifying tool is `job_list`, which works before
+    # any job exists and is the state a fresh home starts in.
+    Plugin(
+        key="job-server",
+        module="slife2.plugins.jobs.server",
+        name="slife2-jobs",
+        probe="job_list",
+        port=24042,
+    ),
     # The two whose whole job is somebody else's servers: the `mcp:` section and
     # the `rest-api:` one.  They hold the connections the toolhub used to hold,
     # and declare what they hold to it — the hub keeps the tool *set* and no link
@@ -835,6 +847,7 @@ MCP_TOOLS_SERVER_NAME = plugin("mcp-tools").name
 RESTAPI_TOOLS_SERVER_NAME = plugin("restapi-tools").name
 SKILLS_SERVER_NAME = plugin("skills-server").name
 CLI_SERVER_NAME = plugin("cli-server").name
+JOB_SERVER_NAME = plugin("job-server").name
 TOOLHUB_SERVER_NAME = plugin("toolhub").name
 EMBEDDINGS_SERVER_NAME = plugin("embeddings").name
 WECHAT_SERVER_NAME = plugin("wechat").name
@@ -3877,6 +3890,7 @@ __all__ = [
     "DEFAULT_AGENT",
     "DEFAULT_CONFIG_NAME",
     "EMBEDDINGS_SERVER_NAME",
+    "JOB_SERVER_NAME",
     "LOCAL_SERVERS",
     "MCP_TOOLS_SERVER_NAME",
     "MEDIA_KINDS",

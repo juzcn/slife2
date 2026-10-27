@@ -357,6 +357,7 @@ or for debugging a single server.
 | `slife2-wechat` | WeChat login and messaging | 24030 |
 | `slife2-skills` | Playbooks and `skill_use` | 24031 |
 | `slife2-cli` | The `cli:` section | 24032 |
+| `slife2-jobs` | Code-defined tools (`job__<name>`) | 24042 |
 | `slife2-mcp-tools` | The `mcp:` section | 24033 |
 | `slife2-restapi-tools` | The `rest-api:` section | 24034 |
 | `slife2-cabinet` | Notes, diary, files, reports, dumps | 24035 |
@@ -620,6 +621,7 @@ for its own section:
 | `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |
 | `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
+| `jobs/` (a folder) | `job_set`, `job_list`, `job_use`, `job_run`, `job_remove` |
 | `providers:` and `default:` | `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
@@ -749,6 +751,33 @@ the installer's closing hint.
 be a real YAML boolean: `no`, `off`, and `'false'` are strings under YAML 1.2
 and are refused rather than guessed. A disabled entry's tools remain in the
 catalogue, marked `disabled`, so searches still find them.
+
+#### Jobs
+
+`job_set` writes a **job** — one Python file in `<data>/jobs/`, one module-level
+function named after the file — and that function becomes a tool the model calls:
+`job__<name>`. The docstring is the tool's description and the typed signature is
+its parameter schema; there is no manifest to keep in step. The same call
+replaces a job: the new file is loaded before the swap, and the previous version
+is restored if it does not load. `job_remove` deletes the file and the tool;
+`job_list` / `job_use` / `job_run` list, read and test one. A broken file stays
+visible as an `error` row rather than disappearing.
+
+A job may be a small deterministic tool or a workflow — its code is plain
+Python, and it composes the rest of the system through two generic handles from
+`slife2.job`:
+
+- `call_tool(name, arguments)` — the hub's catalogue, by the name the model
+  calls: a plugin's own tool, an external `{server}__{tool}`, or another job.
+- `call(server, tool, arguments)` — one of slife2's servers by its `servers:`
+  key: an agent turn (`send_message`), a raw model call (`stream_chat`), or any
+  plugin's own tool.
+
+Nothing in the runtime enumerates the capabilities. `servers()` reads the
+config's one table, so a plugin or tool another change adds is usable from a job
+without changing the job runtime. The code runs in the jobs plugin with the
+caller's identity; it is not sandboxed, and the top-level tool call is where a
+person can be asked to approve it.
 
 ### Media
 
@@ -1119,6 +1148,7 @@ A data directory (a **home**) contains:
 <data>/
   slife2.yaml                  configuration; required
   skills/                      <name>/SKILL.md playbooks
+  jobs/                        <name>.py code-defined tools
   agents/
     tools.db                   the shared tool catalogue for this home
     <agent>/
@@ -1207,6 +1237,8 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
 - `cli:` entries are catalogued and discoverable, but no tool executes them yet.
 - Playbook scripts are not executed by slife2; `skill_use` returns the playbook
   text, and the model runs any commands itself.
+- Jobs are code: they run in `slife2-jobs` with the caller's identity and are
+  not sandboxed. The top-level tool call is the approval point.
 - The cabinet's `file_save` does not fetch URLs, and the cabinet has no `grep`
   search leg.
 - There is no approval gate before a configuration edit, including `mcp_set`

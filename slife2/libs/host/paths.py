@@ -818,3 +818,22 @@ def skills_dir() -> Path:
     path = home() / "skills"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def jobs_dir() -> Path:
+    """Where code-defined jobs live — one `.py` file per job.
+
+    A **job** is code the model wrote and the system made into a tool: unlike a
+    skill there is no manifest beside it, because the function inside the file —
+    its name, docstring and typed signature — *is* the tool's definition.  So the
+    folder is the whole of the state, exactly as `skills/` is for playbooks.
+
+    Created on the way out, like `skills_dir`, because a caller asking where jobs
+    go is about to put one there; an empty folder is the honest answer to "which
+    jobs are installed" on a fresh install.  The home's rather than the
+    process's, for the same reason: the jobs a call is served from are the ones
+    beside the config the caller is running.
+    """
+    path = home() / "jobs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

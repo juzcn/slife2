@@ -177,26 +177,31 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
 
 
 def test_a_document_source_has_one_spelling() -> None:
-    """**One name, four readers, and no second copy to keep in step.**
+    """**One name per source, and no second copy to keep in step.**
 
     The boot pass needs these without asking anybody (`ToolStore.reset` withdraws
     the verdict on rows whose source the config does not name), the hub files
     rows under them, and the family plugins refuse a name that would collide with
-    one — so four modules read `skills` and `cli`.
+    one — so the protocol, the declaring plugin and the hub each read the same
+    word.
 
     This used to be three copies held together by this test, which is a test
     standing in for a language feature.  Now the copies are *aliases*, and what
-    is asserted is that nothing has quietly grown a fourth.
+    is asserted is that nothing has quietly grown a copy of its own.
     """
     from slife2.libs.plugin.protocol import CLI_SOURCE as CONTRACT_CLI
+    from slife2.libs.plugin.protocol import JOB_SOURCE as CONTRACT_JOB
     from slife2.libs.plugin.protocol import SKILLS_SOURCE as CONTRACT_SKILLS
     from slife2.plugins.cli.server import SOURCE as CLI_SOURCE
+    from slife2.plugins.jobs.server import SOURCE as JOB_SOURCE
     from slife2.plugins.skills.server import SOURCE as SKILLS_SOURCE
     from slife2.plugins.toolhub.server import CLI_SOURCE as HUB_CLI
+    from slife2.plugins.toolhub.server import JOB_SOURCE as HUB_JOB
     from slife2.plugins.toolhub.server import SKILLS_SOURCE as HUB_SKILLS
 
     assert HUB_SKILLS is SKILLS_SOURCE is CONTRACT_SKILLS
     assert HUB_CLI is CLI_SOURCE is CONTRACT_CLI
+    assert HUB_JOB is JOB_SOURCE is CONTRACT_JOB
 
 
 def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:

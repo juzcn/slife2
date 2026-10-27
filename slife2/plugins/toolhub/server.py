@@ -220,6 +220,9 @@ from slife2.libs.plugin.protocol import (
     CLI_SOURCE as _CLI_SOURCE,
 )
 from slife2.libs.plugin.protocol import (
+    JOB_SOURCE as _JOB_SOURCE,
+)
+from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
 from slife2.libs.store.catalogue import ToolStore
@@ -259,6 +262,9 @@ SKILL = "skill"
 CLI = "cli"
 MCP = "mcp"
 REST = "rest"
+#: Code the model wrote, made into a tool.  It is a function category — the row
+#: is callable and loadable — and the source name is the folder's (`jobs/`).
+JOB = "job"
 
 #: The categories a plugin may **declare** a source under — everything except
 #: `plugin`, which means *the servers slife2 starts* and is the category whose
@@ -271,7 +277,7 @@ REST = "rest"
 #: So a declaration cannot mint a `plugin` source, and a declared source's name
 #: may not collide with an upstream's either — which `Upstream.declare` checks
 #: against what this process is actually connected to.
-DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST})
+DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST, JOB})
 
 #: The two tools this process serves a *model* to manage its own tool list.
 #: Named here because they are also what the hub will not let go of: see
@@ -303,6 +309,7 @@ SKILL_USE = "skill_use"
 #: See `slife2.libs.plugin.protocol.SKILLS_SOURCE`.
 SKILLS_SOURCE = _SKILLS_SOURCE
 CLI_SOURCE = _CLI_SOURCE
+JOB_SOURCE = _JOB_SOURCE
 
 #: The trim, and the only name here with **two callers**.  The leading
 #: underscore is the convention — **a name beginning with `_` is a harness
@@ -2320,6 +2327,12 @@ def _load_refusal(name: str, answer: Mapping[str, Any]) -> str:
             f"its server has `enabled: false`, which is the operator's decision "
             f"and not a fault"
         )
+    if outcome == "error" and name.startswith(f"{JOB}__"):
+        return (
+            f"{name!r} cannot be loaded: its job file did not load. It is in "
+            f"the catalogue; `job_list` shows it, and `job_use` / `job_set` "
+            f"is how it is read and fixed"
+        )
     if outcome == "error":
         return (
             f"{name!r} cannot be loaded: the server that owns it is not "
@@ -2477,9 +2490,12 @@ def configured_sources(config: Config) -> frozenset[str]:
 
     The two document sources are here as constants rather than read off their
     servers, because a name crossing a process boundary is spelled on both sides
-    (`SKILLS_SOURCE`).  Which means a *disabled* source is in this set too, and
-    must be: `enabled: false` is a switch, not a deletion, and its rows are the
-    ones the catalogue keeps on purpose.
+    (`SKILLS_SOURCE`).  The job source is here for the same boot-window reason —
+    `slife2-jobs` declares it, but `reset` runs before any plugin has answered,
+    and withdrawing a job's row would make a tool the model wrote disappear on
+    every restart until the jobs plugin replied.  Which means a *disabled*
+    source is in this set too, and must be: `enabled: false` is a switch, not a
+    deletion, and its rows are the ones the catalogue keeps on purpose.
     """
     return frozenset(
         {
@@ -2488,6 +2504,7 @@ def configured_sources(config: Config) -> frozenset[str]:
             *config.rest_apis,
             SKILLS_SOURCE,
             CLI_SOURCE,
+            JOB_SOURCE,
         }
     )
 

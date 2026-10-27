@@ -327,6 +327,7 @@ loop（没有 inbox、不会被 cut-in），任务交付的 `agent-task:<name>` 
 | `slife2-wechat` | 微信登录与消息 | 24030 |
 | `slife2-skills` | playbook 与 `skill_use` | 24031 |
 | `slife2-cli` | `cli:` 节 | 24032 |
+| `slife2-jobs` | 代码定义的工具（`job__<name>`） | 24042 |
 | `slife2-mcp-tools` | `mcp:` 节 | 24033 |
 | `slife2-restapi-tools` | `rest-api:` 节 | 24034 |
 | `slife2-cabinet` | 笔记、日记、文件、报告、dump | 24035 |
@@ -561,6 +562,7 @@ skills:
 | `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |
 | `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
+| `jobs/`（文件夹） | `job_set`、`job_list`、`job_use`、`job_run`、`job_remove` |
 | `providers:` 与 `default:` | `model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），并在跨进程锁下执行。
@@ -669,6 +671,28 @@ Skill 可以在头部声明环境变量要求。值来自 `skills:` 配置节，
 `enabled: false` 让条目保持配置但不连接。该值必须是真正的 YAML 布尔值：在
 YAML 1.2 中，`no`、`off` 和 `'false'` 是字符串，会被拒绝而不是猜测。禁用条目的
 工具仍留在目录中，标记为 `disabled`，搜索仍能找到它们。
+
+#### Jobs
+
+`job_set` 写入一个 **job**：`<data>/jobs/` 下的一个 Python 文件，文件中有一个与
+文件同名的模块级函数——这个函数就成为模型可调用的工具 `job__<name>`。docstring
+是工具描述，带类型签名的参数就是工具 schema，没有第二份 manifest 要同步。同一个
+调用也用于替换：新文件先加载，再换入；加载失败则恢复上一版。`job_remove` 删除
+文件和工具；`job_list` / `job_use` / `job_run` 分别列出、读取和试跑。加载失败的
+文件会保留为 `error` 行，而不是消失。
+
+一个 job 可以是一个小的确定性工具，也可以是一段 workflow——它的代码就是普通
+Python，通过 `slife2.job` 的两个通用句柄组合系统的其余能力：
+
+- `call_tool(name, arguments)`：hub 的工具目录，按模型看到的名称调用——插件的
+  工具、外部 `{server}__{tool}`，或另一个 job。
+- `call(server, tool, arguments)`：按 `servers:` 的 key 调用 slife2 自己的服务
+  器——一轮 agent（`send_message`）、一次原始模型调用（`stream_chat`），或任何
+  插件自己的工具。
+
+运行时**不枚举 capabilities**。`servers()` 读取配置里唯一的那张表，所以以后新增
+的插件或工具不需要改 job 运行时就能被 job 使用。代码在 jobs 插件进程里以调用方
+的身份运行；它不是沙箱，顶层工具调用是请求人工批准的位置。
 
 ### 媒体
 
@@ -1076,6 +1100,8 @@ uv run pyright
 - `cli:` 条目会进入目录并可被发现，但目前没有工具执行它们。
 - slife2 不执行 playbook 脚本；`skill_use` 返回 playbook 文本，由模型自己运行
   其中的命令。
+- Job 是代码：它在 `slife2-jobs` 进程里以调用方身份运行，不是沙箱。顶层工具
+  调用是批准点。
 - 文件柜的 `file_save` 不获取 URL，文件柜也没有 `grep` 搜索腿。
 - 编辑配置前没有批准闸，包括带 `command:` 的 `mcp_set`；该调用会记录一个
   slife2 将要启动的程序。

@@ -160,6 +160,14 @@ CALL_SOURCE = "call_source"
 SKILLS_SOURCE = "skills"
 CLI_SOURCE = "cli"
 
+#: The source name the **jobs** are filed under — code the model wrote in the
+#: home's `jobs/` folder, each file becoming a tool named `job__<name>`.  It is
+#: a source rather than a set of plugin tools because the hub must re-read the
+#: folder as the model changes it, and `list_sources` is the one answer the hub
+#: refreshes before every search; and it is a *function* source, so its rows are
+#: callable, unlike the two document sources above.
+JOB_SOURCE = "job"
+
 
 def describe(client: ClientId) -> str:
     """A client id as one readable token, for a log line.

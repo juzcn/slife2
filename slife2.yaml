@@ -24,9 +24,10 @@ servers:
   # MCP and REST servers.
   mcp-tools: {port: 24033}
   restapi-tools: {port: 24034}
-  # Commands and playbooks.
+  # Commands, playbooks and code-defined tools.
   cli-server: {port: 24032}
   skills-server: {port: 24031}
+  job-server: {port: 24042}
   # Capabilities.
   wechat: {port: 24030}
   cabinet: {port: 24035}

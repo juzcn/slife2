@@ -62,6 +62,7 @@ from slife2.libs.plugin.audience import forwarded_client, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     CLI_SOURCE,
+    JOB_SOURCE,
     LIST_SOURCES,
     RETURNS,
     SKILLS_SOURCE,
@@ -1009,6 +1010,11 @@ def refusal(config: Config, name: str) -> str | None:
         return (
             f"'{name}' is the name the `{name}:` section's rows are "
             f"filed under. Choose another name."
+        )
+    if name == JOB_SOURCE:
+        return (
+            f"'{name}' is the name the `jobs/` folder's rows are filed under. "
+            f"Choose another name."
         )
     return None
 

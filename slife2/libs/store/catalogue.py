@@ -88,7 +88,14 @@ logger = logging.getLogger(__name__)
 #: missing one failing the turn, and tools that start loaded (SDD §7.1).
 PLUGIN = "plugin"
 
-FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest"})
+#: A **job**: a tool the model wrote for itself, as a Python function in the
+#: data directory's `jobs/` folder.  It is a *function* category rather than a
+#: document one — the row is callable and has a load state — and it is the only
+#: category whose implementation is a file the model authored rather than a
+#: server somebody configured.
+JOB = "job"
+
+FUNCTION_CATEGORIES = frozenset({PLUGIN, "mcp", "rest", JOB})
 
 #: The two categories **nothing is connected to**, and the two the model cannot
 #: load.  A skill is a document, read by `slife2-skills`; a `cli:` entry is a
@@ -101,10 +108,11 @@ SKILL = "skill"
 CLI = "cli"
 
 #: Everything the code can write, which is what the live table's `CHECK` must
-#: accept.  There is no `job` category, and none for a package of somebody's
-#: own code rather than a server; nothing writes `job` yet, and adding one
-#: later is free: the DDL is checked at open and a file that is not this build's
-#: is rebuilt rather than migrated — which is what adding `cli` did.
+#: accept.  A `job` is the model's own code made into a tool, so it is a
+#: function category: it is callable and loadable, unlike a skill or a command.
+#: The DDL is checked at open and a file that is not this build's is rebuilt
+#: rather than migrated — which is what adding `cli` did, and what adding `job`
+#: does again.
 CATEGORIES = FUNCTION_CATEGORIES | {SKILL, CLI}
 
 #: `tool.status` — the row's whole closed domain, and three MUTUALLY EXCLUSIVE

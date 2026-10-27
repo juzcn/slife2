@@ -276,6 +276,25 @@ manifest the swap would leave behind before swapping. `remove` deletes the
 folder and its `skills:` entry. A skill is therefore authored, re-edited and
 deleted through the same folder rules, with one writer staging and swapping.
 
+A **job** is code this system turns into a tool: one Python function in
+`<data>/jobs/<name>.py`, exposed to the model as `job__<name>`. The function's
+docstring and typed signature are the tool definition — there is no manifest —
+and `job_set` loads the file before swapping it in, so a broken write restores
+the previous version. `job_remove` deletes the file and its row; `job_list`,
+`job_use` and `job_run` list, read and test one. The jobs plugin declares the
+folder as one `job` source whose rows are callable, and the hub's per-search
+refresh makes a new job findable without a restart, exactly as it does a new
+skill.
+
+**The job runtime enumerates no capabilities.** `call_tool(name, arguments)`
+reaches the hub's catalogue; `call(server, tool, arguments)` reaches any server
+in `servers:` by its key — an agent turn (`send_message`), a raw model call
+(`stream_chat`), or any plugin's own tools — and `servers()` reads that config
+table. A plugin or tool another change adds is therefore usable from a job with
+no runtime change. The code runs in the jobs plugin with the caller's identity,
+holds no credential, and is not sandboxed; the top-level tool call is the
+approval point.
+
 ### 2.7 Key design decisions
 
 | Decision | Choice | Consequence |
@@ -405,6 +424,7 @@ The families are:
 | `restapi-tools` | `rest-api:` | OpenAPI documents served by an MCP proxy |
 | `cli-server` | `cli:` | Commands already installed |
 | `skills-server` | `skills:` | Playbooks under `skills/` |
+| `job-server` | none (`jobs/`) | Code-defined tools under `jobs/` |
 | `cabinet` | none | Documents and saved files |
 
 An entry has one `state` field, read from the file before the link is consulted.
@@ -1434,6 +1454,13 @@ and never enter the model's list. Calling a skill row answers with the step that
 reaches it (`skill_use`); calling a command row says that nothing runs one yet.
 Their names are namespaced (`skill:browser-harness`, `cli:yt-dlp`) because one
 name is one row.
+
+A **job** is the other kind: a row that *is* callable and loadable, because its
+implementation is code rather than a document or an installed program. Its name
+is `job__<name>` — double underscore, like an external server's tool — because
+the bare name is a user's Python identifier and the prefix keeps it out of the
+system's namespace. Its row is the same shape as any function tool's: name,
+description, schema, load state.
 
 ### 7.4 Loaded set and budget
 
