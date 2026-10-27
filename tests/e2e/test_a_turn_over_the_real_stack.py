@@ -610,8 +610,7 @@ async def test_a_second_turn_runs_on_the_first(stack) -> None:
 
     assert stack["provider"].last_messages[-1]["role"] == "user"
     assert (
-        _prompt_words(stack["provider"].last_messages[-1]["content"])
-        == "what number?"
+        _prompt_words(stack["provider"].last_messages[-1]["content"]) == "what number?"
     )
     assert any(
         "remember the number 41" in json.dumps(message)
