@@ -662,14 +662,14 @@ def _ensure_python_function(path: Path) -> str:
     return match.group(0) + "\n"
 
 
-def test_the_shell_installer_falls_back_for_a_uv_without_upgrade(
+def test_the_shell_installer_falls_back_for_a_uv_without_default(
     tmp_path: Path,
 ) -> None:
-    """**`--upgrade` is newer than uv 0.7, and `--default` was preview-only.**
+    """**`--default` was preview-only in uv 0.7.**
 
-    A uv that predates either flag rejects the whole command, and `uv self
-    update` is allowed to fail quietly, so the installer must still put Python
-    3.13 in place rather than dying on a flag it does not know.
+    A uv that predates the flag rejects the whole command, and `uv self update`
+    is allowed to fail quietly, so the installer must still put Python 3.13 in
+    place rather than dying on a flag it does not know.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -726,12 +726,80 @@ ensure_python
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
-        "python install 3.13 --upgrade --default",
+        "python find 3.13 --no-python-downloads",
+        "python install 3.13 --default",
         "python install 3.13 --preview --default",
     ]
 
 
-def test_the_powershell_installer_falls_back_for_a_uv_without_upgrade(
+def test_the_shell_installer_leaves_an_installed_python_alone(tmp_path: Path) -> None:
+    """**Installing is not upgrading.**
+
+    `uv python install --upgrade` fetched the latest 3.13 patch on every run,
+    and uv keeps the patch it replaced because a virtualenv may still point
+    into it: three runs over a few months left 3.13.14, 3.13.16 and 3.13.18
+    behind, ~110 MB each.  A 3.13 that is already there is the requirement, so
+    the step says so and starts no install.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(
+        stub_bin / "uv",
+        """\
+#!/bin/sh
+printf '%s\\n' "$*" >> "$UV_LOG"
+case "$*" in
+    "python find 3.13 --no-python-downloads") exit 0 ;;
+esac
+exit 1
+""",
+    )
+    _write_executable(stub_bin / "python3", "#!/bin/sh\nexit 0\n")
+
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(_ensure_python_function(SHELL), encoding="utf-8")
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+PLATFORM=linux
+say() { printf '%s\\n' "$*"; }
+refresh_path() { :; }
+stage() { local message=$1; shift; "$@"; }
+die() { printf 'error: %s\\n' "$*" >&2; exit 2; }
+. "$FUNCTION_FILE"
+ensure_python
+""",
+        encoding="utf-8",
+    )
+    log = tmp_path / "uv.log"
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_bin}:{os.environ.get('PATH', '')}",
+            "FUNCTION_FILE": str(function_file),
+            "UV_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Python 3.13 is already installed" in result.stdout
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "python find 3.13 --no-python-downloads"
+    ]
+
+
+def test_the_powershell_installer_falls_back_for_a_uv_without_default(
     tmp_path: Path,
 ) -> None:
     """The Windows half of the same fallback."""
@@ -781,8 +849,65 @@ def test_the_powershell_installer_falls_back_for_a_uv_without_upgrade(
 
     assert "RESULT=True" in result.stdout, result.stdout + result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
-        "python install 3.13 --upgrade --default",
+        "python find 3.13 --no-python-downloads",
+        "python install 3.13 --default",
         "python install 3.13 --preview --default",
+    ]
+
+
+def test_the_powershell_installer_leaves_an_installed_python_alone(
+    tmp_path: Path,
+) -> None:
+    """The Windows half of the same rule: a present 3.13 is not reinstalled."""
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    (stub_bin / "uv.cmd").write_text(
+        "@echo off\r\n"
+        'echo %*>>"%UV_LOG%"\r\n'
+        'echo %* | findstr /c:"python find" >nul && exit /b 0\r\n'
+        "exit /b 1\r\n",
+        encoding="utf-8",
+    )
+    (stub_bin / "python3.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    quiet = re.search(r"^function Invoke-Quiet.*?^\}", text, re.MULTILINE | re.DOTALL)
+    assert quiet, "Invoke-Quiet is missing from install.ps1"
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        quiet.group(0) + "\n" + _ensure_python_function(POWERSHELL), encoding="utf-8"
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Say([string]$Message) { Write-Output $Message }\n"
+        "function Update-ProcessPath { }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        f". '{function_file}'\n"
+        f"$env:PATH = '{stub_bin};' + $env:PATH\n"
+        "Ensure-Python\n"
+        'Write-Output "RESULT=$?"\n',
+        encoding="utf-8",
+    )
+    log = tmp_path / "uv.log"
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "UV_LOG": str(log)},
+    )
+
+    assert "RESULT=True" in result.stdout, result.stdout + result.stderr
+    assert "Python 3.13 is already installed" in result.stdout
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "python find 3.13 --no-python-downloads"
     ]
 
 

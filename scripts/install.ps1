@@ -227,11 +227,23 @@ function Ensure-Uv {
 }
 
 function Ensure-Python {
+    # **Installing is not upgrading.**  `--upgrade` fetched the latest 3.13
+    # patch on every run, and uv keeps the patch it replaced because a virtual
+    # environment may still point into it: repeated runs leave a ~100 MB
+    # interpreter behind each time.  A 3.13 that is already there is the
+    # requirement; moving to a newer patch is the operator's call
+    # (`uv python upgrade 3.13`).
+    $installed = Invoke-Quiet { & uv python find 3.13 --no-python-downloads } -Silent
+    if ($installed -and (Get-Command python3 -ErrorAction SilentlyContinue)) {
+        Say '  Python 3.13 is already installed'
+        Update-ProcessPath
+        return
+    }
     Say '  installing Python 3.13'
-    # **`--upgrade` is newer than uv 0.7, and `--default` was behind
-    # `--preview` there.**  An older uv still installs 3.13 with the preview
-    # flag, so retry rather than failing the run on a flag it does not know.
-    if (-not (Invoke-Quiet { & uv python install 3.13 --upgrade --default } -Silent)) {
+    # **`--default` was behind `--preview` in uv 0.7.**  An older uv still
+    # installs 3.13 with the preview flag, so retry rather than failing the run
+    # on a flag it does not know.
+    if (-not (Invoke-Quiet { & uv python install 3.13 --default } -Silent)) {
         if (-not (Invoke-Quiet { & uv python install 3.13 --preview --default })) {
             Die 'Python 3.13 could not be installed'
         }

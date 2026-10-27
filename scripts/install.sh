@@ -171,12 +171,23 @@ ensure_python() {
         PY313="$(brew --prefix python@3.13)/bin/python3.13"
         [ -x "$PY313" ] || die "python@3.13 is missing"
     else
-        # `--upgrade` is newer than uv 0.7, and `--default` was behind
-        # `--preview` there.  An older uv still installs 3.13 with the preview
-        # flag, so retry rather than failing the run on a flag it does not know.
-        stage "installing Python 3.13" uv python install 3.13 --upgrade --default 2>/dev/null \
-            || stage "installing Python 3.13" uv python install 3.13 --preview --default \
-            || die "Python 3.13 could not be installed"
+        # **Installing is not upgrading.**  `--upgrade` fetched the latest 3.13
+        # patch on every run, and uv keeps the patch it replaced because a
+        # virtualenv may still point into it: three runs over a few months left
+        # three ~110 MB interpreters in ~/.local/share/uv/python.  A 3.13 that
+        # is already there is the requirement; moving to a newer patch is the
+        # operator's call (`uv python upgrade 3.13`).
+        if uv python find 3.13 --no-python-downloads >/dev/null 2>&1 \
+            && command -v python3 >/dev/null 2>&1; then
+            say "  Python 3.13 is already installed"
+        else
+            # `--default` was behind `--preview` in uv 0.7; an older uv still
+            # installs 3.13 with the preview flag, so retry rather than failing
+            # the run on a flag it does not know.
+            stage "installing Python 3.13" uv python install 3.13 --default \
+                || stage "installing Python 3.13" uv python install 3.13 --preview --default \
+                || die "Python 3.13 could not be installed"
+        fi
         refresh_path
     fi
 }

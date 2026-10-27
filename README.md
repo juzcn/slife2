@@ -127,6 +127,11 @@ configuration. Data and configuration live in `~/.slife2`; binaries and
 libraries live in `~/.local` (`%LOCALAPPDATA%\slife2` on Windows). Run the same
 command again to upgrade.
 
+Python 3.13 is installed only when the machine has none. A later run leaves the
+interpreter as it is — `uv python upgrade 3.13` moves it to a newer patch —
+because uv keeps the patch it replaces for the virtualenvs that may point into
+it, and re-running the installer should not add another ~100 MB copy each time.
+
 The installer also seeds the bundled `skills/` and `jobs/` into the data
 directory, **overwriting files of the same name**; a skill or job you added
 under another name stays untouched. Editing a seeded file means editing a

@@ -119,6 +119,10 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 全部外部程序。数据和配置保存在 `~/.slife2`，二进制和库位于 `~/.local`（Windows
 为 `%LOCALAPPDATA%\slife2`）。再次运行同一条命令即可升级。
 
+Python 3.13 只在机器上没有时安装。再次运行安装器不会动解释器的补丁版本——需要
+更新时运行 `uv python upgrade 3.13`——因为 uv 会保留被替换的补丁供可能指向它的
+虚拟环境使用，重复运行安装器不应每次都多留下一份约 100 MB 的副本。
+
 安装器还会把自带的 `skills/` 和 `jobs/` seed 到数据目录，**同名文件直接覆盖**；
 你自己添加的、名字不同的 skill 或 job 会保留。修改 seed 出来的文件等于修改副本——
 下一次安装会把它替换掉。
