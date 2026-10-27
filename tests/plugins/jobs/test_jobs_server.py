@@ -101,7 +101,7 @@ async def test_a_job_set_is_a_tool_the_catalogue_can_call(
                 "arguments": {"title": "Hello, World!"},
             },
         )
-        read = await ask(client, "job_use", name="slugify")
+        read = await ask(client, "job_read", name="slugify")
         removed = await ask(client, "job_remove", name="slugify")
         after = await declared(client)
 
@@ -214,7 +214,7 @@ async def test_a_file_that_does_not_load_stays_visible_and_is_not_callable(
 ) -> None:
     """**A broken file is a row, not a disappearance.**  The folder says a job is
     installed; hiding it would send the model looking for a tool it can see on
-    disk, so the row says `error`, `job_use` shows the code, and the per-job
+    disk, so the row says `error`, `job_read` shows the code, and the per-job
     tool refuses with the reason.
     """
     config_on_disk(isolated_runtime)
@@ -225,7 +225,7 @@ async def test_a_file_that_does_not_load_stays_visible_and_is_not_callable(
     async with Client(build_server(load())) as client:
         source = await declared(client)
         listed = await ask(client, "job_list")
-        read = await ask(client, "job_use", name="broken")
+        read = await ask(client, "job_read", name="broken")
         refused = await client.call_tool(
             CALL_SOURCE,
             {"source": SOURCE, "tool": "broken", "arguments": {}},
@@ -257,7 +257,7 @@ async def test_a_missing_job_is_a_refusal_not_an_empty_answer(
         assert "nothing close is installed" in str(raised.value)
         assert "job_set" in str(raised.value)
         with pytest.raises(ToolError, match="no job called"):
-            await client.call_tool("job_use", {"name": "nothing"})
+            await client.call_tool("job_read", {"name": "nothing"})
         with pytest.raises(ToolError, match="no job called"):
             await client.call_tool("job_remove", {"name": "nothing"})
 
@@ -276,7 +276,7 @@ async def test_a_misspelled_job_suggests_the_one_it_meant(
     async with Client(build_server(load())) as client:
         await ask(client, "job_set", name="slugify", code=SLUGIFY)
         with pytest.raises(ToolError, match="did you mean") as raised:
-            await client.call_tool("job_use", {"name": "slugifi"})
+            await client.call_tool("job_read", {"name": "slugifi"})
         called = await client.call_tool(
             CALL_SOURCE,
             {"source": SOURCE, "tool": "slugifi", "arguments": {}},

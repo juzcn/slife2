@@ -2352,7 +2352,7 @@ def _load_refusal(
     if outcome == "error" and name.startswith(f"{JOB}__"):
         return (
             f"{name!r} cannot be loaded: its job file did not load. It is in "
-            f"the catalogue; `job_list` shows it, and `job_use` / `job_set` "
+            f"the catalogue; `job_list` shows it, and `job_read` / `job_set` "
             f"is how it is read and fixed"
         )
     if outcome == "error":

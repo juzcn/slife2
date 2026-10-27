@@ -10,7 +10,7 @@ job.
 **A broken file is kept, not skipped.**  The folder says a job is installed, so
 hiding it would send a model looking for a tool the operator can see; the file
 is loaded far enough to report what went wrong, the row says `error`, and
-`job_use`/`job_set` are how it is read and fixed.  That is the same choice
+`job_read`/`job_set` are how it is read and fixed.  That is the same choice
 `slife2.plugins.skills.playbooks` makes for a damaged `SKILL.md`, and for the
 same reason.
 

@@ -281,7 +281,7 @@ A **job** is code this system turns into a tool: one Python function in
 docstring and typed signature are the tool definition — there is no manifest —
 and `job_set` loads the file before swapping it in, so a broken write restores
 the previous version. `job_remove` deletes the file and its row; `job_list`,
-`job_use` and `job_run` list, read and test one. The jobs plugin declares the
+`job_read` and `job_run` list, read and test one. The jobs plugin declares the
 folder as one `job` source whose rows are callable, and the hub's per-search
 refresh makes a new job findable without a restart, exactly as it does a new
 skill.

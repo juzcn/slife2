@@ -627,7 +627,7 @@ for its own section:
 | `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |
 | `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
-| `jobs/` (a folder) | `job_set`, `job_list`, `job_use`, `job_run`, `job_remove` |
+| `jobs/` (a folder) | `job_set`, `job_list`, `job_read`, `job_run`, `job_remove` |
 | `providers:` and `default:` | `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
@@ -767,7 +767,7 @@ function named after the file — and that function becomes a tool the model cal
 its parameter schema; there is no manifest to keep in step. The same call
 replaces a job: the new file is loaded before the swap, and the previous version
 is restored if it does not load. `job_remove` deletes the file and the tool;
-`job_list` / `job_use` / `job_run` list, read and test one. A broken file stays
+`job_list` / `job_read` / `job_run` list, read and test one. A broken file stays
 visible as an `error` row rather than disappearing.
 
 A job may be a small deterministic tool or a workflow — its code is plain

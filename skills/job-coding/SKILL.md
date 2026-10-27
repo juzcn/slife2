@@ -38,7 +38,7 @@ model's judgement at each step, write a skill instead.
   function with that same name**. `_`-prefixed functions are private helpers.
 - The exposed tool is `job__<name>`. The `job__` prefix is fixed and keeps a
   job from displacing a system tool (`job__turn_read` is not `turn_read`).
-- A file that does not load is kept as an `error` row: `job_use` shows the code,
+- A file that does not load is kept as an `error` row: `job_read` shows the code,
   `job_set` replaces it. It is never silently hidden.
 
 ## Lifecycle
@@ -46,7 +46,7 @@ model's judgement at each step, write a skill instead.
 | Tool | Purpose |
 |---|---|
 | `job_list` | What is installed: `name`, the `tool` (`job__<name>`), description, status, file. |
-| `job_use` | Read a job's code and path. This is what you edit. |
+| `job_read` | Read a job's code and path. This is what you edit. |
 | `job_set` | Write a job — create or replace — and register its tool now. A broken write is refused and the previous version restored. |
 | `job_remove` | Delete the file and remove the tool. |
 | `job_run` | Run a job by name with one JSON arguments object; the test path before its tool is loaded. |
@@ -224,7 +224,7 @@ unused import, or an `int()` on a value that may be `None`. Run the project's
 own tools over the file you just wrote, fix what they find, and `job_set` again.
 Repeat until both are clean.
 
-Get the file's path from `job_use` (its `file`), and run these with your shell /
+Get the file's path from `job_read` (its `file`), and run these with your shell /
 terminal capability from the project checkout (where `pyproject.toml` is) or
 with the venv's executables:
 
@@ -294,7 +294,7 @@ cannot check" before searching.
 - One public function per file; helpers start with `_`.
 - Do not send an agent turn to the conversation running the job; give it its own
   `subagent`.
-- Reserved names (`job_list`, `job_set`, `job_remove`, `job_run`, `job_use`) and
+- Reserved names (`job_list`, `job_set`, `job_remove`, `job_run`, `job_read`) and
   names beginning with `_` are refused.
 - **The ruff and pyright checks pass** (or you have said why they could not
   run). A job that installs but fails either check is not finished.

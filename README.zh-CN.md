@@ -567,7 +567,7 @@ skills:
 | `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |
 | `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
-| `jobs/`（文件夹） | `job_set`、`job_list`、`job_use`、`job_run`、`job_remove` |
+| `jobs/`（文件夹） | `job_set`、`job_list`、`job_read`、`job_run`、`job_remove` |
 | `providers:` 与 `default:` | `model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），并在跨进程锁下执行。
@@ -684,7 +684,7 @@ YAML 1.2 中，`no`、`off` 和 `'false'` 是字符串，会被拒绝而不是�
 文件同名的模块级函数——这个函数就成为模型可调用的工具 `job__<name>`。docstring
 是工具描述，带类型签名的参数就是工具 schema，没有第二份 manifest 要同步。同一个
 调用也用于替换：新文件先加载，再换入；加载失败则恢复上一版。`job_remove` 删除
-文件和工具；`job_list` / `job_use` / `job_run` 分别列出、读取和试跑。加载失败的
+文件和工具；`job_list` / `job_read` / `job_run` 分别列出、读取和试跑。加载失败的
 文件会保留为 `error` 行，而不是消失。
 
 一个 job 可以是一个小的确定性工具，也可以是一段 workflow——它的代码就是普通

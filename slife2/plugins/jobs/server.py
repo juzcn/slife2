@@ -10,7 +10,7 @@ catalogue, routed by the hub exactly like a tool from an external server.
 loads it and registers its row in the same call; the hub re-reads `list_sources`
 before every search, so the tool is findable from the model's next search with
 no restart.  `job_remove` deletes the file and the row.  A broken file stays
-visible as an `error` row — `job_use` shows the code, `job_set` replaces it —
+visible as an `error` row — `job_read` shows the code, `job_set` replaces it —
 rather than disappearing and leaving the model to guess.
 
 **A job may be a new tool or a workflow.**  The mechanism does not distinguish:
@@ -98,7 +98,7 @@ _RESERVED = frozenset(
         "job_set",
         "job_remove",
         "job_run",
-        "job_use",
+        "job_read",
         LIST_SOURCES,
         CALL_SOURCE,
     }
@@ -151,13 +151,13 @@ def _not_loaded(job: jobs.Job) -> str:
     """A broken job, and the way out — never the exception alone.
 
     **This failure is self-healable**, and the sentence says so: the file is
-    still on disk, `job_use` reads it, and `job_set` replaces it.  A message
+    still on disk, `job_read` reads it, and `job_set` replaces it.  A message
     that stopped at the exception would make a person search for whether the
     job is worth rescuing; the next step is the answer to that question.
     """
     return (
         f"job {job.name!r} is not loaded: {job.error} — read it with "
-        f"`job_use`, fix the code and call `job_set` again"
+        f"`job_read`, fix the code and call `job_set` again"
     )
 
 
@@ -348,7 +348,7 @@ def build_server(
 
         Each row gives the bare `name`, the `tool` the model calls
         (`job__<name>`), what the job is for, and whether it loaded. A row with
-        `status` `error` is a file that did not load: read it with `job_use`,
+        `status` `error` is a file that did not load: read it with `job_read`,
         fix it, and `job_set` it again.
 
         Args:
@@ -374,8 +374,8 @@ def build_server(
             rows.append(row)
         return listed(rows, "jobs", limit, offset, cap=LIST_PAGE)
 
-    @mcp.tool(name="job_use", meta=FOR_THE_MODEL)
-    async def job_use(name: str) -> dict[str, Any]:
+    @mcp.tool(name="job_read", meta=FOR_THE_MODEL)
+    async def job_read(name: str) -> dict[str, Any]:
         """Read a job's code: the function the tool runs.
 
         The answer is the file itself and the path it lives at — the thing to
@@ -395,7 +395,7 @@ def build_server(
         except OSError as exc:
             raise ToolError(
                 f"could not read {job.path}: {exc} — close whatever holds the "
-                f"file and try `job_use` again"
+                f"file and try `job_read` again"
             ) from exc
         return {
             "name": job.name,
