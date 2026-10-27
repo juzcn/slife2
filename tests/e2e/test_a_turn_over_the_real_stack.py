@@ -38,10 +38,12 @@ import pytest
 import pytest_asyncio
 from fastmcp import Client
 
+from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host import launcher
 from slife2.libs.host.config import LOCAL_SERVERS, load
 from slife2.libs.host.paths import DATA_ENV_VAR, data_dir
 from slife2.libs.plugin.audience import client_meta
+from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import DUMP, index_path, store_of
 from slife2.tui.client import MCPAgentClient
@@ -517,6 +519,18 @@ def _files(data: Path) -> list[str]:
     )
 
 
+def _prompt_words(content: str) -> str:
+    """A live user message as the person wrote it, the turn's prompt taken off.
+
+    `[TURN-PROMPT:{…}]` — the clock and the status bar's figure — is added to
+    the message after the recall has chosen the conversation and removed before
+    the turn is saved.  The model is its only reader, so a request read back
+    from the stub carries it while the row, the transcript and every later
+    rebuild do not.  What the two agree on is the words underneath.
+    """
+    return strip_marker(content, TURN_PROMPT_PREFIX)
+
+
 @pytest.mark.asyncio
 async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> None:
     """One message in, one answer out, and a conversation left behind.
@@ -547,7 +561,11 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     assert events[0] == "ContextChosen", events
     assert "TextDelta" in events and events[-1] == "TurnFinished"
     assert stack["provider"].chats == 2, stack["provider"].calls
-    assert stack["provider"].last_messages[-1]["content"] == "what is 6*7?"
+    # The model is the marker's only reader: the request carries it, across
+    # every process between the agent and the stub.
+    sent = stack["provider"].last_messages[-1]["content"]
+    assert sent.startswith(TURN_PROMPT_PREFIX), sent
+    assert _prompt_words(sent) == "what is 6*7?"
 
     # The conversation outlives the client that ran it: the transcript is the
     # server's, and a *second* connection reads the turn back.
@@ -562,6 +580,9 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     # there and neither is a column of its own (`TurnRecord.to_wire`).
     assert "what is 6*7?" in json.dumps(turns[0]["messages"])
     assert ANSWER in json.dumps(turns[0]["messages"])
+    # ...and the prompt marker stayed out of the row: it is text for the turn
+    # that ran, not a fact about it, so search and recall never see it.
+    assert TURN_PROMPT_PREFIX not in json.dumps(turns[0]["messages"])
 
     # And it is on disk, written by the context plugin rather than by anybody in
     # this process.
@@ -588,7 +609,10 @@ async def test_a_second_turn_runs_on_the_first(stack) -> None:
         await client.close()
 
     assert stack["provider"].last_messages[-1]["role"] == "user"
-    assert stack["provider"].last_messages[-1]["content"] == "what number?"
+    assert (
+        _prompt_words(stack["provider"].last_messages[-1]["content"])
+        == "what number?"
+    )
     assert any(
         "remember the number 41" in json.dumps(message)
         for message in stack["provider"].last_messages[:-1]
