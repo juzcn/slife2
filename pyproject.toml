@@ -286,7 +286,13 @@ target-version = "py313"
 # reformatting a playbook whose upstream would be updated from somewhere else.
 # It is the same rule the formatter follows for generated code — the file is
 # not ours to have an opinion about.
-extend-exclude = ["skills"]
+#
+# jobs/ is the home's code the model wrote for itself (SDD §2.6): user data
+# like agents/, not project source like slife2/.  The author's own style is
+# theirs; the runtime gate is load/schema, not lint.  `ruff check .` in CI is
+# the only project gate that scans the repository root, so this is what keeps a
+# job created in a development checkout from failing the build.
+extend-exclude = ["skills", "jobs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "BLE"]
@@ -303,7 +309,10 @@ ignore = ["E501"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 include = ["slife2"]
-exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "**/node_modules", "**/.*"]
+# `jobs/**` is explicit although `include` already stops at slife2: the editor's
+# language server analyses a file the moment it is opened, and the jobs folder is
+# user data whose type errors are the author's to fix, not the project's build.
+exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "jobs/**", "**/node_modules", "**/.*"]
 reportMissingImports = true
 reportMissingTypeStubs = false
 reportOptionalSubscript = true
