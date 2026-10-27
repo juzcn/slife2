@@ -34,6 +34,7 @@ import contextlib
 import logging
 import re
 import sqlite3
+import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -548,6 +549,12 @@ class ToolStore:
         # (`slife2.plugins.toolhub.server.configured_sources`).  A caller that has not read it
         # passes nothing, and nothing is what the pass then does.
         self.path = path
+        #: The file this store last ensured, and the lock that serializes a
+        #: rebuild of it.  A store outlives its file when a person deletes one,
+        #: so every connection checks that the path still holds the file it
+        #: opened; see `_ensure_file`.
+        self._identity: tuple[int, int] | None = None
+        self._schema_lock = threading.Lock()
         self._ensure_schema()
         # Built means a process has just started, and a verdict this file
         # carries from an older run may be one nothing can justify any more —
@@ -567,10 +574,12 @@ class ToolStore:
         for the same reason: `with sqlite3.connect(...)` commits and *leaves the
         connection open*, so the close this file's call sites assume was the
         collector's to make — late, and on Windows late enough that the file
-        cannot be deleted in the meantime.  A catalogue is never deleted, so
-        nothing here has met that; the lifetime is stated once for both stores so
-        that "a connection per call" means the same thing in both.
+        cannot be deleted in the meantime.  The catalogue's file is not deleted
+        by slife2 itself, so nothing here met the turns' version of that; the
+        lifetime is stated once for both stores so that "a connection per call"
+        means the same thing in both.
         """
+        self._ensure_file()
         connection = connect_to(self.path)
         try:
             with connection:
@@ -579,6 +588,41 @@ class ToolStore:
             connection.close()
 
     # --- the file -------------------------------------------------------------
+
+    def _ensure_file(self) -> None:
+        """Rebuild the schema when the path no longer holds the file this store opened.
+
+        **A catalogue deleted under a running store is a new, empty file, not a
+        missing one**: the next connection creates the path, and this store —
+        the hub keeps one per home for as long as it lives and ensures the
+        schema only at construction — then fails every statement with `no such
+        table: tool`.  A person deleting one home's file (the remedy a stale
+        schema invites) would have to restart the machine's daemons, including
+        the hub every other home is served by.
+
+        The test is the file **identity**, not its modification time: every write
+        moves that, and a rebuild in place keeps the identity — the stale-file
+        case at construction is `_rebuild_if_stale`'s.
+        """
+        if self._file_identity() == self._identity:
+            return
+        with self._schema_lock:
+            if self._file_identity() == self._identity:
+                return
+            self._ensure_schema()
+
+    def _file_identity(self) -> tuple[int, int] | None:
+        """Which file the path holds now, or `None` when it holds none.
+
+        `st_ino` is the file index on Windows and the inode on POSIX; a file
+        deleted and created again under the same name is a different pair, which
+        is exactly what `_ensure_file` has to see.
+        """
+        try:
+            info = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return (info.st_dev, info.st_ino)
 
     def _ensure_schema(self) -> None:
         """Create the tables, on a file that is not this build's.
@@ -592,9 +636,14 @@ class ToolStore:
         person to delete it, because a rebuild is a statement this layer can run
         itself, and the report is a log line naming the file.
         """
-        with self._connect() as connection:
-            self._rebuild_if_stale(connection)
-            connection.executescript(_TOOL_SCHEMA)
+        connection = connect_to(self.path)
+        try:
+            with connection:
+                self._rebuild_if_stale(connection)
+                connection.executescript(_TOOL_SCHEMA)
+        finally:
+            connection.close()
+        self._identity = self._file_identity()
 
     def _rebuild_if_stale(self, connection: sqlite3.Connection) -> None:
         """Empty a `tool` table that is not the one this code writes.

@@ -371,6 +371,29 @@ def test_a_file_whose_check_predates_a_value_is_rebuilt(tmp_path) -> None:
     assert rows_in(store) == [("arxiv__search", STATUS_ERROR, UNLOADED)]
 
 
+def test_a_catalogue_deleted_under_a_running_store_is_rebuilt(tmp_path) -> None:
+    """A deleted file is a new, empty one, and the store owns it.
+
+    The hub keeps one store per home for as long as it lives and ensures the
+    schema only at construction.  Deleting one home's catalogue — the remedy a
+    schema change invites, and one a person can do without touching the daemons
+    every *other* home is being served by — left every later statement failing
+    `no such table: tool` against the empty file the next connection created.
+    The store checks that the path still holds the file it opened, and builds a
+    replacement rather than failing until the hub is restarted.
+    """
+    store = store_at(tmp_path)
+    path = tmp_path / "tools.db"
+
+    path.unlink()
+    assert store.count() == 0, "the file is gone"
+
+    path.unlink()
+    with sqlite3.connect(path):
+        pass
+    assert store.count() == 0, "another, empty file is at the same path"
+
+
 def test_a_skill_row_carries_no_load_state(tmp_path) -> None:
     """`n/a` is what the column documents for a skill, and what its filter means.
 
