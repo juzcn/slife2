@@ -874,7 +874,9 @@ def test_the_powershell_installer_leaves_an_installed_python_alone(
         "exit /b 1\r\n",
         encoding="utf-8",
     )
-    (stub_bin / "python3.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    (stub_bin / "python3.cmd").write_text(
+        "@echo off\r\nexit /b 0\r\n", encoding="utf-8"
+    )
 
     text = POWERSHELL.read_text(encoding="utf-8")
     quiet = re.search(r"^function Invoke-Quiet.*?^\}", text, re.MULTILINE | re.DOTALL)
