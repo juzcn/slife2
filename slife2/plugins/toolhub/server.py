@@ -1804,7 +1804,9 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
 FUNC_TOOL_LOAD_DESCRIPTION = (
     "Put tools into the list you are shown before each request. A name from "
     "`tool_search` can be called without loading; loading is what keeps it in "
-    "that list. The least recently used go when the list passes its cap."
+    "that list. The answer names what was `loaded` and what was `refused`, "
+    "with a reason for each refusal. The least recently used go when the list "
+    "passes its cap."
 )
 
 FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
@@ -1942,7 +1944,7 @@ def local_tools(
                 f"every turn boundary, so load the ones you want now."
             )
         loaded: list[str] = []
-        failed: list[dict[str, str]] = []
+        refused: list[dict[str, str]] = []
         for name in names:
             answer = await catalogue.set_load(name, "loaded")
             close = (
@@ -1952,18 +1954,23 @@ def local_tools(
             )
             reason = _load_refusal(name, answer, close)
             if reason:
-                failed.append({"name": name, "reason": reason})
+                refused.append({"name": name, "reason": reason})
             else:
                 loaded.append(name)
         # **A name that cannot be loaded is a verdict, not a failure.**  The
         # call did what a load does: it asked the catalogue about every name and
         # got an answer for each.  Marking the call failed would make *that*
-        # answer an error, and the four `failed` reasons are exactly what the
+        # answer an error, and the four `refused` reasons are exactly what the
         # model has to read to correct itself — a server that is switched off, a
         # server that is not answering, a playbook that is read with `skill_use`,
         # a name nothing holds.  What *is* a failure is a call that cannot be
         # made at all: no names, or too many to be one call.
-        return {"loaded": loaded, "failed": failed}
+        #
+        # The key is `refused` and not `failed` for the model's sake: an empty
+        # `failed` read as "something failed, and it wasn't you" — the answer to
+        # a load that worked — where an empty `refused` is the same fact in a
+        # word that does not borrow the call's own verdict.
+        return {"loaded": loaded, "refused": refused}
 
     async def unload(arguments: dict[str, Any]) -> dict[str, Any]:
         """Take tools out of the model's list, by name or by budget.

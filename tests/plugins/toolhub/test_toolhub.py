@@ -748,12 +748,12 @@ async def found(hub: Client, query: str) -> str:
 def _load_reason(answer: dict[str, Any]) -> str:
     """Why the one name a test asked to load did not land.
 
-    `func_tool_load` answers a verdict per name — `loaded`, and `failed` with a
+    `func_tool_load` answers a verdict per name — `loaded`, and `refused` with a
     reason each — and a test that is about one name wants that reason.
     """
-    failed = json.loads(answer["text"])["failed"]
-    assert len(failed) == 1, failed
-    return str(failed[0]["reason"])
+    refused = json.loads(answer["text"])["refused"]
+    assert len(refused) == 1, refused
+    return str(refused[0]["reason"])
 
 
 def as_cli_server(answer: dict[str, Any]) -> dict[str, Any]:
@@ -1325,8 +1325,8 @@ async def test_loading_says_why_it_cannot() -> None:
 
     answer = json.loads(unknown["text"])
     assert answer["loaded"] == []
-    assert [entry["name"] for entry in answer["failed"]] == ["nothing__at_all"]
-    reason = answer["failed"][0]["reason"]
+    assert [entry["name"] for entry in answer["refused"]] == ["nothing__at_all"]
+    reason = answer["refused"][0]["reason"]
     assert "unknown tool" in reason
     assert "tool_search" in reason, "the way to find the right name"
 
@@ -1707,7 +1707,7 @@ async def test_an_entry_removed_from_the_config_leaves_no_rows() -> None:
 
     assert "fake__echo" not in rows
     answer = json.loads(refused["text"])
-    reason = answer["failed"][0]["reason"]
+    reason = answer["refused"][0]["reason"]
     assert answer["loaded"] == []
     assert "unknown tool" in reason, (
         f"a tool whose entry is gone is not a tool whose server is down: {reason}"
@@ -1735,7 +1735,7 @@ async def test_an_entry_taken_out_of_a_section_takes_its_rows_with_it() -> None:
         refused = await call(hub, "func_tool_load", {"names": ["cli:thing"]})
 
     assert "cli:thing" not in rows
-    assert "unknown tool" in json.loads(refused["text"])["failed"][0]["reason"]
+    assert "unknown tool" in json.loads(refused["text"])["refused"][0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -1858,8 +1858,8 @@ async def test_a_tool_of_a_switched_off_server_is_not_an_unknown_tool() -> None:
     # `Error:` line would carry the same words under a worse label.
     answer = json.loads(refused["text"])
     assert answer["loaded"] == []
-    assert answer["failed"][0]["name"] == "fake__echo"
-    assert "switched off" in answer["failed"][0]["reason"]
+    assert answer["refused"][0]["name"] == "fake__echo"
+    assert "switched off" in answer["refused"][0]["reason"]
 
     rows = json.loads(found["text"])["results"]
     # Found *and* marked, which is the whole of what a switched-off entry owes a
@@ -3053,7 +3053,7 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
         assert loaded["ok"] is True
         payload = json.loads(loaded["text"])
         assert payload["loaded"] == ["spawned__greet"], payload
-        assert payload["failed"] == [], payload
+        assert payload["refused"] == [], payload
 
         # One iteration later, without a new turn: the list is rebuilt before every
         # model call, so loading takes effect inside the same turn.
