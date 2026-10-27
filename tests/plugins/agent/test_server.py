@@ -36,6 +36,7 @@ from fakes import (
     FakeBackend,
     ScriptedTurn,
     StubEmbedder,
+    a_home,
     keep_the_context,
     text_turn,
 )
@@ -1368,7 +1369,7 @@ async def test_an_interrupted_turn_is_still_recorded(
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     backend = FakeBackend(
         text_turn(
             "never finished",
@@ -1475,7 +1476,7 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
 
     class Refusing(FakeBackend):
         """A model call that fails the way a provider's error does."""
@@ -1669,7 +1670,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     from slife2.plugins.agent import server as server_module
     from slife2.plugins.context.server import build_server as build_context
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     backend = FakeBackend(text_turn("the answer"), text_turn("second answer"))
 
     entered = asyncio.Event()
@@ -1776,7 +1777,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     from slife2.plugins.toolhub.server import build_server as build_hub
     from tests.fakes import plugin_transports
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     opened: list[str] = []
 
     async def open_ours(_url, **kwargs):
@@ -1830,7 +1831,7 @@ async def test_a_turn_is_written_to_the_db(tmp_path, monkeypatch, hub) -> None:
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, agents_dir
     from slife2.plugins.context.server import build_server as build_context
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config()
 
     # Two model calls, of different sizes, so the two token columns can be told
@@ -1934,7 +1935,7 @@ async def test_a_turn_summarize_call_annotates_the_turn_being_saved(
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config()
 
     backend = FakeBackend(
@@ -2008,7 +2009,7 @@ async def test_a_trim_is_recorded_in_the_turn_rather_than_done_silently(
     from slife2.plugins.toolhub.server import build_server as build_hub
     from tests.fakes import plugin_transports, upstream_server
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     # A cap of three, so the five the config starts loaded are already over it
     # and the two the model loads are the only unprotected tools there are.
     base = default_config()

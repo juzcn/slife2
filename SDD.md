@@ -84,7 +84,7 @@ providers, and the WeChat bridge.
 |---|---|
 | **Agent** | An identity named by `--agent NAME`. It is claimed once per machine and is not a process, a port, or a data directory. |
 | **Client id** | The pair `(agent, subagent)` identifying the conversation a call is made on behalf of. A subagent component is empty for an agent's own conversation. |
-| **Home** | A data directory containing `slife2.yaml`, `skills/`, `jobs/`, and `agents/`. A home may contain several agents. |
+| **Home** | A data directory containing `slife2.yaml`, `AGENTS.md`, `skills/`, `jobs/`, and `agents/`. A home may contain several agents. |
 | **Plugin** | One of slife2's own MCP servers. It implements the plugin contract and is started and shared by the launcher. An external MCP server is not a plugin. |
 | **Family** | A plugin that owns one configuration section and declares the rows that section describes. |
 | **Source** | One entry a plugin holds, such as an `mcp:` server, a `rest-api:` document, a playbook, a job, or a command. |
@@ -110,6 +110,7 @@ providers, and the WeChat bridge.
 | OpenAI Responses API | Model wire protocol. |
 | Anthropic Messages API | Model wire protocol. |
 | `slife2.yaml` | Annotated configuration reference shipped with the project. |
+| `AGENTS.md` | The model's guide to its tools: a home document beside the configuration, shipped with the project and edited by an operator. |
 
 ### 1.6 Document conventions
 
@@ -577,6 +578,16 @@ The configuration a process runs on is one it read from a file, never one this
 build supplied in the file's place. The file must name at least one provider and
 at least one embedding provider: there is no built-in provider or embedder to
 run on.
+
+`AGENTS.md` is the second document a home has, and it is required the same way.
+It is the model's guide to its own tools, included in the system prompt every
+conversation opens with, and it is read from the home at that moment, so an edit
+reaches the next conversation without a restart. A home without one is refused
+where the prompt is rendered, naming the file — not rendered with an empty
+section — because a guide silently absent is a model told less than its operator
+believes. The installer seeds it under the configuration's rule: a live file is
+never overwritten, and a changed shipped copy is written beside it as
+`AGENTS-default.md`.
 
 `libs/host/configfile.py` is the single writer for edits made by plugins. It
 performs a document edit under a cross-process lock, preserves comments, and
@@ -2454,6 +2465,7 @@ that was asked and failed keeps its own error.
 A home is a data directory:
 
 - `slife2.yaml`;
+- `AGENTS.md`;
 - `skills/`;
 - `jobs/`;
 - `agents/`, one directory per agent;

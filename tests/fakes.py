@@ -578,13 +578,38 @@ embeddings:
 """
 
 
+#: The guide a home must have beside its config (`slife2.libs.host.paths.agents_doc`).
+#: A stub rather than the checkout's `AGENTS.md`: what a test asserts about a
+#: prompt should be the test's own text, not prose somebody edits later.
+A_HOME_AGENTS = "# Using your tools\n\nThe stub guide to this home's tools.\n"
+
+
 def home_config(data_dir: Path) -> Path:
-    """Write the config a home must have, and answer its path."""
+    """Write the files a home must have, and answer the config's path.
+
+    **Both required documents**, because a home without either is refused where
+    it is used: `slife2.yaml` at load, and `AGENTS.md` when the first system
+    prompt is rendered.  A test that is about one of those refusals removes the
+    file; every other test starts from the same home a running slife2 has.
+    """
     return config_file(data_dir, A_HOME_CONFIG)
 
 
+def a_home(directory: Path) -> Path:
+    """Make *directory* a home a conversation can open in, and answer it.
+
+    `AGENTS.md` is the one document a prompt render needs from the home
+    (`slife2.libs.host.paths.agents_doc`), and it is what a test that points
+    `SLIFE2_DATA_DIR` at a directory of its own — for the conversation store,
+    not the configuration — would otherwise be missing.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "AGENTS.md").write_text(A_HOME_AGENTS, encoding="utf-8")
+    return directory
+
+
 def config_file(data_dir: Path, text: str) -> Path:
-    """Write one config file where the loader will look for it.
+    """Write one config file where the loader will look for it, in a home.
 
     **One copy, because four modules had one each.**  Four test modules write a
     `slife2.yaml` into the isolated data directory before building a server over
@@ -592,8 +617,12 @@ def config_file(data_dir: Path, text: str) -> Path:
     `write_config`, one `config_on_disk`).  What each of those really owns is its
     own `CONFIG` text, so each keeps one line — a `partial` binding that default
     — and the writing happens here.
+
+    **The guide goes beside it** (`a_home`), because a config written by a test
+    is meant to stand in for a home — a directory with one document and not the
+    other would fail the first prompt for a reason the test is not about.
     """
-    data_dir.mkdir(parents=True, exist_ok=True)
+    a_home(data_dir)
     path = data_dir / "slife2.yaml"
     path.write_text(text, encoding="utf-8")
     return path

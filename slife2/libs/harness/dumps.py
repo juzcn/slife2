@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from slife2.libs.turn.messages import Message, ToolCall
-from slife2.libs.turn.prompt import render
+from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tokens import (
     clip_to_tokens,
     estimate_lines_tokens,
@@ -356,7 +356,7 @@ def instruction(
     their results do not exist yet.
     """
     lines = lines_of(body)
-    return render(
+    return render_instruction(
         INSTRUCTION_TEMPLATE,
         tool_name=tool or "a tool",
         result=numbered(lines),

@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from fakes import FakeBackend, StubEmbedder, plugin_transports, text_turn
+from fakes import FakeBackend, StubEmbedder, a_home, plugin_transports, text_turn
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -736,7 +736,7 @@ async def test_a_listing_names_only_the_callers_homes_tasks(
     model cannot act on is worse than naming none: the next thing it does is ask
     about one.
     """
-    theirs = isolated_runtime.parent / "theirs"
+    theirs = a_home(isolated_runtime.parent / "theirs")
     built = build(
         text_turn(
             "never sent",
@@ -775,7 +775,7 @@ async def test_the_cap_counts_only_the_callers_homes_tasks(
     caller nor the operator could explain, since the tasks it counted are ones
     the caller cannot even ask about.
     """
-    theirs = isolated_runtime.parent / "theirs"
+    theirs = a_home(isolated_runtime.parent / "theirs")
     built = build(
         text_turn(
             "never sent",

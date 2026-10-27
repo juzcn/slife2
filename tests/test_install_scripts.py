@@ -944,6 +944,15 @@ def test_requirements_refuse_a_malformed_config(tmp_path: Path) -> None:
 
 
 def _seed(source: Path, home: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    """Run `seed` with the bundle a real one carries: a config and its guide.
+
+    Every shipped bundle has `AGENTS.md` beside `slife2.yaml`; a fixture that
+    omitted it would be seeding a bundle no installer produces — and would
+    assert the warning path instead of the one users take.
+    """
+    guide = source.parent / "AGENTS.md"
+    if not guide.exists():
+        guide.write_text("shipped guide\n", encoding="utf-8")
     return subprocess.run(
         [
             sys.executable,
@@ -991,6 +1000,50 @@ def test_seed_never_overwrites_a_live_file(tmp_path: Path) -> None:
         encoding="utf-8"
     ) == "shipped: true\n"
     assert "left untouched" in result.stdout
+
+
+def test_seed_places_the_guide_and_leaves_a_persons_copy_alone(
+    tmp_path: Path,
+) -> None:
+    """`AGENTS.md` is seeded like the config, not like `skills/`.
+
+    It is a document a person edits — the model's guide to its tools, and the
+    thing an operator changes per home — so a reinstall never overwrites it: the
+    shipped copy lands beside it as a reference.  A missing one is created,
+    exactly as a missing `slife2.yaml` is.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("shipped guide\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "slife2.yaml").write_text("shipped: true\n", encoding="utf-8")
+    (home / "AGENTS.md").write_text("my guide\n", encoding="utf-8")
+
+    result = _seed(source, home)
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "my guide\n"
+    assert (home / "AGENTS-default.md").read_text(encoding="utf-8") == (
+        "shipped guide\n"
+    )
+
+
+def test_seed_creates_a_missing_guide(tmp_path: Path) -> None:
+    """A home the installer made has both documents it requires."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("shipped guide\n", encoding="utf-8")
+    home = tmp_path / "home"
+
+    result = _seed(source, home)
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "shipped guide\n"
 
 
 def test_seed_does_nothing_in_a_checkout(tmp_path: Path) -> None:

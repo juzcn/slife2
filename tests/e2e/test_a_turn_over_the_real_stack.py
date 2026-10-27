@@ -45,7 +45,7 @@ from slife2.libs.plugin.audience import client_meta
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import DUMP, index_path, store_of
 from slife2.tui.client import MCPAgentClient
-from tests.fakes import StubEmbedder
+from tests.fakes import StubEmbedder, a_home
 
 pytestmark = pytest.mark.e2e
 
@@ -473,7 +473,7 @@ async def stack(
     real_dialer("slife2.libs.host.launcher")
     provider = StubProvider()
     provider.start()
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     # **Derived from `LOCAL_SERVERS`, not written out.**  A hand-kept list is a
     # list that goes stale, and this one had: `subagent` was missing, so it
     # started on the built-in default port instead of a picked one — and since

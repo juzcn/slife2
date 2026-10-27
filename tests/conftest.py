@@ -199,9 +199,11 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
     records, claims and locks into the real one, and a test that passed here
     would be one that fails on a machine with nothing running.
 
-    **And the home is given its `slife2.yaml`**, because a home without one is
-    refused (`load`, SDD §4.1).  A test that is about that refusal removes the
-    file; every other test reads a config the same way a running slife2 does.
+    **And the home is given the files it requires** — its `slife2.yaml`, without
+    which a home is refused at load (`load`, SDD §4.1), and its `AGENTS.md`,
+    without which it is refused when the first system prompt is rendered.  A
+    test that is about either refusal removes the file; every other test reads
+    a home the same way a running slife2 does.
     """
     data = tmp_path / "data"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(data))

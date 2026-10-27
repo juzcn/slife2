@@ -214,6 +214,9 @@ include = [
     # The working config, checked in deliberately: it holds no secrets, because
     # every key in it is a ${VAR} reference resolved at runtime.
     "/slife2.yaml",
+    # The model's guide to its tools: a home document beside the config, which
+    # the installer seeds and the system prompt includes.
+    "/AGENTS.md",
 ]
 
 [build-system]

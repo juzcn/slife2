@@ -103,7 +103,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
-from slife2.libs.turn.prompt import render
+from slife2.libs.turn.prompt import render_instruction
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_LIST,
     AGENT_TASK_START,
@@ -422,7 +422,7 @@ async def fire(
         await hand_over(
             config,
             store.agent,
-            render(
+            render_instruction(
                 TRIGGER_TEMPLATE,
                 name=task.name,
                 description=task.description,

@@ -101,7 +101,7 @@ from slife2.libs.plugin.protocol import (
 )
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message
-from slife2.libs.turn.prompt import render
+from slife2.libs.turn.prompt import render_instruction, render_system_prompt
 from slife2.libs.turn.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -669,10 +669,14 @@ def build_server(
         head = [
             Message(
                 role="system",
-                content=render(current.agent.system_prompt, agent_name=task.agent),
+                content=render_system_prompt(
+                    current.agent.system_prompt, agent_name=task.agent
+                ),
             )
         ]
-        opening = render(OPENING_TEMPLATE, name=task.name, description=task.description)
+        opening = render_instruction(
+            OPENING_TEMPLATE, name=task.name, description=task.description
+        )
 
         # **The two calls under the conversation's lock**, which is the rule the
         # agent server states for the same pair: a rebuild's target is built from

@@ -173,7 +173,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.prompt import render as render_system_prompt
+from slife2.libs.turn.prompt import render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import CHECK_NEW_INPUT, ToolFailed, ToolRegistry
 from slife2.libs.turn.watch import (

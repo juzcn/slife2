@@ -40,7 +40,7 @@ MCP server。
 | **catalogue** | 模型可以发现的所有工具、playbook、job 和命令的机器可读清单。 |
 | **job** | 模型为 home 写的代码：`jobs/` 里的一个 Python 函数，暴露为工具 `job__<name>`。 |
 | **dump** | 因为对对话而言过大而完整保存在文件柜中的工具输出。 |
-| **home** | 一个数据目录：配置、skills、jobs、agent 及其文件。 |
+| **home** | 一个数据目录：配置、`AGENTS.md`、skills、jobs、agent 及其文件。 |
 | **runtime 目录** | 共享 server 在整台机器范围内的记录、锁和日志。 |
 
 ## 环境要求
@@ -123,6 +123,10 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 你自己添加的、名字不同的 skill 或 job 会保留。修改 seed 出来的文件等于修改副本——
 下一次安装会把它替换掉。
 
+`AGENTS.md`（模型使用自身工具的指南）会放在 `slife2.yaml` 旁边，并且**绝不会被覆盖**：
+它是供人编辑的文档，所以随附版本有变化时会写成 `AGENTS-default.md` 供你比较和合并。
+你的 `slife2.yaml` 受同一条规则保护。
+
 从源码开发时，在该目录运行：
 
 ```bash
@@ -174,6 +178,9 @@ export DEEPSEEK_API_KEY=...
 
 `slife2.yaml` 是必需的：slife2 没有可在缺少该文件时运行的内置配置。安装器会把
 随附的配置文件写入新的 home；源码目录则使用代码旁边的 `slife2.yaml`。
+
+`AGENTS.md` 同样是必需的：它是模型使用自身工具的指南，会话开始时从数据目录读取。
+安装器会写入随附版本；源码目录则使用代码旁边的 `AGENTS.md`。
 
 ### Docker
 
@@ -447,6 +454,10 @@ embedding provider（`embeddings:` 段）。缺少配置文件时，启动会以
 
 安装器可能会在已有配置旁边写入 `slife2-default.yaml` 作为参考。slife2 只读取
 `slife2.yaml`；参考文件供人比较和合并。
+
+`AGENTS.md` 与配置放在一起，同样是必需的。它是模型使用自身工具的指南，会包含在
+每个会话开头的系统提示中；直接编辑它，下一次会话就会读到新文本。安装器按与配置
+相同的规则 seed 它——你的版本不同时，会把随附版本写成 `AGENTS-default.md`。
 
 配置文件可以安全地纳入版本控制。它不应包含秘密；每个凭证都是运行时解析的
 `${VAR}` 或 `keyring:` 引用。
@@ -1027,6 +1038,7 @@ subagent:
 ```text
 <data>/
   slife2.yaml                  配置；必需
+  AGENTS.md                    模型使用工具的指南；必需
   skills/                      <name>/SKILL.md playbook
   jobs/                        <name>.py 代码定义的工具
   agents/

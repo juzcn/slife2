@@ -35,7 +35,7 @@ from datetime import datetime
 from typing import Any
 
 from slife2.helpers.timeutil import can_place
-from slife2.libs.turn.prompt import render
+from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import INTERRUPTED
 
 #: The discriminator's instruction, shipped as a template for the reason the
@@ -372,7 +372,7 @@ def instruction(user_input: str) -> str:
     instruction is appended to it — and this is what tells it which input the
     decision is about.
     """
-    return render(
+    return render_instruction(
         INSTRUCTION_TEMPLATE,
         user_input=user_input,
         recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),

@@ -41,7 +41,7 @@ decisions, and the measurements behind them — is in [SDD.md](SDD.md).
 | **Catalogue** | The machine-readable list of every tool, playbook, job, and command the model may discover. |
 | **Job** | Code the model wrote for the home: one Python function in `jobs/`, exposed as the tool `job__<name>`. |
 | **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
-| **Home** | A data directory: configuration, skills, jobs, agents, and their files. |
+| **Home** | A data directory: configuration, `AGENTS.md`, skills, jobs, agents, and their files. |
 | **Runtime directory** | The machine-wide records, locks, and logs of the shared servers. |
 
 ## Requirements
@@ -132,6 +132,11 @@ directory, **overwriting files of the same name**; a skill or job you added
 under another name stays untouched. Editing a seeded file means editing a
 copy — the next install replaces it.
 
+`AGENTS.md`, the model's guide to its own tools, is placed beside `slife2.yaml`
+and is **never overwritten**: it is a document you edit, so a changed shipped
+copy is written as `AGENTS-default.md` for you to compare and merge. The same
+rule protects your `slife2.yaml`.
+
 From a source checkout, run the installer in that directory:
 
 ```bash
@@ -186,6 +191,10 @@ export DEEPSEEK_API_KEY=...
 `slife2.yaml` is required: slife2 has no built-in configuration to run without
 one. The installer seeds the shipped file into a new home, and a checkout uses
 the `slife2.yaml` beside its code.
+
+`AGENTS.md` is required too: it is the model's guide to its tools, read from
+the data directory when a conversation starts. The installer seeds the shipped
+one, and a checkout uses the `AGENTS.md` beside its code.
 
 ### Docker
 
@@ -500,8 +509,14 @@ The installer may write `slife2-default.yaml` beside an existing configuration
 as a reference. slife2 reads only `slife2.yaml`; the reference is for a person
 to compare and merge by hand.
 
-The file is safe to check in. It should contain no secrets; every credential is
-a `${VAR}` or `keyring:` reference resolved at runtime.
+`AGENTS.md` sits beside the configuration and is required as well. It is the
+model's guide to its tools, included in the system prompt every conversation
+opens with; edit it by hand, and the next conversation reads the new text. The
+installer seeds it under the configuration's rule, writing `AGENTS-default.md`
+when your copy differs.
+
+`slife2.yaml` is safe to check in. It should contain no secrets; every
+credential is a `${VAR}` or `keyring:` reference resolved at runtime.
 
 ### Sections
 
@@ -1159,6 +1174,7 @@ A data directory (a **home**) contains:
 ```text
 <data>/
   slife2.yaml                  configuration; required
+  AGENTS.md                    the model's guide to its tools; required
   skills/                      <name>/SKILL.md playbooks
   jobs/                        <name>.py code-defined tools
   agents/

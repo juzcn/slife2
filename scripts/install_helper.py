@@ -1,7 +1,8 @@
 """The facts the installer needs from inside the project.
 
-`seed` puts the shipped configuration where slife2 will read it, without ever
-overwriting a file the user already has, and copies the bundled `skills/` and
+`seed` puts the shipped configuration and the model's guide (`AGENTS.md`)
+where slife2 will read them, without ever overwriting a file the user already
+has, and copies the bundled `skills/` and
 `jobs/` into the home **overwriting files of the same name** — the content
 update, and deliberately not the versioned-backup dance the old installer did:
 the bundle is the authority, and a person who edits a seeded file edits their
@@ -37,71 +38,90 @@ CONFIG_NAME = "slife2.yaml"
 #: name slife2 never reads: `find_config_path` looks for `slife2.yaml` only.
 REFERENCE_NAME = "slife2-default.yaml"
 
+#: The model's guide to its tools, seeded beside the configuration.  The name
+#: is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
+#: stdlib-only and runs before the package is importable; the two spellings must
+#: stay one name, or the installer writes a file the prompt never finds.
+AGENTS_NAME = "AGENTS.md"
+#: Its reference copy, for the configuration's reason.
+AGENTS_REFERENCE_NAME = "AGENTS-default.md"
+
 
 def _say(message: str) -> None:
     print(message)
 
 
-def _warn(message: str) -> None:
-    print(f"config: {message}", file=sys.stderr)
+def _warn(message: str, label: str = "config") -> None:
+    print(f"{label}: {message}", file=sys.stderr)
 
 
-def _seed_config(source: Path, home: Path, dry_run: bool) -> int:
-    """Place the shipped configuration, or a reference copy of it.
+def _seed_file(
+    source: Path,
+    home: Path,
+    *,
+    name: str,
+    reference_name: str,
+    label: str,
+    dry_run: bool,
+) -> int:
+    """Place the shipped *name* in *home*, or a reference copy of it.
 
-    **The live file is never overwritten.**  A checkout's own `slife2.yaml` is
-    already the live configuration, so seeding it beside itself is a no-op; any
-    other home gets the shipped file as `slife2.yaml` when it has none, and as
-    `slife2-default.yaml` when it has one.  The second name is a reference for
-    a person to compare and merge, not something slife2 reads.
+    **The live file is never overwritten.**  A checkout's own file is already
+    the live one, so seeding it beside itself is a no-op; any other home gets
+    the shipped file under its own name when it has none, and under
+    *reference_name* when it has one.  The second name is a reference for a
+    person to compare and merge, not something slife2 reads.
+
+    Both files seeded this way — the configuration and the model's guide — are
+    documents a person edits, which is why neither is overwritten: the shipped
+    copy is advice, and the live file is theirs.
     """
     if not source.is_file():
         _warn(
-            f"no shipped configuration at {source}; the home gets no "
-            f"{CONFIG_NAME}, and slife2 will not start without one."
+            f"no shipped {name} at {source}; the home gets no {name}, and "
+            f"slife2 requires one.",
+            label,
         )
         return 0
 
-    live = home / CONFIG_NAME
-    reference = home / REFERENCE_NAME
     try:
         source = source.resolve()
         home = home.resolve()
-        live = home / CONFIG_NAME
-        reference = home / REFERENCE_NAME
+        live = home / name
+        reference = home / reference_name
         if source.parent == home:
             _say(
-                f"config: checkout detected; {live} is the live configuration; nothing to seed."
+                f"{label}: checkout detected; {live} is the live file; nothing to seed."
             )
             return 0
         if not live.exists():
             if dry_run:
-                _say(f"config: would create {live} from the shipped configuration.")
+                _say(f"{label}: would create {live} from the shipped {name}.")
                 return 0
             home.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, live)
-            _say(f"config: created {live} from the shipped configuration.")
+            _say(f"{label}: created {live} from the shipped {name}.")
             return 0
 
         shipped = source.read_bytes()
         if live.read_bytes() == shipped:
-            _say(f"config: {live} already matches the shipped configuration.")
+            _say(f"{label}: {live} already matches the shipped {name}.")
             return 0
         if reference.is_file() and reference.read_bytes() == shipped:
-            _say(f"config: {reference} already matches the shipped configuration.")
+            _say(f"{label}: {reference} already matches the shipped {name}.")
             return 0
         if dry_run:
-            _say(f"config: would write the shipped configuration to {reference}.")
+            _say(f"{label}: would write the shipped {name} to {reference}.")
             return 0
         home.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, reference)
         _say(
-            f"config: {live} already exists and was left untouched. The shipped "
-            f"configuration is at {reference}; compare and merge by hand."
+            f"{label}: {live} already exists and was left untouched. The shipped "
+            f"{name} is at {reference}; compare and merge by hand."
         )
         return 0
     except OSError as exc:
-        _warn(f"{exc}")
+        _warn(f"{exc}", label)
         return 1
 
 
@@ -168,16 +188,34 @@ def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
 
 
 def seed(source: Path, home: Path, dry_run: bool) -> int:
-    """Place the shipped configuration **and** the bundled skills and jobs.
+    """Place the shipped configuration and guide, and the bundled skills and jobs.
 
-    One step, the same source root: the configuration keeps its own rule (the
-    live file is never overwritten — a changed shipped one is written beside it
-    as a reference), while `skills/` and `jobs/` are copied over the home with
-    files of the same name replaced.  A checkout whose home is the checkout
-    itself is a no-op for both; a home pointed elsewhere from a checkout gets
-    the same seeding as an installed one.
+    One step, the same source root, and **two update rules in it**: the
+    documents a person edits (`slife2.yaml`, `AGENTS.md`) keep their own rule —
+    the live file is never overwritten, and a changed shipped one is written
+    beside it as a reference — while `skills/` and `jobs/` are copied over the
+    home with files of the same name replaced.  A checkout whose home is the
+    checkout itself is a no-op for all of them; a home pointed elsewhere from a
+    checkout gets the same seeding as an installed one.
     """
-    code = _seed_config(source, home, dry_run)
+    code = _seed_file(
+        source,
+        home,
+        name=CONFIG_NAME,
+        reference_name=REFERENCE_NAME,
+        label="config",
+        dry_run=dry_run,
+    )
+    if code:
+        return code
+    code = _seed_file(
+        source.parent / AGENTS_NAME,
+        home,
+        name=AGENTS_NAME,
+        reference_name=AGENTS_REFERENCE_NAME,
+        label=AGENTS_NAME,
+        dry_run=dry_run,
+    )
     if code:
         return code
     return seed_trees(source.parent, home, dry_run)

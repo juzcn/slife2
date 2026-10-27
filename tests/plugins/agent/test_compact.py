@@ -39,6 +39,7 @@ from tests.fakes import (
     FakeBackend,
     ScriptedTurn,
     StubEmbedder,
+    a_home,
     keep_the_context,
     plugin_transports,
     upstream_server,
@@ -224,7 +225,7 @@ async def test_a_result_past_the_window_becomes_a_window_over_it(
     the same backend as the turn, because the selection is judged by the model
     that will read it.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = FakeBackend(
         calling("fake__echo", {"text": HUGE}),
@@ -333,7 +334,7 @@ async def test_the_discriminator_call_is_read_as_a_stream(
     not arrive until its chunks have been read — so this test is about the
     *contract* the loop above already keeps and this step has to keep too.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = StreamedBackend(
         calling("fake__echo", {"text": HUGE}),
@@ -369,7 +370,7 @@ async def test_an_output_that_is_not_text_is_dumped_as_one(
     one step: the row is written once (`dump_save` replaces by key), with what the
     model said in it.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = FakeBackend(
         calling("fake__echo", {"text": HUGE}),
@@ -420,7 +421,7 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
     )
     from slife2.plugins.agent import server as server_module
 
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = FakeBackend(
         *(calling("fake__echo", {"text": HUGE}), answered(PICKED), answered("done")) * 2
@@ -490,7 +491,7 @@ async def test_a_result_inside_the_window_is_left_alone(tmp_path, monkeypatch) -
     Which is what makes the mechanism affordable — the results real turns carry
     are under the window, so none of this runs until one is not.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(4000)
     backend = FakeBackend(
         calling("fake__echo", {"text": "short"}),
@@ -520,7 +521,7 @@ async def test_a_reply_nobody_can_read_gets_the_readers_own_first_window(
     had asked for the beginning would have got.  It is bounded, so the loop this
     mechanism exists to prevent stays prevented.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     caplog.set_level(logging.INFO)
     cfg = config_over(WINDOW)
     backend = FakeBackend(
@@ -553,7 +554,7 @@ async def test_a_dump_that_cannot_be_kept_fails_the_turn(tmp_path, monkeypatch) 
     that the mime it answers with is on the row (`compress_for`).  A cabinet that
     refuses the write still fails the turn.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = FakeBackend(calling("fake__echo", {"text": HUGE}), answered(PICKED))
     refused = FastMCP("cabinet-refusing")
@@ -613,7 +614,7 @@ async def test_a_window_that_cannot_be_read_back_fails_the_turn(
     empty tool result: the bound gone *and* the address gone, with nothing
     anywhere saying so — which is the failure that catch was hiding.
     """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
     backend = FakeBackend(
         calling("fake__echo", {"text": HUGE}),
