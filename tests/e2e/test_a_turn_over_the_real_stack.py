@@ -758,4 +758,6 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
     # And the whole of it is a file, which is what the marker will promise.
     dumps = data_dir() / "agents" / "e2e" / "cabinet" / "dumps"
     assert dumps.is_dir() and list(dumps.iterdir()), _files(data_dir())
-    assert "cabinet" in str(first), first
+    # The file is the cabinet's; the answer is the window's.  A model cannot
+    # open a path, and `dump_read` is the only reader it has.
+    assert "where" not in first, first
