@@ -293,6 +293,33 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     )
 
 
+TOOL_EXISTS = "tool_exists"
+
+
+async def tool_exists(client: Client, name: str) -> bool:
+    """Whether the hub's catalogue holds a tool under this name.
+
+    **The harness's error path**, for a model call that named a tool outside the
+    request's list: a catalogued name was unloaded (`func_tool_load` puts it
+    back), and one with no row is a capability this machine does not have
+    (`tool_search` finds what it can do).  The registry cannot tell which from
+    its own list, and the two next steps are different.
+
+    A hub that cannot be read raises `UnreadableAnswer`; the registry catches it,
+    because the call has already failed and its explanation may not turn that
+    into a turn failure.
+    """
+    answer = tool_payload(
+        await client.call_tool(
+            TOOL_EXISTS, {"name": name}, timeout=_T.timeouts.work.hub
+        )
+    )
+    exists = answer.get("exists")
+    if not isinstance(exists, bool):
+        raise unreadable("the toolhub", "say whether it holds a tool", answer)
+    return exists
+
+
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
     """Read a trim's answer — the names it unloaded and its sentence — or refuse it.
 

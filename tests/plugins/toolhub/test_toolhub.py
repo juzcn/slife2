@@ -562,6 +562,26 @@ def write_skill(
 
 
 @pytest.mark.asyncio
+async def test_tool_exists_answers_for_a_catalogued_name_even_unloaded() -> None:
+    """**The harness's question, and the one the model's hint depends on.**
+
+    `ToolRegistry._unknown` asks this before it phrases a call to a name outside
+    the request's list: a catalogued name was unloaded, and `func_tool_load`
+    puts it back; a name with no row is a capability this machine does not have,
+    and `tool_search` finds what it can do instead.  Asking the *loaded* list —
+    or guessing — sent a model that already knew the name back to search.
+    """
+    async with Client(hub_for()) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        unloaded = await hub.call_tool("tool_exists", {"name": "turn_search"})
+        missing = await hub.call_tool("tool_exists", {"name": "no__such_tool"})
+
+    assert "turn_search" not in {tool["name"] for tool in listed.data["tools"]}
+    assert unloaded.data["exists"] is True
+    assert missing.data["exists"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
     """The set-level tools, and why they are the ones that stayed.
 

@@ -498,8 +498,18 @@ class Tool:
 class ToolRegistry:
     """The loop's view of what it can call."""
 
-    def __init__(self, tools: list[Tool] | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[Tool] | None = None,
+        *,
+        exists: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {t.spec.name: t for t in tools or []}
+        #: Whether the catalogue holds a name outside this request's list — the
+        #: hub's answer, asked only when the model calls such a name.  `None` is
+        #: a caller with no hub (a unit test), which keeps the sentence that
+        #: covers both causes.
+        self._exists = exists
         #: Built once, because `specs` is read at the top of every step of every
         #: turn: augmenting sixty schemas per request would be paying the
         #: per-request tax this design already pays twice (see `META_PROPERTIES`).
@@ -554,19 +564,7 @@ class ToolRegistry:
 
         tool = self._tools.get(call.name)
         if tool is None:
-            # **The way back, not the whole list.**  A name that is not in this
-            # request's list is usually one the budget unloaded — the model
-            # still knows it from an earlier request or from a description that
-            # names it — and the two tools that answer that are always loaded
-            # (`REQUIRED_AUTOLOAD`).  Enumerating the loaded set put up to a
-            # hundred names into a result the model then carried for the rest
-            # of the conversation; `tool_search` finds the name by meaning, and
-            # `func_tool_load` puts it back.
-            return (
-                f"Error: unknown tool {call.name!r} — not in your tool list. "
-                f"Find it with tool_search, then load it with func_tool_load.",
-                False,
-            )
+            return await self._unknown(call.name)
 
         try:
             return as_tool_text(await tool.run(call.arguments)), True
@@ -599,3 +597,47 @@ class ToolRegistry:
             # written down.
             logger.warning("tool %s raised: %s", call.name, exc, exc_info=exc)
             return f"Error: {type(exc).__name__}: {exc}", False
+
+    async def _unknown(self, name: str) -> tuple[str, bool]:
+        """The sentence for a call outside the request's list, and `ok=False`.
+
+        **Two causes, two next steps.**  A name the catalogue holds was unloaded
+        from this request — the budget's doing, and `func_tool_load` puts it
+        back.  A name the catalogue does not hold is a capability this machine
+        lacks, and searching for *it* is a dead end: `tool_search` finds a tool
+        that does the job instead.  The registry cannot tell them apart from its
+        own list, so it asks the hub (`exists`).
+
+        **The way back, not the whole list.**  The error is a feedback channel:
+        naming the loaded set put up to a hundred names into a result the model
+        carried for the rest of the conversation.  The two tools that answer the
+        loaded case are always loaded (`REQUIRED_AUTOLOAD`), so the sentence can
+        be one instruction rather than a list.
+
+        A hub that cannot answer leaves the both-cases sentence: the call has
+        already failed, and its explanation may not become a turn failure.
+        """
+        if self._exists is not None:
+            try:
+                found = await self._exists(name)
+            except Exception as exc:  # noqa: BLE001 - a hint, not the call
+                logger.info("could not ask the catalogue about %r: %s", name, exc)
+                found = None
+            if found is True:
+                return (
+                    f"Error: tool {name!r} is in the catalogue but not in your "
+                    f"list. Load it with func_tool_load, then call it.",
+                    False,
+                )
+            if found is False:
+                return (
+                    f"Error: no tool named {name!r} exists in the catalogue. "
+                    f"Use tool_search to find a tool that does this, then load "
+                    f"it with func_tool_load.",
+                    False,
+                )
+        return (
+            f"Error: unknown tool {name!r} — not in your tool list. "
+            f"Find it with tool_search, then load it with func_tool_load.",
+            False,
+        )

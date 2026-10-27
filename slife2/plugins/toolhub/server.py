@@ -3395,6 +3395,20 @@ def build_server(
             absent="in the catalogue",
         )
 
+    @mcp.tool(name="tool_exists")
+    async def tool_exists(name: str) -> dict[str, Any]:
+        """Whether the catalogue holds a tool under this name — the agent's question.
+
+        **Not a model tool.**  The model's own two answers are `tool_search`
+        (find one) and `func_tool_load` (hold it); this exists for the harness's
+        error path, where a call named a tool outside the request's list.  That
+        is either a name the budget unloaded or a capability this machine does
+        not have, and only the catalogue can tell them apart: "not in your list"
+        is not "not a tool", and a hint that treats the two alike sends the model
+        searching for a name it already holds.
+        """
+        return {"exists": await catalogue.route(name) is not None}
+
     @mcp.tool
     async def _func_tool_unload(names: list[str] | None = None) -> dict[str, Any]:
         """Trim the model's tool list — the harness's call, and the model's too.

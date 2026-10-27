@@ -73,6 +73,7 @@ from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
     remote_tools,
+    tool_exists,
     trim_answer,
     unload_tools,
 )
@@ -478,7 +479,15 @@ def build_server(
         `cancel_async` are model tools like every other and arrive in the list
         the hub advertises.
         """
-        return ToolRegistry(await remote_tools(await hub(), task.identity))
+
+        async def catalogue_has(name: str) -> bool:
+            """Whether the catalogue holds a name outside this request's list."""
+            return await tool_exists(await hub(), name)
+
+        return ToolRegistry(
+            await remote_tools(await hub(), task.identity),
+            exists=catalogue_has,
+        )
 
     async def model_for(task: AgentTask) -> LLMBackend:
         """A model backend bound to the agent, opened on first use.

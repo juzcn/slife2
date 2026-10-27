@@ -106,6 +106,7 @@ from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
     ToolListing,
     remote_catalogue,
+    tool_exists,
     trim_answer,
     unload_tools,
 )
@@ -1446,13 +1447,23 @@ def build_server(
         `loaded` is the hub's loaded set and `total` the catalogue it was chosen
         from: a clean pair (events.py says why).
         """
+
+        async def catalogue_has(name: str) -> bool:
+            """Whether the catalogue holds a name outside this request's list.
+
+            The registry's error path asks, so a name the budget unloaded is
+            told to load and a name the machine does not have is told to search
+            — the two sentences `ToolRegistry._unknown` keeps apart.
+            """
+            return await tool_exists(await hub(), name)
+
         found = await turn_tools(client_id)
         if observer is not None:
             await AgentLoop._emit(
                 observer,
                 ToolsCounted(total=found.total, loaded=len(found.tools)),
             )
-        return ToolRegistry(found.tools)
+        return ToolRegistry(found.tools, exists=catalogue_has)
 
     def turn_annotation(
         messages: list[dict[str, Any]],

@@ -103,6 +103,58 @@ async def test_unknown_tool_is_a_result_not_an_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unloaded_tool_is_told_to_load_not_to_search() -> None:
+    """**A name the catalogue holds is not a name that does not exist.**
+
+    The budget unloading a tool leaves a name the model has seen before, and
+    making it search again for the tool it already had is a wasted turn.  The
+    registry asks the catalogue (`exists`) and answers with the one step that
+    helps.
+    """
+
+    async def known(_name: str) -> bool:
+        return True
+
+    found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=known)
+    text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
+
+    assert ok is False
+    assert "in the catalogue" in text
+    assert "func_tool_load" in text
+    assert "tool_search" not in text, "it is a load, not a search"
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_catalogue_does_not_hold_is_told_to_search() -> None:
+    """The other half: no row anywhere, so searching for *the name* is a dead end."""
+
+    async def missing(_name: str) -> bool:
+        return False
+
+    found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=missing)
+    text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
+
+    assert ok is False
+    assert "no tool named" in text
+    assert "tool_search" in text
+    assert "func_tool_load" in text
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_that_cannot_answer_leaves_the_both_cases_sentence() -> None:
+    """A diagnostic may not turn the model's failed call into a failed turn."""
+
+    async def broken(_name: str) -> bool:
+        raise RuntimeError("the hub is gone")
+
+    found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], exists=broken)
+    text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
+
+    assert ok is False
+    assert "not in your tool list" in text
+
+
+@pytest.mark.asyncio
 async def test_a_raising_tool_becomes_an_error_result() -> None:
     text, ok = await registry().execute(ToolCall(id="c1", name="raises"))
     assert ok is False
