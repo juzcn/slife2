@@ -394,6 +394,27 @@ def test_a_catalogue_deleted_under_a_running_store_is_rebuilt(tmp_path) -> None:
     assert store.count() == 0, "another, empty file is at the same path"
 
 
+def test_reconfiguring_applies_an_edited_autoload(tmp_path) -> None:
+    """The hub keeps a store open for its whole life, so an edit must reach it.
+
+    A store's `tool_load` was fixed at construction, and the hub serving every
+    home lives as long as the machine's stack.  Restarting the agent reuses the
+    hub, so an edited list reached every reader but the catalogue: the window
+    kept showing the old loaded set until the daemons were restarted, which one
+    home's edit cannot ask of the others.  `ToolStore.reconfigure` is the pass
+    that applies the operator's baseline to the rows already there.
+    """
+    store = store_at(tmp_path)
+    merge(store, "toolhub", "plugin", [tool("turn_read")])
+    assert rows_in(store) == [("turn_read", STATUS_ENABLED, UNLOADED)]
+
+    store.reconfigure(threshold=100, autoload=["turn_read"], known={"toolhub"})
+    assert rows_in(store) == [("turn_read", STATUS_ENABLED, LOADED)]
+
+    store.reconfigure(threshold=100, autoload=(), known={"toolhub"})
+    assert rows_in(store) == [("turn_read", STATUS_ENABLED, UNLOADED)]
+
+
 def test_a_skill_row_carries_no_load_state(tmp_path) -> None:
     """`n/a` is what the column documents for a skill, and what its filter means.
 

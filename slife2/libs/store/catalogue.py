@@ -1293,6 +1293,33 @@ class ToolStore:
             )
         return {"loaded": loaded, "unloaded": unloaded}
 
+    def reconfigure(
+        self,
+        *,
+        threshold: int,
+        autoload: Iterable[str],
+        known: Iterable[str] | None,
+    ) -> None:
+        """Apply an edited `tool_load` or source list to a store already open.
+
+        **The hub keeps one store per home for as long as it lives**, so an edit
+        to the caller's `slife2.yaml` used to reach every reader except this one:
+        the budget and the boot pass were fixed at construction, and restarting
+        the *agent* reuses the shared hub — so the edit only took effect when the
+        machine's daemons were restarted, which is not something a person editing
+        one home's file can do for the hub serving the others.
+
+        The pass is `seed_autoload`'s, so an edited list loads and unloads exactly
+        as it would at a start; `reset` is re-run for the rows a source the config
+        no longer names would otherwise leave standing.
+        """
+        self.threshold = max(1, int(threshold))
+        self.autoload = frozenset(str(name) for name in autoload)
+        self.known = None if known is None else frozenset(str(name) for name in known)
+        if self.known is not None:
+            self.reset()
+            self.seed_autoload()
+
     def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Flip one row's load state, and say what happened.
 

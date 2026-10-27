@@ -46,7 +46,7 @@ from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
-from slife2.libs.store.catalogue import ToolStore
+from slife2.libs.store.catalogue import LOADED, UNLOADED, ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
     MATCH_FLOOR,
@@ -3232,6 +3232,75 @@ class SlowOpenEmbedder(StubEmbedder):
             self.reached.set()
             await self.proceed.wait()
         return await StubEmbedder.embed(self, texts)
+
+
+@pytest.mark.asyncio
+async def test_an_edited_autoload_reaches_an_open_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The hub outlives the agent, so an edit has to reach the open store.**
+
+    `Catalogue.store()` caches one `ToolStore` per home, and a store's
+    `tool_load` was fixed at construction.  Restarting the agent reuses the
+    shared hub, so an edited `autoload` reached every reader except the
+    catalogue: the window kept the old loaded set until the machine's daemons
+    were restarted — which one home's edit cannot ask of the others.
+    `load_cached` hands back a new `Config` object when the file changes, so a
+    different object is the edit signal and the list is applied in place.
+    """
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "home"))
+    configs = {
+        "config": replace(
+            default_config(),
+            tool_load=ToolLoadSettings(threshold=100, autoload=()),
+        )
+    }
+
+    def make_store() -> ToolStore:
+        theirs = configs["config"]
+        return ToolStore(
+            catalogue_db(),
+            threshold=theirs.tool_load.threshold,
+            autoload=theirs.tool_load.autoload,
+            known=configured_sources(theirs),
+        )
+
+    async def open_store() -> ToolStore:
+        return make_store()
+
+    async def embedder_of_call() -> StubEmbedder:
+        return StubEmbedder()
+
+    catalogue = Catalogue(open_store, embedder_of_call, lambda: configs["config"])
+    row = {
+        "name": "turn_read",
+        "description": "Reads a stored turn.",
+        "remote_name": "turn_read",
+        "schema": "",
+    }
+
+    def load_status() -> str:
+        with sqlite3.connect(catalogue_db()) as connection:
+            return connection.execute(
+                "SELECT load_status FROM tool WHERE name = 'turn_read'"
+            ).fetchone()[0]
+
+    await catalogue.merge("toolhub", PLUGIN, [row])
+    assert load_status() == UNLOADED
+
+    configs["config"] = replace(
+        configs["config"],
+        tool_load=ToolLoadSettings(threshold=100, autoload=("turn_read",)),
+    )
+    await catalogue.merge("toolhub", PLUGIN, [row])
+    assert load_status() == LOADED
+
+    configs["config"] = replace(
+        configs["config"],
+        tool_load=ToolLoadSettings(threshold=100, autoload=()),
+    )
+    await catalogue.store()
+    assert load_status() == UNLOADED
 
 
 @pytest.mark.asyncio

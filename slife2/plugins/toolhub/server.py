@@ -474,11 +474,21 @@ class Catalogue:
         self,
         open_store: Callable[[], Awaitable[ToolStore]],
         embedder: Callable[[], Awaitable[Embedder]],
+        config: Callable[[], Config] | None = None,
     ) -> None:
         self._open = open_store
         self._embedder = embedder
+        #: The config the call in front of us is served from; `None` is a caller
+        #: that has one injected and unchanging (a test), which has no edit for
+        #: `store` to notice.  See `store`, which is the only reader.
+        self._config = config
         #: One store per home, keyed by the data directory it was opened in.
         self._stores: dict[str, ToolStore] = {}
+        #: The `Config` object each store was opened from.  **Identity is the
+        #: edit signal** — `load_cached` answers the same object while the file
+        #: is untouched — so a store whose home has a different one now is a
+        #: home whose `tool_load` or sources changed; see `store`.
+        self._configs: dict[str, Config] = {}
         self._opening = asyncio.Lock()
         #: Why the catalogue could not take each source's listing, **by home and
         #: then by source** — see `failure`, which is the only reader, and
@@ -567,15 +577,40 @@ class Catalogue:
         therefore not a race with that fan-out but the other end of one handoff:
         a fan-out cannot run while the lock is held, so one that has not seen
         this file has already left its rows in `_held` for `seed` to write.
+
+        **An edited `tool_load` or source list is applied here**, because the
+        hub is shared and one home's edit cannot restart it.  `load_cached`
+        answers the same `Config` object while the file is untouched, so the
+        comparison is an identity — the same edit signal the plugin family uses
+        — and a store opened from the old object is reconfigured in place
+        (`ToolStore.reconfigure`) rather than reopened: the rows are the same
+        catalogue, and `seed_autoload` is the pass that applies an operator's
+        baseline to rows that already exist.
         """
         key = home_key()
+        theirs = None if self._config is None else self._config()
         found = self._stores.get(key)
-        if found is None:
-            async with self._opening:
-                found = self._stores.get(key)
-                if found is None:
-                    found = await self._open()
-                    self._stores[key] = found
+        if found is not None and (theirs is None or self._configs.get(key) is theirs):
+            return found
+        async with self._opening:
+            found = self._stores.get(key)
+            if found is not None and (
+                theirs is None or self._configs.get(key) is theirs
+            ):
+                return found
+            if found is not None:
+                if theirs is not None:
+                    found.reconfigure(
+                        threshold=theirs.tool_load.threshold,
+                        autoload=theirs.tool_load.autoload,
+                        known=configured_sources(theirs),
+                    )
+                    self._configs[key] = theirs
+                return found
+            found = await self._open()
+            self._stores[key] = found
+            if theirs is not None:
+                self._configs[key] = theirs
         return found
 
     async def merge(
@@ -2674,7 +2709,7 @@ def build_server(
         return await embedding_for().get()
 
     #: The catalogue, and the one file it opens when something first asks.
-    catalogue = Catalogue(open_catalogue, embedder_of_call)
+    catalogue = Catalogue(open_catalogue, embedder_of_call, current)
 
     #: The plugins first, in the order slife2 starts them, and required — see
     #: `list_tools`.  The hub asks every one of them, including the ones with
