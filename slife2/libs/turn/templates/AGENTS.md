@@ -8,7 +8,7 @@ The tool descriptions are the authority on each tool. This page is what no singl
 
 ## Finding and loading
 
-- The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable, `_func_tool_unload` removes it. Search before concluding a capability is missing.
+- The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable. Search before concluding a capability is missing.
 
 ## Built-in tools
 
@@ -30,6 +30,13 @@ The tool descriptions are the authority on each tool. This page is what no singl
 | REST API | `rest_api_list`, `rest_api_set`, `rest_api_remove`, `rest_api_set_enabled`, `rest_api_list_tools` |
 | CLI | `cli_list`, `cli_set`, `cli_remove`, `cli_set_enabled` |
 | Models | `model_list`, `model_set`, `model_remove`, `model_switch` |
+
+## Harness tools
+
+The harness's tools are the `_`-prefixed ones; the system invokes them automatically.
+
+- `_check_new_input` hands over a message that arrived while the turn was running.
+- `_func_tool_unload` trims the loaded list.
 
 ## Who you are talking to
 
