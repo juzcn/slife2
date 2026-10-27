@@ -263,9 +263,11 @@ asyncio_default_fixture_loop_scope = "module"
 # one test, reporting nothing: measured once at 100% of the dots and no summary,
 # with the culprit only findable by bisecting by hand.  `faulthandler` dumps
 # every thread's stack after this many seconds and exits, so the same defect is
-# a named traceback in three minutes.  The bound is generous on purpose: the
-# slowest test in the fast lane is ~7 s and the e2e lane's stack takes ~50 s to
-# come up, so nothing legitimate comes near it.
+# a named traceback in three minutes.  The bound is sized for the fast lane,
+# where the slowest test is ~7 s, so nothing legitimate comes near it.  **The
+# e2e lane raises it per test** (`tests/e2e/conftest.py`): there a daemon that
+# will not come up must reach `_wait_ready`'s own diagnosis — which names the
+# server and its log — instead of being pre-empted by this watchdog.
 addopts = "-q --tb=short --strict-markers --strict-config --no-header --color=yes --durations=10 -n auto -m 'not e2e'"
 faulthandler_timeout = 180
 faulthandler_exit_on_timeout = true

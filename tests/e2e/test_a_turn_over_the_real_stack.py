@@ -468,7 +468,7 @@ async def stack(
     # picked, so the danger the guard exists for is not here.  Without this,
     # every probe of a daemon that is already serving is refused with the
     # guard's `RuntimeError`, `probe` reports it as "the probe itself failed",
-    # and the stack never finishes starting: the 180 s faulthandler kills the
+    # and the stack never finishes starting: the lane's watchdog kills the
     # worker and the lane reports a crash that names no server at all.
     real_dialer("slife2.libs.host.launcher")
     provider = StubProvider()
