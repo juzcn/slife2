@@ -1,6 +1,6 @@
 ---
 name: job-coding
-description: Create code-defined tools — deterministic Jobs, each exposed as its own MCP tool (job__<name>). Use when a task is well-specified, repeatable and data-in/result-out, or when a multi-step procedure should stop being a prompt and become code. A job may be a small new tool or a workflow that composes tools, models and agents. Load this skill before writing a job.
+description: Create code-defined tools — deterministic Jobs, each exposed as its own MCP tool (job__<name>). Use when a task is well-specified, repeatable and data-in/result-out, or when a multi-step procedure should stop being a prompt and become code. A job may be a small new tool or a workflow that composes tools, models and agents. Load this skill before writing a job; it covers the ruff/pyright check and the fix loop before you call it done.
 ---
 
 # job-coding — how to write a Job
@@ -54,6 +54,10 @@ model's judgement at each step, write a skill instead.
 `job_set` is live: the hub re-reads the jobs' declaration before its next
 search, so the new `job__<name>` is findable without a restart. The same is
 true of `job_remove`.
+
+The static check is **not a tool**: the project's `ruff` and `pyright` are
+installed as normal dependencies of slife2, and you run them with your shell /
+terminal capability against the job file. That is the next section.
 
 ## Grammar
 
@@ -212,6 +216,53 @@ async def daily_report(topic: str) -> str:
 The Python is the workflow: loops, `if`, `try`, `asyncio.gather`, helper
 functions. The handles are the leaves.
 
+## Check before you call it done
+
+**The runtime gate is not the static check.** `job_set` proves the file imports,
+defines the function and has a docstring; it cannot see a blind `except`, an
+unused import, or an `int()` on a value that may be `None`. Run the project's
+own tools over the file you just wrote, fix what they find, and `job_set` again.
+Repeat until both are clean.
+
+Get the file's path from `job_use` (its `file`), and run these with your shell /
+terminal capability from the project checkout (where `pyproject.toml` is) or
+with the venv's executables:
+
+```bash
+# lint — the project's selection, independent of where the home sits
+ruff check --isolated --select E,F,W,I,UP,B,C4,BLE --ignore E501 --line-length 88 <job file>
+
+# formatting — the project's formatter
+ruff format --check <job file>      # or: ruff format <job file>
+
+# types — explicit file, project config when run from the checkout
+pyright <job file>
+```
+
+On Windows the venv's executables are `.venv\Scripts\ruff.exe` and
+`.venv\Scripts\pyright.exe`; on POSIX, `.venv/bin/ruff` and
+`.venv/bin/pyright`. `uv run --with ruff` / `--with pyright` work too when
+nothing is holding the tool environment.
+
+**What the findings mean, and the usual fix:**
+
+- **`BLE001` (ruff)** — a blind `except Exception`. If the catch is deliberate
+  (a peer's failure is data), say so on the line:
+  `except Exception:  # noqa: BLE001 — the search returns its own error text`.
+  Otherwise catch the exceptions that can actually happen.
+- **`reportArgumentType` on `int(...)` / `float(...)`** — the value can be
+  `None` or `Unknown` (a JSON `dict.get`). Narrow it first:
+  `if value is None: continue`, or supply an explicit default. A `try/except`
+  does not narrow a type.
+- **Unused imports / variables** — remove them; the check counts them as errors.
+- **`reportMissingImports` for `slife2.job`** — the checker is running outside
+  the project environment, not a defect in the job. Run from the checkout (or
+  the slife2 venv) and re-check.
+- **Formatting** — run the formatter, or make the same change by hand.
+
+If you have **no shell/terminal capability**, say so in your answer and rely on
+the runtime gate plus the checklist above; do not claim the static check ran.
+
 ## Determinism and trust
 
 - **Control flow is deterministic; model and tool outputs are not.** A job makes
@@ -238,3 +289,5 @@ functions. The handles are the leaves.
   `subagent`.
 - Reserved names (`job_list`, `job_set`, `job_remove`, `job_run`, `job_use`) and
   names beginning with `_` are refused.
+- **The ruff and pyright checks pass** (or you have said why they could not
+  run). A job that installs but fails either check is not finished.

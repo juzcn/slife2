@@ -149,6 +149,14 @@ dependencies = [
     # dependency this project states.  The import is inside the one function that
     # parses, so a process that never lists a tool pays nothing.
     "griffelib>=2.0.0",
+    # The job authoring check.  The `job-coding` skill tells the model to run
+    # these over the code it wrote and fix what they find; a normal dependency
+    # rather than a dev-group one, because the authoring loop is part of the
+    # installed product — a home with no development environment still has the
+    # tools the skill names.  The agent runs them through its shell/terminal
+    # capability; nothing in slife2 imports either.
+    "ruff>=0.16.10",
+    "pyright>=1.1.414",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -222,13 +230,6 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.16.10",
-    # The type checker `[tool.pyright]` below configures.  It was configured and
-    # never installed, which is how a settings block becomes a comment: the
-    # rules were there, nothing ran them, and the first run after wiring it up
-    # found two live bugs — an attribute read off a union member in the middle
-    # of a stream.  CI runs it beside ruff.
-    "pyright>=1.1.414",
 ]
 
 [tool.uv.workspace]
@@ -314,10 +315,12 @@ ignore = ["E501"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 include = ["slife2"]
-# `jobs/**` is explicit although `include` already stops at slife2: the editor's
-# language server analyses a file the moment it is opened, and the jobs folder is
-# user data whose type errors are the author's to fix, not the project's build.
-exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "jobs/**", "**/node_modules", "**/.*"]
+# `jobs/**` is deliberately not excluded here.  The build checks `slife2` only —
+# `include` says that — but the authoring skill tells the model to run
+# `pyright <job file>` and fix what it finds; that explicit path has to be
+# analysed, which is what the editor's open-file pass does too.  The CI is
+# unaffected: it runs `pyright` with this config and no file argument.
+exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "**/node_modules", "**/.*"]
 reportMissingImports = true
 reportMissingTypeStubs = false
 reportOptionalSubscript = true

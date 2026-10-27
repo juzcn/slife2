@@ -784,6 +784,11 @@ without changing the job runtime. The code runs in the jobs plugin with the
 caller's identity; it is not sandboxed, and the top-level tool call is where a
 person can be asked to approve it.
 
+The `job-coding` skill is the authoring guide: it tells the model to run the
+project's `ruff` and `pyright` over the file it wrote and fix the findings
+before it calls the job done. Both tools are normal dependencies, so a
+shell/terminal capability is all the check needs.
+
 ### Media
 
 The `media:` section provides four capabilities:

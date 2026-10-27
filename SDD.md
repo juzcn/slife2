@@ -295,6 +295,11 @@ no runtime change. The code runs in the jobs plugin with the caller's identity,
 holds no credential, and is not sandboxed; the top-level tool call is the
 approval point.
 
+The authoring quality loop is the `job-coding` skill, not a plugin tool: it
+tells the model to run the project's `ruff` and `pyright` over the file it wrote
+and fix the findings before finishing. Both are normal dependencies, so the
+check needs only a shell/terminal capability; no plugin imports them.
+
 ### 2.7 Key design decisions
 
 | Decision | Choice | Consequence |
