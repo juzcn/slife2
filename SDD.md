@@ -1598,10 +1598,15 @@ A field may contain a sentence, because a person reads some answers too. The
 rule is that the envelope is one shape, so a reader that knows one tool knows
 them all.
 
-The switch from prose answers to objects was paid for in schema length:
-model-facing descriptions grew from about 5,500 to about 7,500 words, almost all
-of it `Returns:` sections naming the keys of the object. That is the price of a
-model using an answer without inspecting it first.
+**The return contract is catalogued, not advertised.** A tool's `Returns:`
+section is not part of the description the model carries: the description goes
+out with every request, and repeating the shape of every held tool's answer
+would spend that budget on a fact a model needs once, when it is choosing an
+unfamiliar tool. The section travels on `_meta`, the hub stores it in the
+catalogue's `returns` column beside the input schema, and the keyword leg reads
+it, so a question phrased in the answer's own words finds the tool. That is the
+price of a model using an answer without inspecting it first: the fact exists,
+and the search that finds the tool is the place it speaks.
 
 ### 7.7 Meta-parameters
 

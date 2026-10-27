@@ -888,13 +888,11 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
     is that word and reads the switch first, which is why a switched-off entry
     says `off` rather than the `idle` of a connection nobody started.
 
-    **The count is the cost, and only the tool can say it before it is paid.**
-    Nothing here writes the catalogue: the hub merges this source's whole list
-    before the next search, and that merge embeds every row — one request, every
-    text of every tool.  So a server with four figures of tools makes the
-    model's *next* search the expensive call, which is one turn too late to be
-    discovering it; `large` says so at the moment it is connected, and a count
-    at or under the listing cap is ordinary and goes unsaid.
+    **The count is the one number the tool can give before the work is paid
+    for.**  Nothing here writes the catalogue: the hub merges this source's whole
+    list before the next search.  The count is therefore what a caller reads to
+    know how much a server brings with it, and the threshold language `large`
+    used to carry was a second opinion about the same number.
     """
     if not one.settings.enabled:
         return {"name": name, "enabled": False, "state": "off"}
@@ -904,12 +902,9 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
         "state": one.state,
     }
     if one.usable:
-        count = len(one.rows or [])
         # The count key is the unit's plural, so the number here and the rows a
         # `*_list_tools` hands over are named the same thing.
-        report[f"{words.unit}s"] = count
-        if count > TOOL_LIST_LIMIT:
-            report["large"] = True
+        report[f"{words.unit}s"] = len(one.rows or [])
     else:
         # What it said the last time it failed, or `""` for one that has not
         # answered yet — a different fact from a server that answered with
@@ -1186,11 +1181,12 @@ async def remove_entry(
     neither is refused rather than silently succeeding: nothing was written, so
     the call is a failure the model can see (`prepare_entry`'s rule).
 
-    **`removed` and `stopped` are two facts and the old sentence carried one.**
-    The entry can be held and no longer in the file — another instance removed
-    it, or a person edited it out — and then no entry was deleted but a link
-    *was* stopped, so a single "nothing was removed" is the opposite of what
-    happened.  Both are answered as they are.
+    **The answer is one fact, because that is the one the caller acts on.**  The
+    entry can be held and no longer in the file — another instance removed it,
+    or a person edited it out — and then no entry was deleted but a link *was*
+    stopped; both roads end with the name gone, which is what the caller asked
+    for and all it can act on.  The two internals are still told apart in the
+    refusal below, where the difference is whether there was anything to do.
     """
     if family.held(name) is None and name not in configfile.read_section(words.section):
         raise ToolError(
@@ -1201,7 +1197,7 @@ async def remove_entry(
     stopped = await family.remove(name)
     if removed:
         logger.info("%s name=%s", words.remove_log, name)
-    return {"name": name, "removed": removed, "stopped": stopped is not None}
+    return {"name": name, "removed": removed or stopped is not None}
 
 
 async def switch_entry(

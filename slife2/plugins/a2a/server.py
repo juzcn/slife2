@@ -76,7 +76,7 @@ import sys
 from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -1709,7 +1709,9 @@ def build_server(
         ctx: Context,
         agent: str,
         message: str,
-        message_type: str = "task_request",
+        message_type: Literal[
+            "message", "task_request", "task_response"
+        ] = "task_request",
         task_id: str = "",
     ) -> dict[str, Any]:
         """Send a message to another agent on the A2A mesh.
@@ -1755,6 +1757,15 @@ def build_server(
         was published to a name nobody was subscribed to: the requester ladder
         ran out and the sender was told the subagent had never been reached, for
         every message, for ever.
+
+        Args:
+            agent: The peer to send to, by name from `peer_agent_list`.
+            message: What to say, or the task to do.
+            message_type: `task_request` asks for work, `task_response`
+                completes a task somebody sent you, and `message` is a plain
+                conversation.
+            task_id: The task being completed; required for `task_response`
+                and ignored otherwise.
         """
         if message_type not in ("message", "task_request", "task_response"):
             raise ToolError(
@@ -1835,6 +1846,10 @@ def build_server(
         'completed'/'failed'/'cancelled' when the task had already ended (a
         finished result is never lost by asking), or 'not_found' for an id this
         process never sent.
+
+        Args:
+            agent: The peer the task is with, by name.
+            task_id: The task's id, from the send's answer or its marker.
         """
         sender, mine = speaker(ctx)
         session = await connected(sender, USED, mine)
@@ -1886,19 +1901,12 @@ def build_server(
         `error` says why the list is short when it is: the last failure to join,
         or another agent holding your name — the two states a bare "offline"
         cannot tell apart.
-
-        `org` and `unit` are the mesh this is the roster *of* (`Net.namespace`),
-        and on a subagent network they are what the mesh is: the org is this
-        network's own word and the unit is the agent's name — so the same two
-        fields say which network and whose mesh, and a model reading them is
-        told both without the file being consulted.
         """
         agent, mine = speaker(ctx)
         settings = mesh_settings()
         if not settings.configured:
             return {
                 "agent_name": member_name(agent, mine),
-                "broker": settings.address,
                 "agents": [],
                 "error": switch_off(net),
             }
@@ -1963,13 +1971,9 @@ def build_server(
         error = mesh.collision or session.connect_error
         if not mesh.is_connected and not error:
             error = f"not connected to the broker at {settings.address}"
-        org, unit = mesh.namespace
         return {
             "agent_name": safe_name(own.agent_name),
             "status": mesh.status,
-            "broker": settings.address,
-            "org": org,
-            "unit": unit,
             "agents": cards,
             "error": error,
         }
@@ -2033,15 +2037,15 @@ def build_server(
         not subscribed: an event reaches whoever is listening, and a maker's
         subagents listen only once somebody has given them a place
         (`place_for_all`).
+
+        Args:
+            event: What happened, or what to tell everyone.
         """
         sender, mine = speaker(ctx)
         session = await connected(sender, USED, mine)
         await place_for_all(sender)
         await session.mesh.broadcast(event)
-        return {
-            "broadcast": event,
-            "note": "Sent — fire-and-forget, no reply expected.",
-        }
+        return {"sent": True}
 
     # ── Groups ──────────────────────────────────────────────────────────
     #
@@ -2109,6 +2113,10 @@ def build_server(
         subagents, and a **forked** subagent is refused: a fork is a temporary
         copy of its maker's conversation and ends with the next start, so a
         roster naming one would keep addressing a name nobody answers.
+
+        Args:
+            group: The group's name. Naming one you own replaces its roster.
+            members: The other members, by name; you are added as the owner.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2159,7 +2167,7 @@ def build_server(
         if existing is not None:
             recipients |= set(existing.members)
         await place_for_group(sender, recipients, me)
-        sent = await session.mesh.group_fanout(
+        await session.mesh.group_fanout(
             recipients,
             kind=group_store.KIND_SET,
             group=group,
@@ -2171,12 +2179,6 @@ def build_server(
             "group": group,
             "owner": me,
             "members": list(roster),
-            "sent": sent,
-            "note": (
-                "Created and the others were notified. Group messages are "
-                "fire-and-forget; a member not on the network now may miss "
-                "the notice and learn the group from the next message."
-            ),
         }
 
     @mcp.tool(
@@ -2242,6 +2244,9 @@ def build_server(
         group is refused with the group list tool named, because a name this
         conversation never learned is the wrong name rather than an empty
         group.
+
+        Args:
+            group: The group, by name.
         """
         sender, mine = speaker(ctx)
         session = session_of(sender, mine)
@@ -2271,6 +2276,9 @@ def build_server(
         Only the owner may do this; a member's way out is `group_leave`, which
         hands the group on rather than ending it.  Every member is notified and
         the group disappears from your local list.
+
+        Args:
+            group: The group to disband, by name.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2296,7 +2304,7 @@ def build_server(
         session.groups.forget(found)
         save_group_store(session)
         await place_for_group(sender, found.members, me)
-        sent = await session.mesh.group_fanout(
+        await session.mesh.group_fanout(
             found.members,
             kind=group_store.KIND_DISBANDED,
             group=group,
@@ -2304,7 +2312,7 @@ def build_server(
             members=found.members,
             gid=found.gid,
         )
-        return {"group": group, "disbanded": True, "sent": sent}
+        return {"group": group, "disbanded": True}
 
     @mcp.tool(
         name=net.tool(GROUP_LEAVE),
@@ -2317,6 +2325,9 @@ def build_server(
         If you are the owner, ownership passes to the first remaining member in
         the roster; if nobody remains, the group is disbanded.  The others are
         notified, and the group disappears from your local list.
+
+        Args:
+            group: The group to leave, by name.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2341,7 +2352,6 @@ def build_server(
                 "group": group,
                 "left": True,
                 "disbanded": True,
-                "sent": 0,
             }
         owner = remaining[0] if found.owner == me else found.owner
         updated = group_store.Group(
@@ -2359,7 +2369,7 @@ def build_server(
         session.groups.forget(found)
         save_group_store(session)
         await place_for_group(sender, remaining, me)
-        sent = await session.mesh.group_fanout(
+        await session.mesh.group_fanout(
             remaining,
             kind=group_store.KIND_LEAVE,
             group=group,
@@ -2372,7 +2382,6 @@ def build_server(
             "left": True,
             "owner": updated.owner,
             "members": list(updated.members),
-            "sent": sent,
         }
 
     @mcp.tool(
@@ -2401,6 +2410,10 @@ def build_server(
         roster decides who is delivered to, and the text decides who is being
         asked.  The recipients read the mention as part of the message; the
         harness does not parse it.
+
+        Args:
+            group: The group to speak in, by name.
+            message: What to say; `@name` and `@all` address people in it.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2420,7 +2433,7 @@ def build_server(
         if me not in found.members:
             raise ToolError(f"you are not a member of the group {group!r}.")
         await place_for_group(sender, found.members, me)
-        sent = await session.mesh.group_fanout(
+        await session.mesh.group_fanout(
             found.members,
             kind=group_store.GROUP_MESSAGE,
             group=found.name,
@@ -2429,14 +2442,7 @@ def build_server(
             gid=found.gid,
             text=message,
         )
-        return {
-            "group": group,
-            "sent": sent,
-            "note": (
-                "Sent — fire-and-forget to every other member; nobody replies "
-                "to this call."
-            ),
-        }
+        return {"group": group, "sent": True}
 
     return mcp
 
@@ -2482,18 +2488,18 @@ _TOOL_TEXTS: dict[str, str] = {
         "marker. 'message' is a plain conversation — no task, no completion, and\n"
         "the reply arrives as a message.\n"
         "\n"
-        "The id and `status` are about *acceptance*, not delivery: the first\n"
-        "publish has left when this returns, so `status` is 'unverified' until a\n"
-        "reply arrives, and a notice arrives here if the requester retry ladder\n"
-        "runs out. {addressing}"
+        "The id and `status` are about *acceptance*, not delivery: it has\n"
+        "been handed to the network when this returns, so `status` is\n"
+        "'unverified' until a reply arrives, and a notice arrives here if the\n"
+        "message is never acknowledged. {addressing}"
     ),
     CANCEL_TASK: (
         "Withdraw a task you sent to {them}.\n"
         "\n"
         "`status` is the answer: 'cancelled' when the withdrawal went out,\n"
         "'completed'/'failed'/'cancelled' when the task had already ended (a\n"
-        "finished result is never lost by asking), or 'not_found' for an id this\n"
-        "process never sent."
+        "finished result is never lost by asking), or 'not_found' for an id you\n"
+        "never sent."
     ),
     LIST: (
         "List {roster}.\n"
@@ -2506,7 +2512,7 @@ _TOOL_TEXTS: dict[str, str] = {
         "`error` says why the list is short when it is."
     ),
     BROADCAST: (
-        "Publish a fire-and-forget event to {everyone}.\n"
+        "Send a fire-and-forget event to {everyone}.\n"
         "\n"
         "Nobody answers one and it is delivered at most once, so it is for\n"
         "information somebody may act on and not for anything you need a reply\n"
@@ -2587,8 +2593,8 @@ _TOOL_TEXTS: dict[str, str] = {
         "member still receives the message. Delivery is fire-and-forget — no\n"
         "task, no completion — so a member that is not on the network now may\n"
         "miss it. **A group chat is casual**: nobody has to answer, and silence\n"
-        "is not 'pending' or 'undelivered'; `sent` is only a publish count. Use\n"
-        "`{send}` when you need an answer."
+        "is not 'pending' or 'undelivered'. Use `{send}` when you need an\n"
+        "answer."
     ),
 }
 

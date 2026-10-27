@@ -161,8 +161,7 @@ async def test_adding_a_model_keeps_the_ones_beside_it(isolated_runtime) -> None
         "ref": "local/third",
         "created": True,
         "provider_created": False,
-        "backend": None,
-    }, "added, on a provider that was already there and needs no backend started"
+    }, "added, on a provider that was already there and needs no server started"
     assert any(
         row["model"] == "third" and row["name"] == "Third" for row in listed["models"]
     )
@@ -249,8 +248,42 @@ async def test_a_provider_on_a_new_protocol_starts_its_backend(
         )
 
     assert answer["provider_created"] is True and answer["created"] is True
-    assert answer["backend"] == {"api": "anthropic-messages", "up": True, "detail": ""}
+    assert answer["ready"] is True and "error" not in answer
     assert [spec.name for spec in started] == ["llm:anthropic-messages"]
+    assert section(isolated_runtime)["claude"]["api"] == "anthropic-messages"
+
+
+@pytest.mark.asyncio
+async def test_a_model_server_that_does_not_start_is_reported_not_raised(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The edit stands either way; what the model reads is why the model is not usable yet.
+
+    A start that fails must not read as a write that failed — the config has the
+    provider and the model, and a restart retries the server.  So the answer
+    carries `ready` and the reason beside it, and the caller can tell "written,
+    not reachable yet" from "not written".
+    """
+
+    def fake_ensure(spec: Any, *, config_path: Any = None) -> Outcome:
+        return Outcome(spec, Status.FAILED, detail="port 41873 is taken")
+
+    monkeypatch.setattr("slife2.libs.host.launcher.ensure", fake_ensure)
+
+    async with Client(server_for(isolated_runtime)) as client:
+        answer = await ask(
+            client,
+            "model_set",
+            ref="claude/sonnet",
+            name="Sonnet",
+            api="anthropic-messages",
+            base_url="https://anthropic.test",
+            api_key="ANTHROPIC_KEY",
+        )
+
+    assert answer["provider_created"] is True and answer["created"] is True
+    assert answer["ready"] is False
+    assert "port 41873 is taken" in answer["error"]
     assert section(isolated_runtime)["claude"]["api"] == "anthropic-messages"
 
 

@@ -337,7 +337,6 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
     # delivered, and a result read twice is a result the model keeps paying for.
     answer = await check_async({"task_id": task_id})
     assert answer["status"] == FINISHED
-    assert answer["delivered"] is True
     assert answer["call_id"] == "call-1" and answer["tool"] == "slow"
     assert "result" not in answer, "the answer was already handed over"
 
@@ -371,9 +370,8 @@ async def test_an_undelivered_result_stays_readable() -> None:
         await asyncio.sleep(0)
 
     answer = await check_async({"task_id": task_id})
-    assert answer["result"] == "lost unless kept"
+    assert answer["result"] == "lost unless kept", "nobody took it, so it is still here"
     assert answer["status"] == FINISHED
-    assert answer["delivered"] is False, "nobody took it, so it is still here"
 
 
 @pytest.mark.asyncio
@@ -778,7 +776,6 @@ async def test_a_finished_call_whose_delivery_is_in_flight_is_not_settled() -> N
     try:
         answer = await check_async({"task_id": "inflight"})
         assert answer["status"] == async_tasks.FINISHED
-        assert answer["delivered"] is False, "on its way, and not yet a verdict"
         assert "result" not in answer, "the delivery it is about to make, twice"
         assert async_tasks._get_task("inflight") is task, "and it was not popped"
 

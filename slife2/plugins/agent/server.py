@@ -3067,7 +3067,10 @@ def build_server(
         when the call ends; this asks where it stands, not what it said.
 
         `task_id` is the id the backgrounded call answered with.  A task that
-        does not exist — or one this process never ran — is refused.
+        does not exist — or one that was never started here — is refused.
+
+        Args:
+            task_id: The id the backgrounded call answered with.
         """
         try:
             return await check_async({"task_id": task_id})
@@ -3083,6 +3086,9 @@ def build_server(
         handed over, not dropped.
 
         `task_id` is the id the backgrounded call answered with.
+
+        Args:
+            task_id: The id the backgrounded call answered with.
         """
         try:
             return await cancel_async({"task_id": task_id})
@@ -3322,10 +3328,9 @@ def build_server(
         Returns:
             `ref`, and what the write did: `created` when this call added a model
             the file did not have rather than replacing one it did, and
-            `provider_created` when it made the provider too. `backend` is the
-            protocol's backend when this call had to start one — `{"api", "up",
-            "detail"}`, where `up: false` carries the reason — and `null` when a
-            provider for that protocol was already configured.
+            `provider_created` when it made the provider too. When this call also
+            had to start the provider's model server, `ready` says whether it is
+            up, and `error` says why it is not.
         """
         provider, _slash, model = ref.strip().partition("/")
         provider, model, name = provider.strip(), model.strip(), name.strip()
@@ -3399,18 +3404,21 @@ def build_server(
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
 
-        return {
+        answer: dict[str, Any] = {
             "ref": f"{provider}/{model}",
             "created": not had_model,
             "provider_created": creating,
-            # Only when this call is what made the protocol reachable: a provider
-            # for an api that was already configured is served by a backend that
-            # has been up since boot, and reporting on it here would be this tool
-            # answering about a process it never touched.
-            "backend": await _ensure_backend(entry_api)
-            if entry_api not in known
-            else None,
         }
+        # Only when this call is what made the protocol reachable: a provider
+        # for an api that was already configured is served by a server that has
+        # been up since boot, and reporting on it here would be this tool
+        # answering about a process it never touched.
+        if entry_api not in known:
+            outcome = await _ensure_backend(entry_api)
+            answer["ready"] = bool(outcome.get("up"))
+            if not outcome.get("up"):
+                answer["error"] = str(outcome.get("detail") or "")
+        return answer
 
     @mcp.tool(name="model_remove", meta=FOR_THE_MODEL)
     async def model_remove(ref: str) -> dict[str, Any]:
@@ -4291,22 +4299,21 @@ def build_server(
         """Make a subagent: an agent of your own, named, with its own memory.
 
         A subagent is an agent that belongs to you — the same tools, the same way
-        of working, its own conversation, and its own directory underneath
-        yours (`agents/<you>/subagents/<name>/`).  It has no window and no
-        process: it runs when something sends it a message, and from then on you
-        address it by name.  It
-        is *made* here and *unmade* by `subagent_remove`; everything else it does,
-        it does with the tools you have.
+        of working, its own conversation and its own memory. It has no window
+        and no process: it runs when something sends it a message, and from then
+        on you address it by name. It is *made* here and *unmade* by
+        `subagent_remove`; everything else it does, it does with the tools you
+        have.
 
         **A subagent you already have is the same subagent** — `set` rather than
-        `add`, so naming one twice is safe.  What a second call changes is its
-        model and its role; when it was made, and whether it was made as a fork,
-        are what they were — a fork's conversation is a copy already taken, and
-        what it is made of is not something a later call can re-decide.
+        `add`, so naming one twice is safe. What a second call changes is its
+        model and its role; whether it was made as a fork is what it was — a
+        fork's conversation is a copy already taken, and a later call cannot
+        re-decide what it is made of.
 
         Args:
-            name: What to call it.  A name is one subagent and one directory
-                inside yours, so it is also the address you send to.
+            name: What to call it. A name is one subagent, so it is also the
+                address you send to.
             model: Which model it runs on, as `provider/model`.  Empty — the
                 default — is *your* model, read when the subagent first runs
                 rather than now, so a `model_switch` you make in between reaches
@@ -4328,9 +4335,8 @@ def build_server(
                 history.
 
         Returns:
-            `name` (made safe to be a directory), `model`, `role`, `fork`,
-            `created_at`, and `created`: whether this call was the one that made
-            it.
+            `name`, `model`, `role`, `fork`, and `created`: whether this call
+            was the one that made it.
         """
         who = request_client(ctx)
         if who is None or not who[0]:
@@ -4400,7 +4406,6 @@ def build_server(
             "model": model,
             "role": role or DEFAULT_ROLE,
             "fork": made_fork,
-            "created_at": record.get("created_at") or made_at,
             "created": created,
         }
 
@@ -4408,20 +4413,10 @@ def build_server(
     async def subagent_remove(ctx: Context, name: str) -> dict[str, Any]:
         """Unmake a subagent, and take everything it wrote with it.
 
-        The whole of one subagent: its conversation is forgotten (the loop, and
-        the list it would restore from), and its directory — turns, cabinet,
-        ledger and the record of what it was made with — is deleted.  A subagent
-        is a directory, so this is one operation rather than a list somebody has
-        to keep complete.
-
-        **Nothing outside `subagents/` can be removed by it, and that is the
-        layout rather than a check.**  The name is a name inside the container
-        (`subagent_path`), so the agent's own `cabinet/`, `media/` and `turns.db`
-        are not reachable from here at all — and inside it, what makes a directory
-        a subagent's is the record the directory carries (`subagent.yaml`).  A
-        directory there without the record is refused rather than emptied; a name
-        that is not there at all is not an error, because the caller wanted it
-        gone and it is gone.
+        Its conversation is forgotten and everything it wrote — turns, cabinet,
+        ledger — is deleted. Removing a subagent that is not there is not an
+        error: the caller wanted it gone, and it is gone. A name that exists but
+        is not one of your subagents is refused rather than deleted.
 
         Args:
             name: Which of your subagents.  The same name you made it with.

@@ -1075,9 +1075,9 @@ to every other member — never back to the sender — and arrive with a
 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker on the
 `peer_agent_group:<group>:<sender>` channel. Viewing the members is a separate
 read (`peer_agent_group_member_list`). **A group chat is casual**: no member owes
-an answer, and silence is not `pending` or `undelivered`; `sent` is only a
-publish count. Use the direct send tool when you need an answer. Each member
-keeps what it has learned in
+an answer, and silence is not `pending` or `undelivered`; `sent` confirms the
+send, not that anyone read it. Use the direct send tool when you need an
+answer. Each member keeps what it has learned in
 `agents/<agent>/groups.yaml`, so groups survive a restart. A member that is
 offline when a message is sent misses it; `peer_agent_group_list` is the local
 truth, not a live check. Only the owner can change the roster or disband the

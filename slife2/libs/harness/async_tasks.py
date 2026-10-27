@@ -427,27 +427,29 @@ def _not_found(task_id: str) -> str:
 def _answer(task: Task, task_id: str) -> dict[str, Any]:
     """One task, as the object both tools answer with.
 
-    Five facts, and the answer itself only when the conversation has not been
-    given it: the id, the status, the tool and call the task is about, whether
-    the hand-back landed, and — **only then** — the result.
+    Four facts, and the answer itself only when the conversation has not been
+    given it: the id, the status, the tool and call the task is about, and —
+    **only when there is one to hand over** — the result.  Whether the hand-back
+    landed is this process's bookkeeping, not a fact the model can act on: a
+    result that is present is one nobody has seen, and its absence is the whole
+    of "there is nothing to hand over".
 
     **A result in flight is not a result to hand over.**  `_runner` records the
     ending before it awaits `hand_back`, so there is a window in which the call
     is over and its delivery has no verdict yet — the work is not still running,
-    and `delivered` is false because the hand-back has not returned, which is
-    not the same as false because it failed.  Offering the text in that window
-    would hand the model the same answer twice (once here, once as the message
-    it is about to become), and popping the task there would throw the only copy
-    away if that delivery then failed.  So `result` appears only once `handle` is
-    done, and its *absence* is what "there is nothing to hand over" looks like —
-    whichever of the several ways that happens to be true.
+    and the hand-back has not returned, which is not the same as having failed.
+    Offering the text in that window would hand the model the same answer twice
+    (once here, once as the message it is about to become), and popping the task
+    there would throw the only copy away if that delivery then failed.  So
+    `result` appears only once `handle` is done, and its *absence* is what
+    "there is nothing to hand over" looks like — whichever of the several ways
+    that happens to be true.
     """
     answer: dict[str, Any] = {
         "task_id": task_id,
         "status": task.status,
         "tool": task.tool,
         "call_id": task.call_id,
-        "delivered": task.delivered,
     }
     if task.result and not task.delivered and task.handle.done():
         answer["result"] = task.result

@@ -78,7 +78,7 @@ import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -992,6 +992,15 @@ def build_server(
 
         This is the whole task, so anything you leave out is cleared. `enabled`
         false keeps it written down and never fires it.
+
+        Args:
+            name: The task's name — how it is listed, run and removed.
+            description: What to do when it comes due, and what "done" looks
+                like. It is the whole of what that run is given.
+            cron: Five fields — `minute hour day-of-month month day-of-week`.
+            timezone: An IANA name like `Asia/Shanghai`; empty follows this
+                machine's clock.
+            enabled: False keeps the task but never fires it.
         """
         agent = agent_of(ctx)
         name = name.strip()
@@ -1030,6 +1039,9 @@ def build_server(
         Deleting rather than switching off, and the difference is the history:
         `schedule_set(enabled=False)` keeps the ledger, and this takes it. Do it
         when the task is not a thing any more; switch it off when it is.
+
+        Args:
+            name: The task to forget, by name.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
@@ -1058,6 +1070,10 @@ def build_server(
         `limit` bounds this page (at most 200); left out it is 50. `offset` skips
         that many, which is how you page back.
 
+        Args:
+            limit: How many tasks this page may hold; 50 when left out.
+            offset: How many tasks to skip — that is how you page.
+
         Returns:
             `tasks` — the rows of this page — and `total`, so
             `offset + len(tasks) < total` says whether more remain.
@@ -1075,7 +1091,11 @@ def build_server(
 
     @mcp.tool(name=SCHEDULE_RUNS, meta=FOR_THE_MODEL)
     async def schedule_runs(
-        ctx: Context, name: str = "", status: str = "", limit: int = 0, offset: int = 0
+        ctx: Context,
+        name: str = "",
+        status: Literal["", "pending", "ran", "failed", "missed", "skipped"] = "",
+        limit: int = 0,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """What a scheduled task has actually done, newest first.
 
@@ -1088,6 +1108,12 @@ def build_server(
 
         This is the answer to "did it run", and it is the only place that answer
         exists: a run nobody closed stays here until somebody does.
+
+        Args:
+            name: Only this task's runs; empty lists every task's.
+            status: Only this state; empty lists every state.
+            limit: How many runs this page may hold; 20 when left out.
+            offset: How many runs to skip — that is how you page.
 
         Returns:
             `runs` — the rows of this page — and `total`, so
@@ -1133,6 +1159,11 @@ def build_server(
         The answer is the run's row, with the background task's id on it. A
         `pending` row means the work is in flight; `failed` means it could not be
         started, and the error says why.
+
+        Args:
+            name: The scheduled task, by name.
+            due_at: The run's due time, as the trigger carried it; empty starts
+                a new run due now.
         """
         agent = agent_of(ctx)
         store = store_for(agent)
@@ -1202,6 +1233,11 @@ def build_server(
         way to you however this call goes — so skipping it is refused, and the
         row you get back is the one that is still in flight. A run closes itself
         when the task doing it ends; `schedule_runs` says which run is which.
+
+        Args:
+            name: The scheduled task, by name.
+            due_at: The run's due time; empty closes the newest open run.
+            note: Why it is being skipped — this is what the ledger keeps.
         """
         agent = agent_of(ctx)
         store = store_for(agent)

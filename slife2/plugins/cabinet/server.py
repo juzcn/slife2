@@ -403,8 +403,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """Write a private note about a subject, replacing what it held.
 
         A note is a document: this is the whole of what the cabinet keeps under
-        that subject, and an older body goes. It lands as markdown in the
-        agent's cabinet directory too.
+        that subject, and an older body goes.
 
         Args:
             subject: What the note is about — its name, and reusing one replaces
@@ -413,8 +412,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags: Comma-separated words to file it under.
 
         Returns:
-            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`,
-            `summary` and `mirror`.
+            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`
+            and `summary`.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -429,7 +428,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     @mcp.tool(name="note_remove", meta=FOR_THE_MODEL)
     async def note_remove(ctx: Context, subject: str) -> dict[str, Any]:
-        """Delete a note — its markdown, its index entry and its vectors.
+        """Delete a note, and everything that made it findable.
 
         Args:
             subject: The note's subject.
@@ -450,8 +449,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             subject: The note's subject.
 
         Returns:
-            The note's `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `mirror`, and the whole of it under `text`.
+            The note's `kind`, `key`, `title`, `time`, `tags` and `summary`,
+            and the whole of it under `text`.
         """
         row = await missing_row(
             ctx, NOTE, subject, f"there is no note about {subject!r}."
@@ -476,10 +475,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset: How many notes to skip — that is how you page back.
 
         Returns:
-            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `mirror` and `excerpt` per note — and `total`, how many notes the
-            window holds, so `offset + len(entries) < total` says whether more
-            remain.
+            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
+            `excerpt` per note — and `total`, how many notes match the filters,
+            so `offset + len(entries) < total` says whether more remain.
         """
         return await page_of(
             ctx, NOTE, since=since, until=until, limit=limit, offset=offset
@@ -503,7 +501,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The day as it is stored — `kind`, `key`, `title`, `time` (the day
-            itself), `tags`, `summary` and `mirror`.
+            itself), `tags` and `summary`.
         """
         opened = await cabinet(ctx)
         day = date.strip() or _today()
@@ -531,8 +529,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             date: The day, `YYYY-MM-DD`.
 
         Returns:
-            The day's `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `mirror`, and the whole entry under `text`.
+            The day's `kind`, `key`, `title`, `time`, `tags` and `summary`, and
+            the whole entry under `text`.
         """
         row = await missing_row(
             ctx, DIARY, date, f"there is no diary entry for {date}."
@@ -557,9 +555,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             `entries` — `kind`, `key` (the day), `title`, `time`, `tags`,
-            `summary`, `mirror` and `excerpt` per day — and `total`, how many
-            days the window holds, so `offset + len(entries) < total` says
-            whether more remain.
+            `summary` and `excerpt` per day — and `total`, how many days match
+            the filters, so `offset + len(entries) < total` says whether more
+            remain.
         """
         return await page_of(
             ctx, DIARY, since=since, until=until, limit=limit, offset=offset
@@ -578,9 +576,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> dict[str, Any]:
         """Copy files from this machine into the cabinet.
 
-        It copies and never moves, so what you point at stays where it is. The
-        bytes are not indexed: a search matches the file's name, where it came
-        from and any `summary` you write.
+        It copies and never moves, so what you point at stays where it is. A
+        search does not read inside the file: it matches the file's name, where
+        it came from and any `summary` you write.
 
         Args:
             paths: Local paths to copy. Name the files in a directory rather
@@ -593,7 +591,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 and so on. Empty picks one from the extension.
 
         Returns:
-            `saved` — one row per file, as `file_read` describes it, so the
+            `saved` — one row per file, with the fields a listing shows, so the
             `key` is the path each file was stored under. A file already there
             under that name is stored beside it rather than over it, which is
             why the key is worth reading.
@@ -657,7 +655,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     @mcp.tool(name="file_remove", meta=FOR_THE_MODEL)
     async def file_remove(ctx: Context, path: str) -> dict[str, Any]:
-        """Delete a saved file — the cabinet's copy, its row and its vectors.
+        """Delete a saved file, and everything that made it findable.
 
         The file it was copied from stays where it is.
 
@@ -735,7 +733,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Returns:
             `entries` — `kind`, `key` (the path inside the cabinet), `title`,
             `time`, `tags`, `summary`, `size`, `mime`, `source` and `excerpt`
-            per file — and `total`, how many files the window holds, so
+            per file — and `total`, how many files match the filters, so
             `offset + len(entries) < total` says whether more remain.
         """
         return await page_of(
@@ -773,9 +771,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The title as it is stored — `kind`, `key`, `title`, `time`, `tags`,
-            `summary`, `mirror`, `period_start` and `period_end`.  `time` is
-            when the report was first written; adding a section does not
-            change it.
+            `summary`, `period_start` and `period_end`.  `time` is when the
+            report was first written; adding a section does not change it.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -799,8 +796,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The report's `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `mirror`, `period_start` and `period_end`, and every section under
-            `text`.  `time` is when the report was first written.
+            `period_start` and `period_end`, and every section under `text`.
+            `time` is when the report was first written.
         """
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
@@ -827,10 +824,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset: How many reports to skip — that is how you page back.
 
         Returns:
-            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `mirror` and `excerpt` per report — and `total`, how many reports
-            the window holds, so `offset + len(entries) < total` says whether
-            more remain.
+            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
+            `excerpt` per report — and `total`, how many reports match the
+            filters, so `offset + len(entries) < total` says whether more
+            remain.
         """
         return await page_of(
             ctx, REPORT, since=since, until=until, limit=limit, offset=offset
@@ -847,7 +844,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         pattern: str = "",
         context: int = 0,
     ) -> dict[str, Any]:
-        """Read a tool output the harness saved, by finding — not by scrolling.
+        """Read a tool output that was saved whole, by finding — not by scrolling.
 
         A result too large for the conversation is shortened for you and kept
         whole here; the marker standing in for it names the call. This is the way
@@ -857,16 +854,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         numbered, a matched line is marked `:` and the lines around it `-`, and
         the numbers are the ones the marker beside the result shows.
 
-        **Every answer is within the configured budget** (`tool_result.tokens`),
-        the same number the harness spends shortening a result — so reading an
-        output back can never hand over more than the shortening took away, and
-        this tool can never feed the thing that shortens results. Read as much
-        as you like, in as many windows as it takes.
-
         Args:
             call: The tool call id, from the marker in the conversation.
             offset: The first line to read; `1` is the first and `-1` the last.
-            limit: The most lines to show. `0` shows as many as the budget holds.
+            limit: The most lines to show. `0` shows as many as fit.
             pattern: Show the lines containing this text, matched literally and
                 ignoring case.
             context: With a pattern, how many lines either side of a match to
@@ -874,12 +865,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             `total`, how many lines the output has; `text`, the window, each line
-            prefixed with its own number; `where`, the file the whole output is
-            in; `next`, the `offset` of the window after this one — absent when
-            there is nothing further to read of what you asked for; and
-            `matched`, how many lines at or after `offset` hold `pattern`, which
-            is there only when you gave one, and is `0` with an empty window when
-            nothing matched.
+            prefixed with its own number; `next`, the `offset` of the window
+            after this one — absent when there is nothing further to read of what
+            you asked for; and `matched`, how many lines at or after `offset`
+            hold `pattern`, which is there only when you gave one, and is `0`
+            with an empty window when nothing matched.
         """
         opened = await cabinet(ctx)
         budget = config.tool_result.tokens
@@ -1115,14 +1105,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> dict[str, Any]:
         """Search the cabinet — every note, day, file and report at once.
 
-        The two legs add up rather than competing: give both for the strongest
-        answer, a sentence alone for meaning, or words alone — the words are
-        also read by meaning as a sentence made of them. Give neither to browse
-        what is there, newest first.
+        Words and meaning add up rather than competing: give both for the
+        strongest answer, a sentence alone for meaning, or words alone — the
+        words are also read by meaning as a sentence made of them. Give neither
+        to browse what is there, newest first.
 
-        **A hit need not contain the words.**  The meaning leg ranks the
-        nearest documents whether or not they carry them, and adding a sentence
-        only adds rows; `matched_in` says when the words were found, and
+        **A hit need not contain the words.**  Meaning ranks the nearest
+        documents whether or not they carry them, and adding a sentence only
+        adds hits; `matched_in` says when the words were found, and
         `similarity` says how close a meaning hit came. There is no exact-only
         mode, and an empty page means the filters left nothing to rank — not
         that nothing was close.
@@ -1136,9 +1126,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             sentences: What you are looking for, asked normally. One per
                 question you have.
             kind: `note`, `diary`, `file`, `report`, `dump` or `image` — the
-                last two are the harness's (a tool's output and a picture a
-                turn carried) — to look in one of them. Empty searches all of
-                them but the dumps, which are reached by the marker naming them
+                last two being a tool's saved output and a picture a turn
+                carried — to look in one of them. Empty searches all of them
+                but the dumps, which are reached by the marker naming them
                 rather than by a search.
             since: Only documents from this time on.
             until: Only documents up to this time.
@@ -1146,10 +1136,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             `results` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `excerpt` per hit, with `similarity` where the meaning leg ranked it
-            and `matched_in` (`line`, or `rest` for elsewhere in the document)
-            where the words leg found it — and `browsed`, true when neither leg
-            was given and the page is simply newest first.
+            `excerpt` per hit, with `similarity` where meaning ranked it and
+            `matched_in` (`line`, or `rest` for elsewhere in the document)
+            where your words were found — and `browsed`, true when neither was
+            given and the page is simply newest first.
         """
         opened = await cabinet(ctx)
         try:
@@ -1176,10 +1166,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> dict[str, Any]:
         """Describe a document already in the cabinet so it can be found.
 
-        Tags work for any kind; a summary is what a file's meaning is built
-        from, so writing one for a file re-embeds it — a file has no text of its
-        own, and a search reaches it by its name and paths until somebody
-        describes it.
+        Tags work for any kind. A file has no text of its own, so until somebody
+        describes it a search reaches it only by its name and paths; a summary
+        is what a search by meaning reads instead.
 
         Args:
             kind: `note`, `diary`, `file`, `report`, `dump` or `image`.
@@ -1189,8 +1178,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags: Comma-separated words to file it under.
 
         Returns:
-            The document's own fields, and `reembedded` — true when the file's
-            vector was built again, so a search by meaning finds the new words.
+            The document's own fields.
         """
         opened = await cabinet(ctx)
         wanted = kind.strip()
@@ -1206,10 +1194,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         if row is None:
             raise ToolError(f"there is no {wanted} with the key {key!r}.")
         logger.info("cabinet_summarize kind=%s key=%s", kind, key)
-        return {
-            **facts(row),
-            "reembedded": wanted in (FILE, IMAGE) and bool(summary),
-        }
+        return facts(row)
 
     return mcp
 
@@ -1240,10 +1225,10 @@ def _window_of(
     own shortening, which is one system at both ends of a loop.  So the window
     is filled line by line against the budget — measured by the one estimator,
     `slife2.libs.turn.tokens` — and then the *payload* is measured and trimmed
-    from its end until it fits, because `total`, `where` and the count of what
-    matched are part of what a model is handed.  What did not fit is named
-    rather than lost: how many lines there are, how many matched, and the offset
-    the next window starts at.
+    from its end until it fits, because `total` and the count of what matched
+    are part of what a model is handed.  What did not fit is named rather than
+    lost: how many lines there are, how many matched, and the offset the next
+    window starts at.
 
     **Nothing the caller wrote is quoted back**, which is why there is no
     clipping left to do here: the old reader put `pattern` into a sentence about
@@ -1263,8 +1248,7 @@ def _window_of(
     their engines cannot backtrack, which Python's can.  A literal substring,
     ignoring case, is also what the common case wants: a symbol, a path, a
     spelling remembered approximately (SDD §14.2's own three examples for the
-    grep leg).  A model that needs a real regex has the file — `where` names
-    it, and the operator's own tools read it.
+    grep leg).
 
     **The numbers are the ones the harness's shortening shows a model**, on
     purpose: a line named in a discriminator's reply and a line read back here
@@ -1304,7 +1288,7 @@ def _window_of(
     # claim — so the count is what says so, and it is what sends a model to
     # fewer or different words rather than to a file problem it does not have.
     if wanted and not matched:
-        return {"total": total, "text": "", "where": _where(where), "matched": 0}
+        return {"total": total, "text": "", "matched": 0}
     runs = _runs(hits, max(context, 0), total) if wanted else [(start, total)]
 
     kept: list[tuple[int, str]] = []
@@ -1329,7 +1313,6 @@ def _window_of(
             matched=matched,
             hits=set(hits),
             pattern=pattern,
-            where=where,
         )
         if estimate_text_tokens(_wire(window)) <= budget:
             return window
@@ -1391,7 +1374,6 @@ def _render_window(
     matched: int,
     hits: set[int],
     pattern: str,
-    where: str,
 ) -> dict[str, Any]:
     """A window as the payload a model reads: numbered lines, and where they sit.
 
@@ -1420,7 +1402,6 @@ def _render_window(
     window: dict[str, Any] = {
         "total": total,
         "text": text,
-        "where": _where(where),
     }
     # What is still to come, of what was asked for: with a pattern that is the
     # next match rather than the next line, so a reader is not sent to a window

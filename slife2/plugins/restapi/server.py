@@ -264,9 +264,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         Returns:
             The payload `mcp_set` answers with over this family's words:
             `name`, `enabled`, `state` (`ready`, `connecting`, `failed`, `idle`
-            or `off`), `operations` when it answered, `large` when that count is
-            past a page's worth, `error` when it has not — and `unresolved`, the
-            credential reference that resolves to nothing yet, when there is one.
+            or `off`), `operations` when it answered, `error` when it has not —
+            and `unresolved`, the credential reference that resolves to nothing
+            yet, when there is one.
         """
         settings = _prepare(
             load(),
@@ -286,15 +286,15 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     async def rest_api_remove(name: str) -> dict[str, Any]:
         """Stop a REST API and delete its entry from `rest-api:`.
 
-        Its operations leave the catalogue at the next search. A name that is
+        Its operations stop being offered at the next search. A name that is
         not in `rest-api:` is refused, so a success means the entry is gone.
 
         Args:
             name: The API to remove — the key it is written under.
 
         Returns:
-            `removed`, whether the entry was in the file, and `stopped`, whether
-            this process was holding a link to it.
+            `name` and `removed` — true, because a name in neither the file nor
+            a live link is refused rather than answered.
         """
         return await remove_entry(homes.current(), name, words=WORDS, logger=logger)
 
@@ -303,7 +303,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         """Switch a REST API on or off, keeping its entry in `rest-api:`.
 
         A spec generates an operation per endpoint, so one served API can
-        outweigh every other tool in the catalogue; off keeps it written down.
+        outweigh every other tool in search; off keeps it written down.
 
         Args:
             name: The API — the key it is written under.

@@ -953,7 +953,7 @@ agent 是两个 peer，同一个名字的第二个活实例会在加入前被拒
 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker 到达，频道为
 `peer_agent_group:<group>:<sender>`。查看成员是单独的操作
 （`peer_agent_group_member_list`）。**群聊是随意的**：没有成员必须回复，沉默不是
-`pending` 或 `undelivered`；`sent` 只是发布数量。需要回答时用一对一的 send 工具。
+`pending` 或 `undelivered`；`sent` 只表示已发出，不代表有人读过。需要回答时用一对一的 send 工具。
 每个成员把学到的内容保存在
 `agents/<agent>/groups.yaml`，因此群在重启后仍然存在。群消息发送时不在线的成员
 会错过它；`peer_agent_group_list` 是本地事实，不是实时检查。只有群主能改名单或

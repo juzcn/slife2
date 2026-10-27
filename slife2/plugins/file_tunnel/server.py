@@ -432,10 +432,10 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         picture, a chat API that only accepts links.
 
         The file is not moved or copied: it is served from where it is, for as
-        long as this process is running. It stops being served the moment the
-        file changes, and `unexpose_local_image` stops it sooner — call that
-        when the file is no longer wanted out there, and expect the URL to
-        outlive the conversation otherwise.
+        long as slife2 is running. It stops being served the moment the file
+        changes, and `unexpose_local_image` stops it sooner — call that when the
+        file is no longer wanted out there, and expect the URL to outlive the
+        conversation otherwise.
 
         Args:
             path: The file on this machine, as an absolute path or one
@@ -495,7 +495,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
 
     @mcp.tool(name="unexpose_local_image", meta=FOR_THE_MODEL)
     async def unexpose_local_image(ctx: Context, token: str) -> dict[str, Any]:
-        """Stop serving a file that `expose_local_image` published. Its URL
+        """Stop serving a file that `expose_local_image` made public. Its URL
         answers 403 from then on, and the file itself is untouched.
 
         Args:

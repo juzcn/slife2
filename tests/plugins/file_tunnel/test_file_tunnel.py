@@ -236,7 +236,7 @@ async def test_the_description_of_an_exposure_says_what_really_ends_it() -> None
 
     description = listed["expose_local_image"].description or ""
     assert "when the conversation ends" not in description
-    assert "this process is running" in description
+    assert "slife2 is running" in description
     assert "unexpose_local_image" in description
 
 

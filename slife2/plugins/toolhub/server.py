@@ -1776,7 +1776,8 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
 TOOL_SEARCH_DESCRIPTION = (
     "Find a tool by what it does, across the whole catalogue — including MCP, "
     "REST API, CLI and SKILL tools. By default it includes tools already in "
-    "your list; `unloaded_only` narrows it to the rest."
+    "your list; `unloaded_only` narrows it to the rest. The answer's "
+    "`confidence` says whether the page is `sure`, `weak` or `none`."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {

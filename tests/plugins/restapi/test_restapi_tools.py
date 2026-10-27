@@ -429,7 +429,7 @@ async def test_removing_and_switching_behave_as_they_do_next_door(
     assert off_entry["enabled"] is False
     assert [row["state"] for row in listed["apis"]] == ["off"]
     assert on["state"] == "ready" and on["operations"] == 2
-    assert removed == {"name": "registry", "removed": True, "stopped": True}
+    assert removed == {"name": "registry", "removed": True}
     assert gone == {"apis": [], "total": 0, "limit": 50, "offset": 0}, gone
 
 

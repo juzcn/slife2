@@ -240,8 +240,10 @@ async def test_a_file_that_does_not_load_stays_visible_and_is_not_callable(
         "",
     )
     assert listed["jobs"][0]["status"] == "error"
+    assert "file" not in listed["jobs"][0], "a path is not the model's to act on"
     assert read["code"] == "def broken(:\n"
-    assert read["file"].endswith("broken.py") and read["error"]
+    assert read["error"], "the broken line's reason is the answer"
+    assert "file" not in read
     assert refused.data["ok"] is False
     assert "not loaded" in refused.data["text"]
 

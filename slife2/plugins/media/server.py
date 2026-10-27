@@ -346,9 +346,8 @@ def build_server(
                 default for transcription.
             offset: The character to start at; `0` is the beginning.
             limit: The most characters to answer with. `0` answers as much as
-                fits the tool-result budget, which is also the ceiling on any
-                `limit` — a page is never longer than the budget whatever is
-                asked for.
+                one page may hold, which is also the ceiling on any `limit` —
+                a page is never longer than that whatever is asked for.
 
         Returns:
             `text` — the transcript from `offset` — `total`, how many characters

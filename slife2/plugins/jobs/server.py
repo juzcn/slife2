@@ -357,8 +357,8 @@ def build_server(
 
         Returns:
             `jobs` — one row per job: `name`, `tool`, `description`, `status`
-            (`enabled` or `error`), `file`, and `error` when it did not load —
-            plus `total`, `limit` and `offset`.
+            (`enabled` or `error`), and `error` when it did not load — plus
+            `total`, `limit` and `offset`.
         """
         rows: list[dict[str, Any]] = []
         for job in _home().values():
@@ -367,7 +367,6 @@ def build_server(
                 "tool": _exposed(job.name),
                 "description": job.description if job.ok else "",
                 "status": "error" if job.error else "enabled",
-                "file": job.path.name,
             }
             if job.error:
                 row["error"] = job.error
@@ -378,16 +377,16 @@ def build_server(
     async def job_read(name: str) -> dict[str, Any]:
         """Read a job's code: the function the tool runs.
 
-        The answer is the file itself and the path it lives at — the thing to
-        copy from when changing it with `job_set`. A job that did not load says
-        why, so the broken line is in front of you when you fix it.
+        The answer is the code itself — the thing to copy from when changing it
+        with `job_set`. A job that did not load says why, so the broken line is
+        in front of you when you fix it.
 
         Args:
             name: The job's name, bare or as its `tool` row.
 
         Returns:
-            `name`, `file`, `code` — the source as written — and `error`, which
-            is empty for a job that loaded.
+            `name`, `code` — the source as written — and `error`, which is
+            empty for a job that loaded.
         """
         job = _refused(name)
         try:
@@ -399,7 +398,6 @@ def build_server(
             ) from exc
         return {
             "name": job.name,
-            "file": str(job.path),
             "code": code,
             "error": job.error,
         }
@@ -485,8 +483,8 @@ def build_server(
         """Uninstall a job: delete its file and remove its tool.
 
         A name with no file is refused — nothing was removed, so the call
-        failed. The tool's row goes with the file; the model's next search no
-        longer offers it.
+        failed. The tool's row goes with it, so the next search no longer
+        offers it.
 
         Args:
             name: The job's name, bare or as its `tool` row.

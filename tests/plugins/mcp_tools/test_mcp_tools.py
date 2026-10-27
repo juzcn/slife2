@@ -306,11 +306,11 @@ async def test_a_name_the_hub_is_already_using_is_refused(isolated_runtime) -> N
 
 @pytest.mark.asyncio
 async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) -> None:
-    """**`removed` and `stopped` are the two facts the removal carries.**
+    """**The answer is one fact: the name is gone.**
 
-    The entry leaves the file and the link stops, and a caller can tell which of
-    the two happened — the one thing a single sentence could not say when only
-    one of them had (see the entry-not-in-the-file case below).
+    The entry leaves the file and the link stops; which of the two roads it took
+    is this process's bookkeeping, and both leave the caller with the same thing
+    to do — nothing.  A name in neither is refused below.
     """
     async with Client(family(isolated_runtime)) as client:
         await ask(client, "mcp_set", name="added", command="in-memory")
@@ -319,7 +319,7 @@ async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) 
         with pytest.raises(ToolError) as gone:
             await client.call_tool("mcp_list_tools", {"name": "added"})
 
-    assert answer == {"name": "added", "removed": True, "stopped": True}
+    assert answer == {"name": "added", "removed": True}
     assert "added" not in section(isolated_runtime)
     assert "added" not in {row["name"] for row in listed["servers"]}
     assert "not a server this process holds" in str(gone.value)

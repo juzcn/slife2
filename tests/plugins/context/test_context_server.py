@@ -129,16 +129,10 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
     assert record["token_count"] == estimate_turn_tokens(messages)
     assert "context_tokens" not in record
     assert "who_helped" not in record
+    assert "usage" not in record, "a bill is the operator's, not the model's"
     assert record["created_at"] and record["completed_at"]
-    # The bill's split is a fact about the turn that ran, so a detached read
-    # keeps it — unlike the context size, which belongs to a context this read
-    # does not return.
-    assert record["usage"] == {
-        "prompt_tokens": 200,
-        "completion_tokens": 45,
-        "cache_read": 150,
-        "cache_creation": 20,
-    }
+    # The bill's split is still the stored row's, for the status bar — the
+    # model's read is the turn itself, not what it cost.
     stored_row = TurnStore(agent_dir("jack") / "turns.db").turn(1)
     assert (
         stored_row.who_helped,

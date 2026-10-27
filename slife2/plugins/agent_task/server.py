@@ -1004,6 +1004,11 @@ def build_server(
 
         `name` is the handle — how the task is asked about and stopped. This is
         not a way to run a program in the background.
+
+        Args:
+            name: What to call the task — how it is asked about and stopped.
+            description: The task itself: what to do, and what "done" looks
+                like. It is the whole of what the task is given.
         """
         agent = agent_of(ctx)
         name = name.strip()
@@ -1065,8 +1070,10 @@ def build_server(
 
         Its state — `running`, `finished`, `failed` or `cancelled` — and never
         the result, which arrives by itself and cannot be fetched. Do not poll:
-        if it is `running`, end your turn. `unknown` is a name this process no
-        longer holds.
+        if it is `running`, end your turn. `unknown` is a name no task here has.
+
+        Args:
+            name: The task's name, as `agent_task_start` was given it.
         """
         agent = agent_of(ctx)
         task = find(agent, name.strip())
@@ -1118,6 +1125,9 @@ def build_server(
         what stopped it, `finished` or `failed` when it was already over — a
         finished task still delivers, and a cancelled one never does. Nothing is
         rolled back: a tool call that was running is wherever it got to.
+
+        Args:
+            name: The task's name, as `agent_task_start` was given it.
         """
         agent = agent_of(ctx)
         task = find(agent, name.strip())

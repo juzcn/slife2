@@ -878,9 +878,7 @@ async def test_a_reply_carries_the_peer_and_the_conversation(
             context_token="ctx-1",
         )
 
-    assert answer["sent"] is True
-    assert answer["peer_wechat_id"] == "peer-1"
-    assert answer["context_token"] == "ctx-1"
+    assert answer == {"sent": True}, "the bridge is the proof, not an echo"
     sent = made.bridge.sent[0]["msg"]
     assert (sent["to_user_id"], sent["context_token"]) == ("peer-1", "ctx-1")
     assert sent["item_list"][0]["text_item"]["text"] == "在的"
@@ -1056,7 +1054,7 @@ async def test_logging_out_forgets_the_login_and_the_scan(
 
     assert answer["logged_out"] is True
     assert answer["login_removed"] is True
-    assert answer["login_file"] == str(session_path("jack"))
+    assert "login_file" not in answer, "a path with nothing to act on is noise"
     assert session.qr_state == ""
     assert forgotten == {}, "the file goes with the login"
     assert not session_path("jack").exists()

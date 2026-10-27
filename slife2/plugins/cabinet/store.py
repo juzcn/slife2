@@ -1905,6 +1905,11 @@ def facts(row: Mapping[str, Any]) -> dict[str, Any]:
     it came from was sorted on.  A row of a kind this build does not know, or
     one whose axis column is empty, answers with whichever moment it does carry
     rather than with no time at all.
+
+    **`mirror` is not here, and it is the row's rather than the model's.**  The
+    path is how a person finds the Markdown file on disk; a model reads the
+    document through these tools and can do nothing with the path, so carrying
+    it would spend a field of every answer on a fact its work never uses.
     """
     kind = str(row.get("kind") or "")
     spec = SPECS.get(kind)
@@ -1916,7 +1921,6 @@ def facts(row: Mapping[str, Any]) -> dict[str, Any]:
         "time": ordered or str(row.get("updated_at") or row.get("created_at") or ""),
         "tags": str(row.get("tags") or ""),
         "summary": str(row.get("summary") or ""),
-        "mirror": str(row.get("mirror") or ""),
     }
     for column in _EXTRA_COLUMNS.get(kind, ()):
         found[column] = (

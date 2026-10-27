@@ -130,26 +130,26 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
 
     async with Client(cabinet()) as client:
         record.write_text("fork: false\n", encoding="utf-8")
-        own = await payload(
+        await payload(
             client,
             "note_edit",
             subagent="researcher",
             subject="own",
             content="the subagent's note",
         )
-        own_mirror = Path(own["mirror"])
+        own_mirror = Path("notes") / f"{cabinet_store.mirror_stem('own')}.md"
         assert (researcher / "cabinet" / own_mirror).is_file()
         assert not (agent_dir("jack") / "cabinet" / own_mirror).exists()
 
         record.write_text("fork: true\n", encoding="utf-8")
-        shared = await payload(
+        await payload(
             client,
             "note_edit",
             subagent="researcher",
             subject="shared",
             content="the maker's note",
         )
-        shared_mirror = Path(shared["mirror"])
+        shared_mirror = Path("notes") / f"{cabinet_store.mirror_stem('shared')}.md"
         assert (agent_dir("jack") / "cabinet" / shared_mirror).is_file()
         assert not (researcher / "cabinet" / shared_mirror).exists()
 
@@ -240,7 +240,7 @@ async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
         "",
     ]
     assert wrote["time"], "the write answers the row it stored, stamp and all"
-    assert wrote["mirror"] == f"notes/{cabinet_store.mirror_stem('Python')}.md"
+    assert "mirror" not in wrote, "the file's path is the cabinet's, not the model's"
     # The path is the stem's to decide (`mirror_stem`), and that rule has a test
     # of its own: what this one is about is that the file was rewritten, not
     # what it is called.
@@ -485,7 +485,6 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
         "time",
         "tags",
         "summary",
-        "mirror",
         "excerpt",
     }, "the row itself, and not its body"
     assert first["entries"][0]["excerpt"] == "body 2"
@@ -999,8 +998,8 @@ async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
     assert before["results"][0]["similarity"] == 0.0, (
         "nothing describes it yet but its name"
     )
-    assert written["reembedded"] is True, "a file's vector is of its summary too"
     assert written["summary"] == f"about {OTHER}"
+    assert "reembedded" not in written, "the work it did is not the model's to track"
     assert after["results"][0]["key"] == "documents/spec.txt"
     assert after["results"][0]["similarity"] == 1.0, "and now it is what it is about"
 

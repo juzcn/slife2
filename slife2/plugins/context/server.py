@@ -460,7 +460,7 @@ def build_server(
         Returns:
             `entries` — `turn_id`, `created_at`, `user_message`,
             `assistant_message` and `token_count` (the turn's own estimated size)
-            per turn — and `total`, how many turns the window holds, so
+            per turn — and `total`, how many turns match the filters, so
             `offset + len(entries) < total` says whether more remain.
         """
         # `store_for` and not `store_of`: reading history needs the turn table
@@ -489,10 +489,6 @@ def build_server(
         assistant message, the tool calls and their answers. Your own history,
         like `turn_list` — an id resolves inside it and nowhere else.
         `token_count` is how large this turn is, estimated from its messages.
-        `usage` is what the turn actually spent when it ran — `prompt_tokens`,
-        `completion_tokens`, `cache_read`, `cache_creation` — or null for a
-        turn stored before that was measured. It is a bill from the past, not
-        the size of the conversation you are reading.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.
@@ -517,6 +513,11 @@ def build_server(
         # the conversation belongs to — so a read of that conversation gains
         # nothing from it.
         wire.pop("who_helped", None)
+        # **`usage` is a bill, not a fact about the turn.**  It sums what the
+        # model calls cost when the turn ran, which is the operator's question;
+        # a reader choosing what to do with the turn has `token_count` for its
+        # size and nothing to do with the price.
+        wire.pop("usage", None)
         return wire
 
     @mcp.tool(meta=FOR_THE_MODEL)
@@ -530,19 +531,19 @@ def build_server(
     ) -> dict[str, Any]:
         """Search your own history by what a turn was about, or by what it did.
 
-        Two legs decide the answer: the words and exact strings a turn is found
-        by — what was asked and answered, and the tool calls and their results —
-        and what it was about. A path, a command, an error string or a tool name
-        from the record is therefore as searchable as the subject the turn
-        discussed. A turn both legs find ranks first. Each hit is the one line
-        `turn_list` gives, plus `similarity` — the meaning score when the
-        meaning leg measured the turn, `null` when only its words matched.
+        Words and meaning decide the answer together: the words and exact
+        strings a turn is found by — what was asked and answered, and the tool
+        calls and their results — and what it was about. A path, a command, an
+        error string or a tool name from the record is therefore as searchable
+        as the subject the turn discussed. A turn both find ranks first. Each hit
+        is the one line `turn_list` gives, plus `similarity` — the meaning score
+        when meaning measured the turn, `null` when only its words matched.
         Read one whole with `turn_read`.
 
-        **A hit need not contain the query words.**  The meaning leg ranks the
-        nearest turns whether or not they carry them, and a low `similarity`
-        says the words were not found; there is no exact-only mode, so a
-        nonsense query can come back with the history's closest turns.
+        **A hit need not contain the query words.**  Meaning ranks the nearest
+        turns whether or not they carry them, and a low `similarity` says the
+        words were not found; there is no exact-only mode, so a nonsense query
+        can come back with the history's closest turns.
 
         Args:
             query: Words to look for — names, paths, an exact string. They rank
@@ -606,8 +607,8 @@ def build_server(
         """Write a summary and tags for a turn, so a keyword search can find it.
 
         A summary is one or two sentences about what the turn was about; tags
-        are comma-separated words. Either or both. They join the text the words
-        leg of `turn_search` reads; the meaning leg does not use them.
+        are comma-separated words. Either or both. They join what a search by
+        words reads, so the turn can be found by words it never said.
 
         Omit `turn_id` to annotate the turn being run: the annotation is
         captured now and written when this turn is saved. With a `turn_id`, an

@@ -3404,12 +3404,15 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
     assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
     record = subagent_file(DEFAULT_AGENT, "researcher")
     assert record.is_file(), "the file is what makes the directory a subagent's"
-    assert YAML(typ="safe").load(record.read_text(encoding="utf-8")) == {
+    stored = YAML(typ="safe").load(record.read_text(encoding="utf-8"))
+    # The answer names what the model acts on; when it was made is the record's
+    # own, the part the model never reads.
+    assert stored.pop("created_at")
+    assert stored == {
         "name": "researcher",
         "model": "deepseek/deepseek-flash",
         "role": "code reviewer",
         "fork": True,
-        "created_at": made.data["created_at"],
     }
 
 
@@ -3430,8 +3433,14 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
     )
 
     first = await set_subagent(server, "researcher", model="one/one", fork=True)
+    before = YAML(typ="safe").load(
+        subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
+    )
     again = await set_subagent(
         server, "researcher", model="two/two", role="code reviewer", fork=False
+    )
+    after = YAML(typ="safe").load(
+        subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
     )
 
     assert first.data["created"] is True
@@ -3439,7 +3448,7 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
     assert again.data["model"] == "two/two"
     assert again.data["role"] == "code reviewer"
     assert again.data["fork"] is True, "made as a fork, and that is what it is"
-    assert again.data["created_at"] == first.data["created_at"]
+    assert after["created_at"] == before["created_at"], "when it was made is kept"
     assert len(subagent_dirs(DEFAULT_AGENT)) == 1
 
 

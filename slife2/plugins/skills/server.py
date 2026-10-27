@@ -243,9 +243,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         Read the one for a job before starting it. The answer is the skill's
         whole `SKILL.md`, preceded by the directory its paths are relative to.
         It is the document itself rather than JSON, and it is not shortened
-        here: a playbook cut at the result budget would stop in the middle of a
-        step. One too large for a conversation is the harness's oversized
-        result, whose selection is chosen from the document's own lines.
+        here — a playbook cut in the middle would stop in the middle of a step.
 
         Args:
             name: The skill's name, e.g. `browser-harness`.
@@ -301,7 +299,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         to get wrong.
 
         Args:
-            name: The directory it will live in — what `skill_use` takes.
+            name: The skill's name — what `skill_use` takes.
             description: One line saying what job the skill is for. This is
                 what a search finds it by and what `skill_list` shows, so name
                 the task, not the technology.
@@ -427,7 +425,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         clear it. A switch already on the entry is kept either way.
 
         Args:
-            name: The directory it lives in — what `skill_use` takes.
+            name: The skill's name — what `skill_use` takes.
             files: The files to write, each `{"path": "SKILL.md", "content":
                 "..."}`. Paths are relative to the skill's own directory, and
                 one that leaves it is refused.
@@ -538,8 +536,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         `skill_set` and `skill_set_enabled`.
 
         Args:
-            name: The skill to change — the name `skill_list` shows, or its
-                directory's.
+            name: The skill to change — the name `skill_list` shows.
             files: The files to write, each `{"path": "SKILL.md", "content":
                 "..."}`. Paths are relative to the skill's own directory, and
                 one that leaves it is refused. `SKILL.md` is optional.
@@ -561,14 +558,11 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
     @mcp.tool(name="skill_remove", meta=FOR_THE_MODEL)
     async def skill_remove(name: str) -> dict[str, Any]:
-        """Uninstall a skill: delete its directory and its `skills:` entry.
+        """Uninstall a skill: delete its files and its `skills:` entry.
 
-        The entry goes with the folder: it is *this* skill's `env` and switch,
-        and leaving it behind is a section that describes a playbook nothing can
-        read. The key is the one `skill_use` was reading — an entry filed under
-        the playbook's own name rather than its directory's is removed under
-        that name. A name with no folder is refused: nothing was deleted, so the
-        call failed.
+        Its `env` and switch go with it, so nothing is left behind that
+        describes a playbook nobody can read. A name with no skill is refused:
+        nothing was deleted, so the call failed.
 
         Args:
             name: The skill to remove.
@@ -608,7 +602,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         """Switch a skill on or off, keeping it installed.
 
         Off keeps the files, stops it being findable, and `skill_use` refuses
-        it. The switch lives in the config.
+        it.
 
         Args:
             name: The skill.

@@ -223,9 +223,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         Returns:
             `name` and `enabled`; `state`, one of `ready`, `connecting`,
             `failed`, `idle` or `off`; `tools`, how many it offers, when it
-            answered; `large`, true when that count is past a page's worth and
-            the next search has a row per tool to write and embed; and `error`,
-            what it said, when it has not answered.
+            answered; and `error`, what it said, when it has not answered.
         """
         settings = _prepare(
             load(),
@@ -247,7 +245,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     async def mcp_remove(name: str) -> dict[str, Any]:
         """Stop an MCP server and delete its entry from `mcp:`.
 
-        Its tools leave the catalogue at the next search. A package the command
+        Its tools stop being offered at the next search. A package the command
         names stays on the machine. A name that is not in `mcp:` is refused, so
         a success means the entry is gone.
 
@@ -255,8 +253,8 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             name: The server to remove — the key it is written under.
 
         Returns:
-            `removed`, whether the entry was in the file, and `stopped`, whether
-            this process was holding a link to it.
+            `name` and `removed` — true, because a name in neither the file nor
+            a live link is refused rather than answered.
         """
         return await remove_entry(homes.current(), name, words=WORDS, logger=logger)
 

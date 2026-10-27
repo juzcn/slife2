@@ -2097,8 +2097,9 @@ async def test_a_machine_with_no_section_is_told_so_rather_than_dialled() -> Non
 
 @pytest.mark.asyncio
 async def test_an_invented_message_type_is_refused() -> None:
+    """The schema says which three words are allowed, so the refusal names them."""
     async with Client(build(on_the_mesh=True)) as client:
-        with pytest.raises(ToolError, match="must be 'message'"):
+        with pytest.raises(ToolError, match="Input should be 'message'"):
             await client.call_tool(
                 PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "hi", "message_type": "invented"},
@@ -2170,9 +2171,12 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
         answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
     data = answer.data
     assert data["agent_name"] == AGENT
-    assert data["broker"] == "localhost:1883"
     assert data["status"] == "offline"
     assert "not connected to the broker" in data["error"]
+    # The address it could not reach is in that sentence; the roster itself is
+    # the names and their states, and a broker address is not something the
+    # model can act on.
+    assert "broker" not in data
     # Its own card is always first, from the cache and never by dialling.
     assert data["agents"] == [{"agent_name": AGENT, "status": "offline"}]
 
@@ -3248,11 +3252,9 @@ async def test_the_local_roster_takes_its_own_place_and_lists_the_members(
         {"agent_name": AGENT, "status": "online"},
         {"agent_name": "tester", "status": "offline"},
     ]
-    # **The mesh, which on this network is whose it is.**  The section says
-    # nothing of the sort — the code makes the unit the agent's name and the org
-    # this network's word (`Net.namespace`) — so the answer names the mesh
-    # *and* which network it is on, where the section's pair named neither.
-    assert (data["org"], data["unit"]) == ("subagent", AGENT)
+    # The mesh address and namespace are the transport's; the roster is the
+    # names and their states, which is what a model addresses and acts on.
+    assert "broker" not in data and "org" not in data and "unit" not in data
 
 
 @pytest.mark.asyncio
@@ -4116,7 +4118,9 @@ async def test_group_tools_on_the_peer_network(
 
         assert made.data["owner"] == AGENT
         assert made.data["members"] == [AGENT, PEER, "bob"]
-        assert made.data["sent"] == 2
+        assert "sent" not in made.data, (
+            "a publish count is the transport's, not the model's"
+        )
         assert published[0][0] == sorted([PEER, "bob"])
         assert published[0][1]["kind"] == group_store.KIND_SET
         assert published[0][1]["group"] == GROUP
@@ -4135,7 +4139,7 @@ async def test_group_tools_on_the_peer_network(
         assert members_read.data["members"] == [AGENT, PEER, "bob"]
         assert members_read.data["role"] == "owner"
         assert members_read.data["error"] == ""
-        assert spoke.data["sent"] == 2
+        assert spoke.data["sent"] is True
         assert published[1][1]["kind"] == group_store.GROUP_MESSAGE
         assert published[1][1]["text"] == "@jill hello"
 

@@ -306,8 +306,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     async def cli_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the commands recorded under `cli:`, with their switch.
 
-        Each is a command recorded as installed on this machine, and a row in
-        the tool catalogue, so a search finds one by what it does.
+        Each is a command recorded as installed on this machine, and a search
+        finds one by what it does.
 
         Args:
             limit: How many entries this page may hold. Omit for the cap.
@@ -345,7 +345,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             description: What it does, in the words a search should find it by.
             install: How to get it, for somebody who does not have it.
             source: Where the entry came from — `url`, `type`, `version`.
-            enabled: False records it and keeps it out of the catalogue.
+            enabled: False records it and keeps it out of search.
 
         Returns:
             `name`, `enabled` and `state` (`on`, or `off` for a switch written
@@ -404,8 +404,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
         Args:
             name: The key it is recorded under.
-            enabled: True records it as usable; False keeps it out of the
-                catalogue, the same switch as on a server.
+            enabled: True records it as usable; False keeps it out of search,
+                the same switch as on a server.
 
         Returns:
             `name`, `enabled`, and `state` — `on` or `off` — which is the same

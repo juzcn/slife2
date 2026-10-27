@@ -1559,7 +1559,7 @@ class Wechat:
         logger.debug(
             "wechat %s: sent %d characters to %s", session.agent, len(text), peer
         )
-        return {"sent": True, "peer_wechat_id": peer, "context_token": token}
+        return {"sent": True}
 
     async def logout(self, session: Session) -> dict[str, Any]:
         """`wechat_logout`: stop watching, forget the login, forget its QR.
@@ -1570,9 +1570,8 @@ class Wechat:
         still there, and the next start adopted the same account the logout was
         asked to end.  The teardown still happens (the loop stops, the client is
         replaced, the link is announced down), and what changes is the answer:
-        `login_removed` is the file's own verdict and `login_file` names it, so
-        a model can say the one thing that is true and a person can remove the
-        file by hand.
+        `login_removed` is the file's own verdict and, when it is false,
+        `login_file` names the file a person can remove by hand.
         """
         self._cancel(session.poll)
         session.poll = None
@@ -1604,15 +1603,17 @@ class Wechat:
         # and a logout somebody asked for would be silent (`_announce`).
         await self._announce(session)
         logger.info("wechat %s: logged out", session.agent)
-        # **The path is answered either way.**  It is what a person removes by
-        # hand when the unlink failed, and it is also where a login would be
-        # written next time — a fact about the session rather than about this
-        # call's outcome, which is what `login_removed` is for.
-        return {
+        # **The path is answered only when the file is still there.**  It is
+        # what a person removes by hand after an unlink that failed, and a path
+        # on a logout that worked is a technical fact with nothing to do with
+        # the model's work; `login_removed` already says the file is gone.
+        answer: dict[str, Any] = {
             "logged_out": True,
             "login_removed": forgotten,
-            "login_file": str(session_path(session.agent)),
         }
+        if not forgotten:
+            answer["login_file"] = str(session_path(session.agent))
+        return answer
 
 
 def build_server(
@@ -1713,8 +1714,7 @@ def build_server(
                 starts a new thread, which a first message wants.
 
         Returns:
-            `sent` — true, because a send that did not land raises — with the
-            `peer_wechat_id` and `context_token` it went to.
+            `sent` — true, because a send that did not land raises.
         """
         agent = plugin.who(ctx)
         if not agent:
@@ -1732,9 +1732,9 @@ def build_server(
         arrive again after a new scan, which is how accounts are switched.
 
         Returns:
-            `logged_out` — true — `login_removed`, whether the saved login file
-            is gone (the next start would adopt that account again if it is
-            not), and `login_file`, the path it was at.
+            `logged_out` — true — and `login_removed`, whether the saved login
+            file is gone. When it is not, `login_file` says where it is, so a
+            person can remove it by hand.
         """
         agent = plugin.who(ctx)
         if not agent:
