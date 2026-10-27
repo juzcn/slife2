@@ -193,6 +193,11 @@ packages = ["slife2"]
 include = [
     "/slife2",
     "/scripts",
+    # The content the installer seeds into a home: the playbooks and the
+    # code-defined jobs.  They are shipped, not project source, but a source
+    # distribution that could not seed them would be an incomplete install.
+    "/skills",
+    "/jobs",
     "/tests",
     "/README.md",
     "/SDD.md",

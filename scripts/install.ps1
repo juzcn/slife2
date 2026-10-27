@@ -313,7 +313,7 @@ function Seed-Config {
     else {
         & $script:Py $script:Helper seed --source (Join-Path $script:SourceDir 'slife2.yaml') --home $script:HomeDir
     }
-    if ($LASTEXITCODE -ne 0) { Die 'the configuration could not be prepared' }
+    if ($LASTEXITCODE -ne 0) { Die 'the configuration or bundled skills/jobs could not be prepared' }
 }
 
 function Get-Requirements {

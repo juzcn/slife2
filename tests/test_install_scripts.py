@@ -1025,3 +1025,58 @@ def test_readmes_document_the_installer() -> None:
         assert "install.sh" in text, name
         assert "install.ps1" in text, name
         assert "slife2-default.yaml" in text, name
+
+
+def test_seed_copies_the_bundled_skills_and_jobs_over_the_home(
+    tmp_path: Path,
+) -> None:
+    """**The same seed step, and the trees are overwritten.**  A bundled file
+    replaces the home's copy of the same path; a file the home added under
+    another name stays.  That is the whole update story — the bundle is the
+    authority, not a versioned backup."""
+    root = tmp_path / "repo"
+    (root / "skills" / "one").mkdir(parents=True)
+    (root / "skills" / "one" / "SKILL.md").write_text("bundled skill\n")
+    (root / "jobs").mkdir()
+    (root / "jobs" / "one.py").write_text("bundled job\n")
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+
+    home = tmp_path / "home"
+    (home / "skills" / "one").mkdir(parents=True)
+    (home / "skills" / "one" / "SKILL.md").write_text("old\n", encoding="utf-8")
+    (home / "skills" / "one" / "mine.txt").write_text("keep\n", encoding="utf-8")
+    (home / "jobs").mkdir()
+    (home / "jobs" / "one.py").write_text("old\n", encoding="utf-8")
+    (home / "jobs" / "mine.py").write_text("keep\n", encoding="utf-8")
+
+    result = _seed(source, home)
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "skills" / "one" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "bundled skill\n"
+    assert (home / "skills" / "one" / "mine.txt").read_text(encoding="utf-8") == (
+        "keep\n"
+    )
+    assert (home / "jobs" / "one.py").read_text(encoding="utf-8") == "bundled job\n"
+    assert (home / "jobs" / "mine.py").read_text(encoding="utf-8") == "keep\n"
+    assert "seeded" in result.stdout
+
+
+def test_seed_dry_run_does_not_touch_the_trees(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / "skills" / "one").mkdir(parents=True)
+    (root / "skills" / "one" / "SKILL.md").write_text("bundled\n", encoding="utf-8")
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+    home = tmp_path / "home"
+    (home / "skills" / "one").mkdir(parents=True)
+    live = home / "skills" / "one" / "SKILL.md"
+    live.write_text("old\n", encoding="utf-8")
+
+    result = _seed(source, home, "--dry-run")
+
+    assert result.returncode == 0, result.stderr
+    assert live.read_text(encoding="utf-8") == "old\n"
+    assert "would copy" in result.stdout

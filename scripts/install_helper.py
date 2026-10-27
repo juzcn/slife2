@@ -1,13 +1,17 @@
 """The facts the installer needs from inside the project.
 
 `seed` puts the shipped configuration where slife2 will read it, without ever
-overwriting a file the user already has.  `require` reads the *effective*
-configuration with the project's own loader and prints every external program
-it names, with the place that names it — and, for a `cli:` entry, the line that
-installs it.  The installer maps those names to packages and installs them;
-nothing here installs anything.  `secrets` reads the same configuration for the
-credentials it cannot resolve, so the installer can say which `credstore set`
-commands would make it work.
+overwriting a file the user already has, and copies the bundled `skills/` and
+`jobs/` into the home **overwriting files of the same name** — the content
+update, and deliberately not the versioned-backup dance the old installer did:
+the bundle is the authority, and a person who edits a seeded file edits their
+copy.  `require` reads the *effective* configuration with the
+project's own loader and prints every external program it names, with the place
+that names it — and, for a `cli:` entry, the line that installs it.  The
+installer maps those names to packages and installs them; nothing here installs
+anything.  `secrets` reads the same configuration for the credentials it cannot
+resolve, so the installer can say which `credstore set` commands would make it
+work.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --home <dir>
@@ -42,7 +46,7 @@ def _warn(message: str) -> None:
     print(f"config: {message}", file=sys.stderr)
 
 
-def seed(source: Path, home: Path, dry_run: bool) -> int:
+def _seed_config(source: Path, home: Path, dry_run: bool) -> int:
     """Place the shipped configuration, or a reference copy of it.
 
     **The live file is never overwritten.**  A checkout's own `slife2.yaml` is
@@ -99,6 +103,71 @@ def seed(source: Path, home: Path, dry_run: bool) -> int:
     except OSError as exc:
         _warn(f"{exc}")
         return 1
+
+
+#: The bundled content directories the installer seeds beside the config.
+#: Both are things a person or a model *uses*, not project source: `skills/`
+#: ships the playbooks and `jobs/` ships the code-defined tools.
+SEED_TREES = ("skills", "jobs")
+
+
+def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
+    """Copy the bundled `skills/` and `jobs/` into *home*, overwriting.
+
+    **Overwrite is the whole update story.**  A reinstall replaces a bundled
+    file with the one it ships; a skill or job the user added under a name of
+    its own is not in the source and stays.  The v1 installer preserved a
+    changed bundled file under a versioned name instead; this is deliberately
+    simpler — the bundle is the authority, and editing a seeded file is editing
+    a copy.
+
+    A checkout whose home is the checkout itself is a no-op: the source *is*
+    the destination, so there is no update to make.  A home pointed elsewhere
+    from a checkout is seeded like any other.
+    """
+    try:
+        root = source.resolve()
+        target = home.resolve()
+        if root == target:
+            _say("skills/jobs: checkout detected; nothing to seed.")
+            return 0
+        for name in SEED_TREES:
+            src = root / name
+            if not src.is_dir():
+                _say(f"{name}: no bundled directory at {src}; nothing to seed.")
+                continue
+            dst = target / name
+            if dry_run:
+                _say(f"{name}: would copy {src} -> {dst}, overwriting same names.")
+                continue
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(
+                src,
+                dst,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            _say(f"{name}: seeded {dst}; same names overwritten.")
+        return 0
+    except OSError as exc:
+        print(f"skills/jobs: {exc}", file=sys.stderr)
+        return 1
+
+
+def seed(source: Path, home: Path, dry_run: bool) -> int:
+    """Place the shipped configuration **and** the bundled skills and jobs.
+
+    One step, the same source root: the configuration keeps its own rule (the
+    live file is never overwritten — a changed shipped one is written beside it
+    as a reference), while `skills/` and `jobs/` are copied over the home with
+    files of the same name replaced.  A checkout whose home is the checkout
+    itself is a no-op for both; a home pointed elsewhere from a checkout gets
+    the same seeding as an installed one.
+    """
+    code = _seed_config(source, home, dry_run)
+    if code:
+        return code
+    return seed_trees(source.parent, home, dry_run)
 
 
 def _first_word(command: str) -> str:

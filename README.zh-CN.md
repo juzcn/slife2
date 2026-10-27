@@ -118,6 +118,10 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 全部外部程序。数据和配置保存在 `~/.slife2`，二进制和库位于 `~/.local`（Windows
 为 `%LOCALAPPDATA%\slife2`）。再次运行同一条命令即可升级。
 
+安装器还会把自带的 `skills/` 和 `jobs/` seed 到数据目录，**同名文件直接覆盖**；
+你自己添加的、名字不同的 skill 或 job 会保留。修改 seed 出来的文件等于修改副本——
+下一次安装会把它替换掉。
+
 从源码开发时，在该目录运行：
 
 ```bash

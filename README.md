@@ -126,6 +126,11 @@ configuration. Data and configuration live in `~/.slife2`; binaries and
 libraries live in `~/.local` (`%LOCALAPPDATA%\slife2` on Windows). Run the same
 command again to upgrade.
 
+The installer also seeds the bundled `skills/` and `jobs/` into the data
+directory, **overwriting files of the same name**; a skill or job you added
+under another name stays untouched. Editing a seeded file means editing a
+copy — the next install replaces it.
+
 From a source checkout, run the installer in that directory:
 
 ```bash

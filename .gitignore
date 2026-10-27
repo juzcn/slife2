@@ -193,11 +193,11 @@ __marimo__/
 # one in use and agents/ is a directory you can open.  That puts generated
 # state in the working tree, which is exactly what this keeps out of it:
 # agents/ is where a conversation, a cabinet and a WeChat login live, and none
-# of that belongs in a commit.  jobs/ is the model's own code — written by a
-# run through `job_set`, running in the jobs plugin — and is generated state for
-# the same reason.  slife2.yaml and skills/ are deliberately NOT ignored — both
-# are written by a person rather than produced by a run, and neither holds a
-# secret, so both are the file the whole arrangement exists to read.
+# of that belongs in a commit.  slife2.yaml, skills/ and jobs/ are deliberately
+# NOT ignored: the first two are written by a person, and jobs/ carries the
+# bundled samples the installer seeds.  A job the model writes in a checkout is
+# simply an untracked file beside those samples, the same way a local playbook
+# would be.
 #
 # The machine's runtime — records, locks, logs — is no longer here at all: it
 # lives in ~/.slife2/runtime, because the servers are one set per machine and
@@ -205,7 +205,6 @@ __marimo__/
 # for a checkout that still has an old one lying around.
 runtime/
 agents/
-jobs/
 
 # The designer's own memory of intent, which is not part of what this repository
 # publishes.
