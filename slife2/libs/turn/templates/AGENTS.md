@@ -14,7 +14,7 @@ The tool descriptions are the authority on each tool. This page is what no singl
 
 | Category | Tools |
 |---|---|
-| Tools | `tool_search`, `func_tool_load`, `_func_tool_unload`, `_check_new_input` |
+| Tools | `tool_search`, `func_tool_load` |
 | Memory | `turn_list`, `turn_read`, `turn_search`, `turn_summarize` |
 | Cabinet | `note_edit`, `note_remove`, `note_read`, `note_list`, `diary_write`, `diary_read`, `diary_list`, `file_save`, `file_remove`, `file_read`, `file_list`, `report_save`, `report_read`, `report_list`, `cabinet_search`, `cabinet_summarize`, `dump_read` |
 | Subagents | `subagent_set`, `subagent_remove`, `subagent_list`, `subagent_send_message`, `subagent_broadcast`, `subagent_task_list`, `subagent_cancel_task`, `subagent_group_set`, `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`, `subagent_group_leave`, `subagent_group_send_message` |
