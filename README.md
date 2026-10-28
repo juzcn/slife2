@@ -106,10 +106,7 @@ example, declares `python3`. The installer ensures the `npx` and `uvx` launchers
 exist; the packages those launchers fetch are downloaded on first use.
 
 On Windows, `python3` comes from uv's `--default` launchers in
-`%USERPROFILE%\.local\bin`. The Microsoft Store's `python3.exe` app execution
-alias is a stub that cannot run a script; when a system PATH entry puts it
-first, the installer says so — Settings > Apps > Advanced app settings > App
-execution aliases turns it off.
+`%USERPROFILE%\.local\bin`.
 
 ## Installation
 

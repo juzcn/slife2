@@ -126,31 +126,7 @@ function Get-UvTools {
     finally { $ErrorActionPreference = $previous }
 }
 
-function Get-Python3Program([switch]$NewShell) {
-    # The application a `python3` call would start, or $null.  `-NewShell`
-    # asks the question with the PATH a new shell starts from — machine then
-    # user — instead of this process's, which Update-ProcessPath has arranged.
-    # A *system* PATH entry cannot be outranked from user scope, and the
-    # Store's alias can sit in one (see Test-Python3).
-    $previous = $env:Path
-    try {
-        if ($NewShell) {
-            $parts = @()
-            foreach ($scope in @('Machine', 'User')) {
-                $value = [Environment]::GetEnvironmentVariable('Path', $scope)
-                if ($value) { $parts += $value.Split(';') }
-            }
-            $env:Path = (@($parts | Where-Object { $_ } | Select-Object -Unique) -join ';')
-        }
-        $command = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($command) { return $command.Source }
-        return $null
-    }
-    finally { $env:Path = $previous }
-}
-
-function Test-Python3([switch]$NewShell) {
+function Test-Python3 {
     # **The Store's alias is not an interpreter.**  Every Windows 11 install
     # ships `%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe` — a stub that is
     # on PATH and exits 9009 with "Python was not found".  `Get-Command
@@ -160,12 +136,13 @@ function Test-Python3([switch]$NewShell) {
     # Running the command is the only check that tells the stub from Python.
     # The application, not any profile function of the same name: a function
     # sets no `$LASTEXITCODE`, and the check would read a stale one.
-    $program = Get-Python3Program -NewShell:$NewShell
-    if (-not $program) { return $false }
+    $command = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $command) { return $false }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $program --version *> $null
+        & $command.Source --version *> $null
         return ($LASTEXITCODE -eq 0)
     }
     catch { return $false }
@@ -346,7 +323,6 @@ function Ensure-Python {
     if ($installed -and (Test-Python3)) {
         Say '  Python 3.13 is already installed'
         Update-ProcessPath
-        Show-Python3ShellNote
         return
     }
     # **`--default` was behind `--preview` in uv 0.7.**  An older uv still
@@ -364,21 +340,6 @@ function Ensure-Python {
     # to mean this interpreter in a shell the installer did not start.
     Add-UserPath (Join-Path $env:USERPROFILE '.local\bin')
     Update-ProcessPath
-    Show-Python3ShellNote
-}
-
-function Show-Python3ShellNote {
-    # **A system PATH entry cannot be outranked from user scope.**  The
-    # launchers are in `.local\bin` and the user PATH now leads with it, but a
-    # WindowsApps entry in the *machine* PATH still comes first, and that is
-    # where the Store's stub lives on some machines.  The installer cannot move
-    # it without elevation; the operator can turn the alias off, and the one
-    # line says so rather than leaving a name that silently cannot run.
-    if (Test-Python3 -NewShell) { return }
-    $program = Get-Python3Program -NewShell
-    if (-not $program) { $program = 'nothing on PATH' }
-    Say "  python3 in a new shell is $program, not this interpreter"
-    Say '  turn the Store alias off: Settings > Apps > Advanced app settings > App execution aliases'
 }
 
 function Download-Source {

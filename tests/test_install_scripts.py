@@ -849,11 +849,7 @@ def test_the_powershell_installer_falls_back_for_a_uv_without_default(
         + "\n"
         + _powershell_function(text, "Stop-DotSpinner")
         + "\n"
-        + _powershell_function(text, "Get-Python3Program")
-        + "\n"
         + _powershell_function(text, "Test-Python3")
-        + "\n"
-        + _powershell_function(text, "Show-Python3ShellNote")
         + "\n"
         + _ensure_python_function(POWERSHELL),
         encoding="utf-8",
@@ -924,11 +920,7 @@ def test_the_powershell_installer_leaves_an_installed_python_alone(
         + "\n"
         + _powershell_function(text, "Stop-DotSpinner")
         + "\n"
-        + _powershell_function(text, "Get-Python3Program")
-        + "\n"
         + _powershell_function(text, "Test-Python3")
-        + "\n"
-        + _powershell_function(text, "Show-Python3ShellNote")
         + "\n"
         + _ensure_python_function(POWERSHELL),
         encoding="utf-8",
@@ -980,10 +972,7 @@ def test_python3_means_a_name_that_runs(tmp_path: Path) -> None:
     text = POWERSHELL.read_text(encoding="utf-8")
     function_file = tmp_path / "function.ps1"
     function_file.write_text(
-        _powershell_function(text, "Get-Python3Program")
-        + "\n"
-        + _powershell_function(text, "Test-Python3"),
-        encoding="utf-8",
+        _powershell_function(text, "Test-Python3"), encoding="utf-8"
     )
 
     store_bin = tmp_path / "store-bin"
