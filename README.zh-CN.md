@@ -99,6 +99,11 @@ skill 也可以在头部通过 `requires.bins` 声明所需的程序，这些程
 例如随附的 `baidu-search` 声明了 `python3`。安装器只负责让 `npx` 和 `uvx`
 启动器可用；它们首次运行时才下载各自的第三方包。
 
+在 Windows 上，`python3` 来自 uv `--default` 装进 `%USERPROFILE%\.local\bin`
+的启动器。微软商店的 `python3.exe` 执行别名是无法运行脚本的存根；如果系统
+PATH 中它排在前面，安装器会指出这一点——在“设置 > 应用 > 高级应用设置 >
+应用执行别名”里关掉它即可。
+
 ## 安装
 
 ### 一键安装

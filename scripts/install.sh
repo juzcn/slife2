@@ -125,6 +125,12 @@ broker_listening() {
     return 1
 }
 
+# The requirement is a program that runs, not a name on PATH.  The Windows
+# installer needs this because a stock Windows 11 has a non-working
+# `python3.exe` alias in WindowsApps (see Test-Python3 there); asking the same
+# question on both sides keeps the two installers' logic the same.
+python3_runs() { python3 --version >/dev/null 2>&1; }
+
 require_homebrew() {
     [ "$PLATFORM" = macos ] || return 0
     command -v brew >/dev/null 2>&1 && return 0
@@ -178,7 +184,7 @@ ensure_python() {
         # is already there is the requirement; moving to a newer patch is the
         # operator's call (`uv python upgrade 3.13`).
         if uv python find 3.13 --no-python-downloads >/dev/null 2>&1 \
-            && command -v python3 >/dev/null 2>&1; then
+            && python3_runs; then
             say "  Python 3.13 is already installed"
         else
             # `--default` was behind `--preview` in uv 0.7; an older uv still
@@ -489,8 +495,11 @@ install_dependencies() {
         case " $seen " in *" $exe "*) continue ;; esac
         seen="$seen$exe "
         case "$exe" in
-            uv|python|python3|uvx)
+            uv|python|uvx)
                 command -v "$exe" >/dev/null 2>&1 || fail "$exe is missing ($why)"
+                ;;
+            python3)
+                python3_runs || fail "python3 does not run"
                 ;;
             *) ensure_tool "$exe" "$why" "$hint" ;;
         esac
