@@ -382,6 +382,9 @@ def test_a_catalogue_deleted_under_a_running_store_is_rebuilt(tmp_path) -> None:
     `no such table: tool` against the empty file the next connection created.
     The store checks that the path still holds the file it opened, and builds a
     replacement rather than failing until the hub is restarted.
+
+    The replacement is not always a *different* file to the filesystem, which
+    is the test below.
     """
     store = store_at(tmp_path)
     path = tmp_path / "tools.db"
@@ -393,6 +396,56 @@ def test_a_catalogue_deleted_under_a_running_store_is_rebuilt(tmp_path) -> None:
     with sqlite3.connect(path):
         pass
     assert store.count() == 0, "another, empty file is at the same path"
+
+
+def test_a_recreated_file_that_reuses_its_identity_is_still_rebuilt(
+    tmp_path, monkeypatch
+) -> None:
+    """**The pair is not an identity**, so the file has to say which file it is.
+
+    ext4 hands the freed inode straight to the next file created in that
+    directory, so the empty replacement presents the `(st_dev, st_ino)` this
+    store recorded for the catalogue it replaced — and the check above waves it
+    through, leaving every statement to fail `no such table: tool` (ubuntu CI;
+    this machine's filesystem did not reuse it, so the test above passes here).
+    The store therefore reads the marker `_ensure_schema` writes into the file,
+    which a recreated file cannot carry.
+
+    The reuse is made to happen rather than raced for: what the filesystem does
+    by chance, the test does every time.
+    """
+
+    def same_file(_store: ToolStore) -> tuple[int, int]:
+        """The pair the path answers with, whatever file it holds."""
+        return (1, 1)
+
+    monkeypatch.setattr(ToolStore, "_file_identity", same_file)
+    store = store_at(tmp_path)
+    path = tmp_path / "tools.db"
+
+    path.unlink()
+    with sqlite3.connect(path):
+        pass  # what a connection to the deleted path leaves behind
+    assert store.count() == 0, "the replacement is rebuilt despite the same pair"
+
+
+def test_a_catalogue_without_the_marker_is_adopted_rather_than_rebuilt(
+    tmp_path,
+) -> None:
+    """The marker decides *which file*, not *which schema*.
+
+    A catalogue written by the build before the marker has the current columns
+    and no marker, and it is still this build's file.  Staleness remains the
+    column check at construction (`_rebuild_if_stale`), so the upgrade keeps the
+    rows — and the model's loaded set with them — and only stamps the marker.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA application_id = 0")
+
+    again = ToolStore(store.path, threshold=100)
+    assert rows_in(again) == [("arxiv__search", STATUS_ENABLED, UNLOADED)]
 
 
 def test_reconfiguring_applies_an_edited_autoload(tmp_path) -> None:

@@ -329,6 +329,15 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+#: What `PRAGMA application_id` makes a file say about itself: that it is a tool
+#: catalogue this build wrote.  **The marker lives in the file because the pair
+#: the path answers with does not survive a deletion** — POSIX filesystems hand
+#: the freed inode to the next file created in that directory (measured on
+#: ext4), so `(st_dev, st_ino)` says "same file" about a replacement this store
+#: never wrote: the empty one, and every statement failing `no such table: tool`
+#: (ubuntu CI).  The magic is four ASCII bytes, `SLF2`.
+_APPLICATION_ID = 0x534C4632
+
 #: The columns a search result carries, in the order it carries them.  `schema`
 #: is reported as a *size* rather than as text: it is the tool's whole parameter
 #: JSON, a model reading a result has no use for it, and what it does tell a
@@ -549,10 +558,12 @@ class ToolStore:
         # (`slife2.plugins.toolhub.server.configured_sources`).  A caller that has not read it
         # passes nothing, and nothing is what the pass then does.
         self.path = path
-        #: The file this store last ensured, and the lock that serializes a
-        #: rebuild of it.  A store outlives its file when a person deletes one,
-        #: so every connection checks that the path still holds the file it
-        #: opened; see `_ensure_file`.
+        #: The file this store last ensured, as `(device, inode)`, and the lock
+        #: that serializes a rebuild of it.  A store outlives its file when a
+        #: person deletes one, so every connection checks that the path still
+        #: holds the file it opened — and that the file still carries this
+        #: build's marker, because the pair alone can point at the replacement;
+        #: see `_ensure_file`.
         self._identity: tuple[int, int] | None = None
         self._schema_lock = threading.Lock()
         self._ensure_schema()
@@ -579,18 +590,18 @@ class ToolStore:
         lifetime is stated once for both stores so that "a connection per call"
         means the same thing in both.
         """
-        self._ensure_file()
         connection = connect_to(self.path)
         try:
             with connection:
+                self._ensure_file(connection)
                 yield connection
         finally:
             connection.close()
 
     # --- the file -------------------------------------------------------------
 
-    def _ensure_file(self) -> None:
-        """Rebuild the schema when the path no longer holds the file this store opened.
+    def _ensure_file(self, connection: sqlite3.Connection) -> None:
+        """Rebuild the schema when this connection is not to the file we built.
 
         **A catalogue deleted under a running store is a new, empty file, not a
         missing one**: the next connection creates the path, and this store —
@@ -600,23 +611,43 @@ class ToolStore:
         schema invites) would have to restart the machine's daemons, including
         the hub every other home is served by.
 
-        The test is the file **identity**, not its modification time: every write
-        moves that, and a rebuild in place keeps the identity — the stale-file
-        case at construction is `_rebuild_if_stale`'s.
+        **The file has to say which file it is, because the path cannot.**  The
+        test used to be the file identity — `(st_dev, st_ino)` — and that pair
+        is reused: a file created in a directory that has just lost one is
+        handed the freed inode straight back, so the empty replacement presents
+        the identity this store recorded for the catalogue it replaced, the
+        rebuild is skipped, and every statement fails on the table that was
+        never created (ubuntu CI; this machine's filesystem did not reuse it,
+        which is why the test above passes here).  The marker `_ensure_schema`
+        writes into the file is what decides.
+
+        The stat is still the first look, and it catches the one thing the
+        marker cannot: a *different* catalogue copied over the path.  Its marker
+        says it is ours, but it is not the file this store opened.
         """
-        if self._file_identity() == self._identity:
+        if self._holds_our_file(connection):
             return
         with self._schema_lock:
-            if self._file_identity() == self._identity:
+            if self._holds_our_file(connection):
                 return
-            self._ensure_schema()
+            self._apply_schema(connection)
+            self._identity = self._file_identity()
+
+    def _holds_our_file(self, connection: sqlite3.Connection) -> bool:
+        """Whether this connection is to the file this store opened and built."""
+        if self._file_identity() != self._identity:
+            return False
+        marker = connection.execute("PRAGMA application_id").fetchone()[0]
+        return marker == _APPLICATION_ID
 
     def _file_identity(self) -> tuple[int, int] | None:
         """Which file the path holds now, or `None` when it holds none.
 
-        `st_ino` is the file index on Windows and the inode on POSIX; a file
-        deleted and created again under the same name is a different pair, which
-        is exactly what `_ensure_file` has to see.
+        `st_ino` is the file index on Windows and the inode on POSIX.  **It is
+        not an identity across a deletion**: the filesystem hands the freed
+        inode to the next file created in that directory, so a replacement
+        presents the same pair — which is why `_ensure_file` also reads the
+        marker out of the file itself.
         """
         try:
             info = self.path.stat()
@@ -639,11 +670,23 @@ class ToolStore:
         connection = connect_to(self.path)
         try:
             with connection:
-                self._rebuild_if_stale(connection)
-                connection.executescript(_TOOL_SCHEMA)
+                self._apply_schema(connection)
         finally:
             connection.close()
         self._identity = self._file_identity()
+
+    def _apply_schema(self, connection: sqlite3.Connection) -> None:
+        """Make this connection's file one this build can write, and mark it so.
+
+        The marker is written last: a file that lost the process halfway through
+        the DDL carries no marker, so the next connection rebuilds it rather
+        than trusting an incomplete catalogue.  It is written in *autocommit*
+        (the `executescript` commits before it), which is what keeps a marked
+        file from ever being a rolled-back one.
+        """
+        self._rebuild_if_stale(connection)
+        connection.executescript(_TOOL_SCHEMA)
+        connection.execute(f"PRAGMA application_id = {_APPLICATION_ID}")
 
     def _rebuild_if_stale(self, connection: sqlite3.Connection) -> None:
         """Empty a `tool` table that is not the one this code writes.
