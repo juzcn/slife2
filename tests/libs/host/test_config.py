@@ -839,6 +839,51 @@ def test_env_var_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "from-env"
 
 
+def test_the_environment_wins_over_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The shell is the first half of the chain; the store is the fallback.**
+
+    ``${VAR}`` means "the environment's value, or, when the variable is unset,
+    the store's".  The order *is* the precedence: a variable exported for this
+    shell is the operator changing the key now, and a value ``credstore set``
+    left behind is the one from before.  Swapping the two lookups would keep
+    every other secret test green, so this is what makes the order a contract
+    rather than an accident of how ``_replace`` was written.
+    """
+    import credstore
+
+    monkeypatch.setenv("SLIFE2_TEST_KEY", "from-env")
+
+    def consulted(key: str) -> str | None:
+        raise AssertionError(f"the store was consulted for a set variable: {key}")
+
+    monkeypatch.setattr(credstore, "get_credential", consulted)
+
+    assert resolve_secret("${SLIFE2_TEST_KEY}") == "from-env"
+
+
+def test_a_plaintext_value_never_reaches_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A literal written in the file is an answer, not a reference.**
+
+    The chain exists for references — ``${VAR}`` and ``keyring:`` — and a
+    plaintext value resolves by not being looked up at all.  Consulting the
+    store for one would be a lookup nobody asked for, and it would make a
+    config whose keys are written out depend on a store that holds none of
+    them.
+    """
+    import credstore
+
+    def consulted(key: str) -> str | None:
+        raise AssertionError(f"the store was consulted for a literal: {key}")
+
+    monkeypatch.setattr(credstore, "get_credential", consulted)
+
+    assert resolve_secret("sk-literal") == "sk-literal"
+
+
 def test_default_is_used_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
     assert resolve_secret("${SLIFE2_TEST_KEY:-fallback}") == "fallback"
