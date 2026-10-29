@@ -53,6 +53,7 @@ The marker at the start of a message says where it came from.
 | Person, WeChat | `[Wechat:{…}]` | `wechat_send_message` |
 | Your subagent | `[Subagent:{…}]` | `subagent_send_message` |
 | Peer agent | `[PeerAgent:{…}]` | `peer_agent_send_message` |
+| Group message | `[PeerAgentGroup:{…}]` / `[SubagentGroup:{…}]` | `peer_agent_group_send_message` / `subagent_group_send_message` |
 | Agent task or background call | `[AgentTaskResult:{…}]` / `[AgentToolResult:{…}]` | already delivered |
 
 - **Subagents** are yours, with their own conversation and memory; **peers** are other agents, with their own identity and memory. `subagent_*` does not reach a peer, and `peer_agent_*` does not reach your subagents.
