@@ -268,15 +268,12 @@ def client_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], Clie
 def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
     """The `agent_of(ctx)` a plugin binds its own refusal words to.
 
-    **A factory rather than a function, because every caller already had the
-    call shape it wants.**  Three plugins wrote the same four lines — read the
-    client id, refuse when it is absent, answer with it — and every one of them
-    called the result `agent_of(ctx)` from a dozen tool bodies.  Handing them a
-    helper that takes the words as arguments would have rewritten all of those
-    calls to repeat two strings; this hands back the same one-argument function
-    they had, so what each plugin declares is exactly the part that is its own:
-    the two words its refusal varies by (`slife2.libs.plugin.audience.UNADDRESSED`), named
-    once, at the top of the plugin that says them.
+    **A factory rather than a function, because every caller already has the
+    call shape it wants.**  Three plugins call the result `agent_of(ctx)` from a
+    dozen tool bodies, so what each declares here is exactly the part that is
+    its own: the two words its refusal varies by
+    (`slife2.libs.plugin.audience.UNADDRESSED`), named once, at the top of the
+    plugin that says them.
 
     That is `slife2.libs.plugin.family.FamilyWords`'s arrangement one level down: the
     sentence lives where the mechanism lives and the vocabulary lives with the
@@ -309,12 +306,6 @@ def agent_or_blank(ctx: Any) -> str:
     *class* whose tool bodies decide what to do with the blank, which is the
     login's (`slife2.plugins.wechat.server.Wechat.who`), and whose `unaddressed`
     method exists so the wording stays with the class that owns it.
-
-    What both ask is this one question, and it was written out line for line in
-    both of the servers that ask it — three lines each, in the two modules whose
-    refusal wording the shared sentence already covers.  Nothing was wrong with
-    either copy; the count was two, which is one more than the number of places
-    a rule can be stated in.
 
     **`""` and not `None`**, because both callers ask `if not agent:` and an
     empty name is what a server that keys nothing on it can act on.  `None`
@@ -601,9 +592,8 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     an exact modern protocol version gets a *synthesized* identity with an empty
     name, and a server from another implementation may report none at all — so
     when there is no name to compare, this falls back to asking whether the
-    expected tool is present.  That check is weaker, and it is the one this
-    system used exclusively until the handshake was found to answer the same
-    question for free.
+    expected tool is present.  That check is weaker, and it is the second
+    opinion rather than the identity test.
 
     Note what neither check is: a *liveness* probe in the sense the removed
     protocol-level `ping` was.  The spec names no replacement for `ping`, so
@@ -635,9 +625,9 @@ class _Ours(ClientTransport):
     **And this system needs it off.**  Whole conversations travel in single
     messages here by design — `rebuild` sends the context a turn runs on,
     `remember` sends a turn, `transcript` sends a conversation to a screen — so
-    1 MiB is a ceiling on how long a conversation may be.  It was reached in a
-    real session, as `send_message` failing with "Server-sent event exceeded the
-    1048576 byte limit".
+    1 MiB is a ceiling on how long a conversation may be.  A conversation can
+    reach it: `send_message` fails with "Server-sent event exceeded the 1048576
+    byte limit".
 
     `None` rather than a large number, because a number is the same wall further
     away and there is no size at which one of our own conversations is too big.
@@ -756,11 +746,9 @@ async def open_server(
     # Ask the port before asking the protocol.  A refused TCP connect comes back
     # at once, where building an MCP client against nothing spends a couple of
     # seconds inside the transport's own retries — measured here at 0.27s
-    # against 2.29s.  It used to be worth this only for the turn store, whose
-    # absence was the one that could be discovered on the first turn of a
-    # session; now that any missing peer fails the turn, it is worth it for all
-    # of them, and it costs a quarter of a second only when something is
-    # genuinely wrong.
+    # against 2.29s.  Any missing peer fails the turn, so the gate is worth it
+    # for all of them, and it costs a quarter of a second only when something
+    # is genuinely wrong.
     parts = urlsplit(url)
     if parts.hostname and parts.port:
         listening = tcp_listening(parts.hostname, parts.port)
@@ -808,9 +796,7 @@ async def close_server(client: Client) -> None:
     Two callers, and one copy of the three lines they share: a caller that has
     finished with a client `open_server` handed back, and `open_server` itself
     for a client it could not hand back — a connection that was not the server we
-    meant, or an enter a cancellation interrupted.  It used to be two copies, and
-    the one that *lacked* the cancellation branch is how a half-entered client
-    was leaked.
+    meant, or an enter a cancellation interrupted.
 
     Suppressed, because every one of those is a way out: a shutdown, an error
     path, a cancellation.  A transport that is already gone has nothing left to
@@ -838,18 +824,16 @@ def tool_payload(result: Any) -> dict[str, Any]:
     text is still readable, and one that answered with neither is a caller that
     gets an empty mapping and says so itself.
 
-    **The text block is `result.content`, and it has to be read there.**  The
-    fallback used to look for a `str` in `result.data`, which can never be one
-    of these: `fastmcp.client` fills `data` from `structured_content` alone
-    (`_parse_call_tool_result`), so a result that carried no structured content
-    — an older build of one of our servers, which is the case this tolerance
-    was written for, or any tool whose return the SDK did not wrap — arrives
-    with `data` `None` and the JSON sitting in a text block.  The claim above
-    was therefore false in the one situation it names: the answer was readable
-    all along and the caller was told the far end was a build it could not read.
-    Only the JSON matters, so a text block that is not a mapping — a refusal's
-    message, a tool that answered in prose — is still `{}`, which is the
-    caller's cue to say the shape is wrong.
+    **The text block is `result.content`, and it has to be read there.**  A
+    result that carried no structured content — an older build of one of our
+    servers, which is the tolerance this exists for, or any tool whose return
+    the SDK did not wrap — arrives with `data` `None` and the JSON sitting in a
+    text block, because `fastmcp.client` fills `data` from `structured_content`
+    alone (`_parse_call_tool_result`).  A tool returning a scalar is wrapped by
+    FastMCP, so its JSON arrives in `data` itself, which is why the loop below
+    reads both.  Only the JSON matters, so a text block that is not a mapping —
+    a refusal's message, a tool that answered in prose — is still `{}`, which
+    is the caller's cue to say the shape is wrong.
 
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
@@ -889,13 +873,12 @@ class UnreadableAnswer(ConnectionError):
 def unreadable(peer: str, what: str, payload: Any) -> UnreadableAnswer:
     """The loud failure a peer's answer that is not its shape raises, worded once.
 
-    **One sentence, written out in eight places until this function existed** —
-    the hub's tool list, the model's `stream_chat` result, the context store's
-    message list, its turn-id list, its rebuild counts and its turn list, each
-    from two or three modules.  Every copy was right; the count was the problem,
-    because the diagnosis is the valuable half and a reader who learns it from one
-    peer should recognise it from another.  What varies is only *who* was asked
-    and *what* they failed to do, so those are the two arguments and the rest is
+    **One sentence rather than one per peer**, because the diagnosis is the
+    valuable half: the hub's tool list, the model's `stream_chat` result, the
+    context store's message list, its turn-id list, its rebuild counts and its
+    turn list are all this answer, and a reader who learns it from one peer
+    should recognise it from another.  What varies is only *who* was asked and
+    *what* they failed to do, so those are the two arguments and the rest is
     this.
 
     `peer` is the far end as a reader meets it — "the toolhub", "the context
@@ -1113,8 +1096,8 @@ class ASGICancellationFilter(logging.Filter):
     application as an error and writes `Exception in ASGI application` with a
     traceback — `CancelledError` included.  A long-lived stream (the TUI's
     `attach`, an agent's `watch`) has no completion to wait for, so uvicorn ends
-    it by cancelling the task at FastMCP's two-second graceful limit; every
-    `slife2 down` therefore closed with a stack trace naming a normal stop as a
+    it by cancelling the task at FastMCP's two-second graceful limit, which
+    would close every `slife2 down` with a stack trace naming a normal stop as a
     fault.  The cancellation is the mechanism, and this is the one record it
     makes that is not worth a line.
 
@@ -1149,10 +1132,10 @@ def _log_level() -> tuple[int, str]:
     """The root level, and the name asked for when it was not one.
 
     **The level is an operator's, not a build's.**  Every debugging line in this
-    project is written at DEBUG and none of them could be reached: the level was
-    a constant, so seeing one meant editing the code and restarting the stack.
-    `SLIFE2_LOG_LEVEL` is the lever — read per process, so one noisy server can
-    be raised without turning DEBUG on for every server.
+    project is written at DEBUG, so without a lever seeing one would mean
+    editing the code and restarting the stack.  `SLIFE2_LOG_LEVEL` is that
+    lever — read per process, so one noisy server can be raised without turning
+    DEBUG on for every server.
 
     An unreadable value is not a reason to refuse to start: the server logs at
     INFO and says the value was not a level (the second half of the pair, so the
@@ -1209,11 +1192,10 @@ def configure_logging() -> None:
 
     **Uvicorn's access log is pinned down too.**  `serve` passes
     `log_config=None` so those records reach this formatter and are masked — but
-    they are one line per MCP request, and the corpus that prompted this file's
-    work was a fifth request chatter with no tool name on it.  A request line is
-    a DEBUG fact; `uvicorn.error` stays at INFO because "Started server
-    process"/"Application startup complete" are the run boundaries a reader
-    uses.
+    they are one line per MCP request, a fifth of the chatter and with no tool
+    name on it.  A request line is a DEBUG fact; `uvicorn.error` stays at INFO
+    because "Started server process"/"Application startup complete" are the run
+    boundaries a reader uses.
 
     **And the one error uvicorn writes for a normal stop is dropped.**  A stream
     that is held open by design cannot complete on request, so uvicorn cancels
@@ -1255,13 +1237,10 @@ def serve_plugin(
 
     One process per plugin, so the only thing that differs between any two of
     them is which config key their address is filed under, which server they
-    build, and what they say about it — those are the three hooks.  Servers used
-    to spell these eleven lines out one at a time, and the count of copies was
-    itself the bug: eleven lines is enough to drift, and a copy that drifted was
-    a server that started differently from every other one for no reason anyone
-    had chosen.  Today the only servers that do not call this directly are the
-    three model backends, through `slife2.plugins.llm.server_common.serve_backend`,
-    which is a wrapper over this and not a second implementation.
+    build, and what they say about it — those are the three hooks.  The only
+    servers that do not call this directly are the three model backends,
+    through `slife2.plugins.llm.server_common.serve_backend`, which is a wrapper
+    over this and not a second implementation.
 
     `note` is the one thing a server wants to add to its start-up line — "turns
     in <dir>", "N plugin(s) to ask" — and it is a *callable* because the config

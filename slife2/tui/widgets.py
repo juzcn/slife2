@@ -85,11 +85,11 @@ MARKERS: tuple[str, ...] = (
     ASYNC_CALL_MARKER,
     PEER_MARKER,
     # **The local network's, which is a second envelope and not a second name
-    # for the remote one.**  This list held the four the plugins export and
-    # missed the one the *config* owns (`LOCAL.marker`, `[Subagent:`) — so a
-    # subagent's handed-over answer was drawn with its raw envelope in front of
-    # it, which is the exact failure the imports above exist to prevent:
-    # `channel_prefix` already knows this channel and gives it `Subagent(jill)>`.
+    # for the remote one.**  The one the *config* owns (`LOCAL.marker`,
+    # `[Subagent:`) is not among the plugins' exports, and missing it draws a
+    # subagent's handed-over answer with its raw envelope in front of it — the
+    # exact failure the imports above exist to prevent: `channel_prefix` already
+    # knows this channel and gives it `Subagent(jill)>`.
     LOCAL.marker,
     # And the same network's other speaker: a message the agent sends to one of
     # its subagents wears `[Agent:` (`slife2.libs.host.config.LOCAL_AGENT`).
@@ -135,16 +135,15 @@ def is_own_channel(channel: str) -> bool:
 
     **The one predicate for "these are the person's words", asked by both things
     the screen does with a channel**, because a second answer to that question
-    disagrees with this one somewhere nobody can see which is right: the bubble
+    disagrees somewhere nobody can see which is right: the bubble
     (:func:`channel_prefix`) and the marker that comes back off the text
-    (:meth:`ChatView.add_user`) are the same claim about the same turn, and they
-    were written as `channel in ("", WINDOW_CHANNEL)` and `channel != WINDOW_CHANNEL`
-    — so an *absent* channel was the person's own to the prefix and somebody
-    else's to the strip.  A row can be absent-channel for real: it is what every
-    turn stored before the column existed reads as (`DEFAULT ''`), and what
-    `Client.run_turn` sends when its caller names none, so the disagreement ate
-    the front of a person's own message the moment it happened to begin with a
-    marker.
+    (:meth:`ChatView.add_user`) are the same claim about the same turn.  Spelled
+    as `channel in ("", WINDOW_CHANNEL)` and `channel != WINDOW_CHANNEL`, an
+    *absent* channel is the person's own to the prefix and somebody else's to
+    the strip — and a row can be absent-channel for real: it is what every turn
+    stored before the column existed reads as (`DEFAULT ''`), and what
+    `Client.run_turn` sends when its caller names none, so the disagreement eats
+    the front of a person's own message the moment it begins with a marker.
 
     Absent is this window's own, and that is deliberate rather than a default:
     the only rows without a channel are rows this window wrote or ran, so there
@@ -179,8 +178,8 @@ def channel_prefix(channel: str) -> str:
     spelled again.
 
     `tui` is this window, so its turns are the person's own and read `You> `.
-    An absent channel is read the same way, because the only rows without one are
-    rows this window wrote before there was a column for it.
+    An absent channel is read the same way: it is this window's own
+    (`is_own_channel`).
 
     Anything else is a name that already exists in the conversation — the key a
     plugin runs under, or a worker's — and it is shown as itself.  `wechat` keeps
@@ -267,8 +266,8 @@ def _timestamp(when: datetime | str | None = None) -> str:
 
     **A stored moment that will not parse is no moment, not this one.**  The
     `now` a caller gets for an *absent* moment is the live path's — a message
-    that is arriving has no other moment to carry — and a damaged record was
-    falling into it, so yesterday's turns wore the moment the window opened
+    that is arriving has no other moment to carry — and a damaged record must
+    not fall into it, or yesterday's turns wear the moment the window opened
     (SDD §5.5: a window that stamped everything now "would render every
     restored conversation as one undivided block stamped now").  A string that
     is not a moment answers `""`, which `add_user` draws as no stamp at all.
@@ -386,8 +385,8 @@ class ChatView(VerticalScroll):
         #: Tool panels by call id, for a result that is still coming.  **Scoped
         #: to the turn in progress** — :meth:`add_user` clears it as a turn opens
         #: — because a call id is only unique within its turn: keeping every id a
-        #: window had ever drawn grew without bound (a day of agent work is
-        #: thousands of widget handles) and let a later turn's result for a
+        #: window has ever drawn grows without bound (a day of agent work is
+        #: thousands of widget handles) and lets a later turn's result for a
         #: reused id complete the previous turn's panel.
         self._tools: dict[str, ToolCallWidget] = {}
         #: Whether the view is pinned to the bottom.  Cleared when the user
@@ -396,7 +395,7 @@ class ChatView(VerticalScroll):
         self._at_tail = True
         #: Whether mounting a widget follows the tail.  On for a live turn;
         #: restore turns it off, mounts the whole history and scrolls exactly
-        #: once at the end — a scroll per widget is what made a rebuild jitter.
+        #: once at the end — a scroll per widget is what makes a rebuild jitter.
         self._autoscroll = True
 
     # --- following the tail --------------------------------------------------
@@ -405,17 +404,15 @@ class ChatView(VerticalScroll):
         """Repaint at the new offset — and deliberately nothing else.
 
         This overrides `Widget.watch_scroll_y`, which is what repaints the
-        widget at the new offset: dropping the delegation left the reader
+        widget at the new offset: dropping the delegation leaves the reader
         scrolling an image that never moved.
 
         Following is **not** decided here, and that is the whole point of the
-        method being this short.  The offset is not the reader's alone: Textual
-        re-clamps `scroll_y` whenever a size change leaves it past the end, and
-        that assignment arrives through this watcher exactly like a keypress
-        does.  Reading it as intent re-armed following under a reader who was
-        reading history — the prompt box growing a line was enough, and the next
-        streamed token then pulled them to the bottom.  The decision is made
-        where the request is made; see :meth:`_scroll_to`.
+        method being this short.  Textual re-clamps `scroll_y` whenever a size
+        change leaves it past the end, and that assignment arrives through this
+        watcher exactly like a keypress does; the offset is not the reader's
+        alone.  The decision is made where the request is made; see
+        :meth:`_scroll_to`.
         """
         super().watch_scroll_y(old_value, new_value)
 
@@ -427,7 +424,8 @@ class ChatView(VerticalScroll):
         `scroll_end`.  So one comparison covers every mover, including one added
         later — which is what a per-method override could never promise, since
         each new way to move the view would have to remember to state the
-        intent, and the one that forgot re-armed following under the reader.
+        intent, and the one that forgot would re-arm following under the
+        reader.
 
         `scroll_target_y` is the clamped request — the value the offset will
         land on — so aiming at or past the end means "follow from here" and
@@ -572,10 +570,10 @@ class ChatView(VerticalScroll):
         nothing else.
 
         **Why this exists at all.**  A cut-in is written into the conversation as
-        a harness tool pair, so a display with no vocabulary for it could only
-        draw a tool panel (which it is not) or nothing (which is what the
-        transcript did while this was deferred, SDD §14.2).  The words are
-        already in the record; this is the line that says so while they arrive.
+        a harness tool pair, so a display with no vocabulary for it could draw
+        only a tool panel (which it is not) or nothing (SDD §14.2).  The words
+        are already in the record; this is the line that says so while they
+        arrive.
         """
         self._close_block()
         self._user_line(text, moment, "", channel)
@@ -631,7 +629,7 @@ class ChatView(VerticalScroll):
 
         `ends_turn` is for the one note that *is* the end of a turn:
         `[interrupted]`.  A cancelled turn has no rest to stream, and leaving it
-        open is what let a delta already in the pump for it be drawn under this
+        open would let a delta already in the pump for it be drawn under this
         line as though the turn had gone on — the trigger the module docstring
         names for the finish boundary, arriving from the other side.
         """
@@ -692,17 +690,17 @@ class ChatView(VerticalScroll):
     def begin_assistant(self) -> None:
         """Open a turn: from here until `finish_assistant`, deltas land.
 
-        **No block yet, because nothing has been said.**  One used to be opened
-        here — "before anything is known about it" — and *anything* that wrote a
-        line first closed it again: `add_note` closes the block it is given, so a
-        note arriving before the first delta left an empty assistant block in the
-        transcript, a blank gap between the prompt and the answer.  The
-        discriminator's note is such a line, and so is `[interrupted]` on a turn
-        that streamed nothing before it was interrupted.
+        **No block yet, because nothing has been said.**  Opening one here would
+        leave it to be closed again by anything that writes a line first:
+        `add_note` closes the block it is given, so a note arriving before the
+        first delta would leave an empty assistant block in the transcript, a
+        blank gap between the prompt and the answer.  The discriminator's note
+        is such a line, and so is `[interrupted]` on a turn that streamed
+        nothing before it was interrupted.
 
         Text, reasoning and the final answer each open the block they need —
-        which `append_text` was already doing for the case after a tool panel —
-        so a turn with nothing to say leaves nothing behind.
+        which `append_text` already does for the case after a tool panel — so a
+        turn with nothing to say leaves nothing behind.
         """
         self._close_block()
         self._turn_open = True
@@ -756,8 +754,8 @@ class ChatView(VerticalScroll):
         **A turn with nothing to say leaves nothing behind**, which
         `begin_assistant` promises and which it takes this method to keep: the
         block is opened here for a turn that streamed nothing, and an *empty*
-        answer used to open an empty one — a lone dim `…`, which is the widget's
-        "still working" affordance, left under a turn that had finished.  The
+        answer must open nothing — a lone dim `…` is the widget's "still
+        working" affordance, and one left under a finished turn is a lie.  The
         bill goes with it: a turn that drew no answer has no line to print a
         token count under, so the count is dropped rather than hung on the
         previous turn's block (see :meth:`set_usage`).
@@ -791,11 +789,10 @@ class ChatView(VerticalScroll):
         `TurnFinished` arrives on the progress stream, *before* the turn's answer
         comes back on the awaited call (`slife2.tui.app`), so a turn that has
         streamed no text yet has no block to print the number under.  Holding it
-        is what stops the fallback this used to have — `_last_assistant`, the
-        *previous* turn's block — from printing this turn's bill under the last
-        answer on the screen: a turn that ended with nothing to say (a
-        `max_iterations` stop) reported its own tokens beneath somebody else's words.
-        :meth:`finish_assistant` places what was held.
+        keeps this turn's bill off the previous turn's block: a turn that ended
+        with nothing to say (a `max_iterations` stop) would otherwise report its
+        own tokens beneath somebody else's words.  :meth:`finish_assistant`
+        places what was held.
         """
         self._pending_usage = tokens
         if self._streaming is not None:
@@ -883,9 +880,9 @@ class ChatView(VerticalScroll):
         a test asserting on this is asserting on what the user sees.
 
         **The selector is every class the transcript draws, and an approval row
-        is one of them** — it went without one, so the most consequential thing
-        on the screen was the one thing this could not see.  A class added here
-        and not there is a row that is visibly present and textually absent;
+        is one of them**: without its class the most consequential thing on the
+        screen would be the one thing this cannot see.  A class added here and
+        not there is a row that is visibly present and textually absent;
         `content_text` is what the fallback branch reads it through.
         """
         lines = []
@@ -935,9 +932,8 @@ class AssistantMessage(Static):
         # Painted once at construction, so the block is there before the first
         # delta lands: an empty one renders the dim ellipsis `_refresh` draws for
         # "working", which is the only affordance a model that has not said
-        # anything yet can offer.  The *signature* is not painted here — a block
-        # is opened before anything is known about it, so signing at construction
-        # would leave a bare `jack>` row per iteration (see `_refresh`).
+        # anything yet can offer.  The *signature* is painted in `_refresh`, and
+        # only where there is text to sign.
         self._refresh()
 
     @property
@@ -1020,10 +1016,8 @@ class AssistantMessage(Static):
             # Signed only where there is text to sign.  A block is opened before
             # anything is known about it — at `begin_assistant`, and again after
             # each tool panel when reasoning or text resumes — so a signature
-            # painted at construction leaves a bare `slife2>` row in the
-            # transcript for every iteration that has only reasoning to show:
-            # one per tool call, on a reasoning model.  The message is signed,
-            # not the widget.
+            # painted then leaves a bare `slife2>` row for every iteration that
+            # has only reasoning to show (see the module docstring).
             if self._agent:
                 line.append(f"{self._agent}> ", f"bold {PALETTE['amber-bold']}")
             line.append(self._text, PALETTE["text"])
@@ -1191,13 +1185,10 @@ class ToolCallWidget(VerticalScroll):
                 )
                 line.append("\n" + self._result, PALETTE["text-secondary"])
                 # What the tool actually returned, when that is more than the
-                # preview shows.  A line-count guard used to stand here,
-                # trimming to `MAX_RESULT_LINES` and saying how many were left
-                # — and it could never fire: the result on the wire is capped at
-                # `events.PREVIEW_CHARS` (two hundred), which cannot make five
-                # hundred lines however it is spelled.  What is worth saying is
-                # the size, which is the number carried beside the preview for
-                # exactly this and was read by nothing else.
+                # preview shows.  The result on the wire is capped at
+                # `events.PREVIEW_CHARS` (two hundred), so a line count says
+                # nothing; the size is the number carried beside the preview for
+                # exactly this.
                 if self._result_chars > len(self._result):
                     line.append(
                         f"\n{GLYPHS['ellipsis']} "
@@ -1553,8 +1544,8 @@ class ModelPicker(Static):
         shutdown then delivers arrives with nothing to resolve it into, and
         `set_result` on a cancelled future raises `InvalidStateError` — out of
         the message pump, as a traceback at exit instead of a clean quit.
-        `ApprovalPrompt._decide` guards this and this did not; the two are the
-        same widget shape, so they are guarded the same way.
+        `ApprovalPrompt._decide` guards this too; the two are the same widget
+        shape, so they are guarded the same way.
         """
         if self._decided:
             return
@@ -1938,9 +1929,8 @@ class StatusBar(Static):
         if not connected:
             # **A pending connection is not an error.**  Both states have no
             # connection, so both words are the bar's, but only the one that
-            # was tried and failed wears red — a normal start used to flash
-            # `connecting` in the error colour, which read as a startup
-            # failure nobody could find in a log.
+            # was tried and failed wears red — a normal start in the error
+            # colour reads as a startup failure nobody can find in a log.
             colour = PALETTE["dim"] if connecting else PALETTE["red"]
             parts.append(f"[{colour}]{connection}[/]")
         elif busy:

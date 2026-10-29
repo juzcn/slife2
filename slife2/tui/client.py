@@ -354,10 +354,9 @@ class MCPAgentClient:
         answer = getattr(result, "data", None)
         # **The answer *is* the adoption.**  A refused switch raises out of
         # `_call_tool` (`ToolError`, re-raised untouched), so reaching this line
-        # means the server switched and the reference is the one to carry —
-        # which is what the `[refused]` prefix test used to be, read off a
-        # sentence.  A shape this build cannot read raises rather than adopting:
-        # `_unreadable` has the argument (SDD Appendix C).
+        # means the server switched and the reference is the one to carry.  A
+        # shape this build cannot read raises rather than adopting: `_unreadable`
+        # has the argument (SDD Appendix C).
         if not isinstance(answer, dict) or "default" not in answer:
             raise _unreadable("answer with the switch it made", result)
         self._model = ref
@@ -480,12 +479,10 @@ class MCPAgentClient:
             "agent": self._agent,
             "subagent": self._subagent,
             "prompt": prompt,
-            # Where this turn came in on, as the caller knows it.  For a
-            # message the person typed that is this window (`tui` names the
-            # terminal and not the person: `human` was the first spelling and it
-            # says less, since a channel is what tells one caller's turns from
-            # another's); for one another channel handed the window, it is that
-            # channel's key, and the window is only the thing running it.
+            # Where this turn came in on, as the caller knows it.  For a message
+            # the person typed that is this window; for one another channel
+            # handed the window, it is that channel's key, and the window is only
+            # the thing running it.
             "channel": channel,
             # **This client can be asked a question and will answer it.**  A
             # window draws the `_approve` prompt and answers it with
@@ -537,11 +534,10 @@ class MCPAgentClient:
             raise
 
         # **The turn's answer is `text`, and a payload without it is refused.**
-        # This used to read as `""`, which the window draws as a question with no
-        # answer and no error — a failed turn presented as a finished one
-        # (SDD Appendix C: a value that cannot be read is not a value that is
-        # absent).  Raised here, after the `try`, so the connection stays: the
-        # server answered, and it is the answer this build cannot read.
+        # Reading it as `""` draws a question with no answer and no error — a
+        # failed turn presented as a finished one (SDD Appendix C).  Raised here,
+        # after the `try`, so the connection stays: the server answered, and it
+        # is the answer this build cannot read.
         payload = result.data
         text = payload.get("text") if isinstance(payload, dict) else None
         if not isinstance(text, str):

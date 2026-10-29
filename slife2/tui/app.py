@@ -6,16 +6,16 @@ Four things here are worth knowing before changing them:
    task group has to live in the app's event loop, and `__init__` runs before
    there is one.
 2. **Every submission is sent at once; the server's inbox is the only queue.**
-   The window used to hold messages until the running turn ended, because two
-   turns' event streams could not be ordered into one transcript. That made the
-   window the one caller excluded from the agent server's cut-in mechanism: a
-   message typed here could not reach the running turn, while a peer's could.
-   Now every message — typed, handed over by a channel, from a headless window —
-   is submitted immediately, and the server's lock orders the turns while its
-   inbox holds a message for the running turn's next iteration boundary. What
-   the window keeps is only the *display's* order: one block at a time, in
-   submission order, and a message the running turn folded in is drawn by the
-   cut-in event inside that turn rather than as a block of its own.
+   Two turns' event streams cannot be ordered into one transcript, so holding
+   a message until the running turn ended would make the window the one caller
+   excluded from the agent server's cut-in mechanism: a message typed here
+   could not reach the running turn, while a peer's could. Every message —
+   typed, handed over by a channel, from a headless window — is submitted
+   immediately, and the server's lock orders the turns while its inbox holds a
+   message for the running turn's next iteration boundary. What the window
+   keeps is only the *display's* order: one block at a time, in submission
+   order, and a message the running turn folded in is drawn by the cut-in
+   event inside that turn rather than as a block of its own.
 3. **Every event is stamped with the submission it belongs to.**  Textual
    delivers events as queued messages, so a delta from the turn that just
    finished can be handled after the *next* turn's block is already open — and
@@ -105,11 +105,6 @@ from slife2.tui.widgets import (
 
 logger = logging.getLogger(__name__)
 
-#: How long to wait before offering to attach again, when the plugin that hands
-#: this window its messages is not answering.  A pause rather than a spin: the
-#: usual reason is that it has not started yet or is being restarted, and both
-#: are over in a second or two.
-
 
 class TurnEventMessage(TextualMessage):
     """A turn event, carried from the client callback into Textual's handling."""
@@ -163,9 +158,9 @@ def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
 
     **The same quantity a live turn reports, and the only place it can come from
     on a window that has run no turn.**  `_context_tokens` is set from
-    `TurnFinished`'s `last_usage`, so a window that has only restored kept its
-    initial zero — a conversation the server had just rebuilt from fourteen turns
-    showed `0 (0.0%)` directly under a note saying fourteen turns had come back.
+    `TurnFinished`'s `last_usage`, so a window that has only restored keeps its
+    initial zero — a rebuilt conversation would show `0 (0.0%)` directly under a
+    note saying its turns had come back.
 
     `TurnRecord.context_tokens` is documented as exactly this question ("how
     large the conversation had become by the end of it — the number the *next*
@@ -282,8 +277,7 @@ class SlifeApp(App[None]):
         # a fact about the machine rather than about this window.)
         self.title = f"slife2 - {agent}"
         # (The address is *not* kept as an attribute: the client factory below
-        # closes over the parameter, so `self._url` was a second spelling of one
-        # fact that nothing ever read.)
+        # closes over the parameter.)
         self._agent = agent
         self._model = model
         self._model_label = model_label or model
@@ -617,23 +611,21 @@ class SlifeApp(App[None]):
         like any other.  The channel travels with it, and that is what the
         bubble and the turn's own record are made of.
 
-        **Nothing is held back for the transcript.**  The window used to queue
-        hand-overs until the running turn ended, on the argument that two turns'
-        event streams could not be ordered; the server's lock orders the turns,
-        and its inbox is the cut-in path.  Holding a message here was holding it
-        out of the conversation it was addressed to.
+        **Nothing is held back for the transcript.**  Hand-overs are not queued
+        until the running turn ends: the server's lock orders the turns, and its
+        inbox is the cut-in path, so holding a message here would hold it out of
+        the conversation it was addressed to.
         """
         self._submit(text, channel)
 
     def _submit(self, text: str, channel: str) -> None:
         """Put one message on its way, and put it in the display's order.
 
-        **The call starts here, not when its turn comes up.**  That is the whole
-        change that makes cut-in uniform: the server appends to its inbox before
-        it takes the lock, so a message submitted while a turn is running is
-        available to that turn's next iteration boundary.  A window that waited
-        to send was a window that had decided, on everyone else's behalf, that
-        the message could not cut in.
+        **The call starts here, not when its turn comes up.**  That is what
+        makes cut-in uniform: the server appends to its inbox before it takes
+        the lock, so a message submitted while a turn is running is available to
+        that turn's next iteration boundary.  A window that waited to send would
+        decide, on everyone else's behalf, that the message could not cut in.
 
         The task runs immediately and the window awaits it in arrival order
         (`_drain`), so the transcript still reads as the conversation happened
@@ -705,13 +697,13 @@ class SlifeApp(App[None]):
 
         **Connected is not the same as restored, and this is where the difference
         bites.**  `_connect` sets the connected flag *before* it reads the
-        history, so a caller that stopped at "connected" — which this used to —
-        would sail past a read that is still in flight and mount its turn under
-        history that lands afterwards.  The gap is not exotic: a large
-        conversation takes a moment to read, and a prompt typed (or a `deliver`
-        from another channel) in that moment is an ordinary thing to happen.  So
-        the restored half is awaited here too; `_restore` is single-flight, so a
-        window whose history is already up returns from it at once.
+        history, so a caller that stops at "connected" sails past a read that is
+        still in flight and mounts its turn under history that lands afterwards.
+        The gap is not exotic: a large conversation takes a moment to read, and
+        a prompt typed (or a `deliver` from another channel) in that moment is an
+        ordinary thing to happen.  So the restored half is awaited here too;
+        `_restore` is single-flight, so a window whose history is already up
+        returns from it at once.
 
         The lazy retry, for the case the window opened before the servers were
         up.  Both halves of the condition matter: the window's own flag says
@@ -729,11 +721,11 @@ class SlifeApp(App[None]):
         """Connect, restore, and raise when a server still cannot be reached.
 
         `_ensure_connected` plus the check it leaves to its caller, written once:
-        `_send`, `_finish_switch` and `_finish_approval` each had the same two
+        `_send`, `_finish_switch` and `_finish_approval` all need the same two
         statements, and the sentence the raise carries is a fact about this
-        window rather than about any one of them — so it is stated here once, with
-        the reason the caller wants it: a turn, a switch and an answer all need a
-        transport, and the failure reads the same to a person watching.
+        window rather than about any one of them — so it is stated here once,
+        with the reason the caller wants it: a turn, a switch and an answer all
+        need a transport, and the failure reads the same to a person watching.
         """
         await self._ensure_connected()
         if not self._connected:
@@ -783,8 +775,8 @@ class SlifeApp(App[None]):
             # cannot raise on its own data — it drops a row it cannot read — so
             # the only failure left outside the `try` is the transport's, above.
             self._restored = True
-        # The bar was the one part of the window that did not know the
-        # conversation had come back — see `context_of`.
+        # The bar is the one part of the window that would not otherwise know
+        # the conversation had come back — see `context_of`.
         self._context_tokens = context_of(turns)
         self._refresh_status()
 
@@ -822,7 +814,7 @@ class SlifeApp(App[None]):
 
         A submission whose call is still waiting on the server's lock therefore
         waits here too, which is what the status bar counts.  Nothing is held
-        back on the wire — that was the defect this replaces.
+        back on the wire.
         """
         try:
             while self._order:
@@ -890,20 +882,18 @@ class SlifeApp(App[None]):
                         entry.drawn = True
                     # `append_text` is guarded by `_turn_open`, which the
                     # `ends_turn` below clears, but `add_tool_start` is guarded
-                    # by neither: a late `ToolCallStarted` mounted a panel under
-                    # `[interrupted]`, as though the turn had gone on.  Retiring
-                    # the ticket before the next entry does the same for the
-                    # turn's tail — the cancel just does it early.
+                    # by neither: a late `ToolCallStarted` would mount a panel
+                    # under `[interrupted]`, as though the turn had gone on.
+                    # Retiring the ticket before the next entry does the same
+                    # for the turn's tail — the cancel just does it early.
                     self._finish_entry(ticket)
                     self._transcript.add_note(notes.interrupted(), ends_turn=True)
                 except Exception as exc:
                     logger.exception("turn failed")
                     # The same flush and retirement the cancel branch makes, for
-                    # the same reason: a turn that is over has no business
-                    # mounting anything, and a `ToolCallStarted` still in the
-                    # pump would mount a panel under the line below — where
-                    # `settle_tools` has already been and gone, so it would say
-                    # "running" for the rest of the session.
+                    # the same reason: a turn that is over must not mount
+                    # anything later, and the ticket is retired before the line
+                    # below so no event can arrive under it.
                     await self._flush_events()
                     self._finish_entry(ticket)
                     # A turn that died before its first event still had a
@@ -953,8 +943,7 @@ class SlifeApp(App[None]):
         order, so everything at or below it is over.  That is what keeps a late
         fragment of a turn (`TextDelta` after the result, a tool call that was
         already answered) out of the next turn's block — the module docstring's
-        ticket rule, which no longer needs a ticket *counter* because the
-        submission's own id is the ticket.
+        ticket rule, with the submission's own id as the ticket.
         """
         self._last_finished = ticket
         with contextlib.suppress(ValueError):
@@ -1080,7 +1069,7 @@ class SlifeApp(App[None]):
             # across every model call it took, which is what the line under the
             # answer reports.  Taking the bill for the size reads as a context
             # two or three times fuller than it is on any turn that called a
-            # tool, and it was what this did.
+            # tool.
             self._context_tokens = event.last_usage.total_tokens
             self._transcript.set_usage(event.usage.total_tokens)
             self._refresh_status()

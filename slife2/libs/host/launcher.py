@@ -207,7 +207,7 @@ def specs(config: Config) -> list[ServerSpec]:
     format, so every OpenAI-compatible provider is served by the same process
     and `stream_chat(provider=..., model=...)` says whose credentials to use.
     A provider with its own process would mean three processes for three
-    providers, which is what this replaced.
+    providers.
 
     Which families are needed is derived from the provider table: a protocol no
     provider uses has nothing to serve, and starting it would be a process
@@ -227,10 +227,10 @@ async def _probe_async(spec: ServerSpec, timeout: float) -> bool:
 
     **One connection path.**  `open_server` asks the port before building a
     client, wraps an enter failure as a `ConnectionError`, and checks the
-    identity — so a server that is simply down comes back as an ordinary
-    connection refusal, not as the transport's own `RuntimeError` that a probe
-    logging by exception type mistook for a defect in the probe.  A second
-    client construction here would be a second answer to the same question.
+    identity — so a server that is simply down is an ordinary connection
+    refusal, not the transport's own `RuntimeError` that a probe logging by
+    exception type would report as a defect in the probe.  A second client
+    construction here would be a second answer to the same question.
     """
     client = await open_server(
         spec.url,
@@ -345,9 +345,9 @@ def open_catalogue(config: Config) -> ToolCounts:
     part of that this process cannot write itself: `agents/tools.db` belongs to
     the *hub*, which is its one writer (`slife2.plugins.toolhub.server.Catalogue`),
     so the way to make it exist is to ask the hub the question a turn asks —
-    `list_tools` — once, before the window opens.  Until this existed the file
-    appeared only if a model turn happened to ask, so a data directory an agent
-    had been started in and not yet used held its `slife2.yaml`, the `agents/`
+    `list_tools` — once, before the window opens.  Without this ask the file
+    appears only if a model turn happens to ask, so a data directory an agent
+    has been started in and not yet used holds its `slife2.yaml`, the `agents/`
     and `skills/` `slife2._open_home` makes, and no catalogue at all.
 
     **And the ask names the home and nothing else.**  `Peer.call_tool` puts this
@@ -399,17 +399,13 @@ def _argv(spec: ServerSpec) -> list[str]:
         "--port",
         str(spec.port),
     ]
-    # The *resolved* directory, not the environment variable.  A child is
-    # spawned with its working directory set away from the checkout, so one left
-    # to work it out for itself would decide it is an installation, look in
-    # `~/.slife2`, and find no config there — while this process, which read the
-    # config it was pointed at, believes otherwise.  The symptom is a server
-    # that refuses to start over a file its parent has just read.
-    # `.resolve()` is the load-bearing half of "the resolved directory".  The
-    # child is spawned with its working directory set to `<data>/runtime`, so a
-    # relative `--data-dir rel/chk` — from the flag or from `SLIFE2_DATA_DIR` —
-    # would be re-resolved *underneath that*, pointing the child at a directory
-    # that has no config in it while this process reads the one it was given.
+    # The *resolved* directory, not the environment variable.  The child is
+    # spawned with its working directory at `<data>/runtime`, so a relative
+    # `--data-dir rel/chk` — from the flag or from `SLIFE2_DATA_DIR` — would be
+    # re-resolved *underneath that*, leaving the child on a directory with no
+    # config while this process reads the one it was given.  `.resolve()` is the
+    # load-bearing half; left to work it out itself, a child would decide it is
+    # an installation, look in `~/.slife2`, and find no config there either.
     argv += ["--data-dir", str(data_dir().resolve())]
     return argv
 
@@ -474,14 +470,14 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     contends — and the probe inside the lock is what makes the wait meaningful:
     whoever held it has just started the server, so the answer changes.
 
-    **The port is asked about inside the lock and not before it**, which is a
-    correctness fix rather than a tidying.  A port that is bound and not yet
-    answering is what a *concurrent cold start* looks like from here — two
-    instances launched together, this one probing while the other's child is
-    between `bind` and `serve` — and answering `CONFLICT` there refused to start
-    against our own server coming up.  Inside the lock the question means what it
-    says: anyone else starting this server holds that lock, so by the time this
-    runs, bound-and-silent is somebody else's process and not ours mid-boot.
+    **The port is asked about inside the lock and not before it.**  A port that
+    is bound and not yet answering is what a *concurrent cold start* looks like
+    from here — two instances launched together, this one probing while the
+    other's child is between `bind` and `serve` — so asking before the lock
+    would refuse to start against our own server coming up.  Inside the lock
+    the question means what it says: anyone else starting this server holds
+    that lock, so by the time this runs, bound-and-silent is somebody else's
+    process and not ours mid-boot.
     """
     if probe(spec):
         return _reuse(spec, config_path=config_path)
@@ -504,9 +500,9 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     except (TimeoutError, OSError, subprocess.SubprocessError) as exc:
         # `spawn` can fail before there is anything to probe: the log file
         # cannot be opened, or both `Popen` attempts are refused.  Every other
-        # path here reports a server's outcome rather than raising, and this
-        # was the one that did not — so a start failure arrived as a traceback
-        # out of `slife2 run` instead of the line naming the server and why.
+        # path here reports a server's outcome rather than raising, so this one
+        # does too — a start failure is the line naming the server and why, not
+        # a traceback out of `slife2 run`.
         return Outcome(spec, Status.FAILED, detail=f"{type(exc).__name__}: {exc}")
 
 
@@ -570,16 +566,14 @@ def claim_agent(name: str, *, headless: bool = False) -> Generator[None]:
         raise AgentInUse(name, read_claim(name))
 
     # **The acquire is translated on its own, and the caller's body is not
-    # inside it.**  This used to be one `try:` around the whole `with
-    # exclusive(...)`, `yield` and all, so the `except TimeoutError` covered
-    # everything the window ever did: a `TimeoutError` raised anywhere in
-    # slife2's start-up or in `app.run()` — `toolclient.remote_tools` asks the
-    # hub under `work.hub`, and an ask that runs out of time raises exactly this
-    # — came back out as `AgentInUse(name, …) from None`, which says "agent
-    # 'slife2' is already running (pid …)" about a name nothing was holding and
-    # throws the real failure away.  The docstring above is the contract, and it
-    # is about the *claim*: the only thing that can say "another live instance
-    # already answers to this name" is `exclusive`'s own timeout.
+    # inside it.**  The docstring above is the contract, and it is about the
+    # *claim*: the only thing that can say "another live instance already
+    # answers to this name" is `exclusive`'s own timeout.  A `TimeoutError` from
+    # anywhere in the window's body — `toolclient.remote_tools` asking the hub
+    # under `work.hub`, an ask that runs out of time — would otherwise come back
+    # as `AgentInUse(name, …) from None`, saying "agent 'slife2' is already
+    # running (pid …)" about a name nothing was holding and throwing the real
+    # failure away.
     held = contextlib.ExitStack()
     try:
         held.enter_context(
@@ -646,14 +640,13 @@ _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
 #: embeddings is a context that fails to start, not one that starts slowly.
 #:
 #: **The hub's entry is every plugin it asks, minus the three that reach it**,
-#: and it is a comprehension rather than thirteen names because the list did
-#: drift: `a2a` landed, the hub asks it for its tools, and the tuple nobody had a
-#: reason to revisit said otherwise.  What the edge is for is not
-#: politeness — `list_tools` *refuses* while any plugin is not answering
-#: (`slife2.plugins.toolhub.server`: a missing hub is a plugin gone and fails the turn), so a
-#: plugin that comes up after the hub is a first turn that cannot run.  The hub
-#: asks the plugins with nothing to offer the model too, which is why this is the
-#: whole set and not the ones with tools.
+#: and it is a comprehension rather than thirteen names so that a plugin added
+#: later is one the hub waits for without a tuple to revisit.  What the edge is
+#: for is not politeness — `list_tools` *refuses* while any plugin is not
+#: answering (`slife2.plugins.toolhub.server`: a missing hub is a plugin gone
+#: and fails the turn), so a plugin that comes up after the hub is a first turn
+#: that cannot run.  The hub asks the plugins with nothing to offer the model
+#: too, which is why this is the whole set and not the ones with tools.
 #:
 #: **`agent` is a peer the agent server reaches and this table cannot say.**  Its
 #: tool list and its turn log both come from a peer, and the hub is one of them —
@@ -671,11 +664,10 @@ NEEDS: dict[str, tuple[str, ...]] = {
     "context": ("embeddings",),
     # **The window, and not the agent server** (SDD §9.1).  WeChat's poll
     # loop hands a message to the conversation the window is showing, which is
-    # the one inbox everything this system takes goes into — and the agent server
-    # was the peer named here until that changed, an edge that outlived the code
-    # by a release.  Ordering rather than correctness, which is what every edge
-    # here is: a login resumed before its peer is up would be a session watching
-    # a bridge for messages it cannot deliver, and its own call is what notices.
+    # the one inbox everything this system takes goes into.  Ordering rather
+    # than correctness, which is what every edge here is: a login resumed before
+    # its peer is up would be a session watching a bridge for messages it cannot
+    # deliver, and its own call is what notices.
     "wechat": ("tui",),
     # The cabinet embeds through the embeddings server, like the context store:
     # a write places its vector in the same call, so a cabinet that cannot embed
@@ -832,8 +824,7 @@ def _status_of(spec: ServerSpec) -> Outcome:
     server answering with no record of ours was started by hand, so `status`
     calling it merely "running" while `down` refuses to stop it is two commands
     disagreeing about one process.  The `UNMANAGED` branch in `slife2 status`'s
-    output — "(not started by slife2)" — existed and could never be reached
-    without this.
+    output — "(not started by slife2)" — is what this makes reachable.
     """
     if probe(spec):
         record = read_record(spec.url)

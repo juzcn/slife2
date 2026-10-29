@@ -250,14 +250,10 @@ class AgentLoop:
         #: not about this decision.
         self._compress = compress
         #: Model calls allowed in one turn before it is cut off, or **0 for no
-        #: cap at all**.  Zero is the config's spelling for "nobody asked for
-        #: one" (`slife2.libs.host.config.AgentSettings.max_iterations`, where
-        #: an absent key is the same 0), and it is the default here for the same
-        #: reason: a cap is something somebody asks for, and a turn that runs
-        #: until the model stops asking for tools is what a loop is when nobody
-        #: has said otherwise.  So there is one rule rather than two — a cap
-        #: exists when the number is positive — and where one exists it produces
-        #: an ordinary result, not an exception.
+        #: cap at all**.  A cap is something somebody asks for: an absent key is
+        #: the same 0 (`config.AgentSettings.max_iterations`), and a turn runs
+        #: until the model stops asking for tools.  Where a cap exists it
+        #: produces an ordinary result, not an exception.
         self._max_iterations = max_iterations
         #: The bill for the turn in flight, and the last completed call's own.
         #: Kept on the loop because **a cancellation has no return value to
@@ -486,29 +482,24 @@ class AgentLoop:
             # call of it has an answer.
             #
             # **The assistant message and its answers are appended together,
-            # with no await between them** — the same rule the harness pair
-            # above follows, for the same reason.  An assistant message whose
-            # calls are only partly answered is the one history state every
-            # provider rejects, and appending the message before fitting its
-            # results left exactly that whenever a fit raised: `_fit` is the
-            # caller's own callback, so it is the iteration that can fail (a
-            # cabinet
-            # that will not open, a discriminator that stalled), and nothing
-            # downstream repairs a failure — a failed turn keeps its messages,
-            # so the conversation failed every later turn until it was rebuilt.
+            # with no await between them.**  An assistant message whose calls are
+            # only partly answered is the one history state every provider
+            # rejects.  `_fit` is the caller's own callback, so it is the
+            # iteration that can fail (a cabinet that will not open, a
+            # discriminator that stalled), and a failed turn keeps its messages:
+            # appending the message before its answers would fail every later
+            # turn until the conversation was rebuilt.
             #
-            # **An interruption is completed rather than dropped**, and that is
-            # a different rule from the failure above: nothing downstream could
-            # reconstruct the answers the batch had already produced, and a turn
-            # the person asks to continue cannot resume from a question alone.
-            # The completed batch is the one thing that survives the turn, and
-            # the agent server keeps it rather than truncating it
-            # (`send_message`'s cancellation repair).
+            # **An interruption is completed rather than dropped**, a different
+            # rule from the failure above: nothing downstream could reconstruct
+            # the answers the batch had already produced, and a turn the person
+            # asks to continue cannot resume from a question alone.  The
+            # completed batch is the one thing that survives the turn, and the
+            # agent server keeps it (`send_message`'s cancellation repair).
             #
             # What `_fit` is handed is therefore the conversation *before* this
-            # iteration's answer, which is also the honest list to judge a
-            # result
-            # against: it no longer contains a half-written batch.
+            # iteration's answer, which is also the honest list to judge a result
+            # against: it contains no half-written batch.
             answers: list[Message] = []
             cutins: list[tuple[str, str, str]] = []
             for index, call in enumerate(result.tool_calls):
@@ -519,12 +510,11 @@ class AgentLoop:
                     fitted = await self._fit(call, text, messages)
                 except asyncio.CancelledError:
                     # **The batch is completed on the way out, not dropped.**
-                    # The calls that already ran keep the answers they gave, a
-                    # call whose fit was cut keeps the text it had returned, and
-                    # every call that produced nothing says so.  The appends
-                    # have no await between them for the reason the whole batch
-                    # does: the interruption is in flight, and the next checkpoint
-                    # would cancel this cleanup before it was written.
+                    # Calls that already ran keep their answers, a call whose fit
+                    # was cut keeps the text it had returned, and every call that
+                    # produced nothing says so.  The appends have no await
+                    # between them: the interruption is in flight, and the next
+                    # checkpoint would cancel this cleanup before it was written.
                     answers.extend(interrupted_results(result.tool_calls[index:], text))
                     messages.append(answer)
                     messages.extend(answers)
@@ -698,15 +688,11 @@ class AgentLoop:
                 elapsed_ms=elapsed_ms,
             ),
         )
-        # **The successful call used to leave no trace at all.**  The only tool
-        # lines in the 2026-10 corpus were warnings about calls that failed, so
-        # "what did this turn actually do for four minutes" had no answer in any
-        # log; a transcript showed the call but the record it lives in is the
-        # conversation's, not the operator's.  One line per *foreground* call:
-        # a background call has not run yet when its id is returned, and
-        # `slife2.libs.harness.async_tasks` logs its own schedule and finish.
-        # Arguments are deliberately absent — they can hold a path, a message or
-        # a credential, and the name and duration are what a trace needs.
+        # **One line per *foreground* tool call.**  A background call has not run
+        # yet when its id is returned, and `slife2.libs.harness.async_tasks` logs
+        # its own schedule and finish.  Arguments are deliberately absent — they
+        # can hold a path, a message or a credential, and the name and duration
+        # are what a trace needs.
         if not meta.background:
             logger.info(
                 "tool_call name=%s ok=%s elapsed_ms=%d result_chars=%d",

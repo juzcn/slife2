@@ -8,20 +8,13 @@ back on its feet after a restart.  The turns themselves come from the library
 path rather than reaching it over MCP, so the whole plugin is that import with a
 serve face on it.
 
-Why the turns moved out of `slife2-db`
---------------------------------------
-They used to be served by the db plugin, beside the tool catalogue.  Two things
-were wrong with that, and they are the same thing said twice.  The first is that
-a *store* which is shared by two clients has to be a process, and neither of
-these is: the turns have exactly one writer (this plugin) and so does the
-catalogue (the hub), and "one writer" is a property of a SQLite file rather than
-of a server.  The second is that the store is a library — `TurnStore` is imported
-by the process that writes it, and the plugin is a serve face over that import
-rather than a second implementation of it.
-
-So the db plugin is gone.  What it was for — one holder of the schema, one
-embedder hop, one startup pass over every file — is what this plugin and the hub
-each do for the half they own, from the same library.
+Turns are a library, not a plugin
+---------------------------------
+The turns have exactly one writer — this plugin — and the catalogue has exactly
+one writer — the hub; "one writer" is a property of a SQLite file rather than of
+a server.  `TurnStore` is therefore imported by the process that writes it, and
+this plugin is a serve face over that import: one holder of the schema, one
+embedder hop, one startup pass over every file, for the half it owns.
 
 The two decisions, and where they sit in a turn
 -----------------------------------------------
@@ -152,9 +145,9 @@ async def _ask_model(
     **An answer this build cannot read is refused, not read as a silent one.**
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
-    result — so a model server from another build arrived here as "the model
-    answered with nothing": `_discriminate` logged `recall_discriminator_unparsed`
-    and kept the context, and every rebuild for the rest of the session did the
+    result — so a model server from another build would arrive here as "the model
+    answered with nothing": `_discriminate` logs `recall_discriminator_unparsed`
+    and keeps the context, and every rebuild for the rest of the session does the
     same, with the log pointing at the model's output rather than at the
     transport.  `slife2.clients.model` raises for exactly this on the loop's own
     hop, and this is the same check with the same sentence, because the cause is
@@ -266,9 +259,8 @@ def build_server(
         expensive step: every turn in every file is embedded again, and that is
         the price of changing the model rather than a fault to be avoided.
 
-        This is the pass that used to run in the db plugin's lifespan.  It runs
-        here now because the turns do: a file belongs to the plugin that owns its
-        schema, and a startup pass is part of owning one.
+        The pass belongs here because the turns do: a file belongs to the plugin
+        that owns its schema, and a startup pass is part of owning one.
         """
         model = await embedding.get()
         # Every per-agent store, the agent's own and its subagents'.  Named by
@@ -410,10 +402,7 @@ def build_server(
         this case: the situation is the shared one — a call that did not say
         whose it is, on a process that serves everybody — but the *reason* is
         this plugin's, because the road that always supplies an identity is the
-        hub, and a reader who is told so knows where to look.  It was raised as a
-        bare `ValueError` with the sentence in it, which crossed the wire as the
-        same `ToolError` (FastMCP wraps what a handler raises) while being the
-        one refusal in this system that was not written in the shared words.
+        hub, and a reader who is told so knows where to look.
         """
         return client_reader(
             "memory to read",
@@ -684,12 +673,11 @@ def build_server(
         and hands that to the caller; it falls back here only when the store's
         list has turned out to be the caller's after all.
 
-        It used to name a fifth exit that does not exist, "the switch is off":
-        `ContextSettings` has no switch, and nothing here reads one, so a reader
-        looking for the arm that honours it was looking for an arm nobody had
-        written.  The discriminator that answers nothing is the real fourth, and
-        `rebuild` logs it as its own reason (`no_decision`, not
-        `context_sufficient`) because it is not a decision the model made.
+        There is no fifth exit named "the switch is off": `ContextSettings` has
+        no switch, and nothing here reads one.  The discriminator that answers
+        nothing is the fourth, and `rebuild` logs it as its own reason
+        (`no_decision`, not `context_sufficient`) because it is not a decision
+        the model made.
 
         `kept` is what the caller in hand, `recalled` none of it — and the two
         together are what `rebuild` always reports, so a reader of the answer never
@@ -814,9 +802,9 @@ def build_server(
         answering.
 
         **A model the config cannot resolve is not that answer.**  A broad
-        `except` folded a `ConfigError` in with a declared-absent window, so a
-        broken config silently dropped the token cap and let a recall spend by
-        count — the overfill the cap exists to stop.  A window that cannot be
+        `except` would fold a `ConfigError` in with a declared-absent window, and
+        a broken config would silently drop the token cap and let a recall spend
+        by count — the overfill the cap exists to stop.  A window that cannot be
         *asked for* is a failure, not a zero (SDD Appendix C: a weaker path is
         not a substitute for a missing capability).
         """
@@ -972,7 +960,7 @@ def build_server(
         # other: this line is the only sight anybody gets of the discriminator
         # (`recall_discriminator_failed` and `_unparsed` are written a moment
         # above and say *why* there was none), and a single `context_sufficient`
-        # for both made counting "the model decided the context was enough"
+        # for both would make counting "the model decided the context was enough"
         # count every timeout and every unreadable reply as a decision the model
         # never made.  A decision that asks for nothing is the model's word; no
         # decision at all is the transport's silence.
@@ -1049,11 +1037,8 @@ def build_server(
         # this answer as its context, so returning the in-memory rebuild while
         # the *persisted* list did not move leaves the two disagreeing, and the
         # next start replays the stale one — a conversation that comes back one
-        # turn short, silently.  The guard that used to swallow this described a
-        # tolerance the code did not have anyway (a busy or full disk raised out
-        # of `rebuild` regardless); refusing it is the honest half, and the
-        # caller that cannot have the write is told rather than handed a context
-        # the log will not have on the next start.
+        # turn short, silently.  The caller that cannot have the write is told
+        # rather than handed a context the log will not have on the next start.
         #
         # **A write that lost the conversation is not that failure.**  With
         # `expected` the store answers `None` when the list is no longer the one
@@ -1104,8 +1089,9 @@ def build_server(
 
         **The budget is headroom below the *ceiling*, and the ceiling is the
         bound a kept context is measured against.**  Subtracting the *floor*
-        instead would grant no headroom at all: the trim compacts down to the
-        floor, so a live context sits at or above it for most of a session.
+        instead would grant no headroom at all: the floor is what a recall may
+        spend when nothing was kept, so a live context sits at or above it for
+        most of a session.
 
         **What was kept is excluded from what is recalled.**  The two halves are
         joined by id, so a turn in both is one turn; the recall would have spent
@@ -1120,10 +1106,12 @@ def build_server(
         stands.  That gives a sentence recall at least two questions, so the
         paraphrase is never the only way the subject is found — unless the
         decision set `prompt_as_sentence` false, which is what it does when the
-        input names nothing ("hi", "continue", "what about the other one?").  A
-        keyword-only recall keeps its query as the one meaning question — the
-        phrase is the deliberate one, and a second raw question there can only
-        reorder it — and a period recall is not narrowed by the input at all.
+        input names nothing ("hi", "continue", "what about the other one?") —
+        the model sees the input and the conversation, so that judgement is its
+        to make.  A keyword-only recall keeps its query as the one meaning
+        question — the phrase is the deliberate one, and a second raw question
+        there can only reorder it — and a period recall is not narrowed by the
+        input at all.
         """
         query = str(condition.get("query") or "")
         raw_sentences = condition.get("sentences")
@@ -1158,16 +1146,8 @@ def build_server(
             logger.info("recall_anchor_ignored anchor=%s", anchor)
             anchor = None
 
-        # **The person's own words are a question too.**  The discriminator's
-        # sentence is a paraphrase of what the input points at; the input is the
-        # text it was paraphrasing, and the meaning leg reads it as it stands.
-        # So a sentence recall asks the person's way as well — at least two
-        # questions — unless the decision said the input names nothing ("hi",
-        # "continue", "what about the other one?"): the model sees the input and
-        # the conversation, and that judgement is its to make.  A keyword-only
-        # recall keeps its query as the one meaning question (the phrase is the
-        # deliberate one, and a second raw question there can only reorder it),
-        # and a period recall is not narrowed by the input at all.
+        # What the input adds is the docstring's rule; `prompt_as_sentence` is
+        # the decision's say over whether it joins the sentences at all.
         asker = await embedding.get() if (query or sentences) else None
         include_prompt = condition.get("prompt_as_sentence") is not False
         if (

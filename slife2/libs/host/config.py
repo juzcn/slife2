@@ -183,17 +183,15 @@ SUBAGENT_ORG = "subagent"
 
 #: The tools a network offers the model, by verb.  **Here rather than in the
 #: plugin that serves them**, because one of them is also what the launcher
-#: probes with (`expected_tool`) and a probe looking for a name the server does
+#: probes with (`expected_tool`), and a probe looking for a name the server does
 #: not serve is a server that never starts.  `Net.tool` is the other half:
 #: `peer_agent_send_message` and `subagent_send_message` are one verb and two
 #: networks.
 #:
 #: **All of them are shared**, and what a network calls its members is its
-#: `prefix` (`peer_agent_`, `subagent_`) — so `list` is `peer_agent_list` on one
-#: side and `subagent_list` on the other.  `list_agents` was the remote network's
-#: own word for the roster, and it is gone: it named *agents* while every other
-#: word that network teaches says *peer agents*, and the name a model calls is
-#: not the place for the protocol's vocabulary.
+#: `prefix` (`peer_agent_`, `subagent_`), so `list` is `peer_agent_list` on one
+#: side and `subagent_list` on the other.  The model's vocabulary never borrows
+#: the protocol's.
 SEND_MESSAGE = "send_message"
 CANCEL_TASK = "cancel_task"
 LIST = "list"
@@ -506,26 +504,17 @@ class Plugin:
 
 #: Every server slife2 starts, in the order they are described in.
 #:
-#: **The order of the two halves is load-bearing and this is the whole of it.**
-#: The model backends come first because a model server answering first is what
-#: keeps a first turn from failing and retrying; of those, `openai-responses` is
-#: appended last on purpose, and to its own protocol rather than as a flag on
-#: `openai-completions` — the Responses API takes a different input shape, names
-#: its tools differently and streams different events, so it is a process of its
-#: own like every other row here.  What follows is `LOCAL_SERVERS`' order, which
-#: is a preference rather than a dependency: **the two edges that are
-#: dependencies are not here** — `embeddings` before `context`, because the
-#: context plugin opens the embedder before it serves anything, and every plugin
-#: the hub asks before `toolhub` — because prose is not something a launcher can
-#: act on, and they are a table (`slife2.libs.host.launcher.NEEDS`).  Everything
-#: not named there starts at once, so this order only decides who is first off
-#: the line.
+#: **The order of the two halves is load-bearing.**  The model backends come
+#: first, so a first turn is not a failed attempt and a retry; `openai-responses`
+#: is last because it is a protocol of its own, not a flag on
+#: `openai-completions` — different input shape, tool names, and events.  What
+#: follows is `LOCAL_SERVERS`' order, a preference rather than a dependency: the
+#: two real dependencies live in `launcher.NEEDS` — `embeddings` before
+#: `context`, and every plugin the hub asks before `toolhub`.
 #:
-#: **There is no `db` here**, and its absence is the design rather than a gap.
-#: It served the turns and the tool catalogue, and neither needed a process: a
-#: store has one writer, and "one writer" is a property of a SQLite file, not of
-#: a server.  The turns are `context`'s now and the catalogue is the hub's, both
-#: out of the same library (`slife2.libs.store.db`).
+#: **There is no `db` here, and its absence is the design.**  A store has one
+#: writer, and that is a property of a SQLite file, not of a server: the turns
+#: are `context`'s and the catalogue is the hub's, both out of the same library.
 PLUGINS: tuple[Plugin, ...] = (
     # One port per wire protocol, not per provider: a process speaks one format,
     # and `stream_chat(provider=...)` picks whose credentials.
@@ -553,13 +542,11 @@ PLUGINS: tuple[Plugin, ...] = (
         port=24003,
         api=True,
     ),
-    # Embeddings are an OpenAI-protocol endpoint and *not* one of the three
-    # above, so they are served by a process of their own rather than borrowed
-    # from `openai-completions`: that process is built from the chat providers,
-    # and there is no chat provider here to attach an embedding model to.  It is
-    # a plugin (rather than a library) for SDD §2.4's reason — it holds a key — and
-    # it identifies itself by `describe`, the tool a store calls before it can
-    # build an index.  See `slife2.plugins.llm.embeddings_server`.
+    # Embeddings are an OpenAI-protocol endpoint and not one of the three above,
+    # so they are a process of their own: that process is built from chat
+    # providers, and there is no chat provider here to attach an embedding model
+    # to.  It is a plugin because it holds a key (SDD §2.4), and it identifies
+    # itself by `describe`, the tool a store calls before it can build an index.
     Plugin(
         key="embeddings",
         module="slife2.plugins.llm.embeddings_server",
@@ -614,10 +601,10 @@ PLUGINS: tuple[Plugin, ...] = (
         port=24042,
     ),
     # The two whose whole job is somebody else's servers: the `mcp:` section and
-    # the `rest-api:` one.  They hold the connections the toolhub used to hold,
-    # and declare what they hold to it — the hub keeps the tool *set* and no link
-    # to anybody.  Neither offers the model anything of its own, so each
-    # identifies itself by the tool it holds them *with*.
+    # the `rest-api:` one.  They hold the connections and declare them to the
+    # hub, which keeps the tool *set* and no link.  Neither offers the model
+    # anything of its own, so each identifies itself by the tool it holds them
+    # *with*.
     Plugin(
         key="mcp-tools",
         module="slife2.plugins.mcp_tools.server",
@@ -831,15 +818,10 @@ def plugin(key: str) -> Plugin:
 #: reports them.  A client proves it reached the server it meant by comparing
 #: against these; see `slife2.libs.plugin.protocol.identifies`.
 #:
-#: **Views over `PLUGINS` and not a second table.**  They are spelled as
-#: constants rather than read out of the rows at each call site because that is
-#: how they were written down before there was a table, and a caller that wants
-#: `AGENT_SERVER_NAME` should not have to know that a registry exists to get it.
-#: Two things follow, and both are the point of the arrangement: a plugin module
-#: binds its own `SERVER_NAME` to the constant rather than to a literal, so the
-#: two spellings that used to drift are one; and `REMOTE`/`LOCAL` read their
-#: `server_name` off the same rows (`Net.server_name`), which is what removed the
-#: last place the mesh's name was written twice.
+#: **Views over `PLUGINS`, not a second table.**  Spelled as constants so a
+#: caller that wants `AGENT_SERVER_NAME` does not have to know a registry exists,
+#: and bound by each plugin module to its own `SERVER_NAME` — one spelling, not
+#: two that can drift.
 AGENT_SERVER_NAME = plugin("agent").name
 TUI_SERVER_NAME = plugin("tui").name
 CONTEXT_SERVER_NAME = plugin("context").name
@@ -1479,12 +1461,11 @@ class SubagentSettings:
     #:
     #: **A cap because nothing else bounds it.**  The tool set is the one
     #: catalogue and nothing filters it, so a subagent may make a subagent, and
-    #: without this a model can grow a tree of them without limit.  What it costs
-    #: when it does is small per member — a subagent is a conversation in the
-    #: shared agent server, measured at ~1.5 MB against a `--headless` instance's
-    #: ~100 MB (`SDD §4.5`) — so the number here is about a runaway rather
-    #: than about the machine, and it is larger than the four an agent task gets
-    #: because a subagent is a thing an agent *has* rather than a run it started.
+    #: without this a model can grow a tree without limit.  The cost per member is
+    #: small — a conversation in the shared agent server, ~1.5 MB against a
+    #: headless instance's ~100 MB (SDD §4.5) — so the number is about a runaway,
+    #: not the machine.  It is larger than an agent task's four because a
+    #: subagent is a thing an agent *has* rather than a run it started.
     max_running: int = 32
 
 
@@ -1498,11 +1479,10 @@ class ContextSettings:
     section is how a setting comes to mean two things.
     """
 
-    #: Both are **fractions of the model's own context window**, and both are
-    #: therefore only meaningful where the model's config declares one.  The
-    #: ceiling is what a kept context is measured against — a recall's budget is
-    #: the headroom below it — and the floor is the size a recall may spend when
-    #: nothing was kept.
+    #: Both are **fractions of the model's own context window**, so both are
+    #: meaningful only where the model's config declares one.  The ceiling
+    #: measures a kept context; the floor is what a recall may spend when nothing
+    #: was kept.
     ceiling: float = 0.8
     floor: float = 0.2
     #: Most turns one recall may select.  A cap rather than a preference, for the
@@ -1510,19 +1490,16 @@ class ContextSettings:
     #: when the model's window is undeclared.
     recall_limit: int = 40
     #: The similarity a *measured* candidate must reach to be recalled.  The
-    #: keyword leg is exempt — it has no similarity to measure, and an exact
-    #: match is a stronger signal than a cosine neighbourhood (`slife2.libs.turn.context`).
+    #: keyword leg is exempt: it has no similarity to measure, and an exact match
+    #: is a stronger signal than a cosine neighbourhood.
     min_similarity: float = 0.45
     #: How long the discriminator call may take before the turn runs on the
-    #: context it already has.  Generous for a remote model, tight for the
-    #: reason `slife2.plugins.context.server` gives: the answer is optional by design, so
-    #: a slow one is only making the *turn* late.
+    #: context it already has.  Generous for a remote model, because the answer is
+    #: optional by design: a slow one only makes the turn late.
     #:
-    #: **The default is the registry's value, read when a config is built** —
-    #: `slife2.helpers.timeouts.work.recall_discriminator` — so this is an *override* and
-    #: not a second seat for the number.  Read through a factory rather than as a
-    #: def-time default, which would capture it at import and ignore a patch
-    #: (`slife2.helpers.timeouts` states the rule).
+    #: **The default is the registry's** (`timeouts.work.recall_discriminator`),
+    #: read when a config is built through a factory rather than a def-time
+    #: default, which would capture it at import and ignore a patch.
     timeout: float = field(
         default_factory=lambda: _T.timeouts.work.recall_discriminator
     )
@@ -1580,10 +1557,9 @@ class ToolServerSettings:
     args: tuple[str, ...] = ()
     #:
     #: `repr=False` on this and `headers`, because both can hold a secret that
-    #: was resolved eagerly (a ``keyring:`` URI); a ``${VAR}`` stays the
-    #: reference it was written as.  Everything that prints a config — a log
-    #: line, a traceback, a REPL — goes through the generated `__repr__`, so
-    #: this is what keeps a live key out of all three.
+    #: was resolved eagerly (`keyring:`); a `${VAR}` stays the reference it was
+    #: written as.  Everything that prints a config goes through `__repr__`, so
+    #: this keeps a live key out of a log line, a traceback, and a REPL.
     env: dict[str, str] = field(default_factory=dict, repr=False)
     #: http: the endpoint, either transport.  A URL ending in `/sse` is the
     #: older SSE transport; anything else is Streamable HTTP.
@@ -1599,10 +1575,10 @@ class ToolServerSettings:
     #: currently-broken server stays in the file without being in the way.
     enabled: bool = True
     #:
-    #: **There is no `autoload` here any more.**  Whether a tool starts in the
-    #: model's list is a fact about the *tool*, not about the server that offers
-    #: it: one server may offer ninety endpoints of which two are wanted every
-    #: turn, and a flag here could only say "all of them".  The names live in
+    #: **`autoload` is not here.**  Whether a tool starts in the model's list is
+    #: a fact about the *tool*, not about the server that offers it: one server
+    #: may offer ninety endpoints of which two are wanted every turn, and a flag
+    #: here could only say "all of them".  The names live in
     #: `tool_load.autoload`, where the model calls them by.
 
     @property
@@ -1625,8 +1601,8 @@ class ToolServerSettings:
 
 
 #: How many function tools the model's list may hold before the least recently
-#: used are evicted.  `tool_load.threshold`, and the number was arrived at by
-#: watching a real tool set: nothing about slife2 is a reason to differ.
+#: used are evicted.  The number came from watching a real tool set; nothing
+#: about slife2 is a reason to differ.
 DEFAULT_TOOL_LOAD = 100
 
 #: The tools every configuration starts with in the model's list, **and the one
@@ -1692,58 +1668,32 @@ class ToolLoadSettings:
     autoload: tuple[str, ...] = REQUIRED_AUTOLOAD
 
 
-#: How much of one tool result a model is handed.  **One number for both sides
-#: of the arrangement**, and that is the whole of why it is a setting rather
-#: than two: the harness spends it shortening a result too large for the
-#: conversation, and a tool of ours that hands text back — `dump_read` today —
-#: caps itself with it.  Two numbers would be two answers to "how much fits",
-#: and the failure is a loop with this system's machinery at both ends: a reader
-#: handing the harness's own shortening more than it shortened away.
+#: How much of one tool result a model is handed.  **One number for both
+#: sides**: the harness spends it shortening a result too large for the
+#: conversation, and a tool that hands text back — `dump_read` — caps itself with
+#: it.  Two numbers would be two answers to "how much fits", and the failure is a
+#: loop with this system's machinery at both ends.
 #:
-#: **The number is measured, and it moved once — down in effect, not up.**
-#: Measured off this machine's turn log on 2026-10-16: **182 turns, 349 tool
-#: results, median 48 tokens, p90 1,587, largest 5,284**.  Against the 4,000
-#: this used to be, the mechanism fired on **7 results (2.0%)**; against 8,000 it
-#: fires on none, and still catches the case it exists for — an output whose
-#: length nobody controls (a shell command, a huge file read) riding in every
-#: request the conversation makes afterwards.
+#: **Measured, and above every ordinary result.**  On the 2026-10 turn log (349
+#: results) the median was 48 tokens, p90 1,587, the largest 5,284: at 8,000 the
+#: mechanism fires on none of them, and still catches the case it exists for — an
+#: output whose length nobody controls (a shell command, a huge file read) riding
+#: in every later request.  A result over the window pays a discriminator call
+#: carrying the whole conversation plus a dump file, to save at most ~1,300
+#: tokens; a model call to save a kilobyte is a bad trade at any window size.
 #:
-#: **The window sits between the ordinary result and the deliberately long one,
-#: and that is what makes shortening a rare event** — which is what it should be,
-#: because what it costs is out of proportion to what it saves.  A result over
-#: the window pays a *discriminator call* — a model call carrying the whole
-#: conversation — plus a dump file and, when the model wants the rest, a
-#: `dump_read` round trip; what it buys is the lines the window did not keep,
-#: which on this log is at most 1,284 tokens (5,284 − 4,000).  A model call to
-#: save a kilobyte is a bad trade at any window size, and the ~1M-token windows
-#: this system runs on (`slife2.yaml`'s `context_window`) make it worse rather
-#: than better: the largest result this machine has produced is 0.5% of one.
-#:
-#: **Above the ordinary and below the deliberate.**  Every ordinary result here —
-#: a file read, a command's `stdout`, a page of a listing — is under 6,000
-#: tokens, and the case the mechanism exists for is the tool *bound* to be long
-#: (the designer's own example is a ten-thousand-word essay, ~13,000 tokens).
-#: 8,000 is above the first and below the second, so shortening fires on what
-#: nobody controls rather than on what a model asked for once.
-#:
-#: What would move it again is the same instrument — the rows themselves, so
-#: re-reading it is a query, which is the observation SDD §7.4 makes about the tool
-#: list's threshold.
+#: The case it exists for is the tool *bound* to be long (a ten-thousand-word
+#: essay is ~13,000 tokens): 8,000 sits above the ordinary and below the
+#: deliberate, so shortening fires on what nobody controls rather than on what a
+#: model asked for once.  Re-reading the log is the same instrument that would
+#: move it again (SDD §7.4).
 DEFAULT_TOOL_RESULT_TOKENS = 8000
 
-#: The smallest window that can be *read*, and it is measured rather than
-#: chosen.  A window over a shortened result is built by
-#: `slife2.libs.harness.dumps.window`, and the line that says where the whole of
-#: it is — `[DUMP:{"call": "…", "total": N}]` — is what makes the rest reachable
-#: at all.  Measured with the same estimator the harness spends, that address
-#: alone costs 50 tokens for a short call id and 61 for the ~20-character ids
-#: the providers actually emit, before a single line of the output is kept.
-#: `dumps.window` now refuses to hand back a window whose address it had to cut
-#: (an output nobody can name is one nobody can read back, so it fails the turn
-#: rather than looking like an answer) — and a budget that can *only* fail is a
-#: configuration that looks like a working one and answers nothing, which is the
-#: same argument this section has always made about zero, applied to the number
-#: the address actually costs.
+#: The smallest window that can be *read*, measured rather than chosen.  The line
+#: that says where the whole of a shortened result is —
+#: `[DUMP:{"call": "…", "total": N}]` — costs 50 tokens for a short call id and 61
+#: for the ~20-character ids providers emit.  A budget below that can only fail,
+#: which is a configuration that looks like a working one and answers nothing.
 MIN_TOOL_RESULT_TOKENS = 128
 
 
@@ -2688,11 +2638,9 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
         )
 
-    # `tui:` used to be a section of its own, and a config written before that
-    # changed would still parse — every other key in it is optional, so the
-    # section would simply be ignored and a port somebody chose would quietly
-    # revert to 24005.  Refused rather than migrated, because the fix is one
-    # indentation and the failure is silent either way.
+    # A `tui:` section is refused: every key is optional, so an ignored section
+    # would quietly revert a port somebody chose to 24005.  Refused rather than
+    # migrated, because the fix is one indentation and the failure is silent.
     if raw.get("tui") is not None:
         raise ConfigError(
             "tui: is a `servers:` entry now, not a section of its own; "
@@ -2721,13 +2669,10 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             "it configures, and `a2a` is the plugin that serves it; rename the key"
         )
 
-    # **`providers:` is required, and an empty one is refused for a second
-    # reason.**  Leaving the section out used to run the built-in DeepSeek
-    # provider and call api.deepseek.com — a machine nobody described, from a
-    # file that did not mention it.  There is no such row any more: the file is
-    # the description, and a file that names no provider describes a machine
-    # with no models.  `providers: {}` is refused as it always was, because an
-    # empty section is a statement, and the statement is "none".
+    # **`providers:` is required, and an empty one is refused.**  There is no
+    # built-in provider: the file is the description, and a file that names no
+    # provider describes a machine with no models.  `providers: {}` is refused as
+    # well, because an empty section is a statement, and the statement is "none".
     providers_raw = _mapping(raw.get("providers"), "providers")
     if not providers_raw:
         raise ConfigError(
@@ -2869,14 +2814,11 @@ def _a2a(
     same thing — so on a machine with no `peer_agent:` the flag is refused, by
     name, rather than answered with a mesh nobody asked the file for.
     """
-    # **Read through the parameter, which is the whole of who gets it.**  This
-    # line used to name `A2A_BROKER_ENV_VAR` itself, so the parameter above was
-    # dead and `--a2a-broker` reached *both* networks: the local mesh was dialled
-    # at somebody else's broker under its per-maker namespace, and because
-    # `slife2.plugins.a2a.broker.ensure` never starts a broker that is not this
-    # machine's, the local one was no longer brought up either.  A subagent has
-    # no business on anybody else's broker — the docstring above is the rule, and
-    # this is the one line that has to obey it.
+    # **Read through the parameter, which is the whole of who gets it.**  Naming
+    # the environment variable here would make the parameter dead and send
+    # `--a2a-broker` to *both* networks: the local mesh would be dialled at
+    # somebody else's broker, and its own broker would no longer be started.  A
+    # subagent has no business on anybody else's broker.
     override = os.environ.get(override, "").strip() if override else ""
     if raw is None and override:
         raise ConfigError(
@@ -3723,12 +3665,11 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         )
     port = _int_or(raw.get("port"), default.port, f"{where}.port")
     if not 0 < port < 65536:
-        # Refused rather than defaulted, and rather than passed on: a port is
-        # how the launcher finds this server again — it probes the address it
-        # decided, before it starts anything — so `port: 0` would bind whatever
-        # the kernel liked and then be probed at a port nobody is on.  The
-        # `_int_or` above is what makes this reachable at all; `int(x or
-        # default)` read the zero as "not given".
+        # Refused rather than defaulted: a port is how the launcher finds this
+        # server again — it probes the address it decided before starting
+        # anything — so `port: 0` would bind whatever the kernel liked and then
+        # be probed at a port nobody is on.  `_int_or` makes the zero reach this
+        # point; `int(x or default)` read it as "not given".
         raise ConfigError(
             f"{where}.port: {port} is not a port (1-65535); leave it out for "
             f"the default ({default.port})"

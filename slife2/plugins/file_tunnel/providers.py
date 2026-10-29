@@ -496,10 +496,6 @@ class _TunnelProviderBase:
         ``SLIFE2_FILE_TUNNEL_URL`` — a tunnel this process did not start, which
         is the whole point of the variable and what :meth:`share_url_for` hands
         out — so ``self._public_url`` is ``None`` while ``is_active`` is True.
-        Reading the private field made every such URL unreachable in the same
-        breath as ``is_active`` saying it was running: ``expose_local_image``
-        refused the file with a sentence about the edge answering 530, which is
-        a claim about a transport this process is not running and never probed.
         With nothing of ours behind the URL there is nothing to ask, so the
         answer is whether there is a URL at all.
 
@@ -540,9 +536,8 @@ class _TunnelProviderBase:
 
         **An inherited URL is reported as the active one**, because that is what
         it is: :attr:`is_active` is True and :meth:`share_url_for` hands it out,
-        so answering ``idle`` with an empty url made `tunnel_status` deny the one
-        URL every other reader in this process was using — the contradiction
-        :meth:`is_reachable` was fixed on, told about the same tunnel.
+        so answering ``idle`` with an empty url would have `tunnel_status` deny
+        the one URL every other reader in this process is using.
         """
         if self._public_url is not None:
             state = {"state": "active", "url": self._public_url}
@@ -1236,11 +1231,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
                 # a stale line arriving after the new attempt reset its state
                 # would mark a dead tunnel ready — or, once the child is gone and
                 # `_proc` is None, resurrect the URL of a tunnel `stop` took
-                # down.  The guard used to be `self._proc is not None and proc is
-                # not self._proc`, and that first clause read "this process has
-                # torn the attempt down" as "this reader is the current one":
-                # every stale line written between the termination and the pipe
-                # closing was applied to a tunnel that no longer existed.
+                # down.
                 if proc is not self._proc:
                     break
                 self._recent.append(line.rstrip())
@@ -1290,8 +1281,8 @@ class _CliTunnelProvider(_TunnelProviderBase):
             )
         finally:
             # **`_eof_event` is the *current* attempt's**, and the same guard
-            # decides who may set it.  `_spawn` clears it for the attempt it is
-            # starting, so a superseded reader that died after that clear used to
+            # decides who may set it: `_spawn` clears it for the attempt it is
+            # starting, so a superseded reader that died after that clear would
             # answer the new attempt's wait loop with "the child closed its
             # output without a tunnel URL" — a start reported as a failure while
             # its own child was still coming up.

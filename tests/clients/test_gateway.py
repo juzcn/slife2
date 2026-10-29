@@ -715,12 +715,10 @@ def test_the_gateway_holds_no_catalogue_and_no_database() -> None:
     """The module's claim, read off the module rather than off its text.
 
     What a tool list *means* is the caller's, so a `sqlite3` binding here — or a
-    reach into the db plugin — would be the first sign that the connection and
-    the catalogue had started to overlap half way.  This read the module's
-    *source* until now, where "no sqlite3" was as true of a comment as of an
-    import and "no catalogue" was a claim about a spelling; what an import
-    actually does is bind a name in the module's own namespace, so that is what
-    is read, and the names are the ones an import of either would leave.
+    catalogue — would be the first sign that the connection and the catalogue
+    had started to overlap half way.  An import binds a name in the module's own
+    namespace, so that is what is read: the names an import of either would
+    leave, not a spelling in the source.
     """
     held = vars(gateway)
 

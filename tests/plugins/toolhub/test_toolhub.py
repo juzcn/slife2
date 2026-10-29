@@ -1060,7 +1060,7 @@ async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
 def plugin_with_two_kinds_of_tool() -> FastMCP:
     """One of our own servers, offering one tool of each kind.
 
-    Which is what every one of them is: `slife2-db` serves `turn_list` to
+    Which is what every one of them is: the context plugin serves `turn_list` to
     the model and `remember` to the agent, and the difference is not visible in
     anything but the tool itself.
 

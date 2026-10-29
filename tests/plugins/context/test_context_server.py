@@ -1,8 +1,7 @@
 """slife2-context over the wire.
 
 Two halves, and they are tested together because they are one plugin: the **turn
-log** — the tools that came over from `slife2-db` when that plugin stopped
-being one — and the **two decisions about it**, `restore` and `rebuild`,
+log** tools, and the **two decisions about it**, `restore` and `rebuild`,
 which is what makes this the thing that manages a conversation's context.
 
 The tools are thin and that thinness is exactly what a payload mismatch hides

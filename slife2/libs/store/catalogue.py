@@ -165,9 +165,9 @@ NOT_APPLICABLE = "n/a"
 #: must not import a server.
 MODEL_VISIBLE_HARNESS_TOOLS = frozenset({"_func_tool_unload", "_check_new_input"})
 
-#: The columns the code reads or writes on `tool`, checked at open in BOTH
+#: The columns the code reads or writes on `tool`, checked at open in both
 #: directions: a missing column cannot answer a query, and an unknown one is a
-#: leftover from a schema this code no longer writes.
+#: column this build does not write.
 _TOOL_COLUMNS = frozenset(
     {
         "name",
@@ -184,13 +184,12 @@ _TOOL_COLUMNS = frozenset(
     }
 )
 
-#: The `category` values a live `tool` DDL accepts, parsed rather than
-#: substring-matched: `'skill'` is an ordinary word another clause could carry.
-#: The columns of `tool` whose live DDL is a closed domain the code writes into,
-#: and the whole set of values this build writes into each.  Read at open: a file
-#: whose DDL accepts fewer values than this build uses passes a column check and
-#: then raises `IntegrityError` at the first write — inside a tool call, where
-#: the hub reads it as the catalogue refusing one caller's data and carries on.
+#: The `tool` columns whose DDL is a closed domain, and the values this build
+#: writes into each.  Parsed rather than substring-matched: `'skill'` is an
+#: ordinary word another clause could carry.  Read at open, because a file whose
+#: DDL accepts fewer values passes the column check and then raises
+#: `IntegrityError` at the first write — inside a tool call, where the hub reads
+#: it as the catalogue refusing one caller's data.
 _CHECKED_DOMAINS: dict[str, frozenset[str] | set[str]] = {
     "category": CATEGORIES,
     "status": STATUSES,
@@ -330,12 +329,10 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 #: What `PRAGMA application_id` makes a file say about itself: that it is a tool
-#: catalogue this build wrote.  **The marker lives in the file because the pair
-#: the path answers with does not survive a deletion** — POSIX filesystems hand
-#: the freed inode to the next file created in that directory (measured on
-#: ext4), so `(st_dev, st_ino)` says "same file" about a replacement this store
-#: never wrote: the empty one, and every statement failing `no such table: tool`
-#: (ubuntu CI).  The magic is four ASCII bytes, `SLF2`.
+#: catalogue this build wrote.  The marker lives in the file because the path's
+#: `(st_dev, st_ino)` does not survive a deletion — POSIX filesystems reuse a
+#: freed inode, so the pair would call an empty replacement "the same file" and
+#: every statement would fail `no such table: tool`.  The magic is `SLF2`.
 _APPLICATION_ID = 0x534C4632
 
 #: The columns a search result carries, in the order it carries them.  `schema`
@@ -806,12 +803,9 @@ class ToolStore:
         await asyncio.to_thread(self.ensure_index, embedder)
         vectors = await embed_rows(plan["documents"], embedder, noun="tool")
         applied = await asyncio.to_thread(self._apply, plan, vectors)
-        # **A merge that changed nothing is a DEBUG fact.**  This line was INFO
-        # unconditionally, and on a repeated start-up it is one row per source
-        # saying "0 added, 0 changed, 0 deleted, N unchanged" — 4,330 of the
-        # 4,536 catalogue lines in the 2026-10 corpus, and every one of them a
-        # line a reader scrolls past to find the handful that did move.  The
-        # counts stay on the INFO line when any of the three actually happened.
+        # **A merge that changed nothing is a DEBUG fact.**  An INFO line per
+        # unchanged source floods the log on a repeated start-up; the counts
+        # stay on the INFO line when anything actually moved.
         changed = plan["inserts"] or plan["updates"] or plan["purged"]
         logger.log(
             logging.INFO if changed else logging.DEBUG,
@@ -866,17 +860,10 @@ class ToolStore:
             }
             for row in rows:
                 name = str(row.get("name") or "")
-                # **Whitespace is no name either**, and it is the same fact the
-                # sentence above states: nothing can call a tool whose name is
-                # blank.  It is not merely untidy to admit one — `tool_document`
-                # builds the chunk text from this name, and `embed_chunks` drops
-                # every paragraph that strips to empty, so such a row yields no
-                # chunk at all.  `sync_indexes` terminates on "a selected row is
-                # no longer missing", and `tools_without_vectors` asks for rows
-                # with no chunk row, so the row it wrote is selected again and
-                # again for ever: the hub awaits that loop while building its
-                # store, so one such tool from any source hung every turn of
-                # every home, on one core, with nothing said.
+                # **Whitespace is no name either.**  Such a row yields no chunk,
+                # and `sync_indexes` selects rows with no chunk row again and
+                # again — one such tool from any source hung every turn of every
+                # home, on one core, with nothing said.
                 if not name.strip():
                     skipped += 1
                     continue
@@ -936,14 +923,11 @@ class ToolStore:
                 }
                 if moved:
                     updates.append({**previous, **fields, "moved": sorted(moved)})
-                    # A description, a schema or a returns text that moved is
-                    # a document that moved, and the vector it had is a vector
-                    # of text that is no longer there — those three are the
-                    # whole of what `tool_document` reads.  Anything else that
-                    # moved (a `remote_name`, a status) leaves the document
-                    # identical, so re-embedding it would buy a vector of the
-                    # same text at the price of an embedding call and a
-                    # rewritten row.
+                    # A moved description, schema or returns text is a moved
+                    # document: those three are all `tool_document` reads, so the
+                    # vector must be remade.  Anything else (a `remote_name`, a
+                    # status) leaves the document identical, and re-embedding it
+                    # would buy the same text at the price of a call.
                     if moved.keys() & {"description", "schema", "returns"}:
                         documents.append((name, tool_document(fields)))
                 # Except a row that stated its own: a merge re-enables what an
@@ -1260,14 +1244,10 @@ class ToolStore:
         pass, so it keeps the meaning an empty set has always had.
         """
         if self.known is None:
-            # **Not told is not told "none".**  `self.known or frozenset()`
-            # used to collapse the two, which made this method the destructive
-            # case the constructor's own comment says it must never be: a store
-            # nobody told which sources the config carries deleted every
-            # `plugin`, `mcp` and `rest` row in the file and their vectors, on
-            # a call it was asked for outright.  `__init__` already declines to
-            # run the pass for that store; the state it declines to run is now
-            # the state the method has (SDD Appendix C).
+            # **Not told is not told "none".**  Collapsing `None` to an empty set
+            # makes this pass delete every `plugin`, `mcp` and `rest` row of a
+            # file nobody described; `__init__` declines to run it for that store,
+            # and this method keeps the state that says so (SDD Appendix C).
             return {"forgotten": 0}
         known = self.known
         with self._connect(write=True) as connection:
@@ -1323,11 +1303,9 @@ class ToolStore:
                     f" WHERE name IN ({_marks(chunk)}) AND load_status = ?"
                     f" AND category IN ({_in_list(FUNCTION_CATEGORIES)})",
                     # **The names before the `load_status` filter.**  The
-                    # placeholders are the two SET values, the `name IN` list,
-                    # and then the WHERE's state; binding `UNLOADED` third put
-                    # it into the name list and the last name into the state,
-                    # so the update matched nothing and a name the model
-                    # unloaded was never loaded back at the next start.
+                    # placeholders are the two SET values, then the `name IN`
+                    # list, then the WHERE's state; one out of order updates
+                    # nothing and a name the model unloaded never reloads.
                     (LOADED, stamp, *chunk, UNLOADED),
                 )
                 loaded += int(cursor.rowcount)
@@ -1708,7 +1686,7 @@ class ToolStore:
         whole catalogue by accident, and a list of what exists is how a model or
         a person finds out what a category holds — which is why the store still
         answers it, and why the tool does not (`tool_search` refuses it: a
-        listing is a different question with a different shape, SDD §14.2 of DESIGN).
+        listing is a different question with a different shape, SDD §14.2).
 
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is
@@ -1737,21 +1715,13 @@ class ToolStore:
             return {"results": rows, "browsed": True}
 
         # **The words are a sentence when they are all there is.**  A
-        # keywords-only call used to be answered by the keyword leg alone, and
-        # measured on the live catalogue that leg found 23 of the 36 tools a
-        # caller asks for — the same 23 whether the catalogue held 130 of them or
-        # 253, because what it misses is word forms and not choice.  Routing the
-        # same words through both legs finds 34 to 36.
+        # keywords-only call used to reach the keyword leg alone, which found 23
+        # of the 36 tools callers ask for — the same 23 at 130 and at 253,
+        # because what it misses is word forms, not choice.  Routing the same
+        # words through both legs finds 34 to 36; the cost is one embedding call.
         #
-        # The loss was never that words embed badly — a word list embeds as well
-        # as the sentence taken from it.  It was that they never reached the leg
-        # that could answer them.  The cost of closing that is one embedding call
-        # on a call that used to make none.
-        #
-        # Here rather than in `toolhub`, which had it: this is a fact about the
-        # *search* and not about the tool, and a second caller of this method got
-        # rows with no number on them because the words had been routed by the
-        # caller that remembered to.
+        # It lives here because it is a fact about the search, not about the
+        # tool: a second caller of this method must not have to remember it.
         if keywords and not any(s.strip() for s in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
@@ -1787,28 +1757,18 @@ class ToolStore:
             # asked for — not whichever sentence happened to be looked at first.
             for rowid, measured in hits:
                 meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-        # (A `if keyword_hits is not None and not shortlist` fallback stood
-        # here, assigning the keyword list when the fusion had produced nothing.
-        # It could not: the words are always *some* question's other leg — a
-        # keywords-only call is routed into `sentences` above — so every keyword
-        # id is already in `shortlist` by the time this line is reached.  The
-        # byte-identical line in `slife2.plugins.cabinet.store` was live until
-        # that corpus adopted the same routing; this copy was the one that
-        # outlived its reason first.)
         # **The union is capped, and each question may bring `over` ids of its
         # own.**  Nothing a caller passes bounds this list: every sentence
-        # contributes its meaning leg's ids plus the keyword leg's, so forty
-        # sentences is forty times a page, and the query that reads the rows
-        # binds one value per id.  What is dropped is the tail of the *union*,
-        # which is the weakest evidence there is — a page is at most `limit`
-        # rows and every question's own list is already ranked.
+        # contributes its meaning leg's ids plus the keyword leg's, and the query
+        # binds one value per id.  What is dropped is the tail of the union —
+        # the weakest evidence — because a page is at most `limit` rows and every
+        # question's own list is already ranked.
         shortlist = shortlist[:MAX_SQL_VARS]
 
         # **Every row of the shortlist gets its number**, not only the rows the
-        # meaning leg returned — those are exactly the rows the words found, and
-        # they are about to be shown first.  They used to be the only rows with no
-        # number at all, so the strongest evidence on the page read as the
-        # weakest thing on it.
+        # meaning leg returned: the word-matched rows are about to be shown
+        # first, and without a number the strongest evidence on the page would
+        # read as the weakest.
         for rowid, value in self._meaning_of(
             [rowid for rowid in shortlist if rowid not in meaning], queries
         ).items():
@@ -1816,21 +1776,15 @@ class ToolStore:
 
         # **The page is ordered by two things the caller can see.**  The words
         # first, because a row whose own text contains them is certain where a
-        # cosine is graded, and the cosines cannot separate a cluster at all:
-        # `set_table_column_width` and `..._widths` measure 0.63 and 0.62, `v0`
-        # and `v0_1` both 0.66 — only the word match knows which was named.  Then
-        # by meaning, descending.
+        # cosine is graded, and cosines cannot separate a near-duplicate cluster
+        # (`set_table_column_width` and `..._widths` measure 0.63 and 0.62).
+        # Then by meaning, descending.
         #
-        # Ordered *here* rather than by the fusion's ranks, which is what this
-        # did: ranking across questions gave each of them an alternating half of
-        # the page, so a second question the caller appended cost the first one
-        # five of its ten rows — measured, a row at rank 5 of question one came
-        # back at rank 9, under four rows of a question it was unrelated to.
-        # The sort is **stable and carries no id in its key**, so rows whose
-        # meaning is equal keep the order the fusion gave them: where the number
-        # cannot decide, the evidence does, rather than whichever rowid sorts
-        # first.  That is also what makes a tie fall back to what this did before
-        # there was a number to order by.
+        # Ordered here rather than by the fusion's ranks: ranking across
+        # questions gave each an alternating half of the page, so a second
+        # question the caller appended cost the first one five of its ten rows.
+        # The sort is stable and carries no id in its key, so equal meaning keeps
+        # the fusion's order and a tie falls back to the evidence.
         worded = set(keyword_hits or ())
         ordered = sorted(
             shortlist,

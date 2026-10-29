@@ -103,9 +103,9 @@ the config is.
 file: its markdown and a saved file's bytes are what a person opens, and its
 index (`.index.db`, hidden) sits inside the directory it indexes so that a
 cabinet can be copied, backed up or deleted as one thing.  That is why its path
-is not derivable from the data directory alone — `slife2.plugins.cabinet.store` owns
-those two names, and the `<agent>.files/` layout is stable, so existing
-documents are adopted by copying the directory in.
+is not derivable from the data directory alone — `slife2.plugins.cabinet.store`
+owns those two names, and the layout is stable, so existing documents are
+adopted by copying the directory in.
 
 `SLIFE2_DATA_DIR` overrides where the home is, and is what `--data-dir` sets;
 `SLIFE2_RUNTIME_DIR` overrides where the machine's runtime is.  Both exist for
@@ -260,10 +260,7 @@ def runtime_dir() -> Path:
     record naming a pid, the lock two launchers race on, the log a failed start
     is read from and the claim holding an agent name are all facts about *the
     machine* — and a copy of each per home is a copy that can disagree with the
-    others.  What that looked like in practice: a second data directory reporting
-    a running stack it could not see ("no record; not started by slife2"), two
-    launchers cold-starting one port because the lock was in neither's way, and a
-    client in one home stopping the servers a client in another was still using.
+    others.
 
     `~/.slife2/runtime` rather than a per-OS state directory, because
     `~/.slife2` is already this project's home-directory root (`data_dir`) — and
@@ -297,7 +294,7 @@ def in_home(root: str | Path | None) -> Generator[None]:
     reads — belongs to the caller rather than to the process.
 
     `None` and `""` mean "no home was named", which is not an error: it is the
-    daemon's own home, which is what everything did before any of this existed.
+    daemon's own home.
     """
     token = _HOME.set(Path(root) if root else None)
     try:
@@ -376,14 +373,14 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
     argument one level down, and the reason nothing has to hold a second record
     of who made whom.
 
-    **`subagents/` rather than one more directory beside the agent's own**, and
-    the container is the whole of what that buys: `agents/jack/` also holds
+    **`subagents/` rather than one more directory beside the agent's own**: the
+    container is the whole of what that buys.  `agents/jack/` also holds
     `cabinet/`, `media/` and every fixed name this build has, so a subagent
-    called `cabinet` used to be *that directory* — a name check in `subagent_set`
-    (`slife2.plugins.agent.server`) is what stopped it, and a check is a
-    convention somebody can go around.  One segment makes the collision
-    impossible to express: a subagent's name is a name *inside* `subagents/`, and
-    nothing else in this system writes there.
+    called `cabinet` would be *that directory* — and a name check in
+    `subagent_set` (`slife2.plugins.agent.server`) is a convention somebody can
+    go around.  One segment makes the collision impossible to express: a
+    subagent's name is a name *inside* `subagents/`, and nothing else in this
+    system writes there.
 
     It takes **both halves of the client id** because it is the one place that
     knows the layout: every per-agent path in this system is this function plus a
@@ -507,12 +504,11 @@ def _write_atomically(path: Path, text: str) -> None:
     leaves the file empty for as long as it takes to write it back — the file is
     opened and emptied first, and the JSON arrives afterwards — and `known_homes`
     lets a `ValueError` out by design: a record it cannot read is a file to look
-    at, not a home that is not there (`SDD Appendix C).  So a daemon walking
-    the registry in that window — the context store's lifespan pass
-    (`turn_dbs`), the scheduler's poll (`schedule_dbs`), WeChat's resume — read
-    an empty file and its `json.loads("")` failed its *start-up* pass, which is
-    a server the launcher reports as FAILED and an exit 2 on a first start, over
-    a file that was never damaged, only in flight.
+    at, not a home that is not there (SDD Appendix C).  So a daemon walking the
+    registry in that window — the context store's lifespan pass (`turn_dbs`),
+    the scheduler's poll (`schedule_dbs`), WeChat's resume — would fail its
+    *start-up* pass on an empty file that was never damaged, only in flight: a
+    server the launcher reports as FAILED and an exit 2 on a first start.
 
     Written beside the target and renamed onto it, which is what every other
     bookkeeping file in this codebase does (`slife2.libs.host.runtime._write_json_atomic`)
@@ -538,8 +534,8 @@ def known_homes() -> list[Path]:
 
     **This process's own, and every home a client has recorded.**  The first is
     what makes a home work with nothing registered — a server started by hand in
-    a directory nothing else knows about serves that directory, exactly as it did
-    before any of this — and the second is what lets one daemon serve the rest.
+    a directory nothing else knows about serves that directory — and the second
+    is what lets one daemon serve the rest.
 
     A registered home whose directory has been deleted is *skipped*, and that is
     not a fallback: a home that is not there has nothing to serve, and the entry
@@ -581,14 +577,14 @@ TURNS_DB = "turns.db"
 def turn_dbs() -> list[Path]:
     """Every conversation store on this machine: an agent's own, and its subagents'.
 
-    **The pattern, named — and the name is the whole point.**  This replaces a
-    `glob("*/*.db")` in `slife2-context`'s startup pass, which is not a
-    description of the turn files at all: `schedule.db` sits in the same
-    directory and matches it, so the pass opened the *scheduler's* ledger as a
-    `TurnStore` and wrote the turn schema into it — two plugins sharing one
-    SQLite file, which is the one thing `SDD` §8.1 says the file layout is
-    for.  A suffix `*.db` means "a database"; what is wanted here is "a
-    conversation", and only the middle of the name says which.
+    **The pattern, named — and the name is the whole point.**  A
+    `glob("*/*.db")` is not a description of the turn files at all:
+    `schedule.db` sits in the same directory and matches it, so the pass would
+    open the *scheduler's* ledger as a `TurnStore` and write the turn schema
+    into it — two plugins sharing one SQLite file, which is the one thing
+    `SDD` §8.1 says the file layout is for.  A suffix `*.db` means "a database";
+    what is wanted here is "a conversation", and only the middle of the name
+    says which.
 
     **Two places, and they are the ones `agent_dir` lays down**: the agent's
     conversation, then each subagent's own (`agents/jack/turns.db`,
@@ -681,7 +677,7 @@ def schedule_db(agent: str) -> Path:
 #: walks them (`subagent_dirs`).  **The name is the relationship and the reason
 #: the layout is safe**: everything else under `agents/<agent>/` is a fixed name
 #: this build writes (`cabinet/`, `media/`, `turns.db`), so a subagent called
-#: `cabinet` used to be *that* directory — and one segment makes that
+#: `cabinet` would be *that* directory — and one segment makes that
 #: unexpressible rather than something a name check has to catch.
 SUBAGENTS_DIR = "subagents"
 
@@ -740,10 +736,10 @@ def forked(agent: str, subagent: str) -> bool:
         return False
     if not isinstance(record, Mapping):
         # **A file that parsed to nothing is damage too.**  An empty or torn
-        # record loads as `None` (and a hand-written list as a list), which the
-        # old `isinstance(record, dict)` test quietly read as "not a fork" — the
-        # one arm of this function that did not name what it found.  The answer
-        # stays the safe one, but the warning is the trace a person needs.
+        # record loads as `None` (and a hand-written list as a list), which a
+        # plain `isinstance(record, dict)` test would quietly read as "not a
+        # fork".  The answer stays the safe one, but the warning is the trace a
+        # person needs.
         logger.warning(
             "the record of %s/%s is not a mapping (%r), so it is treated as not a fork",
             agent,
@@ -765,10 +761,10 @@ def subagent_file(agent: str, subagent: str) -> Path:
     the way `wechat.yaml` says a login.
 
     **And the container is what the blast radius rests on.**  A directory without
-    this file is not a subagent's, which used to be the only thing keeping
-    `subagent_remove` away from the agent's *own* directories — and those live
-    one level up, beside nothing a subagent could be named, now that a subagent's
-    name is a name inside `subagents/` (`agent_dir`).
+    this file is not a subagent's, which is what keeps `subagent_remove` away
+    from the agent's *own* directories — and those live one level up, beside
+    nothing a subagent could be named, now that a subagent's name is a name
+    inside `subagents/` (`agent_dir`).
 
     What it holds is the whole of what the subagent *is* — the model it runs on,
     the role it was made for, whether it was made as a fork, and when it was made

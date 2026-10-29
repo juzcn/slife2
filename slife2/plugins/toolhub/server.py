@@ -333,38 +333,19 @@ JOB_SOURCE = _JOB_SOURCE
 #: copies of a tool name across a wire is a rename that half-works.
 FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 
-#: What a model may not take out of its own list.  The three this process
-#: serves are how a tool list is managed at all — a budget that could take them
-#: away would leave the model holding a set it cannot change — and the fourth is
-#: `skill_use`, which reads the playbooks every session is meant to reach for.
-#: The rest are the agent process's: `_check_new_input`, the pair a mid-turn
-#: delivery is written under, and the two background-call tools, which are the
-#: only way to use the task id an `_async` call returns.
+#: What a model may not take out of its own list: the tools something *else*
+#: refers to by name.  The three this process serves are how a tool list is
+#: managed at all; `skill_use` is what every session reaches for; the rest are
+#: the agent process's — `_check_new_input`, the pair a mid-turn delivery is
+#: written under, and the two background-call tools that consume an `_async`
+#: task id.
 #:
-#: **It lives in a plugin and is still on this list.**  It is also in
-#: `tool_load.autoload` by construction (`slife2.libs.host.config.REQUIRED_AUTOLOAD`), so the
-#: budget could not evict it; what this adds is the other half: the model naming
-#: it in `_func_tool_unload` and being obeyed.  One string is cheaper than a
-#: column the row would have to carry to say "the system needs me", and the name
-#: it must match is `slife2.plugins.skills.playbooks.USE_TOOL`.
-#:
-#: **This is a question about unloadability and not about who calls a tool** —
-#: `slife2.libs.turn.tools` separates the two and this set is where the third one is
-#: answered.  So it holds `skill_use`, which nothing but the model drives,
-#: alongside the harness tools, which the machinery drives and the model may call
-#: too; what all of them share is that something *else* refers to them by name.
-#:
-#: **A tool the model calls for itself is not one of them**, however important:
-#: `attach_image` is a plugin's ordinary model-facing tool and is not here,
-#: because nothing *else* names it — no pair the harness writes, no prompt the
-#: system builds.  Being wanted in every turn is a separate answer, and it is
-#: `tool_load.autoload`'s: the operator lists the tools that start loaded, and
-#: the budget protects that list rather than this one.
-#: `CHECK_NEW_INPUT` is the sharpest case of that and is spelled below
-#: (the hub must not import a server): a pair the harness wrote into the history
-#: names it, so a turn that unloaded it would send a request whose history calls
-#: a tool its `tools` array no longer declares — a 400, and one the model could
-#: not have avoided.
+#: `tool_load.autoload` already keeps these out of the budget's reach; this set
+#: is the other half, refusing the model's own `_func_tool_unload`.  The question
+#: is unloadability, not who calls the tool: a tool the model calls for itself,
+#: however important (`attach_image`), is not here, because nothing else names
+#: it.  `_check_new_input` is the sharp case: a history that calls a tool its
+#: request no longer declares is a 400 the model could not have avoided.
 ALWAYS_LOADED = frozenset(
     {
         TOOL_SEARCH,
@@ -716,9 +697,9 @@ class Catalogue:
 
         **Called once, and it is what makes a store complete the moment it
         exists** — including the hub's own tools, which the model needs before it
-        can find or load anything else.  A home whose file was built without this
-        got the declarations of its own config and nothing else: measured
-        against the real plugin set, twenty-four of twenty-eight tools missing.
+        can find or load anything else.  Without this, a home's file holds the
+        declarations of its own config and none of the tools the machine's
+        plugins offer.
 
         Takes the store rather than reaching for it, because `store()` is holding
         `_opening` while this runs and `asyncio.Lock` is not reentrant.
@@ -1168,10 +1149,9 @@ class Upstream:
         #: **Ours, rather than somebody else's.**  An optional upstream that
         #: cannot be reached is a tool the model does not have; a required one
         #: that cannot be reached is this system coming apart, and `list_tools`
-        #: refuses rather than quietly serving a shorter list.  Nothing in
-        #: `mcp:` sets this — it is what makes a plugin a plugin, and it
-        #: is read twice: for that failure rule, and for whether this server's
-        #: tools have to ask before the model is given them (`_offered`).
+        #: refuses rather than quietly serving a shorter list.  Read for that
+        #: failure rule and for whether this server's tools must ask before the
+        #: model is given them (`_offered`).
         self.required = required
         #: **Whether this source declares catalogue rows**, which is a fact
         #: about the listing and not a second copy of it: the one tool name
@@ -1198,11 +1178,9 @@ class Upstream:
         #: for the same fact seen from the other side, and this is the field that
         #: was left behind.
         self._declared: dict[str, set[str]] = {}
-        #: Verdicts written without waiting for them.  Held for the reason
-        #: `slife2.plugins.agent.server.detach` holds its own: a task nothing
-        #: references can be collected before it runs, and its failure is
-        #: otherwise only ever reported as a warning about a task nobody
-        #: awaited.
+        #: Verdicts written without waiting for them.  Held because a task nothing
+        #: references can be collected before it runs, and its failure would
+        #: otherwise surface only as "task exception was never retrieved".
         self._verdicts: set[asyncio.Task[None]] = set()
         self._connection = Connection(
             settings,
@@ -1425,12 +1403,11 @@ class Upstream:
         operator configured arrives by declaration instead, and is not gated,
         because the entry in the config is the opt-in — see `Upstream.declare`.
         """
-        # **And there is no other case any more.**  A source the operator
-        # configured is not an upstream of this process — a plugin holds it and
-        # declares it, and what it declares was never gated, because the entry
-        # in the config is the opt-in.  So every tool that arrives here by
-        # `tools/list` belongs to a plugin's own code, and every one of them
-        # has to ask.
+        # **There is no other case.**  A source the operator configured is not an
+        # upstream of this process — a plugin holds it and declares it, and what
+        # it declares was never gated, because the entry in the config is the
+        # opt-in.  So every tool that arrives here by `tools/list` belongs to a
+        # plugin's own code, and every one of them has to ask.
         return [
             _advertise(self.settings, tool)
             for tool in listed
@@ -1546,20 +1523,16 @@ class Upstream:
         what the refresh lock and this order exist to keep apart.
         """
         declared = [one for raw in held if (one := await self._record(raw)) is not None]
-        # **A source it used to hold and does not any more.**  The entry was
-        # taken out of the section, so nothing will declare it again and its rows
-        # go with it — deleted, not marked.  `error` is the verdict for a source
-        # that is *there* and cannot be reached; this one is not there at all, and
-        # a row left behind would be a search hit saying "not answering" about a
-        # server nobody is asking.  The other moment an entry can be removed is
-        # while slife2 is not running, which is the catalogue's boot pass
-        # (`ToolStore.reset`); the two agree, so a removal does not depend on
-        # whether a process happened to be up when it was made.
+        # **A source it held and does not any more.**  The entry left the
+        # section, so nothing will declare it again and its rows go with it —
+        # deleted, not marked.  `error` is the verdict for a source that is
+        # *there* and unreachable; this one is not there at all.  The boot pass
+        # (`ToolStore.reset`) removes entries dropped while slife2 was down, so a
+        # removal does not depend on a process being up.
         #
-        # **Against *this* home's last answer**, which is the home the ask was
-        # for and the home these rows are in (`_declared`): comparing against a
-        # set shared with the process would compute the difference across two
-        # sections, and the row it deletes would be one of this home's.
+        # **Against this home's last answer**, because comparing against a set
+        # shared with the process would compute the difference across two
+        # sections and delete one of this home's rows.
         here = home_key()
         last = self._declared.get(here, set())
         for source in sorted(last - {one.name for one in declared}):
@@ -1600,11 +1573,9 @@ class Upstream:
         error = str(raw.get("error") or "")
         if not name or category not in DECLARABLE_CATEGORIES:
             # **The audience gate is not renegotiable over this channel.**  A
-            # source that could name its own category could offer the model
-            # `remember`: a function category under a live source is exactly what
-            # `injectable` answers with.  Refused rather than clamped — a plugin
-            # asking for this is either confused or lying, and both are worth a
-            # line in the log.
+            # source naming its own category could offer the model `remember`.
+            # Refused rather than clamped: a plugin asking for this is confused
+            # or lying, and both are worth a log line.
             logger.warning(
                 "%s: may not declare %r as %r (known: %s)",
                 self.settings.name,
@@ -1614,9 +1585,9 @@ class Upstream:
             )
             return None
         if name == self.settings.name:
-            # The old rule, kept: a source's verdict is written across every row
-            # it owns, so a plugin that filed its held sources under its own name
-            # would have its documents marked broken whenever it faltered.
+            # A source's verdict is written across every row it owns; a plugin
+            # that filed its sources under its own name would mark its documents
+            # broken whenever it faltered.
             logger.warning(
                 "%s: may not declare a source under its own name", self.settings.name
             )
@@ -1697,58 +1668,33 @@ class LocalTool:
     run: Callable[[dict[str, Any]], Awaitable[Any]]
 
 
-#: How many rows one search answers with.
-#:
-#: The harness's number and not the model's, which is a change: `limit` used to
-#: be a parameter, so a model could ask for the whole catalogue a page at a time
-#: — and did.  What a search is for is finding *a* tool, and a page big enough to
-#: be a listing is the thing this tool stopped being.  `tool_search` finds by
-#: meaning; the tool that enumerates is a different tool, and it will own the
-#: question of how much of the catalogue fits in an answer.
+#: How many rows one search answers with.  The harness's number, not the
+#: model's: `limit` was a parameter until a model asked for the catalogue a page
+#: at a time.  A search finds *a* tool; enumerating the catalogue is a different
+#: tool's question.
 SEARCH_LIMIT = 10
 
-#: **Two inputs, because the two legs want different things, and nothing else.**
-#: `category`, `source_id`, `status`, `load_status` and `limit` used to be here,
-#: and five filters on a search is five ways to ask a question that is not "find
-#: me the tool that does this": narrowing to one server, or to the rows that are
-#: switched off, is *reading the catalogue* — a different job with a different
-#: answer shape (a list, with no ranking), and SDD §14.2 of DESIGN says so.
+#: **Two inputs, because the two legs want different things.**  Filters and a
+#: single `query` were removed: five filters are five ways to ask a question that
+#: is not "find me the tool that does this" (narrowing to one server or to the
+#: switched-off rows is *reading* the catalogue, a list with no ranking — SDD
+#: §14.2), and one string went to both legs, one of which cannot read a sentence.
 #:
-#: The single `query` that replaced them is gone too, and this is the reason:
-#: one string went to *both* legs, and one of the two cannot read a sentence.
-#: The keyword leg asks for every term it is handed, so a sentence — "take a
-#: screenshot of a web page" — demands six words at once and matches nothing.
-#:
-#: **What is *not* the reason is that the semantic leg wants a phrase over
-#: words.**  An earlier version of this comment said that, and it was measured
-#: and is false: a compact word list embeds as well as the sentence it was taken
-#: from — 36 of 36 either way on this catalogue — which is what makes the
-#: words-as-a-sentence routing in `ToolStore.search` sound.  The two inputs are one call apart,
-#: not one being the other's poor relation.
-#:
-#: Measured on the live catalogue, splitting them is 20/20 against 18/20, and
-#: the two queries the single string missed are found by the two halves of the
-#: split (`work out 17 times 23` by a second sentence, `读一下这个网页的内容` by
-#: one written in English).  Both fields are `required` and either may be an
-#: empty array: a model made to answer both has said which one it means, and a
-#: field that may go unfilled is a leg that silently never runs.
+#: The inputs are one call apart, not one being the other's poor relation: a
+#: compact word list embeds as well as the sentence taken from it (36 of 36 on
+#: this catalogue).  Splitting them measured 20/20 against 18/20, and both fields
+#: are `required` — a field that may go unfilled is a leg that silently never
+#: runs.
 TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
         "keywords": {
             "type": "array",
             "items": {"type": "string"},
-            # Three short sentences, and each one is a fact about this search
-            # rather than advice about how to use it: what the words rank, which
-            # words are worth giving, and what empty means.  The warning this
-            # used to carry ("guessing at words makes it find nothing") was true
-            # while a keywords-only call was answered by the keyword leg alone;
-            # with the routing in `ToolStore.search` a guess costs nothing, so
-            # the sentence had become false and would only talk a model out of
-            # the words it was sure of.  **And the words are not a filter**: a
-            # keywords-only call reads them through both legs, so the result may
-            # not carry them — saying "must contain" here promised the opposite
-            # of what the search does.
+            # Three sentences, each a fact about this search: what the words
+            # rank, which words are worth giving, and what empty means.  **The
+            # words are not a filter**: a keywords-only call reads them through
+            # both legs, so the result may not carry them.
             "description": (
                 "Words a tool's own text is likely to carry — 'screenshot', "
                 "'pdf'. They rank exact matches first but are not a filter: with "
@@ -1810,12 +1756,9 @@ FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
     "required": ["names"],
 }
 
-#: What loading is *for*, which is not what it used to say.  "into your tool
-#: list so you can call them" contradicted the sentence three lines later — a
-#: name can be called without being loaded, because routing looks the name up
-#: in the catalogue and never asks `load_status` (`Catalogue.route`).  Loading
-#: is what puts a tool in the list the model is *shown*, so the accurate
-#: version is what the text below says.
+#: What loading is *for*: it is what puts a tool in the list the model is
+#: *shown*.  A name can be called without being loaded — routing looks it up in
+#: the catalogue and never asks `load_status` (`Catalogue.route`).
 FUNC_TOOL_LOAD_DESCRIPTION = (
     "Put tools into the list you are shown before each request. A name from "
     "`tool_search` can be called without loading; loading is what keeps it in "
@@ -1906,20 +1849,15 @@ def local_tools(
         keywords = [word for word in _listed(arguments.get("keywords")) if terms(word)]
         sentences = _listed(arguments.get("sentences"))
         if not keywords and not sentences:
-            # Refused rather than answered with everything, which is what this
-            # used to do: an empty query was a *browse*, and a browse is a list.
-            # A list is not a search — it has no ranking, it is as long as the
-            # catalogue, and a model that wanted one tool has to read all of
-            # them — so the tool that finds things by meaning declines to be the
-            # tool that enumerates.
+            # Refused rather than answered with everything: an empty query was a
+            # *browse*, and a browse is a list.  A list has no ranking, is as long
+            # as the catalogue, and makes a model read all of it to find one tool;
+            # the tool that finds by meaning declines to be the tool that
+            # enumerates.
             #
-            # **And it does not say where else to look.**  It used to end "ask
-            # for the list" — a pointer at a tool this one cannot see, and in
-            # the log of a real turn a model followed it: it called `skill_use`
-            # with an invented name and got "no skill called '__list__'".  A
-            # tool's own answer promising that somebody else can do the job is a
-            # promise it cannot keep; when there is a tool that enumerates, the
-            # sentence can name it and be true.
+            # **And it does not say where else to look.**  A tool's own answer
+            # promising that somebody else can do the job is a promise it cannot
+            # keep; when there is a tool that enumerates, the sentence can name it.
             raise ToolError(
                 "tool_search needs something to look for: `sentences` is what you "
                 "want to do ('take a screenshot of a page') and `keywords` are "
@@ -2097,22 +2035,16 @@ async def unload_tools(
         elif outcome == "no_load_state":
             # The two document families, which are findable and not callable:
             # they were never in the list, so nothing was taken out of it.  The
-            # sibling `_load_as_text` splits this outcome out for the same
-            # reason, and the fallback below used to answer for both of them.
+            # sibling `_load_as_text` splits this outcome out for the same reason.
             no_load_state.append(name)
         elif outcome == "already":
             not_loaded.append(name)
         else:
-            # **There is no fifth outcome to fall through to, and that is a
-            # property of the store rather than a hope**: asking for `unloaded`
-            # can only answer `unknown`, `no_load_state`, `already` or the move
-            # itself, because `_load_outcome` reaches `disabled`/`error` for a
-            # *load* alone (`slife2.libs.store.catalogue._load_outcome`).  So this arm is the
-            # `unloaded` one, and the `else` that used to sit here — sending
-            # whatever was left to `refused` — described an outcome nothing can
-            # produce.  It is how a reader came to believe a fifth existed, and
-            # that a *row* could be "refused (the system needs them)"; `refused`
-            # is only ever the names above it.
+            # **There is no fifth outcome to fall through to**: asking for
+            # `unloaded` can only answer `unknown`, `no_load_state`, `already` or
+            # the move itself, because `_load_outcome` reaches `disabled`/`error`
+            # for a *load* alone.  So this arm is the `unloaded` one, and
+            # `refused` is only ever the names above it.
             unloaded.append(name)
     return {
         "unloaded": unloaded,
@@ -2198,23 +2130,16 @@ def _names_of(arguments: Mapping[str, Any]) -> list[str]:
 
 #: Where "the meaning leg is sure" begins, and where "it found nothing" ends.
 #:
-#: Measured on the live catalogue with the real embedder — 36 queries it can
-#: answer against 10 it cannot, taking each page's best `meaning`:
-#:
-#:   can answer     min 0.477   median 0.631   max 0.782
-#:   cannot         min 0.389   median 0.487   max 0.512
-#:
-#: So the two overlap in a 0.035 band and no cutoff is exact.  `MATCH_FLOOR` is
-#: the conservative end of the band: at 0.55 every unanswerable query is caught
-#: and 32 of the 36 answerable ones stay a match.  `WEAK_FLOOR` is inside the
-#: overlap, and it exists to be *said* rather than decided — what sits between
-#: the two is genuinely undecided, and which of the three tiers a page lands in
-#: is a sentence in the answer, not a row removed from it.
+#: Measured with the real embedder: 36 answerable queries scored 0.477-0.782 and
+#: 10 unanswerable ones 0.389-0.512, so the bands overlap by 0.035 and no cutoff
+#: is exact.  `MATCH_FLOOR` is the conservative end (every unanswerable query
+#: caught, 32 of 36 answerable ones kept); `WEAK_FLOOR` exists to be *said*
+#: rather than decided — the band between them is genuinely undecided, and the
+#: tier is a sentence in the answer, not a row removed.
 #:
 #: **The words override both.**  A row whose text contains every word the caller
-#: gave is certain, whatever it scores — `pandoc` scores 0.514 against the row
-#: *named* `mcp-pandoc`, and a cutoff alone would answer "nothing here" to
-#: somebody who just said the tool's name.
+#: gave is certain whatever it scores — `pandoc` scores 0.514 against the row
+#: *named* `mcp-pandoc`.
 MATCH_FLOOR = 0.55
 WEAK_FLOOR = 0.48
 
@@ -2693,16 +2618,13 @@ def build_server(
             known=configured_sources(theirs),
         )
         # **Everything the machine already holds goes in before this home is
-        # asked anything**, and it is the difference between a file with this
-        # home's declarations in it and a *catalogue*: without it the home opens
-        # with the `mcp:` entries of its own section and none of the tools the
-        # plugins offer — the hub's own three among them, which are what finds and
-        # loads all the others.  See `Catalogue.remember`.
+        # asked anything**, or the home opens with its own `mcp:` entries and
+        # none of the plugins' tools — the hub's own three among them, which are
+        # what finds and loads the others.  See `Catalogue.remember`.
         #
-        # The key is this process's ambient home, which is the one `store()`
-        # asked for: a store is only ever opened from inside the call that wanted
-        # it.  The sync below may therefore use the ambient embedder, and the
-        # fan-out inside a `remember` may not — there it is another home's file.
+        # The key is this process's ambient home: a store is only opened from
+        # inside the call that wanted it, so the sync may use the ambient
+        # embedder while a fan-out inside `remember` may not.
         await catalogue.seed(home_key(), store)
         status = await store.sync_indexes(await embedder_of_call())
         logger.info("indexed the tool catalogue at %s (%s)", store.path, status)
@@ -2733,16 +2655,14 @@ def build_server(
     #: The catalogue, and the one file it opens when something first asks.
     catalogue = Catalogue(open_catalogue, embedder_of_call, current)
 
-    #: The plugins first, in the order slife2 starts them, and required — see
-    #: `list_tools`.  The hub asks every one of them, including the ones with
-    #: nothing to offer the model: which
+    #: The plugins first, in start order, and required — see `list_tools`.  The
+    #: hub asks every one of them, including those with nothing to offer: which
     #: tools a server has is not knowable without asking, and a second list of
-    #: "plugins worth asking" is a list that goes stale the first time
-    #: somebody adds a tool.
-    #: **Ours, and only ours.**  Every one of these is a server slife2 starts,
-    #: which is why they are all `required` and why their tools have to declare
-    #: themselves the model's.  Somebody else's servers are not here at all: a
-    #: plugin holds those and *declares* them, and this process holds the set.
+    #: "plugins worth asking" goes stale when somebody adds a tool.
+    #: **Ours, and only ours.**  Every one is a server slife2 starts, which is
+    #: why they are required and their tools must declare themselves the
+    #: model's.  Somebody else's servers are declared by a plugin that holds
+    #: them; this process holds the set.
     upstreams: list[Upstream] = [
         Upstream(
             plugin_settings(config, name),
@@ -2895,16 +2815,12 @@ def build_server(
                 except ConnectionError as exc:
                     return upstream, None, exc
 
-            # **Every ask at once, every merge in turn.**  A round trip is what
-            # a build waits for — a plugin that is up but still starting the
-            # servers it holds answers late — and an ask does not touch the
-            # catalogue, so asking them together costs the slowest one instead
-            # of their sum.  The sum was the failure: enough slow plugins
-            # outlived the launcher's catalogue budget and took the stack down
-            # with them.  The merges below do write rows and stay sequential in
-            # plugin order, which is what settles two plugins claiming one
-            # source and what the lock through this function exists to keep
-            # apart.
+            # **Every ask at once, every merge in turn.**  A round trip is what a
+            # build waits for, and an ask does not touch the catalogue, so asking
+            # together costs the slowest plugin instead of their sum — the sum
+            # once outlived the launcher's catalogue budget and took the stack
+            # down.  The merges below do write rows and stay sequential in plugin
+            # order, which settles two plugins claiming one source.
             answers = await asyncio.gather(*(fetched(one) for one in asked))
             for upstream, held, failure in answers:
                 if failure is not None:
@@ -3320,28 +3236,22 @@ def build_server(
         source = str(row.get("source_id") or "")
         upstream = by_source(source)
         if upstream is None:
-            # **The row is real and nothing is holding it.**  Its owner is not
-            # one of our own connections and no plugin has declared it *now*,
-            # which has two causes and the caller's own config tells them apart
-            # — where the answer here used to be one guess at both.
+            # **The row is real and nothing is holding it.**  Its owner is not one
+            # of our own connections and no plugin declares it *now*, and the
+            # caller's own config tells the two causes apart.
             #
             # A source the config still names and no plugin declares is a plugin
-            # that is not answering: `refresh_declared` skips a plugin that is
-            # down whole, so its sources leave this home's address book while
-            # their rows stay on purpose (`Upstream.declare`, and
-            # `test_a_plugin_that_stops_answering_keeps_the_rows_it_declared`).
-            # The other shape is an entry taken out of the section while the
-            # plugin that held it was silent: `forget_source` is that plugin's
-            # deletion to ask for, and it has not been asked.
+            # that is not answering: `refresh_declared` skips a plugin that is down
+            # whole, so its sources leave this home's address book while their
+            # rows stay on purpose (`Upstream.declare`).  The other shape is an
+            # entry taken out of the section while the plugin that held it was
+            # silent: `forget_source` is that plugin's deletion to ask for, and it
+            # has not been asked.
             #
-            # **Neither sentence may tell the caller the config does not name the
-            # source when it does**, which is the one thing the text here got
-            # wrong: it answered "not a server this hub is configured with any
-            # more — check `mcp:` in the config" for a source whose entry was
-            # there all along and whose *plugin* was the thing that was down.
-            # That is the shape this is reached in: a switched-off entry stays
-            # declared and is refused by its plugin, and a removal whose plugin
-            # did answer has already had its rows deleted (`forget_source`).
+            # **Neither sentence may say the config does not name the source when
+            # it does**: a switched-off entry stays declared and is refused by its
+            # plugin, and a removal whose plugin did answer has already had its
+            # rows deleted.
             if source in configured_sources(current()):
                 return {
                     "text": (
@@ -3376,21 +3286,18 @@ def build_server(
             )
         else:
             text, ok = await upstream.call(remote, arguments, forwarded)
-        # Recency, for the budget — **and this is where it is learned**.  The
-        # hub is not told which tools the model called: it is the process that
-        # calls them, so the stamp belongs beside the call rather than on a
-        # notification from the loop, which would be a second mechanism for a
-        # fact already in hand.
+        # Recency, for the budget — **and this is where it is learned**.  The hub
+        # calls the tools, so the stamp belongs beside the call rather than on a
+        # notification from the loop, which would be a second mechanism for a fact
+        # already in hand.
         #
-        # **Every routed call, refused or not.**  The model reaching for a tool
-        # is the evidence the budget is deciding on, and a call the far end said
-        # no to is still the model asking — a tool that keeps erroring is one it
-        # keeps wanting, not one to throw away.
+        # **Every routed call, refused or not.**  A call the far end said no to is
+        # still the model asking; a tool that keeps erroring is one it keeps
+        # wanting.
         #
-        # **Before the answer is returned, and deliberately.**  The stamp is the
-        # turn boundary's input: the harness trims the list after the turn, and
-        # a write detached from this call could land *after* the trim and cost
-        # the model the tool it had just been using.
+        # **Before the answer is returned**: the harness trims after the turn, and
+        # a detached write could land after the trim and cost the model the tool
+        # it had just been using.
         await catalogue.touch(name)
         return {"text": text, "ok": ok}
 

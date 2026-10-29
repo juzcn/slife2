@@ -683,15 +683,13 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 streamer, provider, messages, tools, model, ctx
             )
         except Exception as exc:
-            # **A failed call used to leave only FastMCP's generic report.**  It
-            # names the tool (`stream_chat`) and carries a traceback, but not the
-            # provider, the model, or whose conversation paid for the failure —
-            # the 2026-10 `unsupported image` 400s were exactly this.  This line
-            # is the same failure with the identity on it.  **No `exc_info`
-            # here**: FastMCP prints the raw exception's traceback to stderr
-            # (which is this process's log file) as its own panel, and that
-            # traceback is what this line puts a name on.  A second copy of the
-            # same stack is the noise this line exists to remove.
+            # **A failed call carries the identity on the line**: FastMCP's own
+            # report names the tool and carries a traceback, but not the
+            # provider, the model, or whose conversation paid for the failure.
+            # **No `exc_info` here**: FastMCP prints the raw exception's
+            # traceback to stderr (this process's log file) as its own panel, and
+            # a second copy of the same stack is the noise this line exists to
+            # remove.
             logger.warning(
                 "stream_chat_failed %s/%s for %s kind=%s: %s: %s",
                 provider,

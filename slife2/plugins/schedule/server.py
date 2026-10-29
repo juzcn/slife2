@@ -52,11 +52,11 @@ written and the run is `failed`; a hand-over that does not come back is SDD §5.
 third answer and leaves the row **pending**, because a run whose fate is unknown
 must not be reported as either.  Coming up again, the sweep fails what a stopped
 process left pending, and the poll records the newest fire each task missed — and
-**neither is announced**.  A note handed over on the trigger's channel would
-announce one, and it is deferred rather than half-built (SDD §14.2).  The
-ledger is where the answer is and `schedule_runs` is how it is read, so a
-**fire is the only thing this plugin ever says to a conversation** — one path,
-one template, and a prompt nobody had to edit.
+**neither is announced**: a note handed over on the trigger's channel would be a
+second thing said to a conversation, and it is deferred rather than half-built
+(SDD §14.2).  The ledger is where the answer is and `schedule_runs` is how it is
+read, so a **fire is the only thing this plugin ever says to a conversation** —
+one path, one template, and a prompt nobody had to edit.
 
 **No marker, and that is deliberate.**  A message handed over here wears only its
 **channel** (`schedule:<name>`), which is what tells the window and the model
@@ -346,10 +346,10 @@ def ledgers() -> list[ScheduleStore]:
     go and look at (SDD Appendix C).
 
     **Only the failures that mean "this file cannot be opened" are skipped.**
-    A broad `except Exception` made a bug in `adopt` — or a schema this build
-    wrote and then cannot read — look like an operator's damaged file, and the
-    skip is the one shape that hides the clock's own defect.  A `TypeError` is
-    the clock's and propagates; SQLite's and the filesystem's are the file's.
+    A broad `except Exception` would make a bug in `adopt` — or a schema this
+    build wrote and then cannot read — look like an operator's damaged file, and
+    the skip is the one shape that hides the clock's own defect.  A `TypeError`
+    is the clock's and propagates; SQLite's and the filesystem's are the file's.
     """
     found: list[ScheduleStore] = []
     for ledger in schedule_dbs():
@@ -703,8 +703,7 @@ async def poll_once(
     **Two jobs, and they are the two ends of one run's life**: what has come due
     is fired, and what is in flight is asked after.  A poll that only did the
     first would leave every run `pending` for as long as nothing else closed it —
-    which is what a prompt telling a *model* to close it amounts to (SDD
-    SDD §9.4).
+    which is what a prompt telling a *model* to close it amounts to (SDD §9.4).
 
     Returns what it did, as lines — for the log, and because "it did nothing" is
     the ordinary answer and a caller should be able to see that rather than infer

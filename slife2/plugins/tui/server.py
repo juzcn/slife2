@@ -209,7 +209,7 @@ def decode(message: str) -> Handover | None:
     # raise here ends the progress callback that delivers every hand-over for
     # that window — one malformed push from a peer on another build, or a torn
     # write, and the delivery path is gone for the life of the attachment.  A
-    # `bool` is not a ticket either, and `True` used to read as ticket 1.
+    # `bool` is not a ticket either.
     ticket = payload.get("id")
     if not isinstance(ticket, int) or isinstance(ticket, bool):
         return None

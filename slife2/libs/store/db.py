@@ -1,23 +1,19 @@
 """The db's storage — a conversation's turns.
 
 **The turns** are one SQLite file per agent: a conversation's history, which
-cannot be derived from anything and would be a loss.  The tool catalogue was the
-second thing this module kept, and it is `slife2.libs.store.catalogue` now: the two have no
-name in common — one is a history nothing else can reconstruct, the other a set
-of rows the servers can be asked again — and a module that holds both makes
-every question about one of them a question about a file that is mostly about
-the other.
+cannot be derived from anything and would be a loss.  The tool catalogue is
+`slife2.libs.store.catalogue`, and the two are separate: one is a history
+nothing else can reconstruct, the other a set of rows the servers can be asked
+again; a module that held both would make every question about one of them a
+question about a file that is mostly about the other.
 
 The two indexes over these turns are `slife2.libs.store.index`'s, which is the same
 machinery the catalogue and the cabinet are searched by.
 
-The schema separates the facts the first `turns` table conflated.  This module
-originally had a `turns` table of its own invention — `(id, agent, created_at,
-prompt, messages, model, usage, steps)` — and it was the wrong shape in ways that
-only show up later: one column for two different token counts, one column for two
-different moments, and no place for the reasoning at all.  The columns here
-answer those, arrived at by use.  There is no `user_message` column beside the
-assistant's half — see below.
+**The schema separates facts a single `turns` table conflated**: one column for
+two different token counts, one column for two different moments, and no place
+for the reasoning at all.  The columns here answer those.  There is no
+`user_message` column beside the assistant's half — see below.
 
 **One row is one turn**: what the user said, and everything the agent did about
 it.  Turns are independent — no session grouping, no lifecycle.  Nothing here
@@ -50,8 +46,8 @@ index — which is most of what tends to arrive.
 
 A file that is missing one of the columns this build declares is **refused at
 open** (`StaleSchema`), naming the column and the file.  Reported and served
-anyway — which is what this did — the failure lands later and per row as
-SQLite's `No item with that key`: a message that names neither.
+anyway, the failure lands later and per row as SQLite's `No item with that
+key`: a message that names neither.
 
 **The search indexes are derived, not migrated.**  Finding a turn by what it was
 about needs a keyword index over its text and a vector index over what it was
@@ -133,7 +129,7 @@ logger = logging.getLogger(__name__)
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 #: Database files whose old schema has already been named — a missing column
-#: (`_refuse_old_schema`) or the previous `turns` table (`_report_legacy_file`).
+#: (`_refuse_old_schema`) or the previous `turns` table (`_refuse_legacy_file`).
 #: The report is once per process per file, which is why this is not simply
 #: computed.
 _legacy_reported: set[Path] = set()
@@ -220,7 +216,7 @@ class TurnRecord:
     #: message out: it is `messages[0]`, and a reader that wants what was asked
     #: reads it there, where the model read it too.
     messages: list[dict[str, Any]] = field(default_factory=list)
-    #: A retrieval hook the model may write later.  Nothing writes it yet.
+    #: A retrieval hook the model writes through `turn_summarize`.
     summary: str = ""
     tags: str = ""
     #: When the user pressed enter, and when the agent finished.  Two columns
@@ -242,9 +238,10 @@ class TurnRecord:
     #: The bill's breakdown — prompt, completion, cache read and cache
     #: creation — as the loop measured it.  `token_count` is that bill's total,
     #: which is what a reader asks for first; the breakdown is what a cache-hit
-    #: ratio is computed from, and no sum can reconstruct it.  None for a row
-    #: written before this was recorded: the totals it has are kept, and the
-    #: absence says the split was never measured rather than that it was zero.
+    #: ratio is computed from, and no sum can reconstruct it.  None when no
+    #: split was recorded — a writer that measured none, or a value that will
+    #: not read: the totals it has are kept, and the absence says the split was
+    #: never measured rather than that it was zero.
     usage: Usage | None = None
 
     def to_listing(self, chars: int = PREVIEW_CHARS) -> dict[str, Any]:
@@ -256,10 +253,9 @@ class TurnRecord:
         Reading them back is this module's job and not the tool's, because this
         is the module that knows what a turn is.
 
-        The cut is **announced** (`…`), for the reason the tool-result digest
-        announces itself: a message that reads as short is a message the caller
-        has no reason to `turn_read`, so a silent cut turns one wrong answer
-        into a wrong answer nobody looks up.
+        The cut is **announced** (`…`): a message that reads as short is a
+        message the caller has no reason to `turn_read`, so a silent cut turns
+        one wrong answer into a wrong answer nobody looks up.
 
         **`token_count` is the turn's own size, not the bill `self.token_count`
         records.**  The stored count sums every model call the turn made, and
@@ -302,7 +298,7 @@ class _Stored:
     Assembled before the transaction and before the embed, so that the two
     halves of a save can run in different places: the embedding on the event
     loop, where a network call belongs, and the inserts on a thread, where
-    blocking belongs.  A plain bundle rather than fifteen arguments across that
+    blocking belongs.  A plain bundle rather than a dozen arguments across that
     boundary.
     """
 
@@ -352,8 +348,9 @@ CREATE TABLE IF NOT EXISTS turn (
     -- The bill's breakdown, as `Usage.to_wire()` wrote it.  `token_count` is
     -- this bill's total and `context_tokens` the last call's; the split is
     -- here because a cache-hit ratio cannot be reconstructed from sums.
-    -- NULL for a row written before it was recorded — the totals it has are
-    -- kept, and NULL says the split was never measured.
+    -- NULL when no split was recorded — a writer that measured none, or a
+    -- value that will not read.  The totals it has are kept, and NULL says the
+    -- split was never measured.
     usage          TEXT
 );
 
@@ -474,8 +471,8 @@ def strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     the person's own words are stored with the turn, and when those words name a
     path or a URL, the model can attach it again in a new call.
 
-    Announced, never silent, for the reason the tool-result digest is: a
-    placeholder that reads as the real thing is a lie a model reasons from.
+    Announced, never silent: a placeholder that reads as the real thing is a
+    lie a model reasons from.
 
     Returns new dicts; the caller's list is untouched, because the live
     conversation is still using the image — the model that just read it may be
@@ -706,19 +703,19 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     **The turn's own voice: what was asked, what the model reasoned, and what it
     finally answered.**  The reasoning is included because it is the model's own
     statement of what the turn is doing and it is stored with the message
-    (`slife2.libs.turn.messages`); measured on this repository's live log it was
-    83.6k characters against a 73.9k semantic text and visible to neither leg.
-    The answer is the turn's own synthesis, written with the whole turn in view.
+    (`slife2.libs.turn.messages`); it is also invisible to both legs otherwise —
+    measured on this repository's live log it was 83.6k characters against a
+    73.9k semantic text.  The answer is the turn's own synthesis, written with
+    the whole turn in view.
 
     **Tool results and tool-call arguments are out, and that is measured.**  With
     30 discriminator-style subject queries over the same log, dropping the
     per-call argument head raised MRR from 0.83 to 0.88, and adding the reasoning
     raised it to 0.92 (hit@1 0.77 to 0.90); keeping the full arguments as well
-    cost 2.7x the chunks and recovered one query.  The reason results were out
-    before still holds — they were 56–99% of a turn's text — but with chunking it
-    is a statement about *candidates*: evidence chunks crowd the `k` a turn-level
-    answer is chosen from.  A result is still in the turn, which is what the
-    keyword leg and `turn_read` read.
+    cost 2.7x the chunks and recovered one query.  Results are 56–99% of a
+    turn's text, so with chunking this is a statement about *candidates*:
+    evidence chunks crowd the `k` a turn-level answer is chosen from.  A result
+    is still in the turn, which is what the keyword leg and `turn_read` read.
 
     Summaries and tags are out for a second reason: they are written *after* the
     turn, and a vector index that depended on them would have to be rebuilt
@@ -779,12 +776,11 @@ def _fuse_questions(
     """Fuse the words into each question, then keep each turn's best question.
 
     **The keyword leg is evidence *about a question*.**  The catalogue already
-    fuses it that way; the turn recall used to fuse one keyword list against one
-    merged meaning list, which credited a turn by its best similarity across
-    questions rather than by how well it answers the question the words belong
-    to.  A turn is kept once, at the score of its best question, so another
-    question can only add a turn or raise one — the same rule the measured
-    similarity follows.
+    fuses it that way; fusing one keyword list against one merged meaning list
+    instead credits a turn by its best similarity across questions rather than
+    by how well it answers the question the words belong to.  A turn is kept
+    once, at the score of its best question, so another question can only add a
+    turn or raise one — the same rule the measured similarity follows.
 
     Ties fall to the newer turn, the order `fuse_ranked` uses.  The words are one
     list and the same for every question; an empty keyword leg is a question
@@ -819,20 +815,11 @@ class TurnStore:
         """One connection for this call, and **it is closed on the way out**.
 
         `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
-        and leaves the connection *open*.  What closed these was the garbage
-        collector — and a connection that has survived one young collection waits
-        for a full one, which in a daemon serving turns can be minutes away.
-        Nothing sees that until something wants the file: on Windows an open
-        handle is a file nobody else can delete, and `subagent_remove` met
-        exactly that — `[WinError 32] … tester/turns.db`, with a non-fork
-        subagent's own last turn long since answered and its directory
-        undeletable.
-        (`slife2.plugins.agent.server.subagent_remove`.)
-
-        So the lifetime is stated where the connection is made.  Every call site
-        keeps the `with` it already had and gets the close as well as the commit;
-        the commit is what `with connection:` here is for, and the `finally` is
-        the half that was missing.
+        and leaves the connection *open*.  On Windows an open handle is a file
+        nobody else can delete — `subagent_remove` met exactly that, with a
+        non-fork subagent's own `turns.db` undeletable
+        (`slife2.plugins.agent.server.subagent_remove`).  `with connection:`
+        here is the commit; the `finally` is the close.
         """
         connection = connect_to(self.path)
         try:
@@ -856,7 +843,6 @@ class TurnStore:
         `PRAGMA` and leaves the file as it was found.
 
         **Every column this build declares, not the one that arrived last.**
-        `usage` is what made the gap reachable, but the rule is the table's:
         `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
         exists, so the next addition is the same case, and a file missing any of
         them can neither be read to its end nor written at all.
@@ -864,8 +850,7 @@ class TurnStore:
         **Reported once per process per file, and raised every time.**  The
         report is the operator's — the store is built on every call, so a
         complaint per turn would be a log nobody reads — while the raise is the
-        caller's.  Reporting and then serving is what produced the failure this
-        exists to prevent: `_row_to_record` reading `row["usage"]` raised
+        caller's.  Served, `_row_to_record` reading a missing column raises
         SQLite's `No item with that key` for every turn in the file, naming
         neither the file nor the remedy.
         """
@@ -946,18 +931,16 @@ class TurnStore:
         index holds.  The vector is the conversation's alone, so they are not
         embedded.
 
-        **There used to be a second one, and its absence is a decision.**  An
-        oversized tool result was kept as a head-and-tail digest, on the argument
-        that tool output is reproducible — re-run the tool and the answer comes
-        back — and that argument was wrong twice over: nothing checked it (a
-        `git status` after a commit, a `ps` a second later and a search over a
-        moving corpus all answer differently the second time), and deciding
-        *which* part of an output to keep is the tool designer's judgement rather
-        than the store's.  The record now keeps the whole of what happened, and
-        what a model is *shown* is bounded where text enters a context instead —
-        the harness's window over a result, and the cabinet's `dump_read` over
-        what it was windowed out of.  That bound is a number about tokens rather
-        than a guess about content, and it is one a model can read past.
+        **The record keeps the whole of what happened.**  A tool result is not
+        trimmed to a head and tail on the way in: tool output is not reliably
+        reproducible (a `git status` after a commit, a `ps` a second later and a
+        search over a moving corpus all answer differently the second time), and
+        deciding *which* part of an output to keep is the tool designer's
+        judgement rather than the store's.  What a model is *shown* is bounded
+        where text enters a context instead — the harness's window over a
+        result, and the cabinet's `dump_read` over what it was windowed out of.
+        That bound is a number about tokens rather than a guess about content,
+        and it is one a model can read past.
 
         The document is passed through `storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of
@@ -995,14 +978,13 @@ class TurnStore:
         # request blocking every other call this server is answering.
         #
         # **The count is checked, as every other embedding path checks it.**  A
-        # short answer used to be written as-is, and a *partial* one is the worst
-        # shape it can take: the turn gets `turn_chunk` rows for some of its
-        # chunks, and `_turns_without_vectors` selects turns with *no* chunk row
-        # at all — so `sync_indexes` can never see this one again and
-        # `index_status` reports `ready: True` over an index that is missing
-        # vectors.  The save path was the one of them that did not refuse it;
-        # `checked_vectors` is the one seat that check has now.  Raised before the
-        # transaction opens, so a refused save is a save that stored nothing.
+        # *partial* answer is the worst shape it can take: the turn gets
+        # `turn_chunk` rows for some of its chunks, and `_turns_without_vectors`
+        # selects turns with *no* chunk row at all — so `sync_indexes` can never
+        # see this one again and `index_status` reports `ready: True` over an
+        # index that is missing vectors.  `checked_vectors` is the one seat that
+        # check has.  Raised before the transaction opens, so a refused save is a
+        # save that stored nothing.
         vectors = (
             await checked_vectors(
                 embedder,
@@ -1162,10 +1144,10 @@ class TurnStore:
     def context_turns(self) -> list[int]:
         """The live-context list: which turns this conversation is made of.
 
-        `[]` for a conversation whose context has never been recorded, which is
-        every file on the day this table arrives — an addition, so a file
-        predating it opens unchanged and answers honestly rather than needing a
-        migration (`CREATE TABLE IF NOT EXISTS` is what additions need).
+        `[]` for a conversation whose context has never been recorded — every
+        file that predates the table — an addition, so such a file opens
+        unchanged and answers honestly rather than needing a migration
+        (`CREATE TABLE IF NOT EXISTS` is what additions need).
         """
         with self._connect() as connection:
             return read_context(connection)
@@ -1488,9 +1470,7 @@ class TurnStore:
         none, and a turn with nothing to embed is not selected at all.  A model
         that answers with nothing is *not* the other way out: `embed_rows`
         refuses an answer shorter than the batch it was asked for, so this ends
-        either with every turn placed or with the failure named.  (An arm here
-        used to read an empty answer as "the index is as complete as it will
-        get", which is the one thing an empty answer does not mean.)
+        either with every turn placed or with the failure named.
         """
         await off_loop(self._sync_text_index)
         await off_loop(self.ensure_indexes, embedder)
@@ -1913,13 +1893,11 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     **A damaged list is refused rather than read as empty.**  The empty list
     means something here — "this conversation's context has not been recorded",
     which is every file predating the table, and one of the three things a
-    rebuild may decide — and it is also what `_messages` would answer for a
-    `turn_ids` whose JSON will not parse, or parses to something that is not a
-    list of turn ids at all.  Those are not the same fact, and the
-    difference is not academic: `append_context` reads this list and appends to
-    it, so a damaged list read as `[]` becomes a **one-turn context** on the
-    next save, permanently and without a word.  `_structural` is the refusal,
-    and SDD Appendix C is the rule it follows.
+    rebuild may decide — and a damaged `turn_ids` read as `[]` would be
+    indistinguishable from it.  The difference is not academic: `append_context`
+    reads this list and appends to it, so a damaged list read as `[]` becomes a
+    **one-turn context** on the next save, permanently and without a word.
+    `_structural` is the refusal, and SDD Appendix C is the rule it follows.
     """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
@@ -2021,10 +1999,10 @@ _USAGE_KEYS = tuple(Usage().to_wire())
 def _usage(raw: Any, *, what: str) -> Usage | None:
     """The stored breakdown, or None when this row carries none.
 
-    None is the honest answer twice over: a row written before the column
-    existed, and a value that will not read as one.  The totals beside it are
-    still the row's own, so a damaged breakdown costs the split and not the
-    bill — the same field-not-structure rule `_messages` follows.
+    None is the honest answer twice over: no split was stored, and a value that
+    will not read as one.  The totals beside it are still the row's own, so a
+    damaged breakdown costs the split and not the bill — the same
+    field-not-structure rule `_messages` follows.
 
     **A foreign object that parses is damage too.**  `Usage.from_wire` coerces
     every missing key to zero, so `{"prompt": 10}` would read as an honest
@@ -2071,18 +2049,17 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     the damaged value made.  There it means something the damage did not
     (SDD Appendix C).
 
-    **The *shape* is damage too, and it is the half that was missing.**  A
-    stored value that parses to a string, a number, or a list of strings is
-    readable JSON and is not `messages`, and every reader of one asks it for a
-    key: `to_listing`'s two halves, `embed_text`, `searchable_text`.  Each of
-    them used to fail with `<type> object has no attribute 'get'` from inside a
-    comprehension — and a failure is not the one damaged turn this tolerance
-    trades for, it is the whole history, plus the whole `slife2-context` plugin,
-    which lists and indexes every turn file it knows of as it comes up.  That is
-    strictly worse than the total loss this function exists to avoid, so a value
-    that is not a list of mappings is refused exactly as one that will not parse
-    is: they are the same fact about the row, and the same answer is honest for
-    both.
+    **The *shape* is damage too.**  A stored value that parses to a string, a
+    number, or a list of strings is readable JSON and is not `messages`, and
+    every reader of one asks it for a key: `to_listing`'s two halves,
+    `embed_text`, `searchable_text`.  Each of them fails with `<type> object has
+    no attribute 'get'` from inside a comprehension — and a failure is not the
+    one damaged turn this tolerance trades for, it is the whole history, plus the
+    whole `slife2-context` plugin, which lists and indexes every turn file it
+    knows of as it comes up.  That is strictly worse than the total loss this
+    function exists to avoid, so a value that is not a list of mappings is
+    refused exactly as one that will not parse is: they are the same fact about
+    the row, and the same answer is honest for both.
 
     `what` is not decoration: a damaged row that is read as empty leaves a log
     line as the only trace of it, so the line has to say *which* row — the

@@ -18,11 +18,10 @@ not part of that surface: it is the name a message arriving mid-turn is
 delivered under, and it is declared here because the pair the harness writes
 into a conversation has to name a tool the request carries.
 
-**A key is created when it is first used, and it never expires.**  That is the
-difference from the handle this server used to mint: an id could go stale — a
-daemon restart, an idle window — and every caller then had to carry a "your loop
-is gone" path.  A name cannot go stale.  The idle sweep still runs, but it only
-reclaims memory; nothing a caller can observe depends on it.
+**A key is created when it is first used, and it never expires.**  A name
+cannot go stale, so no caller needs a "your loop is gone" path.  The idle sweep
+still runs, but it only reclaims memory; nothing a caller can observe depends
+on it.
 
 **The key travels with the call.**  Everything this server asks of a peer is
 asked on behalf of the same `(agent, subagent)` — the write to the db and the
@@ -37,7 +36,7 @@ still knows nothing about MCP: it is handed a coroutine, and where the registry
 came from is nobody else's business.  Our own plugins included: one owner for
 the model's whole tool list is worth one hop.  See SDD §7.1.
 
-Two consequences of owning the history are paid for here rather than avoided,
+The consequences of owning the history are paid for here rather than avoided,
 because they are the price of the state:
 
 * **A per-key lock**, so two turns cannot race over one list.  `send_message`
@@ -67,9 +66,8 @@ because they are the price of the state:
   it, so `send_message` drops them and says so in the error the caller reads.
   Such a row is note-only by design; the cabinet save is for turns that ran.
 
-What statelessness bought and is now given up deliberately: a conversation store
-that can grow without bound.  See SDD §14.2 — trimming is the next thing, not
-a thing this cut pretends to have solved.
+**The conversation store can grow without bound**, which is the price of
+owning the history.  See SDD §14.2 — trimming is not solved here.
 """
 
 from __future__ import annotations
@@ -335,11 +333,10 @@ async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
     bare call rather than a wrapped one.  The row was written a moment ago by
     this same process, so a window that cannot be read back is not a case to
     design for — it is the cabinet having stopped answering, which the register
-    (SDD Appendix C) puts on the side of the steps that must succeed.  It used to catch
-    every exception, log a warning and answer `""`, which is an empty tool result
-    entering the conversation: the fallback `compress_for` forbids one paragraph
-    up ("nothing else here falls back"), and the mask covered exactly the failure
-    this step would then be unable to report.
+    (SDD Appendix C) puts on the side of the steps that must succeed.  Catching
+    it would put an empty tool result into the conversation, the hidden fallback
+    `compress_for` forbids one paragraph up ("nothing else here falls back"),
+    and would mask exactly the failure this step is here to report.
     """
     answer = await client.call_tool(
         "dump_read",
@@ -354,9 +351,9 @@ def _text_of(message: Message) -> str:
     """The words in one message, whether it is plain or carries parts.
 
     A user message with an attachment is a list of content parts (`Message`
-    documents the shape), and its text is a `{"type": "text"}` part.  Reading
-    only a `str` made the newest user message invisible to `_current_input`,
-    which then answered with the previous turn's words.
+    documents the shape), and its text is a `{"type": "text"}` part.  A
+    `str`-only read would make the newest user message invisible to
+    `_current_input`, which would then answer with the previous turn's words.
     """
     if isinstance(message.content, str):
         return message.content
@@ -413,7 +410,7 @@ def _current_input(messages: Sequence[Message]) -> str:
 
     **The newest user message ends the search even when it has no `str` text.**
     A message carrying an image is a list of parts; skipping it in favour of the
-    previous turn's plain message answered a question nobody asked in this turn.
+    previous turn's plain message answers a question nobody asked in this turn.
     """
     for message in reversed(messages):
         if message.role == "user":
@@ -431,12 +428,12 @@ def _current_input(messages: Sequence[Message]) -> str:
 #: *harness* makes on the model's behalf.  The model can call it too and gets a
 #: sentence saying there is nothing to fetch — only the harness pulls.
 #:
-#: Being declared is not enough for it to survive: `slife2.libs.store.db` admits
-#: `_`-prefixed names to the model's list only from its own set, and
-#: `slife2.plugins.toolhub.server.ALWAYS_LOADED` is what stops the model unloading a name its
-#: own history refers to.  Both spellings are this string, and the string itself
-#: lives in `slife2.libs.turn.tools.CHECK_NEW_INPUT` because the display that
-#: rebuilds a transcript reads it too.
+#: Being declared is not enough for it to survive: `slife2.libs.store.catalogue`
+#: admits `_`-prefixed names to the model's list only from its own set, and
+#: `slife2.plugins.toolhub.server.ALWAYS_LOADED` is what stops the model
+#: unloading a name its own history refers to.  Both spellings are this string,
+#: and the string itself lives in `slife2.libs.turn.tools.CHECK_NEW_INPUT`
+#: because the display that rebuilds a transcript reads it too.
 
 #: The tool an image comes in by.  **The model calls it**, which is the whole
 #: mechanism: somebody writes a path in a sentence and the model attaches it.
@@ -656,7 +653,7 @@ class Outcome:
     #: two completed model calls reports those two rather than zero; a turn
     #: interrupted inside a call reports the calls that came back before it.
     #: `last_usage` is the last completed call's own, which is what
-    #: `context_tokens` has always meant.
+    #: `context_tokens` means.
     usage: Usage = field(default_factory=Usage)
     last_usage: Usage = field(default_factory=Usage)
     #: Sources this turn was handed that could not be attached, in the caller's
@@ -694,11 +691,6 @@ def log_turn(
 ) -> None:
     """One line per turn: what it ran on, what it cost, and how it ended.
 
-    **The gap this closes is the whole reason a session could not be traced.**
-    Before it, the 2026-10 corpus had no turn lines at all: a model call was
-    logged one process over, a stored turn one process over, and a tool only
-    when it failed.  "Where did the five minutes go" had no starting point.
-
     It is written on every ending, and the ending is in `stop=`: a model's own
     reason, `cancelled` for a turn that was interrupted, or `failed` with the
     exception's own words.  `turn=-` is a real value, not a missing one — the id
@@ -708,10 +700,8 @@ def log_turn(
 
     **The whole bill, on one line.**  Prompt and completion are the two halves,
     and `cache_read`/`cache_creation` are their breakdown — the numbers a
-    cache-hit ratio needs, which used to be recoverable only by joining this
-    line to every per-call `stream_chat` line of the same conversation.  A
-    cancelled turn reports the calls that completed before the cut; zero means
-    no call came back, not that the turn was free.
+    cache-hit ratio needs.  A cancelled turn reports the calls that completed
+    before the cut; zero means no call came back, not that the turn was free.
 
     **No prompt or answer text.**  The transcript is where words live; this line
     is the operator's index into it, so it carries counts and times, never the
@@ -731,8 +721,8 @@ def log_turn(
         ending = "failed"
     # **From the outcome, not the result.**  A cancelled turn has no result but
     # did spend the model calls that completed before it was cut off, and the
-    # loop keeps that total (`Outcome.usage`).  Reporting zero here was the one
-    # place a cancellation's cost vanished from both the log and the row.
+    # loop keeps that total (`Outcome.usage`), so reporting zero here would drop
+    # a cancellation's cost from both the log and the row.
     usage = outcome.usage
     logger.info(
         "turn_done agent=%s subagent=%s turn=%s model=%s stop=%s iterations=%d "
@@ -787,9 +777,7 @@ class Loop:
     #: **The iteration cap this conversation started on**, read where the model is
     #: read — at the start, from the config as it was then — and not per turn.
     #: `make_loop` runs on every turn, so taking it from the live config would
-    #: let an operator's edit change the terms of a turn already in flight; the
-    #: boot config was the other half of the same mistake, keeping a cap the
-    #: conversation that *should* have read the edit never saw.
+    #: let an operator's edit change the terms of a turn already in flight.
     max_iterations: int
     messages: list[Message]
     lock: asyncio.Lock
@@ -797,10 +785,10 @@ class Loop:
     inbox: deque[Pending] = field(default_factory=deque)
     #: Whether this conversation has been put back on the context it had when it
     #: last stopped.  A property of the *loop* rather than of the call that
-    #: created it, which is the fix rather than a detail: two callers can arrive
-    #: on one brand-new key at the same time, and only one of them is the caller
-    #: that created it — so a per-call flag left the other running a turn on the
-    #: empty list the restore was about to replace.  Set under the lock, and only
+    #: created it: two callers can arrive on one brand-new key at the same time,
+    #: and only one of them is the caller that created it — so a per-call flag
+    #: would leave the other running a turn on the empty list the restore was
+    #: about to replace.  Set under the lock, and only
     #: once the restore has actually answered, so a store that failed is tried
     #: again by the next turn rather than leaving the conversation blank for the
     #: life of the process.
@@ -893,23 +881,15 @@ class Loop:
     #: that is why it is a dict of futures rather than a queue.
     approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
 
-    #: There was a `records` property here — `not self.subagent` — and it is gone
-    #: with the thing it was about.  Its reason was written down: *a subagent is a
-    #: means to an end inside one turn of its parent's conversation*, so its round
-    #: trips were not written, and the file its store named was a schema and
-    #: nothing more.  A subagent *owns* its conversation now (SDD §3.5) — it has a
-    #: directory, a cabinet and a memory of its own, and `subagent_remove` deletes
-    #: them — so every conversation this server holds is recorded, in the store its
-    #: own key names.  The worker the old rule was for was never built: nothing in
-    #: this tree ever created a conversation with a non-empty `subagent`.
-    #:
-    #: **A `fork` is the one conversation that is not recorded**, and it is not
-    #: the old rule coming back: the old one asked *who is asking*, and this one
-    #: asks *what this conversation is made of*.  A fork is made of its maker's
-    #: conversation — copied out of it, and then its own — so writing it down
-    #: would file one agent's work under another's history and put a second copy
-    #: of that history in the store.  Nothing about it is written: no restore,
-    #: no rebuild, no turn record (`adopt_maker` is all three).
+    #: **A `fork` is the one conversation that is not recorded**; every other
+    #: conversation this server holds is recorded, in the store its own key
+    #: names — a subagent owns its conversation (SDD §3.5), with a directory, a
+    #: cabinet and a memory of its own, and `subagent_remove` deletes them.  A
+    #: fork is made of its maker's conversation — copied out of it, and then its
+    #: own — so writing it down would file one agent's work under another's
+    #: history and put a second copy of that history in the store.  Nothing about
+    #: it is written: no restore, no rebuild, no turn record (`adopt_maker` is
+    #: all three).
     #:
     #: **And its session is its whole life.**  The only file a fork leaves is
     #: its `subagent.yaml`, and `forget_forks` removes that when the server
@@ -955,9 +935,8 @@ def build_server(
     for the process**.  Not per turn — that would pay a handshake for every
     iteration of every turn — and not once at startup either, because which model
     is wanted is a property of the *loop*: a caller names one when it opens one,
-    and
-    this server serves every caller.  A model nobody asks for is a connection
-    nobody opens.
+    and this server serves every caller.  A model nobody asks for is a
+    connection nobody opens.
 
     The toolhub is the same arrangement with a different lifetime question
     answered: its *connection* is kept for the process, and its *tool list* is
@@ -1145,11 +1124,10 @@ def build_server(
     async def hub() -> Client:
         """The client for the toolhub, opened on first use.
 
-        **Never optional.**  There used to be a branch here for a config with no
-        tools at all, and it was wrong for the reason every plugin's tools are in
-        the hub rather than here: the model's tool list has one owner, so a system whose
-        toolhub is missing is not a system with no tools — it is a system that
-        has come apart, and it fails the turn like any other missing peer.
+        **Never optional.**  Every plugin's tools are in the hub rather than
+        here: the model's tool list has one owner, so a system whose toolhub is
+        missing is not a system with no tools — it is a system that has come
+        apart, and it fails the turn like any other missing peer.
 
         A toolhub that is there and whose *upstreams* are not is an entirely
         different thing, and is not an error at all: that is the operator's
@@ -1164,16 +1142,14 @@ def build_server(
                     config.server("toolhub").url,
                     name=TOOLHUB_SERVER_NAME,
                     fallback_tool="list_tools",
-                    # **No request deadline on the connection**, and this is the
-                    # correction that matters most in this file: `timeout=` here
+                    # **No request deadline on the connection**: `timeout=` here
                     # is a clock on *every* request that travels over the link,
-                    # and the number it used to hold (30 s, `list_tools`'
-                    # patience) therefore became the deadline for whatever tool
-                    # the model happened to call — a listing's number killing a
-                    # render.  The asks this process makes of the hub state their
-                    # own patience where they are made
-                    # (`slife2.clients.toolclient.HUB_TIMEOUT_SECONDS`), and a *tool
-                    # call* is bounded by the loop and by nobody else.
+                    # so `list_tools`' patience would become the deadline for
+                    # whatever tool the model happened to call — a listing's
+                    # number killing a render.  The asks this process makes of
+                    # the hub state their own patience where they are made
+                    # (`_T.timeouts.work.hub`), and a *tool call* is bounded by
+                    # the loop and by nobody else.
                 )
             assert hub_conn is not None
             return hub_conn
@@ -1657,13 +1633,12 @@ def build_server(
     ) -> AgentLoop:
         """The agent loop for a conversation, bound to that conversation.
 
-        **Keyed by the model reference, and that is a fix rather than a
-        detail.**  The `MCPBackend` carries the model id it was built with, so a
-        cache keyed by *provider* would hand the second of two conversations on
-        one provider the first one's model — silently, because the name a caller
-        passes is only looked up when the backend is built.  The reference is
-        the loop's own `model`, which is exactly the thing the backend must
-        match.
+        **Keyed by the model reference.**  The `MCPBackend` carries the model id
+        it was built with, so a cache keyed by *provider* would hand the second
+        of two conversations on one provider the first one's model — silently,
+        because the name a caller passes is only looked up when the backend is
+        built.  The reference is the loop's own `model`, which is exactly the
+        thing the backend must match.
 
         What is *not* cached is the key.  `with_key` hands back a view of the
         shared backend carrying this conversation's `(agent, subagent)`, so the
@@ -1762,13 +1737,12 @@ def build_server(
         the turn it was given.  **The unattended sentence names the tools a
         reply leaves by** — the peer network's and the channel's own send tool —
         because nobody is there to read prose.  Two ways for nobody to be there,
-        and they are one
-        answer: the instance holding the name has no terminal (`slife2
-        --headless`), or **no instance is holding it at all** — a peer that asks
-        something of an agent nobody is running is told so rather than served
-        (`slife2.libs.harness.handover`), and a turn that runs here anyway is
-        unattended for the same reason.  A subagent is not one of those cases:
-        it is always unattended, so its prompt has no claim to read.
+        and they are one answer: the instance holding the name has no terminal
+        (`slife2 --headless`), or **no instance is holding it at all** — a peer
+        that asks something of an agent nobody is running is told so rather than
+        served (`slife2.libs.harness.handover`), and a turn that runs here
+        anyway is unattended for the same reason.  A subagent is not one of
+        those cases: it is always unattended, so its prompt has no claim to read.
         """
         if subagent:
             system = render_system_prompt(
@@ -1834,12 +1808,10 @@ def build_server(
         caller to handle.  The idle sweep may have dropped the state; the caller
         cannot tell, and does not have to.
 
-        **A pair is not answered here, and the reason is the fix rather than a
-        tidying.**  This used to return `(loop, started)`, and the caller used
-        `started` to decide whether to restore — which is a fact about *this
-        call*, while the restore is a fact about the *loop*: two callers arriving
-        on one brand-new key are one starter and one not, and the second one
-        would have run a turn on the empty list the restore was about to replace.
+        **A pair is not answered here.**  Whether to restore is a fact about the
+        *loop*, not about *this call*: two callers arriving on one brand-new key
+        are one starter and one not, and a per-call flag would leave the second
+        running a turn on the empty list the restore was about to replace.
         `Loop.restored` is the claim, and it is made under the lock.
         """
         client = client_key(agent, subagent)
@@ -2005,15 +1977,12 @@ def build_server(
     async def record(loop: Loop, item: Pending, outcome: Outcome) -> int | None:
         """Write this turn to the log if this loop has any, and answer with its id.
 
-        **Called inside the lock, which reverses an earlier decision.**  It used
-        to run after the lock was released, on the argument that a queued turn
-        waiting on a network call is a wait with no reason behind it — and that
-        argument held while the write was a store's alone.  It does not hold now
-        that the *live-context list* is what the write maintains: a rebuild reads
-        that list, so a queued turn that started before the write landed would be
-        handed a context missing the turn it is following up on, and would drop
-        it.  The price is one loopback before a queued turn starts; the thing it
-        buys is that `turn_ids` and `messages` are never out of step.
+        **Called inside the lock.**  The write maintains the *live-context list*,
+        and a rebuild reads that list: a queued turn that started before the
+        write landed would be handed a context missing the turn it is following
+        up on, and would drop it.  The price is one loopback before a queued turn
+        starts; the thing it buys is that `turn_ids` and `messages` are never out
+        of step.
 
         **Images are kept before the row is written.**  The record copy is
         handed to `keep_images`; a cabinet refusal raises and the caller treats
@@ -2065,14 +2034,14 @@ def build_server(
         tool list — and quietly keeping the context we had would make an
         unreadable answer indistinguishable from a decision to keep it.
 
-        **`turn_ids` is read as strictly as `messages`**, and it did not used to
-        be: `payload.get("turn_ids") or []` adopted an answer that carried
-        messages and no ids as a list whose turns the loop could not name, so
-        the loop's `turn_ids` and the store's disagreed from that point on and
-        the next write persisted the wrong list.  A missing or null `turn_ids`
-        is the same damage as a non-list `messages` and is refused the same way
-        (SDD Appendix C: a value that cannot be read is not a value that is
-        absent).
+        **`turn_ids` is read as strictly as `messages`.**  An answer read with
+        `payload.get("turn_ids") or []` would be adopted even when it carried
+        messages and no ids — a list whose turns the loop could not name, so the
+        loop's `turn_ids` and the store's would disagree from that point on and
+        the next write would persist the wrong list.  A missing or null
+        `turn_ids` is the same damage as a non-list `messages` and is refused the
+        same way (SDD Appendix C: a value that cannot be read is not a value that
+        is absent).
         """
         messages = payload.get("messages")
         if not isinstance(messages, list):
@@ -2167,8 +2136,8 @@ def build_server(
         if turn_id is None:
             # **`None` is a fork's ordinary answer, not a refused write.**  A
             # fork has no log, so `record` returns `None` by design; rolling the
-            # turn back deleted the very messages the cancellation repair kept,
-            # and the next message to the fork resumed without them.
+            # turn back would delete the very messages the cancellation repair
+            # kept, and the next message to the fork would resume without them.
             if loop.fork:
                 loop.covered = len(loop.messages)
                 return
@@ -2199,10 +2168,10 @@ def build_server(
         # **The status bar's figure, taken from the turn it restored.**  A window
         # that has only restored has run no turn of its own, so `context_tokens`
         # would otherwise be 0 while the bar (which reads the same column,
-        # `tui.app.context_of`) shows the last stored turn's size.  A row from
-        # before the column existed answers 0, which is the bar's own rule for a
-        # size nobody measured; a value of another type is damage and is read
-        # the same way rather than failing a restore over a display fact.
+        # `tui.app.context_of`) shows the last stored turn's size.  A size nobody
+        # measured reads 0, the bar's own rule; a value of another type is damage
+        # and is read the same way rather than failing a restore over a display
+        # fact.
         turns = payload.get("turns")
         if isinstance(turns, list) and turns:
             last = turns[-1]
@@ -2339,7 +2308,7 @@ def build_server(
 
         **An answer that carried no counts is refused**, like a shape `_adopt`
         cannot read: a reply that replaced the context list but omitted `kept`
-        and `recalled` used to draw `[kept 0, recalled 0]`, a note reporting a
+        and `recalled` would draw `[kept 0, recalled 0]`, a note reporting a
         decision nobody made (SDD Appendix C: a failure is not a verdict).
         """
         carried = max(len(loop.messages) - loop.covered, 0)
@@ -2564,14 +2533,13 @@ def build_server(
         holds what this turn is answerable for: the whole exchange, or the
         user's message alone when the turn was cut off.
 
-        **The trim happens here, inside the lock, and no longer after it.**  The
-        pair it records has to be part of *this* turn — the saved record and the
-        live history are one list until the snapshot is taken — and it has to be
-        written before the next queued turn can append anything after it.  The
-        price is that a queued turn waits for one loopback to the hub; the thing
-        it buys is a transcript in which a tool the model lost is something it
-        read in the turn that took it away, rather than a gap somebody has to
-        explain.
+        **The trim happens here, inside the lock.**  The pair it records has to
+        be part of *this* turn — the saved record and the live history are one
+        list until the snapshot is taken — and it has to be written before the
+        next queued turn can append anything after it.  The price is that a
+        queued turn waits for one loopback to the hub; the thing it buys is a
+        transcript in which a tool the model lost is something it read in the
+        turn that took it away, rather than a gap somebody has to explain.
 
         **A cancellation that lands in that trim still finds the turn settled.**
         The trim is post-turn work — it only runs once the turn has answered —
@@ -2747,9 +2715,8 @@ def build_server(
             **A failure here is `False`, and `False` is not "lost"**: the call
             keeps its result, `check_async` is what hands it over, and the model
             that asks for it is the model that has a window.  What is *not* done
-            is running the delivery into a conversation nobody is watching —
-            that road used to exist and it is exactly the "carry on without the
-            window" this system dropped.
+            is running the delivery into a conversation nobody is watching:
+            that is the "carry on without the window" this system does not do.
 
             It goes to the **agent's** conversation and not the subagent's,
             because `send_message` addresses a conversation by `(agent,
@@ -2828,9 +2795,8 @@ def build_server(
             cancelled = True
             raise
         finally:
-            # **The trim is wrapped, and the wrapping is the fix rather than
-            # tidiness.**  It is a *post-turn* step, so it only runs when the
-            # turn answered — but it suspends on a real call to the hub
+            # **The trim is wrapped.**  It is a *post-turn* step, so it only runs
+            # when the turn answered — but it suspends on a real call to the hub
             # (`unload_tools`), and a cancellation that lands in that suspension
             # is a cancellation of something the caller is no longer waiting for;
             # the turn is already done.  Left to unwind freely it would skip the
@@ -3015,15 +2981,14 @@ def build_server(
             if hub_owned and hub_conn is not None:
                 await close_server(hub_conn)
                 hub_conn = None
-            # The third client this server opens for itself, and it is one for
-            # the same rule and not one more than for symmetry: `cabinet()` is
-            # reached only by a turn with a result past `tool_result.tokens` —
-            # and a session that ran one of those used to end with the cabinet
-            # still open and still held, so the *next* session's oversized result
-            # called `dump_save` on a shut client.  `compress_for` deliberately
-            # does not catch a failed write ("nothing else here falls back"), so
-            # that was not a lost dump: it was every such turn failing at its
-            # first hop.
+            # The third client this server opens for itself, for the same rule:
+            # `cabinet()` is reached only by a turn with a result past
+            # `tool_result.tokens`, and a cabinet left open across a session
+            # boundary is handed to the next session already shut — every
+            # oversized result then calling `dump_save` on a shut client.
+            # `compress_for` deliberately does not catch a failed write ("nothing
+            # else here falls back"), so that is not a lost dump: it is every
+            # such turn failing at its first hop.
             if cabinet_owned and cabinet_conn is not None:
                 await close_server(cabinet_conn)
                 cabinet_conn = None
@@ -3099,8 +3064,7 @@ def build_server(
         # four, and a call where every source failed answers the shape a call
         # where none did answers — because the fault is the file's, and a
         # refusal about the *call* would throw away the sentence naming which
-        # file it was (the mistake this used to make: "there is no message to
-        # attach it to", said of a path that is not there).
+        # file it was.
         return {
             "attached": [source for source, _url in pairs],
             "refused": refusals,
@@ -3122,9 +3086,7 @@ def build_server(
         # the empty string for the one thing it refuses — a head that carries
         # images, which cannot ride a tool result — and *this* is a tool result:
         # a blank one reads as a failure rather than as "nothing was handed
-        # over", which is the whole reason `NOTHING_WAITING` is a sentence.  Its
-        # own comment has said it covers that case from the beginning; the code
-        # did not.
+        # over", which is the whole reason `NOTHING_WAITING` is a sentence.
         return take_waiting(client_id) or NOTHING_WAITING
 
     @mcp.tool(name=CHECK_ASYNC, meta=FOR_THE_MODEL)
@@ -3833,15 +3795,14 @@ def build_server(
                 with contextlib.suppress(ValueError):
                     loop.inbox.remove(item)
                 # **Inside the lock, and here rather than when the loop is
-                # built.**  Both halves are the same correction.  A restore
-                # replaces the message list wholesale, so it has to happen before
-                # the turn that runs on it — and it has to happen under the lock,
-                # because two callers can arrive on one brand-new key at once:
-                # one creates the loop and the other does not, and a restore
-                # awaited outside the lock lands *underneath* whichever of them
-                # got in first, reassigning the list a running turn is reading.
-                # The claim is on the loop for the same reason a per-call flag
-                # was not enough.
+                # built.**  A restore replaces the message list wholesale, so it
+                # has to happen before the turn that runs on it — and it has to
+                # happen under the lock, because two callers can arrive on one
+                # brand-new key at once: one creates the loop and the other does
+                # not, and a restore awaited outside the lock lands *underneath*
+                # whichever of them got in first, reassigning the list a running
+                # turn is reading.  The claim is on the loop, for the reason
+                # `Loop.restored` gives.
                 if not loop.restored:
                     # **A fork is put back on its maker's conversation, not on a
                     # stored one.**  It has no store — nothing about it is
@@ -4160,8 +4121,8 @@ def build_server(
 
         **A `turns` this build cannot read is refused, not drawn as none.**  A
         context plugin answering with a shape this build does not know — the
-        same damage `_adopt` refuses — used to become `[]`, so a screen showed
-        an empty conversation and said nothing (SDD Appendix C: a failure is
+        same damage `_adopt` refuses — would become `[]`, and a screen would
+        show an empty conversation and say nothing (SDD Appendix C: a failure is
         not a verdict).
 
         Args:
@@ -4332,11 +4293,10 @@ def build_server(
         satisfied either way, and a caller that had nothing to forget is in
         exactly the state it asked for.
 
-        **The stored live-context list is cleared too**, and that is a change:
-        dropping the in-memory loop used to be the whole of it, and it cannot be
-        any more, because a key that has just been dropped is a key whose next
-        message *restores*.  Forgetting a conversation and having it come back on
-        the next prompt is not forgetting it.
+        **The stored live-context list is cleared too**: a key that has just been
+        dropped is a key whose next message *restores*, so dropping the in-memory
+        loop alone would bring the conversation back on the next prompt.
+        Forgetting a conversation and having it come back is not forgetting it.
 
         Only the *conversation* is forgotten.  The turns it produced are in the
         log — storage rather than state — and clearing those is a different
@@ -4552,11 +4512,8 @@ def _remove_tree(directory: Path) -> None:
     **Windows will not delete a file that is open**, and the one thing in there
     that can be is the subagent's own conversation store: `remember_turn` detaches
     the record of a turn, so a write can outlive the answer that produced it, and
-    until `slife2.libs.store.db._connect` closed its connections the store also
-    held the file from *any* earlier turn until the collector ran.  That last one
-    is fixed; this is the belt for the braces, because a write genuinely in flight
-    is not something the caller can wait for — it belongs to a turn that has
-    already been answered, in another process.
+    a write genuinely in flight is not something the caller can wait for — it
+    belongs to a turn that has already been answered, in another process.
 
     The wait is `storage.sqlite_busy`, which is the registry's number for exactly
     this ("how long a writer waits for the writer holding the database"): a
@@ -4564,13 +4521,12 @@ def _remove_tree(directory: Path) -> None:
     outlasts this is not a write.
 
     Raises:
-        ToolError: With the file named and nothing else.  A `WinError 32` — which
-            is what this used to raise, in the OS's own words and in the OS's own
-            *language* — is not an answer a model can act on; "it is open, try
-            again" is.  Refused rather than half-done: the directory is one
-            subagent, and a removal that deleted most of it would leave something
-            that is neither a subagent nor a directory anybody can finish
-            removing.
+        ToolError: With the file named and nothing else.  A `WinError 32`, in the
+            OS's own words and in the OS's own *language*, is not an answer a
+            model can act on; "it is open, try again" is.  Refused rather than
+            half-done: the directory is one subagent, and a removal that deleted
+            most of it would leave something that is neither a subagent nor a
+            directory anybody can finish removing.
     """
     deadline = time.monotonic() + _T.timeouts.storage.sqlite_busy
     while True:
@@ -4593,7 +4549,7 @@ class SubagentSpec:
 
     **A subagent's configuration is a file inside the subagent** — beside its
     conversation and its work, the way a WeChat login is
-    (`slife2.plugins.wechat.server.SESSION_LOGIN`) — and it is *found* by looking
+    (`slife2.plugins.wechat.server.SESSION_NAME`) — and it is *found* by looking
     rather than listed anywhere (`slife2.libs.host.paths.subagent_dirs`).  That
     is what makes the config as short-lived as the thing it configures: a
     subagent made today and removed tomorrow takes its settings with it, and
@@ -4832,18 +4788,13 @@ def _reply(
 ) -> dict[str, Any]:
     """One turn's answer, in the one key set a caller is promised.
 
-    **Built here rather than at each return, and that is the fix rather than a
-    tidy-up.**  The reply used to be written out twice — once at the end of
-    `send_message` and once in `_injected_reply` — and the two had already
-    drifted: the injected dict had no `refused`, so a caller that read
-    `reply["refused"]` got a `KeyError` on exactly the folded-in path, which is
-    the one path a caller cannot recognise by anything else in the answer.  A
-    stable key set is a promise, and one dict is the only way to keep it.
+    **Built here rather than at each return.**  A stable key set is a promise,
+    and one dict is the only way to keep it.
 
     `result` is never None, which is why there is no `if result else` anywhere
     below.  Every path that leaves a turn without a result has already gone —
     `_injected_reply` for a folded message, and the re-raises in `send_message`
-    for a cancellation and a failure — so those branches were dead.
+    for a cancellation and a failure — so no branch is needed.
 
     **`model` is passed in rather than read off the loop**, and that is the
     second thing this signature is for.  The loop's reference is *not* the model
@@ -4885,9 +4836,9 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
     loop's reference here instead would let a `model_switch` during that turn
     answer this caller as a model that never saw the message.
 
-    `usage` and `iterations` are that whole turn's, deliberately — they describe
-    the
-    work that answered this message, which is that turn's work and nothing else.
+    `usage` and `iterations` are that whole turn's, deliberately — they
+    describe the work that answered this message, which is that turn's work and
+    nothing else.
     `injected` is the one thing added, and it is not decoration: without it a
     caller cannot tell "my message rode in another turn" from "my turn happened
     to say the same thing", and the two call for different things to be shown.
@@ -4908,13 +4859,10 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     """Serve the agent loop.  `slife2.libs.host.launcher` starts this.
 
-    **The shared `main`, and this server is the reason there is one.**  The
-    eleven lines below used to be written out here, which is how they came to be
-    written out in `slife2.plugins.llm.embeddings_server` too and how the other
-    sixteen came to share a function that two of eighteen did not call.  What is
-    this server's own is the `note` — the model a *new* conversation starts on is
-    the one fact about this start that no other line carries, and it is the
-    thing a person checking "did my `--model` take" is looking for.
+    **The shared `main`.**  What is this server's own is the `note` — the model
+    a *new* conversation starts on is the one fact about this start that no
+    other line carries, and it is the thing a person checking "did my `--model`
+    take" is looking for.
 
     The address comes from `config.server("agent")`, which is `config.agent.server`
     (`AgentSettings.server`): the agent's settings are the `agent:` section and

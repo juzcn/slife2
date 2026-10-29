@@ -76,12 +76,11 @@ def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
     match settings.thinking:
         case "enabled":
             # **The budget is a share of a number the config has to have said.**
-            # An absent `max_tokens` used to become 8192 here, which is this
-            # adapter inventing an output budget for somebody else's model — and
-            # the thinking budget is half of it, so the invented number decided
-            # how long the model could think.  `thinking: enabled` without a cap
-            # is a configuration that cannot be satisfied, and SDD Appendix C's rule for
-            # that is to say so where it is used.
+            # An absent `max_tokens` must not become an adapter-invented output
+            # budget — the thinking budget is half of it, so the invented number
+            # would decide how long the model could think.  `thinking: enabled`
+            # without a cap is a configuration that cannot be satisfied, and SDD
+            # Appendix C's rule is to say so where it is used.
             if not settings.max_tokens:
                 raise ValueError(
                     f"{settings.model}: compat.thinking is `enabled` and the "
@@ -181,15 +180,12 @@ def build_request(
     thinking = thinking_parameter(settings)
     if thinking is not None:
         # **`extra_body`, because the SDK's typed surface has no `thinking`.**
-        # `chat.completions.create` accepts no such keyword — measured against
-        # the installed `openai` — so passing it at the top level is a
-        # `TypeError` raised *here*, before anything is sent, on every call of
-        # every conversation, with a message about a keyword rather than about
-        # the model.  Through `extra_body` the configured value reaches the wire,
-        # which is all this promises: a gateway that accepts the field gets it,
-        # and one that does not answers in its own words naming the field.  The
-        # Anthropic adapter routes its own non-typed fields (`sampling`) exactly
-        # this way, for exactly this reason.
+        # `chat.completions.create` accepts no such keyword, so passing it at the
+        # top level raises a `TypeError` here before anything is sent — on every
+        # call, with a message about a keyword rather than about the model.
+        # Through `extra_body` the configured value reaches the wire: a gateway
+        # that accepts the field gets it, and one that does not answers in its own
+        # words.  The Anthropic adapter routes `sampling` the same way.
         request["extra_body"] = {"thinking": thinking}
     return request
 
@@ -210,9 +206,8 @@ def translate(event: Any) -> list[ProviderEvent]:
     # Usage is read *before* the choices branch, and the ordering is the point.
     # OpenAI sends token counts on a trailing chunk whose `choices` list is
     # empty; DeepSeek attaches them to the final chunk that still carries a
-    # choice.  Reading usage only in the empty-choices case silently reports zero
-    # tokens against a real DeepSeek endpoint, which is what happened here until
-    # a live call caught it.
+    # choice.  Reading usage only in the empty-choices case reports zero tokens
+    # against a real DeepSeek endpoint.
     usage = _usage(getattr(event, "usage", None))
     if usage is not None:
         events.append(Chunk(usage=usage))
@@ -248,19 +243,14 @@ def translate(event: Any) -> list[ProviderEvent]:
         # dropped.**  `function_call` is what the API streamed before
         # `tool_calls` existed — one call, no index, no id — and a gateway that
         # still speaks it carries the model's *whole* tool call there.  Reading
-        # only `tool_calls` meant the call vanished: no tool ran, the turn was
-        # recorded as a plain answer, and nothing anywhere said a call had been
-        # made.  The unknown-field warning beside this file exists to refuse
-        # exactly that silence, and the field is not even unknown — the SDK
-        # declares it — so it would not have fired either.
+        # only `tool_calls` would make the call vanish: no tool ran, the turn was
+        # recorded as a plain answer, and nothing said a call had been made.
         #
         # Translated rather than named, because the field is legible: it holds
         # what `tool_calls[0].function` holds, index 0 is the only index the
-        # one-call form had, and the id it lacks is synthesised by the
-        # accumulator for every call that arrives without one
+        # one-call form had, and the missing id is synthesised by the accumulator
         # (`ToolCallAccumulator.complete`).  `tool_calls` wins where a gateway
-        # sends both, which is a proxy translating for an old endpoint: reading
-        # both would dispatch the same call twice.
+        # sends both: reading both would dispatch the same call twice.
         deltas.append(
             ToolCallDelta(
                 index=0,

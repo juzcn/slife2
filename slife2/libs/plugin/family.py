@@ -1,13 +1,11 @@
 """A family plugin's shared half: connections for the families that hold them,
 declarations for the families that do not.
 
-**This is where a connection lives now.**  Until this module existed, the toolhub
-opened one link per configured entry, merged what each offered, and was therefore
-the only process that could reach a server.  The hub is the tool *set's* owner —
-which tools exist, what the model is holding, what the budget takes back — and
-holding twenty connections is not that job; it is the job of the process that
-owns the config section they were written in.  So `mcp:` and `rest-api:` each
-have a plugin, and this is the half of both that is the same code.
+**This is where a connection lives.**  The hub is the tool *set's* owner — which
+tools exist, what the model is holding, what the budget takes back — and holding
+twenty connections is not that job; it is the job of the process that owns the
+config section they were written in.  So `mcp:` and `rest-api:` each have a
+plugin, and this is the half of both that is the same code.
 
 **A family holds, and the hub records.**  What this class does is connect to each
 entry, name its tools the way the model will call them, and answer `list_sources`
@@ -132,7 +130,7 @@ class Link:
     decided by the name.*  An `mcp:` entry is a process — or somebody else's
     endpoint — and a machine is where processes live, so two data directories that
     configure `serper` are two homes naming one server rather than two servers.
-    Without this, the second home started all of them again: `slife2-jack`'s
+    Without this, a second home starts all of them again: `slife2-jack`'s
     section is byte-identical to the checkout's, and that is twenty `npx`/`uvx`
     processes for the same twenty servers.
 
@@ -259,12 +257,10 @@ class Link:
         # from the next declaration.  It is logged because a server that will not
         # start is otherwise only visible as tools that are not there.
         #
-        # **The target is on the line, and this is now the only WARNING for the
-        # event.**  `Connection.fail` used to log the same failure a millisecond
-        # earlier, which made one unreachable server cost two lines and neither
-        # say which command or URL had failed.  `settings.url or command` is what
-        # a reader goes to look at; the full cause chain stays at DEBUG in
-        # `Connection.fail`, where somebody who asked for detail gets it.
+        # **The target is on the line, and this is the only WARNING for the
+        # event.**  `settings.url or command` is what a reader goes to look at;
+        # the full cause chain stays at DEBUG in `Connection.fail`, where
+        # somebody who asked for detail gets it.
         logger.warning(
             "%s (%s) is not reachable: %s: %s",
             self.settings.name,
@@ -282,9 +278,9 @@ class Link:
         answers puts back what an older verdict left `error`, and that is the one
         path the merge has for re-enabling a row (`ToolStore._plan`'s
         `reconnected`).  A row stating a verdict of its own would take that
-        decision away from the runtime and turn it into an "update" — which is
-        what marking every row `error` at boot and then writing it straight back
-        looked like from the log.  Neither document family can do this: a skill
+        decision away from the runtime and turn it into an "update" — what
+        marking every row `error` at boot and writing it straight back would look
+        like in the log.  Neither document family can do this: a skill
         and a `cli:` entry have no connection whose state a verdict could come
         from, which is why they, and only they, carry one.
         """
@@ -544,12 +540,12 @@ async def settle_attempts(attempts: Iterable[asyncio.Task[None] | None]) -> None
     """Let the connect attempts already in flight finish, briefly.
 
     **Wait, never cancel.**  The obvious spelling of this at a call site is
-    `asyncio.gather(*pending)` under `asyncio.timeout`, and it is wrong in a way
-    that took a live run to see: on timeout the timeout cancels *this* task, the
-    cancellation propagates into the gather, and the connect being waited for
-    dies with it — leaving a source `idle` with no error and no tools, which is
-    the one state that describes nothing at all.  A caller's patience has nothing
-    to do with whether a connection should continue.
+    `asyncio.gather(*pending)` under `asyncio.timeout`, and it is wrong: on
+    timeout the timeout cancels *this* task, the cancellation propagates into
+    the gather, and the connect being waited for dies with it — leaving a source
+    `idle` with no error and no tools, which is the one state that describes
+    nothing at all.  A caller's patience has nothing to do with whether a
+    connection should continue.
 
     **Both processes that hold a pool of links settle this way**, and that is why
     it is one function: `slife2.plugins.toolhub.server`'s `settle` over the plugins it is
@@ -786,10 +782,8 @@ class Family:
         **The refusal ends by naming the tool that switches the entry back on,
         so `words` comes in with the call.**  That name is the family's
         (`FamilyWords.enable_tool`, `mcp_set_enabled` / `rest_api_set_enabled`),
-        this class does not hold a vocabulary, and the sentence used to write
-        `set_enabled` out — a tool this system serves under no name at all, in
-        an answer to a model that would go and call it.  Taking it here rather
-        than in the constructor is the same arrangement the payload builders use
+        and this class does not hold a vocabulary.  Taking it here rather than
+        in the constructor is the same arrangement the payload builders use
         (`apply_and_report`, `switch_entry`): the answer is built once and the
         words come from the caller that knows them.
 
@@ -892,8 +886,7 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
     **The count is the one number the tool can give before the work is paid
     for.**  Nothing here writes the catalogue: the hub merges this source's whole
     list before the next search.  The count is therefore what a caller reads to
-    know how much a server brings with it, and the threshold language `large`
-    used to carry was a second opinion about the same number.
+    know how much a server brings with it.
     """
     if not one.settings.enabled:
         return {"name": name, "enabled": False, "state": "off"}
@@ -941,10 +934,8 @@ def tools_payload(
     entry, one that is not answering and one that answered with nothing all have
     an empty page, and folding them together would make this plugin tell a model
     two things about one entry — the model is the party that cannot check, so it
-    is the party the disagreement costs.  The old answer kept them apart in
-    three sentences, each ending by naming the `*_list` tool the model should
-    reach for next; the state *is* that answer now, in the same words the listing
-    and the hub use, so there is nothing to go and ask.
+    is the party the disagreement costs.  The state is the answer, in the same
+    words the listing and the hub use, so there is nothing to go and ask.
 
     The cap is announced rather than applied quietly (`total`), because a
     trimmed list that reads as the whole list is a model concluding a server
@@ -991,10 +982,8 @@ def refusal(config: Config, name: str) -> str | None:
     loudly at declaration time (`Upstream._record`), and duplicating that list
     here would be a second copy to keep in step.
 
-    **One sentence, with no marker in front of it.**  Both answers used to begin
-    `[refused] `, which said in the text what the *call* should have said:
-    `prepare_entry` raises them now, so the failure is the call's status and the
-    sentence is only the reason.
+    **One sentence, with no marker in front of it.**  `prepare_entry` raises it,
+    so the failure is the call's status and the sentence is only the reason.
     """
     if name in config.plugins():
         return (
@@ -1036,12 +1025,9 @@ class FamilyWords:
     built once.  Two builders is two chances for a model to learn two
     vocabularies for one mechanism.
 
-    **What is *not* here is as deliberate as what is.**  A link's state used to
-    be a pair of family words (`present`/`past`, `connected`/`connected` against
-    `serving`/`served`, and `connecting` against `starting`) because it was read
-    off a *sentence*.  As a field it is `state_word`'s one vocabulary instead —
-    the hub answers the same question the same way — so the adjectives are gone
-    and the words that remain are the ones that name *things*: what a row is
+    **What is *not* here is as deliberate as what is.**  A link's state is
+    `state_word`'s one vocabulary, because the hub answers the same question the
+    same way; the words here are the ones that name *things*: what a row is
     called, what a tool is called, which tool to reach for next.
     """
 
@@ -1068,8 +1054,7 @@ class FamilyWords:
     """The `*_set_enabled` tool's name.  It is *not* `set_tool`: one writes an
     entry and the other flips a switch on one that is already written, and a
     sentence that told a model to reach for the wrong one is the failure this
-    whole class exists to make impossible — it was hardcoded to `set_enabled`
-    for both families before this field existed."""
+    whole class exists to make impossible."""
 
     remove_log: str
     """The `logger.info` event a removal writes."""
@@ -1114,10 +1099,8 @@ def prepare_entry(
     that failed — `slife2.clients.gateway` splits a peer's refusal from a
     transport fault on exactly that, and `slife2.plugins.toolhub.server` reads a
     raised `ToolError` as a value with `ok` false — while a sentence *returned*
-    arrives with `ok` true and reads as a success.  Both refusals here used to
-    come back as a sentence, one of them prefixed `[refused]`, which is a marker
-    in the answer rather than a status on the call: the model that read it could
-    not tell that nothing had been written.
+    arrives with `ok` true and reads as a success, so the model reading it cannot
+    tell that nothing was written.
 
     `build` is the family's own half — it constructs the entry and runs it
     through the parser a start uses (`_tool_server`, `_rest_api`), returning
@@ -1155,11 +1138,10 @@ async def list_entries(
     tell apart.  The row is the family's own, because an MCP entry is a command
     or a URL and a REST entry is a spec and a base URL.
 
-    **An empty section is an empty page and not a sentence.**  It used to answer
-    "No … are configured under `…:` yet. `…_set` adds one.", which is a
-    cross-reference to another tool carried in prose — a dependency to keep in
-    step.  `total` says the section is empty, and the tool that writes an entry
-    is one the model can read in its own list.
+    **An empty section is an empty page and not a sentence**: an answer naming
+    another tool in prose is a cross-reference to keep in step, where `total`
+    says the section is empty and the tool that writes an entry is one the model
+    can read in its own list.
     """
     family.connecting()
     await family.settle()

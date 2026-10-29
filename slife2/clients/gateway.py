@@ -25,11 +25,9 @@ usable when a call fails at the transport or when a connect fails, and the next
 ask re-lists it.
 
 **A listing ages, because the peer can no longer be asked to say it changed.**
-This module used to re-list on one event and nothing else — the peer's
-`notifications/tools/list_changed` — and at 2026-07-28 that event stopped
-arriving on its own.  Change notifications moved onto `subscriptions/listen`, a
-stream the *client* has to open, and measured against the installed FastMCP
-4.0.11 there is no way to open one from here: `Client` exposes no such call, a
+Change notifications moved onto `subscriptions/listen` at 2026-07-28, a stream
+the *client* has to open, and measured against the installed FastMCP 4.0.11
+there is no way to open one from here: `Client` exposes no such call, a
 FastMCP **server** advertises `tools.listChanged: false` and answers the listen
 request with `Method not found` — so our own plugins never send one either — and
 the SDK's own `mcp.client.subscriptions.listen` has nothing to talk to.  So
@@ -98,8 +96,8 @@ logger = logging.getLogger(__name__)
 #: does not depend on `mcp_types` by name.
 #:
 #: **It says the link is gone.  It says nothing about how far a request got**,
-#: and reading it as "nothing was asked" is what ran a model's tool twice.  The
-#: dispatcher raises it for a send onto a transport that is already torn down —
+#: and reading it as "nothing was asked" is what would run a model's tool twice.
+#: The dispatcher raises it for a send onto a transport that is already torn down —
 #: nothing reached the far end — and, with the same code, to wake *every request
 #: already in flight* when the read stream ends
 #: (`mcp/shared/jsonrpc_dispatcher.py`'s `_fan_out_closed`), and the streamable
@@ -145,10 +143,9 @@ def sanitise(part: str) -> str:
     to address the far end.
 
     **The alphabet is ASCII, and `isalnum` alone does not say so.**  It is
-    Unicode-aware, so `搜索` passed through unchanged and 400'd every request in
-    that conversation — the exact failure this exists to prevent, and one no
-    test caught because they all used punctuation.  What a provider accepts is
-    `[A-Za-z0-9_-]`, and that is what this now emits.
+    Unicode-aware, so `搜索` would pass through unchanged and 400 every request
+    in that conversation — the exact failure this exists to prevent.  What a
+    provider accepts is `[A-Za-z0-9_-]`, and that is what this emits.
 
     Length is deliberately not trimmed.  A provider's limit is real, but
     truncation has to invent a rule for what happens when two names truncate to
@@ -185,9 +182,8 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
     tool's documentation works after the names are checked.
 
     **The entry is written from the settings, so an unknown key does not reach
-    the SDK.**  This used to claim `auth:` and the rest passed through, and they
-    do not: `_tool_server` reads the keys it knows into `ToolServerSettings`, and
-    nothing carries the others — so a key this build does not implement is
+    the SDK.**  `_tool_server` reads the keys it knows into `ToolServerSettings`,
+    and nothing carries the others — so a key this build does not implement is
     dropped at load rather than at connect.  Supporting one is a field on the
     settings and a line in the loader; this is the place that would hand it on.
 
@@ -219,9 +215,8 @@ def transport_for(settings: ToolServerSettings, *, cwd: str) -> Any:
     ecosystem's shape and stays the shape for HTTP, but it has no `log_file`
     (`StdioMCPServer` has no such field), so a stdio entry built through it hands
     its stderr to this process's stderr — which, in a toolhub, is the file every
-    entry shares.  The 2026-10 corpus shows what that reads like: a node crash,
-    a DuckDuckGo deprecation notice and four servers' start-up chatter interleaved
-    in one file, none of it attributable.
+    entry shares: a node crash, a DuckDuckGo deprecation notice and four servers'
+    start-up chatter interleaved in one file, none of it attributable.
 
     `StdioTransport` takes the field directly.  Each entry gets its own log under
     `runtime/logs/`, bounded by the same ceiling as a daemon's; that file is the
@@ -251,17 +246,15 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
     initialize handshake, which is this module's own await rather than anybody's
     call.
 
-    `timeout` is deliberately *not* set, and setting it was a bug with a long
-    reach.  FastMCP turns it into the session's `read_timeout_seconds`, which the
-    SDK applies as a **total deadline on every request made over that
-    connection** — so the 60 s connect budget became a 60 s cap on every tool
-    call to somebody else's server, whatever the caller had asked for.  A twenty-
-    minute render called with the model's `_timeout: 600` died at 60 s as an
-    ordinary-looking `ok=False`, with the tool still running at the far end, and
-    the module's own prose above ("no clock lives here") was the thing it
-    contradicted.  The rule the registry states is the one that was broken: the
-    layer that awaits owns the bound, and a client library must not set a total
-    for every caller that borrows it.
+    `timeout` is deliberately *not* set.  FastMCP turns it into the session's
+    `read_timeout_seconds`, which the SDK applies as a **total deadline on every
+    request made over that connection** — so the 60 s connect budget would
+    become a 60 s cap on every tool call to somebody else's server, whatever the
+    caller had asked for, and a twenty-minute render called with the model's
+    `_timeout: 600` would die at 60 s as an ordinary-looking `ok=False` with the
+    tool still running at the far end.  The rule the registry states is the one
+    that holds: the layer that awaits owns the bound, and a client library must
+    not set a total for every caller that borrows it.
 
     What bounds a call now is the caller's own: the loop wraps the dispatch in
     the `_timeout` the model stated or the tool declared (and, with neither, in
@@ -269,20 +262,19 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
     two awaits here that *no* caller bounds — a listing, and the hub's ask for a
     plugin's sources — carry their own, at the call site.
 
-    **`mode="legacy"` is the third thing this constructor decides**, and it was
-    found the hard way.  FastMCP 4.1's default is `"auto"`: the client probes
-    `server/discover` at the newest modern protocol version first, and falls
-    back to `initialize` only when the server answers the probe *as an MCP
-    error*.  A server built on an older SDK does neither — the Python one logs
-    a pydantic validation warning and drops the request — so the fallback never
-    fires and the client sits there until `init_timeout` expires, reported as
-    `RuntimeError: Client failed to connect: Failed to initialize server
-    session`.  Measured on the slow machine (2026-10-21): all eighteen stdio
-    `mcp:` entries failed at the 60 s connect budget this way, while the two
-    HTTP entries — whose servers answer the probe with a 400 — fell back and
-    worked; the same `fetch` entry connected in 22.2 s with `"legacy"` and
-    never with `"auto"`.  **A longer timeout does not help**: nothing in an
-    old server will ever answer that probe.  `initialize` is the one handshake
+    **`mode="legacy"` is the third thing this constructor decides.**  FastMCP
+    4.1's default is `"auto"`: the client probes `server/discover` at the newest
+    modern protocol version first, and falls back to `initialize` only when the
+    server answers the probe *as an MCP error*.  A server built on an older SDK
+    does neither — the Python one logs a pydantic validation warning and drops
+    the request — so the fallback never fires and the client sits there until
+    `init_timeout` expires, reported as `RuntimeError: Client failed to connect:
+    Failed to initialize server session`.  Measured: all eighteen stdio `mcp:`
+    entries failed at the 60 s connect budget this way, while the two HTTP
+    entries — whose servers answer the probe with a 400 — fell back and worked;
+    the same `fetch` entry connected in 22.2 s with `"legacy"` and never with
+    `"auto"`.  **A longer timeout does not help**: nothing in an old server will
+    ever answer that probe.  `initialize` is the one handshake
     every MCP server implements, and our own FastMCP servers answer it too, so
     this hop speaks the handshake era.  The hop that dials *our* servers
     (`slife2.libs.plugin.protocol.Peer`) keeps the modern probe, where both
@@ -567,11 +559,10 @@ class Connection:
         the next ask is not already overdue for the one after it.
 
         **The listing carries its own bound**, because no caller gives it one:
-        `client.list_tools` takes no per-call timeout (only `call_tool` does), and
-        `make_client` no longer sets a client-wide one.  Without this a server
-        that accepts the connection and then never answers the listing would hold
-        the hub's own ask open forever — the failure the removed client timeout
-        was accidentally covering for, here stated where it belongs.
+        `client.list_tools` takes no per-call timeout (only `call_tool` does),
+        and `make_client` sets no client-wide one.  Without this a server that
+        accepts the connection and then never answers the listing would hold the
+        hub's own ask open forever.
         """
         client = self._client
         if client is None:  # pragma: no cover - only reachable after `fail`
@@ -626,14 +617,12 @@ class Connection:
         did it say the last time we asked" — and the caller is told, because
         what a failure *means* is not this module's to decide.
 
-        **The report belongs to the caller, and the duplicate is what this split
-        removes.**  A `Family` member and the hub's own sources both pass
-        `on_failed`, and both name the source, its target and what the failure
-        means; this line naming the same failure a millisecond earlier was the
-        second half of a pair every unreachable server cost — seventeen of them
-        in the 2026-10 corpus.  With a callback, the line here drops to DEBUG
-        and carries the traceback instead — the cause chain a one-line report
-        deliberately leaves out, available where somebody has asked for detail.
+        **The report belongs to the caller.**  A `Family` member and the hub's
+        own sources both pass `on_failed`, and both name the source, its target
+        and what the failure means; with a callback, the line here drops to
+        DEBUG and carries the traceback instead — the cause chain a one-line
+        report deliberately leaves out, available where somebody has asked for
+        detail.
         """
         self._ready = False
         self._failures += 1

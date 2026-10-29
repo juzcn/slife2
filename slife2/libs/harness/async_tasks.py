@@ -325,13 +325,12 @@ async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
 
     **The status is the caller's answer, not a reading of its prose.**  The
     coroutine answers `(text, ok)` — the pair a foreground call already comes
-    back as — and `ok` is what `check_async` reports.  This used to ask whether
-    the text began `"Error"`, which made a verdict out of a spelling: an answer
-    that legitimately begins "Error" was recorded `failed`, and a tool the
-    registry itself marked `ok=False` without that prefix was recorded
-    `finished` (SDD Appendix C, "a failure is not a verdict").  A coroutine
-    that *raises* is the one case left, and a raise is a failure because it is
-    the only thing it can be.
+    back as — and `ok` is what `check_async` reports.  Reading the verdict off
+    the text instead would make a verdict out of a spelling: an answer that
+    legitimately begins "Error" recorded `failed`, and a tool the registry
+    marked `ok=False` without that prefix recorded `finished` (SDD Appendix C,
+    "a failure is not a verdict").  A coroutine that *raises* is the one case
+    left, and a raise is a failure because it is the only thing it can be.
     """
     try:
         result, ok = await coro
@@ -411,11 +410,10 @@ def _pop_task(task_id: str) -> Task | None:
 def _not_found(task_id: str) -> str:
     """The one sentence both tools refuse an id they do not hold with.
 
-    **A miss is a refusal and not an answer**, which is the half of these two
-    tools that was wrong: the sentence was *returned*, so a call naming a task
-    nobody ever made came back as a call that succeeded — an `ok` with "Error:"
-    in its text — and a transcript that reads a failure as a success is the one
-    thing this system's tool contract exists to prevent.
+    **A miss is a refusal and not an answer**: a sentence *returned* comes back
+    as a call that succeeded — an `ok` with "Error:" in its text — and a
+    transcript that reads a failure as a success is the one thing this system's
+    tool contract exists to prevent.
     """
     return (
         f"no async task {task_id!r} here: either it was never started, or it "
@@ -473,14 +471,10 @@ async def check_async(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ToolFailed(_not_found(task_id))
     # **Final status is not the same moment as a finished delivery.**  `_runner`
     # records the ending before it awaits `hand_back`, so between the two the
-    # call is over and its answer is still on its way — and this asked
-    # `task.handle.done()` *instead of* the status, so that window fell into the
-    # finished branch: the model was told "its result could not be handed back"
-    # a moment before the message landed (reading the same result twice, once as
-    # a tool answer and once as a turn), the task was popped, and the next poll
-    # answered "not found".  What decides here is the status; the handle decides
-    # whether the *delivery* has an outcome yet, and popping before it has one
-    # would drop the only copy of the result if it fails.
+    # call is over and its answer is still on its way.  What decides here is the
+    # status; the handle decides whether the *delivery* has an outcome yet, and
+    # popping before it has one would drop the only copy of the result if it
+    # fails — or hand the model the same answer twice.
     if task.status == RUNNING or not task.handle.done():
         return _answer(task, task_id)
     _pop_task(task_id)
@@ -519,11 +513,11 @@ async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     if task.status != RUNNING:
         # **Nothing to cancel, and nothing to throw away.**  The work is over —
         # and when its handle is still running, what is running is the hand-back
-        # of a result that already exists: `task.handle.cancel()` there aborted
-        # the delivery mid-flight and this answered "was cancelled, so it has no
-        # result" about a call that had completed, which is the case this
-        # function's own docstring says cannot happen.  The task is kept while
-        # that delivery is in flight, for `check_async`'s reason.
+        # of a result that already exists, so cancelling there would abort the
+        # delivery mid-flight and answer "was cancelled, so it has no result"
+        # about a call that had completed, which is the case this function's own
+        # docstring says cannot happen.  The task is kept while that delivery is
+        # in flight, for `check_async`'s reason.
         if not task.handle.done():
             return _answer(task, task_id)
         _pop_task(task_id)

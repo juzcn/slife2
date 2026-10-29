@@ -76,17 +76,15 @@ INSTRUCTIONS = (
     "themselves reach the model through the hub."
 )
 
-#: What this family calls things, for the payloads `slife2.libs.plugin.family` builds
-#: once for both connection families.  Every word here is one a model reads
-#: back: a `server` here is an `API` next door, and a `tool` here is an
+#: What this family calls things, for the payloads `slife2.libs.plugin.family`
+#: builds once for both connection families.  Every word here is one a model
+#: reads back: a `server` here is an `API` next door, and a `tool` here is an
 #: `operation`, over one road underneath.
 #:
-#: **Nothing here is an adjective.**  `connected` and `connecting` used to be
-#: fields, because a link's state was read off a sentence; as a payload field it
-#: is `state_word`'s own vocabulary (`ready`, `connecting`, `failed`, `idle`,
-#: `off`, `not held`), which is the same one the hub answers `servers` with — so
-#: the words that remain name *things* a family may legitimately call by another
-#: name, and the state is one vocabulary everywhere.
+#: **Nothing here is an adjective.**  A link's state is `state_word`'s vocabulary
+#: (`ready`, `connecting`, `failed`, `idle`, `off`, `not held`), the same one the
+#: hub answers `servers` with, so the words that remain name *things* a family
+#: may legitimately call by another name.
 WORDS = FamilyWords(
     section=SECTION,
     collection="servers",

@@ -59,10 +59,8 @@ class Work:
     stall: float = 120.0
     #: One call to the context plugin.  Long enough for `restore` (a whole
     #: context replayed) and `rebuild` (a recall that may embed a query), and
-    #: for `remember` to embed and write a long turn.  **Raised from 120 s on
-    #: 2026-10-23**: a `winning-avg-corewars` turn's save outlasted 120 s with one
-    #: window and no second client, and the whole turn was rolled back as
-    #: recorded-nowhere.
+    #: for `remember` to embed and write a long turn: a save that outlasts it
+    #: rolls the whole turn back as recorded-nowhere.
     context: float = 300.0
     #: One *ask* of the toolhub by this process — the tool list, and the trim at
     #: a turn boundary.  **Not a tool call**: that is the loop's, and nothing
@@ -74,13 +72,10 @@ class Work:
     #: than `hub` because it is the cold path**: a hub that has just started
     #: must reach every plugin, ask each family for its declaration, and embed
     #: the rows that are new — on a machine that may still be starting nineteen
-    #: servers.  Measured on the slow machine (2026-10-21): 19 servers took
-    #: 170 s, and a 20 s ask expired while the hub was still declaring.  A
+    #: servers, and with external sources that can take minutes to declare.  A
     #: turn's ask stays `hub`; this budget is spent once, and a start-up that
     #: gives up on it leaves the window with no catalogue at all.  `validate`
-    #: keeps it >= `hub`.  **Raised from 240 s on 2026-10-23** for the same cold
-    #: start: with two task containers running, the plugins and the external
-    #: sources can take longer than four minutes to declare.
+    #: keeps it >= `hub`.
     catalogue: float = 360.0
     #: One management call from the terminal to the agent server: `model_switch`,
     #: `reset`, `transcript`.  A question answered from memory or from the store.
@@ -105,12 +100,12 @@ class Ready:
 
     #: How long a plugin may take to come up.  Generous: the launcher refuses to
     #: start at all if one will not, so a short bound here would be a system that
-    #: refuses to boot on a slow machine.  **Raised from 90 s on 2026-10-23**: in
-    #: a fresh task container, `schedule` (the last server up, after the hub's
-    #: catalogue) took ~90 s with one other trial running and was killed at the
-    #: old bound; its port did answer, so this is a cold start, not a hang.
+    #: refuses to boot on a slow machine — a cold `schedule` (the last server up,
+    #: after the hub's catalogue) took ~90 s in a fresh task container, and its
+    #: port did answer, so that is a cold start and not a hang.
     plugin_start: float = 300.0
-    #: A TCP probe of an endpoint (is anything listening).
+    #: How long one readiness probe may take — a TCP connect, a `ps`, or a
+    #: server's own identity answer.  Short: the probe answers, it does not work.
     probe: float = 2.0
     #: How long a second `slife2` waits on the claim file before deciding the
     #: running process is not using it.  Short: it is a mutex, not a wait.
@@ -122,12 +117,11 @@ class Ready:
     connect_ours: float = 10.0
     #: A `mcp:` entry connecting.  Somebody else's process, possibly an `npx`
     #: fetching itself, so it gets far more patience than our own hops.  **180 s,
-    #: not 60**: on the slow machine (2026-10-21) a cold
-    #: `@aryanbv/pdf-toolkit-mcp` install took 138 s, and the old 60 s bound
-    #: killed it mid-install — leaving a half-written npx cache whose missing
-    #: files then failed every later start (`combined-stream/lib/…`,
-    #: `color-convert/route.js`).  A connect that is killed while somebody
-    #: else's package manager is writing is worse than one given time to finish.
+    #: not 60**: a cold `@aryanbv/pdf-toolkit-mcp` install took 138 s, and a
+    #: shorter bound kills it mid-install, leaving a half-written npx cache whose
+    #: missing files then fail every later start.  A connect that is killed while
+    #: somebody else's package manager is writing is worse than one given time to
+    #: finish.
     connect_tools: float = 180.0
     #: How long a listing waits for connects it started, before answering with
     #: what is in hand.  "Not answering yet" and "absent" are the same answer.
@@ -219,9 +213,7 @@ class Stream:
     #:
     #: **A count, so it is here rather than in `pacing`**: the roles are the
     #: registry's own rule, and a number that says "how many" is not a cadence
-    #: however close to one it sits.  It was a module constant beside the loop
-    #: that uses it, which is the second seat this file exists to be the only
-    #: one of.
+    #: however close to one it sits.
     handover: int = 3
 
 

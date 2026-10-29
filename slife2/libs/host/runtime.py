@@ -100,10 +100,9 @@ def log_path(url: str) -> Path:
 def entry_log_path(name: str) -> Path:
     """The log one external stdio entry's child writes.
 
-    **A child's stderr is not the parent's log.**  Every `mcp:` entry the
-    mcp-tools plugin starts used to write into the plugin's own file, so four
-    servers' start-up chatter and one node crash arrived interleaved with the
-    plugin's lines and nothing said which process said what
+    **A child's stderr is not the parent's log.**  Without one file per entry,
+    every `mcp:` entry's start-up chatter and any child crash arrive interleaved
+    with the plugin's own lines and nothing says which process said what
     (`slife2.clients.gateway.transport_for`).  One file per entry, named
     readably and digested for the reason every key here is: a name reaches the
     OS as a file name, and two entries may differ only in a character the
@@ -133,10 +132,8 @@ def agent_claim_path(name: str) -> Path:
     (`slife2.plugins.a2a.server.join`): whatever an agent's name picks out, it
     picks out once.
 
-    I had this keyed by `(home, name)` for a while, on the reasoning that two
-    data directories hold two agents; the designer settled it the other way, and
-    the code is the smaller for it.  Which home a name was started in is where
-    its files are, not part of who it is.
+    Which home a name was started in is where its files are, not part of who it
+    is.
     """
     return _sub("agents") / f"{agent_key(name)}.json"
 
@@ -610,11 +607,10 @@ def pid_alive(pid: int) -> bool:
     that has exited keeps its place in the process table — the pid, the state, an
     exit status nobody has read — until whoever spawned it waits, and `os.kill`
     on that zombie succeeds exactly as it does on a live process.  Reading it as
-    alive is what made `launcher.stop` report `pid N did not exit` for every
-    daemon the end-to-end lane had just stopped, on Linux and macOS — the two
-    platforms that have zombies — while Windows, which has none, passed; and it
-    is the count `live_clients` decides "am I the last one out?" by, where a
-    killed client that stays a zombie is a client keeping the servers up forever.
+    alive makes `launcher.stop` report `pid N did not exit` for every daemon it
+    just stopped, and it is the count `live_clients` decides "am I the last one
+    out?" by, where a killed client that stays a zombie is a client keeping the
+    servers up forever.
 
     The state is therefore read as well, and **a state that could not be read is
     not a zombie**: an unanswerable question leaves the process reported as
@@ -909,7 +905,7 @@ def _posix_flock(key: str, timeout: float):
 def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
     """Start a server as a daemon that outlives this process.
 
-    Two Windows flags, and both were chosen by measurement rather than by
+    Two Windows flags, and both are chosen by measurement rather than by
     reading, because the plausible-looking choice is wrong here:
 
     * **`CREATE_NO_WINDOW`, not `DETACHED_PROCESS`.**  `DETACHED_PROCESS` sounds
@@ -993,9 +989,9 @@ def spawn(argv: list[str], *, url: str) -> subprocess.Popen:
 def truncate_if_huge(path: Path) -> None:
     """Keep a log from growing without bound across restarts — by keeping one.
 
-    **The previous file is renamed, not deleted.**  This used to unlink, and the
-    file it removed whole is exactly the one somebody opens after a crash: the
-    last run's words, gone at the next start.  `<name>.1` is overwritten on the
+    **The previous file is renamed, not deleted**, because the file an unlink
+    removes whole is exactly the one somebody opens after a crash: the last
+    run's words, gone at the next start.  `<name>.1` is overwritten on the
     following rotation and otherwise left alone; `slife2 logs` reads the live
     file, and the rotated one is beside it at the path the failure already names.
 

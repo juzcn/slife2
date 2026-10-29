@@ -58,11 +58,9 @@ from __future__ import annotations
 #: package root is imported by everything under it, so a name here that something
 #: deeper wants is an edge back into this file — and `slife2.libs.plugin.protocol`
 #: wants exactly one: `serve` writes it into the record that says which build a
-#: daemon is.  Defined after the imports below, that read only worked because
-#: nothing imported while this module's body ran ever reached `protocol.py` —
-#: break that (add one import here, above this line) and the daemon start-up dies
-#: with "cannot import name `__version__`", in a file nobody was editing.
-#: Defined first, there is no order to get wrong.
+#: daemon is.  Defined after the imports below, that read depends on nothing
+#: imported while this module's body ran ever reaching `protocol.py`; defined
+#: first, there is no order to get wrong.
 __version__ = "0.4.0"
 
 import argparse
@@ -118,11 +116,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
     The subcommand is an ordinary optional positional, so argparse matches it
     wherever it appears: `slife2 status --data-dir D` and
-    `slife2 --data-dir D status` are the same invocation.  It used to be pulled
-    off the front before argparse saw the rest, which made the second spelling a
-    usage error — and the flag is worth having on `status` and `down`, which are
-    exactly the commands someone reaches for when the data directory is not the
-    default one.
+    `slife2 --data-dir D status` are the same invocation — and the flag is worth
+    having on `status` and `down`, which are exactly the commands someone reaches
+    for when the data directory is not the default one.
 
     Letting argparse own it also means an unknown command is a usage error
     naming the ones that exist, rather than a word silently treated as a flag.
@@ -454,17 +450,14 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
     part of that this process cannot write itself: the hub is the file's one
     writer, so the ask that makes it is `list_tools` — the call a turn makes —
     sent once before the window opens
-    (`slife2.libs.host.launcher.open_catalogue`).  What a `--data-dir` used to get
-    instead was nothing at all until a model turn happened to ask, so a directory
-    an agent had been started in held its config, the `agents/` and `skills/`
-    `_open_home` makes, and no tool set.
+    (`slife2.libs.host.launcher.open_catalogue`).
 
     **Both counts are returned rather than only printed**, because the status
     bar wants them before a turn exists: the window opens on the same pair the
     start-up line names, and `ToolsCounted` keeps it current afterwards.  `None`
-    is the failure the return code used to be, and it is a distinct value rather
-    than a pair of zeros: a catalogue that could not be built is not a catalogue
-    with no tools, and a bar showing `0/0` would say the wrong one.
+    is a distinct value rather than a pair of zeros: a catalogue that could not
+    be built is not a catalogue with no tools, and a bar showing `0/0` would say
+    the wrong one.
 
     Printed for `_ensure`'s reason: this is a step that takes a second, and a
     start-up report that goes quiet while it runs is a report that cannot say
@@ -509,17 +502,15 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
 def _open_home() -> None:
     """Make this data directory a home the whole machine can serve.
 
-    **Two statements, and a fresh `--data-dir` is where both were missing.**  The
-    directory is recorded, because the servers this machine is running are one
-    set shared by every home (`slife2.libs.host.launcher._reuse`) and the only way
-    a daemon can find the ledgers, logins and catalogues of a home nobody is
-    sitting in front of is to be told which directories exist
-    (`slife2.libs.host.paths.known_homes`).  And **the home's own shape is
-    made** — `agents/`, `skills/` and `jobs/`, the parts of it that are not the
-    config — because a client that has started an agent here and left no trace
-    of it is a directory that looks like a mistake: exactly what it looked like,
-    a data directory holding a `runtime/` of its own and nothing else, while
-    every file the agent wrote went to the home the servers happened to be
+    **Two statements, and a home needs both.**  The directory is recorded,
+    because the servers this machine is running are one set shared by every home
+    (`slife2.libs.host.launcher._reuse`) and the only way a daemon can find the
+    ledgers, logins and catalogues of a home nobody is sitting in front of is to
+    be told which directories exist (`slife2.libs.host.paths.known_homes`).  And
+    **the home's own shape is made** — `agents/`, `skills/` and `jobs/`, the
+    parts of it that are not the config — because a client that has started an
+    agent here and left no trace of it is a directory that looks like a mistake,
+    while every file the agent wrote went to the home the servers happened to be
     started from.
 
     One shape for a home and not half of one: `agents/` starts empty because no
@@ -598,11 +589,8 @@ def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     Two values out of one lookup, and the second is the reason this is a
     function.  Everything the status bar says about the model — how full the
     conversation is, whether it reasons, whether it can be shown a picture — is
-    a field of the model's *own* config entry, and none of it was reaching the
-    TUI: `SlifeApp` has taken a `context_window` since it was written and was
-    never passed one, so the bar rendered `↑ 25,000` with no percentage while
-    every widget test passed a window itself and so proved nothing about the
-    wiring.
+    a field of the model's *own* config entry, so the bar can only render what
+    this returns.
 
     Separate for the reason :func:`tui_url` is: assembled inside `main`, these
     are values nothing can assert on.  The reference is built here too rather
@@ -1048,10 +1036,8 @@ def main(argv: list[str] | None = None) -> int:
                     tui_url(config, args.url),
                     agent=args.agent,
                     model=model_reference,
-                    # What this model is, from its own config entry.  Passed at
-                    # all is the point: the status bar has known how to render
-                    # each of these since it was written, and showed none of
-                    # them for as long as nothing handed them over.
+                    # What this model is, from its own config entry: the status
+                    # bar renders each of these from what it is handed.
                     context_window=model_settings.context_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,

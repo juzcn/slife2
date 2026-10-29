@@ -188,11 +188,11 @@ INDEX_NAME = ".index.db"
 #: — `agents/jack/files/files/images/a.png` — read as nothing at all.
 CABINET_DIR = "cabinet"
 
-# `SYNC_BATCH` is `slife2.libs.store.index`'s, imported above, and the cabinet used to spell
-# the number a second time.  The bound it puts on one `sync` call — every
-# document is embedded eventually, because a document without a vector is simply
-# missing from the index and the next open finds it again — is the same bound
-# `MAX_PAGE` puts on a page, read off the one request an `embed` call is.
+# `SYNC_BATCH` is `slife2.libs.store.index`'s, imported above.  The bound it puts
+# on one `sync` call — every document is embedded eventually, because a document
+# without a vector is simply missing from the index and the next open finds it
+# again — is the same bound `MAX_PAGE` puts on a page, read off the one request
+# an `embed` call is.
 
 
 @dataclass(frozen=True)
@@ -472,10 +472,10 @@ def _write_mirror(root: Path, relative: str, text: str, *, append: bool) -> None
         return
     # **A temp name per write, not per path.**  Two writes of one key overlap
     # normally (the embedding before the transaction is awaited), and a shared
-    # `<name>.tmp` meant the second writer's `os.replace` could find the first
-    # had already moved it — raising after the row was committed, so a call
-    # failed that had stored its document.  The lock covers the destination
-    # for the same reason.
+    # `<name>.tmp` would let the second writer's `os.replace` find the first had
+    # already moved it — raising after the row was committed, so a call fails
+    # that had stored its document.  The lock covers the destination for the
+    # same reason.
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with _MIRROR_LOCK:
         try:
@@ -635,10 +635,9 @@ def _report_older_index(connection: sqlite3.Connection, path: Path) -> bool:
 
     **A table rebuild, because a `CHECK` cannot be altered.**  `kind` carries one
     listing the kinds, and `CREATE TABLE IF NOT EXISTS` leaves a table that
-    already exists exactly as it was — so an index written when there were four
-    kinds *refuses* a dump, and refuses it deep inside a transaction, in SQLite's
-    own words about a constraint.  Nothing is wrong with that file except its
-    age.
+    already exists exactly as it was — so an index written before a kind existed
+    *refuses* a dump, and refuses it deep inside a transaction, in SQLite's own
+    words about a constraint.  Nothing is wrong with that file except its age.
 
     The rows are the truth and the columns have not changed, so this is a copy:
     the table is created again under the name this build's schema gives it, the
@@ -748,10 +747,10 @@ class CabinetStore:
         # per call so that a call cannot embed a thousand documents before it
         # answers, so the loop that *finishes* the index belongs here — with the
         # same shape `TurnStore.sync_indexes` uses, and for the same reason.
-        # Without it a changed embedding model left every document past the first
-        # batch with no vector, reported it once, and never tried again: the
-        # cabinet answered meaning queries about part of its corpus, silently,
-        # for as long as the process lived.
+        # Without it a changed embedding model would leave every document past
+        # the first batch with no vector, reported once and never tried again:
+        # the cabinet answering meaning queries about part of its corpus,
+        # silently, for as long as the process lived.
         #
         # **And it terminates, which is the other half of the same rule.**  The
         # set `embed_missing` walks is "not yet tried" rather than "has no
@@ -763,11 +762,10 @@ class CabinetStore:
                 break
 
         # **And the pass is checked, because "tried" is not "has a vector".**
-        # This was declared and never filled, so `ready` was `True` whatever the
-        # index held: a document the vector pass had finished with and the index
-        # does not hold — the state a failed placement leaves, and one the pass
-        # cannot reach itself, since `cabinet_embedded` is exactly what stops it
-        # being selected again — was silently absent from the meaning leg while
+        # A document the vector pass has finished with and the index does not
+        # hold — the state a failed placement leaves, and one the pass cannot
+        # reach itself, since `cabinet_embedded` is exactly what stops it being
+        # selected again — would be silently absent from the meaning leg while
         # the store reported itself whole.  That is the report `cabinet.py` logs
         # on startup, and the reason the docstring calls this the last thing the
         # pass does.  A document with nothing to embed is not one of these; see
@@ -830,9 +828,9 @@ class CabinetStore:
         is empty for a note whose body is empty — a document whose whole text is
         an empty string is one the keyword leg still finds — and no model can be
         asked for a vector of nothing.  Counted here it would be a problem no
-        sync could ever clear, which is the bug `_turns_without_vectors`'
-        docstring describes on the turn side: the plugin refuses to serve an
-        index that is not ready, so one empty note would keep the cabinet down.
+        sync could ever clear — and because the plugin refuses to serve an index
+        that is not ready, one empty note would keep the cabinet down
+        (`_turns_without_vectors` describes the same case on the turn side).
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -957,11 +955,10 @@ class CabinetStore:
         An empty text is no vectors rather than an empty embedding: a document
         with nothing to say about itself is one the keyword leg still finds.
 
-        **And an answer shorter than the request is refused** — the one thing
-        every other embedding path in the tree checked and this one did not.  It
-        is the worst place to miss it: `place` writes one `cabinet_chunk` row per
-        vector it is handed and marks the document tried either way, so a short
-        answer left the document holding vectors for *some* of its chunks,
+        **And an answer shorter than the request is refused**, because it is the
+        worst place to miss it: `place` writes one `cabinet_chunk` row per vector
+        it is handed and marks the document tried either way, so a short answer
+        would leave the document holding vectors for *some* of its chunks,
         `cabinet_embedded` saying the vector pass had finished with it, and
         `embed_missing` therefore never selecting it again — the rest of the
         document unreachable by meaning, with `sync` reporting the cabinet
@@ -1305,16 +1302,15 @@ class CabinetStore:
         call to store the same vector.
 
         **The re-embedding happens before anything is written**, which is
-        `write`'s order and not a detail: the summary was committed first and
-        the vector second, so a `cabinet_summarize` that could not reach the
-        model left the row holding the new summary, its keyword text rewritten
+        `write`'s order and not a detail: with the summary committed first and
+        the vector second, a `cabinet_summarize` that could not reach the model
+        would leave the row holding the new summary, its keyword text rewritten
         and its vector still describing the text without it.  Nothing could
         repair that — `cabinet_embedded` marks a document the vector pass has
         *finished* with, and it has chunks, so `sync`/`embed_missing` never
-        select it again: the words were permanently unreachable by meaning and
-        the cabinet reported itself ready.  A failed re-embed now raises having
-        written nothing, the same contract every other write in this module
-        keeps.
+        select it again: the words permanently unreachable by meaning and the
+        cabinet reporting itself ready.  A failed re-embed raises having written
+        nothing, the same contract every other write in this module keeps.
         """
         spec = SPECS.get(kind)
         if spec is None:
@@ -1389,20 +1385,20 @@ class CabinetStore:
         if category:
             # **Escaped, or the filter is not the query it says it is.**  A
             # category is a folder name and `LIKE` reads two of the characters a
-            # folder name may hold as wildcards: `my_notes` matched `myXnotes`
-            # (the underscore is any one character) and a `%` matched anything at
-            # all.  Bound rather than interpolated, so it was never injection —
-            # it was a listing that answered about a folder nobody named.
+            # folder name may hold as wildcards: `my_notes` would match
+            # `myXnotes` (the underscore is any one character) and a `%` would
+            # match anything at all — a listing that answers about a folder
+            # nobody named, bound rather than interpolated, so never injection.
             clauses.append(r"file_path LIKE ? ESCAPE '\'")
             values.append(f"{_like_literal(category)}/%")
         where = filter_clause(["kind = ?", *clauses])
         limit = page_limit(limit, MAX_PAGE)
         with self._connect() as connection:
-            # **One read snapshot for the count and the page.**  They were two
-            # autocommit statements, so a write between them could put a row on
-            # the page that `total` did not count (or the reverse), and the
-            # page boundary a caller computes from the two then repeats or
-            # skips a row.
+            # **One read snapshot for the count and the page**, because two
+            # autocommit statements let a write between them put a row on the
+            # page that `total` did not count (or the reverse), and the page
+            # boundary a caller computes from the two then repeats or skips a
+            # row.
             connection.execute("BEGIN")
             total = int(
                 connection.execute(
@@ -1440,9 +1436,9 @@ class CabinetStore:
         `normalize_bound` only advances a *date-only* `until` — that advance is
         written for a column holding a moment, where the bound is compared with
         `<=` and means the instant.  Left unadvanced, `until=2026-10-07T12:00:00`
-        cut `< '2026-10-07'` and dropped the very day it names: the same day
-        written two ways was two different answers, and a window whose two bounds
-        were the same moment returned nothing at all.
+        would cut `< '2026-10-07'` and drop the very day it names: the same day
+        written two ways, two different answers, and a window whose two bounds
+        are the same moment returning nothing at all.
         """
         clauses: list[str] = []
         values: list[Any] = []
@@ -1547,8 +1543,7 @@ class CabinetStore:
         # **The words are a sentence when they are all there is.**  The keyword
         # leg asks for every word at once, so a word form the text does not
         # carry finds nothing; the meaning leg reads the same joined words.
-        # `ToolStore.search` measured the difference (23/36 to 34-36) and this
-        # corpus was the one where the words never reached the second leg.
+        # `ToolStore.search` measured the difference (23/36 to 34-36).
         if keywords and not any(sentence.strip() for sentence in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
@@ -1637,10 +1632,10 @@ class CabinetStore:
         """Document ids by `bm25`, best first, with the caller's filters applied.
 
         **The `MATCH` is the query**, and leaving it out is not a syntax error:
-        measured here, a version that passed the expression as a *parameter*
-        whose placeholder was missing bound it to `LIMIT` instead and answered
-        with every document in the cabinet, ranked — a search that looks like it
-        worked and returns the whole corpus.  The filters ride in the same
+        an expression passed as a *parameter* whose placeholder is missing binds
+        to `LIMIT` instead and answers with every document in the cabinet,
+        ranked — a search that looks like it worked and returns the whole
+        corpus.  The filters ride in the same
         `WHERE` for the reason the catalogue's do: `rank` orders every match, so
         cutting to the limit afterwards still returns the best rows *inside* the
         filter.
@@ -1693,11 +1688,11 @@ class CabinetStore:
         # cabinet nobody has written to under this embedder has no `cabinet_vec`
         # at all, which is an empty meaning leg rather than a failure — the
         # keyword leg is still an answer, and `sync` is what says the index is
-        # incomplete.  A bare `except sqlite3.OperationalError` answered that
+        # incomplete.  A bare `except sqlite3.OperationalError` would answer that
         # question and every other one the same way: a malformed vector table, a
-        # width this build cannot read, a corrupt file all came back as "nothing
-        # matched by meaning", and the page then answered keyword-only without
-        # saying so.
+        # width this build cannot read, a corrupt file all coming back as
+        # "nothing matched by meaning", and the page then answering keyword-only
+        # without saying so.
         if not table_exists(connection, "cabinet_vec"):
             return []
         rows = connection.execute(
@@ -1721,16 +1716,17 @@ class CabinetStore:
         Left empty when there is no query vector: a browse has no meaning to
         measure, and inventing a number for it would be a page that looks ranked
         and is not.  The rows the *words* found are the ones that matter here —
-        they are certain evidence and were the only rows on the page with no
-        number at all, which made the strongest evidence read as the weakest.
+        they are certain evidence and would otherwise be the only rows on the
+        page with no number at all, which makes the strongest evidence read as
+        the weakest.
 
         **The number is read from the stored vectors, not asked of the index
         again** (`meanings_by_cosine`), which is what `ToolStore._meaning_of`
         does and why this is one loop and not two implementations: the rows here
         are exactly the ones the KNN has already said are not in its page, so a
-        second KNN — `k` = `MAX_PAGE`, the *nearest* rows — answered with the
-        rows the first page already had and the word-found rows went unmeasured
-        anyway.
+        second KNN — `k` = `MAX_PAGE`, the *nearest* rows — would answer with
+        the rows the first page already had, and the word-found rows would go
+        unmeasured anyway.
         """
         if not ids or not queries:
             return {}
@@ -1787,11 +1783,11 @@ class CabinetStore:
 
         **And the words are the index's, tested by the index's own tokenizer.**
         A containment test over `textindex.normalize`d Python strings is a second
-        tokenizer, and it disagreed with the first exactly where it mattered: the
+        tokenizer, and it disagrees with the first exactly where it matters: the
         index is built by `unicode61 remove_diacritics 2`, which folds `Café` to
         `cafe`, while `normalize` keeps the accent — so a caller asking for
-        `cafe` matched a note at the index and was then reported as having
-        matched *elsewhere*, with the word plainly on the line it had matched.
+        `cafe` matches a note at the index and would then be reported as having
+        matched *elsewhere*, with the word plainly on the line it matched.
         The printed text therefore goes into a temporary FTS5 table built with
         the same tokenizer (`textindex.FTS_TOKENIZE`), and the caller's own
         expression is matched against that: one grammar and one tokenizer on
@@ -1840,10 +1836,9 @@ def line_excerpt(row: Mapping[str, Any]) -> str:
 
     **One spelling of the rule**, because two readers have to agree about it:
     `choice_row` carries it as the row's `excerpt`, and `_matched_in_line` asks
-    whether the caller's words are in it.  Written out twice they disagreed —
-    the mark was decided against the first 400 characters and the excerpt shown
-    stopped at 120, so a note whose word sat at character 300 was marked
-    "matched your words" beside an excerpt the words were not in.  The body is
+    whether the caller's words are in it.  Written twice they disagree — a mark
+    decided against a longer head than the excerpt shows puts "matched your
+    words" beside an excerpt the words are not in.  The body is
     whitespace-collapsed first, because that is what is shown: a newline in a
     note is not a line the reader sees.
     """
@@ -1857,13 +1852,12 @@ def line_excerpt(row: Mapping[str, Any]) -> str:
 def line_text(row: Mapping[str, Any]) -> str:
     """The text one row shows a reader, as one string.
 
-    **What `_matched_in_line` is allowed to test**, and the whole of it — and the
-    rule it keeps is the one this function has always kept: *the haystack is
-    what the answer prints, and nothing else*.  A row's `title` was once in a
-    haystack beside a line that printed only the key and the excerpt, so a file
-    saved with a title and no body answered "matched your words" with every one
-    of them missing from the page; the row is now the answer — `choice_row`, in
-    JSON — and the title is printed with it.
+    **What `_matched_in_line` is allowed to test**, and the whole of it: *the
+    haystack is what the answer prints, and nothing else*.  A haystack that
+    carried a row's `title` beside a line printing only the key and the excerpt
+    would answer "matched your words" for a file saved with a title and no body,
+    with every one of them missing from the page; the row is the answer —
+    `choice_row`, in JSON — and the title is printed with it.
 
     So the scope is derived from the row that is shown rather than written out
     again here: a field added to `choice_row` is one this cannot fall behind,
@@ -1972,7 +1966,7 @@ def _like_literal(text: str) -> str:
     escape character this module's `LIKE` declares, so a folder named with one
     in it would otherwise escape the character after it — and `%` and `_` are
     what a `LIKE` reads as "anything" and "any one thing", which is how a
-    `file_list(category="my_notes")` came to answer about `myXnotes`.
+    `file_list(category="my_notes")` would answer about `myXnotes`.
     """
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -2007,11 +2001,10 @@ def discard_file(path: Path) -> None:
     """Remove a file, and do not care that it was not there.
 
     Public because both halves of the cabinet need it — the store when a
-    document's bytes go, the plugin when a save has to be taken back — and it
-    had been written out once in each for that reason.  A removal that fails is
-    logged rather than raised: the caller is unwinding something else that
-    already went wrong, and replacing that message with "and the file is still
-    there" helps nobody.
+    document's bytes go, the plugin when a save has to be taken back.  A
+    removal that fails is logged rather than raised: the caller is unwinding
+    something else that already went wrong, and replacing that message with "and
+    the file is still there" helps nobody.
     """
     try:
         path.unlink()

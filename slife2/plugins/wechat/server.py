@@ -178,12 +178,10 @@ def render_qr(content: str) -> str:
     makes a code fit on a screen without a window to resize.  The model copies
     this into its reply, and the person scans the screen they are reading.
 
-    **Without `qrcode` this refuses rather than handing back the payload.**  It
-    used to return the content as it came — a URL the caller then told the model
-    to show "so it can be scanned", which is not something a URL can be, so a
-    weaker path was selected silently (SDD Appendix C).  The `ImportError`
-    goes to the caller, which says what actually happened instead of reading a
-    link as a code.
+    **Without `qrcode` this refuses rather than handing back the payload.**  A
+    URL is not something that can be scanned, so returning the content would
+    select a weaker path silently (SDD Appendix C); the `ImportError` goes to
+    the caller, which says what actually happened.
     """
     if not content:
         return ""
@@ -387,15 +385,11 @@ def clear_session(agent: str) -> bool:
     alongside a live session.
 
     ``True`` when no saved login is left afterwards, which is the state every
-    caller is after: a login that was never there is already that state.  The
-    old answer said ``False`` for it, which made "nothing to forget"
-    indistinguishable from "the file would not go" — so `logout`'s answer, "the
-    saved login is gone", stood over a file that was still on disk, and the next
-    start adopted the account again.  A removal that fails is now a ``False``
-    **and an error naming the file**, because the caller that reports the login
-    gone has read the wrong answer otherwise.  Callers that only want the
-    session tidied (`_adopt`, `login`, `status`) may ignore the return; the fact
-    is left in the log for them.
+    caller is after: a login that was never there is already that state.  A
+    removal that fails is a ``False`` **and an error naming the file**, because
+    a caller that reports the login gone has read the wrong answer otherwise.
+    Callers that only want the session tidied (`_adopt`, `login`, `status`) may
+    ignore the return; the fact is left in the log for them.
     """
     path = session_path(agent)
     if not path.exists():
@@ -463,9 +457,8 @@ def format_link_line(state: str) -> str:
 def _home_key(root: str | Path) -> str:
     """One home's canonical spelling, for the session key.
 
-    `slife2.libs.host.paths.home_key` is the rule now, because every plugin that
-    keys state by home had the same bug — see its docstring.  The long note that
-    used to live here is there; the reason it is called at all is `Wechat.session`.
+    `slife2.libs.host.paths.home_key` is the rule — see its docstring.  The
+    reason it is called at all is `Wechat.session`.
     """
     return home_key(root)
 
@@ -507,8 +500,8 @@ class Wechat:
 
         **The home is one key however it is spelled** (`_home_key`): a call
         arrives with the client's own `data_dir` string and `_resume_login`
-        arrives with a resolved directory, and the same home spelled twice was
-        two sessions — and so two poll loops — on one login.
+        arrives with a resolved directory, and the same home spelled twice
+        would be two sessions — and so two poll loops — on one login.
         """
         where = _home_key(home or home_dir())
         found = self._sessions.get((where, agent))
@@ -538,13 +531,9 @@ class Wechat:
         token (`AGENT_KEY`, :func:`save_session`) and read back here, exactly as
         `slife2-schedule` reads its ledger's owner out of the ledger.
 
-        A file too old to carry one — one written before this key — is
-        **skipped and named in the log**, which is what `slife2-schedule` and
-        `slife2-a2a` do with a ledger whose owner is not written down.  The
-        fallback that used to be here (the directory name) looked right for the
-        names where the two are equal — every name without a reserved character
-        — and was the second-session bug for the ones where they are not, which
-        are the only names the key exists for.
+        A file too old to carry one is **skipped and named in the log**, which
+        is what `slife2-schedule` and `slife2-a2a` do with a ledger whose owner
+        is not written down.
 
         Never awaited in the path that serves: a bridge that cannot be reached
         must not stop the plugin from coming up, and every one of these is
@@ -566,19 +555,14 @@ class Wechat:
         (`slife2.libs.host.paths.in_home`).
         """
         saved, _ = _read_session(path)
-        # **The raw name, or nothing.**  The directory is a *sanitised*
-        # name (`a/b` lives in `a_b/`), so resuming under it is a second key
-        # for one login: a tool call from the raw name then builds a second
-        # `Session`, adopts the same token, and starts a second poll loop —
-        # every message delivered twice, which is the bug this key exists to
-        # prevent.  The fallback that used to be here was "exactly right
-        # whenever the raw name and the sanitised one are the same, which is
-        # every name without a reserved character in it" — and it was wrong
-        # for exactly the names it mattered for, silently.  A login file
-        # from before this key existed is *skipped* and named, like the
-        # ownerless ledgers `slife2-schedule` and `slife2-a2a` refuse
-        # (`ScheduleStore.adopt`, `InboundStore`): the file is not lost, and
-        # nobody is told a session is being watched that is not.
+        # **The raw name, or nothing.**  The directory is a *sanitised* name
+        # (`a/b` lives in `a_b/`), so resuming under it would be a second key
+        # for one login: a tool call from the raw name would build a second
+        # `Session`, adopt the same token, and start a second poll loop,
+        # delivering every message twice (`AGENT_KEY`).  A login file from
+        # before this key existed is skipped and named, like the ownerless
+        # ledgers `slife2-schedule` and `slife2-a2a` refuse
+        # (`ScheduleStore.adopt`, `InboundStore`).
         agent = str(saved.get(AGENT_KEY) or "")
         if not agent:
             logger.warning(
@@ -611,9 +595,8 @@ class Wechat:
             self._cancel(task)
         # **Await them, rather than only cancelling them.**  A cancelled task
         # the loop never runs again ends with its coroutine un-awaited, and the
-        # garbage collector reports one at shutdown — the `Wechat._poll`
-        # warning a TUI test used to collect.  `return_exceptions` keeps one
-        # task's failure from hiding the others.
+        # garbage collector reports one at shutdown.  `return_exceptions` keeps
+        # one task's failure from hiding the others.
         if cancelled:
             await asyncio.gather(*cancelled, return_exceptions=True)
 
@@ -653,9 +636,8 @@ class Wechat:
             return
         error = task.exception()
         if error is not None:
-            # `exc_info=error` and not just its repr: a poll loop that died of
-            # a `ReadTimeout` said only `ReadTimeout('')` in the 2026-10 log,
-            # which names the type and nothing about where it was raised.
+            # `exc_info=error` and not just its repr: a repr names the type and
+            # nothing about where it was raised.
             logger.warning("wechat background task failed: %r", error, exc_info=error)
 
     # ── Restoring a login ────────────────────────────────────────────────
@@ -694,9 +676,8 @@ class Wechat:
         **And nothing is said by *raising* either.**  This runs from a spawned
         task whose only reporter is `_spawn`'s callback, and the three outcomes
         `_adopt` tells apart each write a `restore_note` of their own; a fourth
-        failure — a bug in `ready`, a file that cannot be read — used to be
-        swallowed by `contextlib.suppress(Exception)` with no line anywhere at
-        all.  It is logged now: silent about a login is the one thing this must
+        failure — a bug in `ready`, a file that cannot be read — is logged
+        rather than swallowed: silent about a login is the one thing this must
         not be, and a note is not a reason to say the file is fine either.
         """
         try:
@@ -841,9 +822,8 @@ class Wechat:
         **Said once, and not owed.**  An agent's window is what runs that agent —
         a terminal or `--headless`, and both attach — so there is no window only
         in the seconds around that agent's own start, and a line the gap swallows
-        is not offered again (`Note`).  This used to hold the line *owed* and
-        redial for it, which is machinery for a case the deployment does not
-        have: the line is for somebody watching, and in that gap nobody was.
+        is not offered again (`Note`): the line is for somebody watching, and in
+        that gap nobody was.
 
         Called from the poll loop and from `logout`, so the state is derived here
         rather than set at a call site — there is one answer to "is the link up",
@@ -1031,13 +1011,12 @@ class Wechat:
         expires.
 
         **A cursor that did not land is not a cursor that moved, and it is said
-        out loud.**  This was a `debug` line, which made the one consequence it
-        has invisible: the file is the only thing that tells the next start
-        where the stream had got to, so a write that failed leaves the bridge's
-        whole replay window to be re-ingested and answered again as fresh turns
-        — the same messages said twice, by a process that believed it had
-        already read them.  The warning names the file, and `persisted` is left
-        where it was so the next poll tries again.
+        out loud.**  The file is the only thing that tells the next start where
+        the stream had got to, so a write that failed leaves the bridge's whole
+        replay window to be re-ingested and answered again as fresh turns — the
+        same messages said twice, by a process that believed it had already
+        read them.  The warning names the file, and `persisted` is left where it
+        was so the next poll tries again.
         """
         cursor = session.client.updates_buf
         if not cursor or cursor == session.persisted or not session.client.is_logged_in:
@@ -1108,9 +1087,8 @@ class Wechat:
         inbox is the one queue, and it orders the turns.
 
         **The agent is named, and that is what makes this work with more than one
-        window open.**  It used to be implicit in the address, which is one per
-        machine, so a second terminal could not be reached at all; now the plugin
-        keeps a session per agent and this says which one (`slife2.plugins.tui.server`).
+        window open.**  The plugin keeps a session per agent, and this says which
+        one (`slife2.plugins.tui.server`).
 
         **The retry and the classification are `slife2.libs.harness.handover.hand_over`'s** —
         one copy of "the window may be attaching right now" for every caller, and
@@ -1119,7 +1097,7 @@ class Wechat:
         handed over as `wechat`, which is the channel its turn is recorded under
         and the bubble it wears.
 
-        **And a failure is a failure**: this used to fall back on the agent
+        **And a failure is a failure**: there is no fallback to the agent
         server, which is a turn nobody is watching — the one thing a channel
         whose whole point is the terminal must not do (`slife2.libs.harness.handover`).
         """
@@ -1238,13 +1216,12 @@ class Wechat:
     ) -> None:
         """Follow one QR, and leave the session in a state whatever happens.
 
-        **Every exit from the loop below is a `qr_state`**, and the one that
-        raised was the exception to it: the task died, `_spawn`'s callback put
-        the traceback in the log, and `qr_state` stayed `waiting` for ever — so
-        `wechat_check_status` went on telling the model that a login QR was
-        waiting to be scanned, about a watch that no longer existed.  The guard
-        is here and not around the call that raised it first
-        (`poll_login_status`, on a body nothing could read) because the next one
+        **Every exit from the loop below is a `qr_state`**, including a raise:
+        otherwise the task dies, `_spawn`'s callback puts the traceback in the
+        log, and `qr_state` stays `waiting` for ever — `wechat_check_status`
+        telling the model that a login QR is waiting to be scanned, about a
+        watch that no longer exists.  The guard is here rather than around
+        `poll_login_status`, the call that raised first, because the next one
         would be a different line.
         """
         try:
@@ -1305,10 +1282,10 @@ class Wechat:
                 return
             if status.get("need_verifycode"):
                 # **Two states the poll can answer that this loop has to say
-                # something about**, and both used to fall through to the next
-                # poll — so the login sat here until the ten-minute deadline and
-                # then blamed the person for not scanning a code they had
-                # already scanned.
+                # something about.**  Falling through to the next poll would
+                # leave the login here until the ten-minute deadline and then
+                # blame the person for not scanning a code they had already
+                # scanned.
                 #
                 # This one wants a code typed into WeChat.  `poll_login_status`
                 # takes one; nothing in this build supplies it, so the honest
@@ -1564,13 +1541,9 @@ class Wechat:
     async def logout(self, session: Session) -> dict[str, Any]:
         """`wechat_logout`: stop watching, forget the login, forget its QR.
 
-        **The login is only gone if the file is.**  `clear_session` used to
-        swallow the unlink failure and answer `False`, which every caller threw
-        away — so this tool said "the saved login is gone" over a file that was
-        still there, and the next start adopted the same account the logout was
-        asked to end.  The teardown still happens (the loop stops, the client is
-        replaced, the link is announced down), and what changes is the answer:
-        `login_removed` is the file's own verdict and, when it is false,
+        **The login is only gone if the file is.**  The teardown still happens
+        (the loop stops, the client is replaced, the link is announced down),
+        and `login_removed` is the file's own verdict: when it is false,
         `login_file` names the file a person can remove by hand.
         """
         self._cancel(session.poll)
@@ -1579,10 +1552,10 @@ class Wechat:
             self._typing_off(session, typed)
         self._cancel(session.qr_task)
         session.qr_task = None
-        # The QR state goes with the session, and this is a fix rather than
-        # tidiness: `wechat_check_status` reads it first, so a leftover
-        # "confirmed" from the login just ended reported a scan still pending —
-        # and told the model to wait for one that had already happened.
+        # The QR state goes with the session: `wechat_check_status` reads it
+        # first, so a leftover "confirmed" from the login just ended would
+        # report a scan still pending and tell the model to wait for one that
+        # had already happened.
         session.qr_state = ""
         session.qr_error = ""
         session.qr = ""

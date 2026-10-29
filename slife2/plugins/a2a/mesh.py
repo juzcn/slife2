@@ -206,8 +206,8 @@ class AgentCard:
     """Who is this agent and is it alive right now?
 
     ``status`` is one of ``"online"`` / ``"offline"`` on the wire (the standard
-    ``a2a-status`` presence, mapped by the mesh).  The dataclass default keeps
-    the historic ``"idle"`` for constructed-but-unset cards.
+    ``a2a-status`` presence, mapped by the mesh).  The dataclass default is
+    ``"idle"`` for constructed-but-unset cards.
     """
 
     agent_name: AgentName
@@ -651,8 +651,7 @@ class A2AMesh:
         # task_id → last artifact text.  A FIFOCache like the ones below, and for
         # the same reason: an artifact that never reaches a terminal must not
         # accumulate strings for the session, and the oldest is the one least
-        # likely to ever be answered.  The bound used to be hand-rolled at the
-        # insertion site; it lives in the class now so the cap is stated once.
+        # likely to ever be answered.  The cap is stated once, in the class.
         self._pending: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
         # task_id → the peer that withdrew it.  A note, not a recovery path:
         # the completion bridge died with the withdrawal, so this exists only
@@ -666,8 +665,6 @@ class A2AMesh:
         # send because every correlation a task was published under stays routed
         # until its TERMINAL reply lands (see ``_deliver``), so the first
         # publish and each retry each cost a route.
-        # FIFOCache again: the bound used to be a hand-rolled ``pop`` in
-        # ``_publish_attempt``, which is the same one line the class already is.
         self._corr_to_task: FIFOCache = FIFOCache(maxsize=_MAX_CORR_ENTRIES)
 
         # Agent-side callbacks — replaced by the plugin before connect().
@@ -743,10 +740,7 @@ class A2AMesh:
         whatever the last attempt left behind is being replaced rather than
         abandoned, so a send still on its retry ladder keeps its place — its
         loop, its correlation routes and the row the conversation is waiting on
-        — and carries on over the rebuilt connection.  Tearing those down here
-        is what a broker blip cost the conversation: a call landing in the
-        reconnect gap dialled again, and the send died between two rungs of a
-        ladder it would have completed seconds later.
+        — and carries on over the rebuilt connection.
         """
         await self.disconnect(reviving=True)
         self._closing = False
@@ -792,13 +786,11 @@ class A2AMesh:
 
         Returns a description of the claim, or ``None`` when the name is free.
 
-        **A probe that failed is not a probe that found nothing** (SDD
-        SDD Appendix C).  A connection that could not be made or read used to be
-        swallowed at debug and answered ``None``, which reads as "the name is
-        free" — the one verdict this check exists to give, and the one it must
-        never guess: a duplicated name means every task sent to it runs twice.
-        The failure is the connect's now, raised naming the broker the probe
-        could not ask.
+        **A probe that failed is not a probe that found nothing** (SDD Appendix
+        C).  Answering ``None`` reads as "the name is free" — the one verdict
+        this check exists to give, and the one it must never guess: a duplicated
+        name means every task sent to it runs twice.  The failure is the
+        connect's, raised naming the broker the probe could not ask.
         """
         kwargs = self._mqtt_cfg.client_kwargs(
             identifier=(
@@ -886,12 +878,7 @@ class A2AMesh:
         being rebuilt, not abandoned, so the sends still on the retry ladder
         ride over the gap.  Their loops keep running and their correlation
         routes are kept, and the ladder carries on the moment the link is back —
-        which is what the requester profile is *for*, and what a broker blip
-        while a task was outstanding used to destroy: a call landing in the
-        reconnect gap took the `not is_connected` branch, `connect()` tore the
-        sends down, and the conversation was left waiting for an answer that
-        nothing would ever bring (its correlation route had gone too, so the
-        peer's real reply landed as `a2a_reply_unknown_corr`).
+        which is what the requester profile is *for*.
 
         **Every other teardown ends the ladders, and tells the conversation**
         (`_end_send`).  `_deliver`'s contract is that the ladder's ending reaches
@@ -1015,14 +1002,12 @@ class A2AMesh:
         until shutdown.  Publishes requests only — the responder owns presence.
 
         **Only the MQTT library's own errors are read as a dropped connection.**
-        ``AttributeError`` and ``ValueError`` used to be caught beside
-        ``MqttError`` as transport noise, which made them the one class of
-        failure this loop could not report: they are exactly what a bug in
-        ``_handle_reply``/``_handle_event`` raises, so a handler that started
-        returning the wrong shape reconnected the client for ever, cleared the
-        roster on every reconnect, and said nothing anywhere.  A dropped
-        connection is the library's to declare; everything else reaches the
-        clause that logs it.
+        ``AttributeError`` and ``ValueError`` are exactly what a bug in
+        ``_handle_reply``/``_handle_event`` raises, so catching them here would
+        reconnect the client for ever over a handler that returned the wrong
+        shape, clear the roster on every reconnect, and say nothing anywhere.  A
+        dropped connection is the library's to declare; everything else reaches
+        the clause that logs it.
         """
         kwargs = self._mqtt_cfg.client_kwargs(
             identifier=(
@@ -1056,10 +1041,9 @@ class A2AMesh:
                     # **Two exact topics, not a wildcard.**  `broadcast` is
                     # everyone's; `member:<our name>` is ours alone.  A group
                     # event is published to one recipient's member topic, so a
-                    # non-member never receives it — the old `event("+")`
-                    # wildcard would have delivered every group's traffic to
-                    # every member of the namespace.  Nothing else publishes an
-                    # event id in this build.
+                    # non-member never receives it — a wildcard would deliver
+                    # every group's traffic to every member of the namespace.
+                    # Nothing else publishes an event id in this build.
                     #
                     # The other two subscriptions are deliberately not No Local:
                     # the card `_responder_ready` waits for is published by the
@@ -1277,12 +1261,10 @@ class A2AMesh:
         if kind not in TERMINAL_KINDS:
             return
         result = self._pending.pop(task_id, "") or content
-        # **The wire's own ending, carried through as one word.**  It used to
-        # arrive at the plugin as a single `cancelled` flag, so the other two
-        # endings the same function distinguishes — `completed` and `failed` —
-        # collapsed into `completed` on the way out: a peer whose handler raised
-        # had its `TASK_STATE_FAILED` rendered to the conversation as "Peer X
-        # completed async task", in the same delivery that recorded the truth.
+        # **The wire's own ending, carried through as one word.**  A failure
+        # must not collapse into "completed" on the way out: a peer whose
+        # handler raised carries `TASK_STATE_FAILED`, and the conversation reads
+        # that word rather than being told the task succeeded.
         state = _reply_state(data)
         if send is not None and not send.record:
             # MESSAGE conversation: no task record was created — push the
@@ -1302,13 +1284,12 @@ class A2AMesh:
                 # is process-local and evicts the oldest *pending* record once
                 # it is over its cap, so a peer that answers slowly enough
                 # finishes a task this process no longer holds — and `send`,
-                # read above, is what still knows whose it was.  Dropped here as
-                # it used to be, the result was lost with nothing said anywhere.
+                # read above, is what still knows whose it was.
                 #
                 # There is nothing to record against, so this arm delivers and
                 # falls through: the cleanup below is the one place a terminal
-                # reply stops being tracked, and returning early from here left
-                # the send and its correlations in the tables for ever.
+                # reply stops being tracked, and an early return here would
+                # leave the send and its correlations in the tables for ever.
                 logger.warning("a2a_reply_without_record task=%s", task_id)
                 if send is not None:
                     self.on_task_completion(task_id, result, state, send.agent, "task")
@@ -1414,23 +1395,15 @@ class A2AMesh:
 
         **A rung is spent by a publish, not by an attempt to publish.**  The
         ladder is the profile's answer to *silence from the peer*: what it counts
-        is how many times the peer could have seen the request.  ``send.attempts``
-        used to be incremented before ``_publish_attempt`` and left standing when
-        that raised, so a publish that never left was spent as if it had —
-        ``_publish_props`` raises exactly that way whenever the outbound client
-        is mid-reconnect (``_run_outbound`` clears ``_connected`` in its
-        ``finally``), and the first two backoffs are ~1 s and ~2 s, so a
-        three-to-five-second broker or outbound outage consumed the whole budget
-        after ``send_message`` had answered "The result will arrive in this
-        conversation": nothing was ever published, the conversation was pushed
-        "it was sent 3 times ... and never acknowledged" — a count of attempts
-        that no peer could have answered — and the send was not retried when the
-        link came back, leaving its task row ``pending`` for ever.  A failed
-        publish retries the *same* rung now, and ``unsent`` is what makes that
-        retry back off instead of spinning: it rides the same ladder delay, so a
-        send that cannot be published retries on the profile's capped cadence
-        until the mesh carries it — or until the mesh is *abandoned*, which is
-        where this loop ends (``_ladder_over``, and ``disconnect`` cancels
+        is how many times the peer could have seen the request.  A publish that
+        never left must not spend a rung — ``_publish_props`` raises exactly
+        that way whenever the outbound client is mid-reconnect
+        (``_run_outbound`` clears ``_connected`` in its ``finally``).  A failed
+        publish retries the *same* rung, and ``unsent`` makes that retry back off
+        instead of spinning: it rides the same ladder delay, so a send that
+        cannot be published retries on the profile's capped cadence until the
+        mesh carries it — or until the mesh is *abandoned*, which is where this
+        loop ends (``_ladder_over``, and ``disconnect`` cancels
         ``send.loops``).  A mesh that is only being rebuilt is not that: the
         teardown `connect` makes is a reviving one, and the ladder rides over it
         exactly as it rides over a rung whose publish did not leave.
@@ -1572,8 +1545,8 @@ class A2AMesh:
         # `_deliver` waits on `send.first_landed`, which is set only below.
         #
         # **A first publish that raises cancels it.**  Retrying behind a caller
-        # who was told "not sent" made the peer run work the model believed had
-        # never left, and a resend ran it twice.
+        # who was told "not sent" would make the peer run work the model
+        # believed had never left, and a resend would run it twice.
         #
         # First attempt — correlation == the public task_id.
         loop = asyncio.create_task(self._deliver(send, after_first=True))
@@ -1633,11 +1606,11 @@ class A2AMesh:
             }
         )
         # **The withdrawal is published before the row says it happened.**  A
-        # row written first turned a failed publish into a task that every
-        # later cancel answered "cancelled" without ever telling the peer; the
-        # caller was told work had been withdrawn that was still running.  A
-        # reply that lands during this await is recorded by `_handle_reply`
-        # first, and the re-read below leaves that terminal status alone.
+        # row written first would make a failed publish a task that every later
+        # cancel answers "cancelled" without ever telling the peer — the caller
+        # told work was withdrawn that was still running.  A reply that lands
+        # during this await is recorded by `_handle_reply` first, and the re-read
+        # below leaves that terminal status alone.
         await self._publish_props(self._topics.request(agent), payload, props)
         current = get_store().get(task_id)
         if current is not None and current.status in _ENDED:

@@ -47,11 +47,11 @@ than because it was left out:
   instead; SDD §14.2 holds the one it does not bound.
 
 The answer goes back through `slife2-tui`'s `submit`, which is this system's one
-path for "something outside the conversation became a turn in it" (SDD
-SDD §5.4).  A window that is not showing that agent is a **failed delivery**: the
-work happened, the answer reached no conversation, and the log says so — a task
-is over either way, and running a turn for nobody to make the two agree is the
-"carry on without the window" this system dropped.
+path for "something outside the conversation became a turn in it" (SDD §5.4).  A
+window that is not showing that agent is a **failed delivery**: the work
+happened, the answer reached no conversation, and the log says so — a task is
+over either way, and running a turn for nobody to make the two agree is the
+"carry on without the window" this system refuses.
 """
 
 from __future__ import annotations
@@ -166,10 +166,6 @@ RETIRED = 32
 #: name is what the model addresses a task by, and the description is there so
 #: that a name it chose a while ago still means something.
 DESCRIPTION_CHARS = 120
-
-#: What a call that does not say which agent it is for is told.  A shared
-#: process cannot guess it: one `slife2-agent-task` serves every agent, and
-#: whose loop this is, is a fact only the caller has.
 
 
 @dataclass
@@ -540,11 +536,10 @@ def build_server(
         to a tool list — and quietly keeping the context we had would make an
         unreadable answer indistinguishable from a decision to keep it.
 
-        **`turn_ids` is read as strictly as `messages`**, and it did not used to
-        be: `payload.get("turn_ids") or []` adopted an answer that carried
-        messages and no ids as a context whose turns nothing could name, so the
-        task's loop and the store disagreed about what it held from that point
-        on.  A missing or null `turn_ids` is the same damage as a non-list
+        **`turn_ids` is read as strictly as `messages`**: an answer that carried
+        messages and no ids is a context whose turns nothing could name, so the
+        task's loop and the store would disagree about what it held from that
+        point on.  A missing or null `turn_ids` is the same damage as a non-list
         `messages` and is refused the same way (SDD Appendix C: a value that
         cannot be read is not a value that is absent).
         """
@@ -572,10 +567,9 @@ def build_server(
 
         The fourth value is the last restored turn's `context_tokens` — the
         figure the agent's status bar would show, and what the task's
-        `[TURN-PROMPT:]` marker reports.  Zero for a conversation that has never
-        run a turn, and for a row from before the column existed; a value of
-        another type is read the same way, as a display fact rather than a
-        reason to fail the restore.
+        `[TURN-PROMPT:]` marker reports.  Zero when no size was measured; a
+        value of another type is read the same way, as a display fact rather
+        than a reason to fail the restore.
         """
         payload = tool_payload(
             await (await memory()).call_tool(
@@ -621,11 +615,8 @@ def build_server(
 
         **And it writes only when it changes something.**  A decision that asks
         for what is in hand rebuilds nothing and touches nothing on disk
-        (SDD §5.5's common case) — which is a saving and **not** a licence, and it
-        did not use to be read that way: the argument ran that because this call
-        usually writes nothing it need not be serialised.  The case that *does*
-        write is the one that lands, and it is exactly the case that has to be
-        serialised: `rebuild` replaces the conversation's stored list with one
+        (SDD §5.5's common case) — which is a saving and **not** a licence: when
+        this call does write, it replaces the conversation's stored list with one
         built from the snapshot its caller's `restore` read, so a write landing
         after another writer's leaves the store holding a decision taken against
         a conversation that has moved — and the next `restore` (an idle reap, a
@@ -844,13 +835,11 @@ def build_server(
 
         **And the two things a task holds are dropped on every way out.**  The
         outer `try` is the whole life rather than the delivery alone, because a
-        cancellation re-raises out of the `except` below and used to take the
-        path *past* the `finally` that lets go: a cancelled task kept its
-        finished `asyncio.Task` — and that object holds the cancelled
-        coroutine's frames, and the answer beside them — for as long as the
-        registry remembered it, which is the retained megabytes the comment
-        below exists to release.  It is the same rule for the cancelled ending
-        as for the two that deliver: a task that has stopped holds nothing.
+        cancellation re-raises out of the `except` below and would otherwise take
+        the path *past* the `finally` that lets go — and a cancelled task that
+        kept its finished `asyncio.Task` would hold the cancelled coroutine's
+        frames, and the answer beside them, for as long as the registry
+        remembered it.  A task that has stopped holds nothing.
         """
         try:
             try:
@@ -1133,9 +1122,7 @@ def build_server(
         # "what is still going" wants, and a total order rather than a ranking.
         # Two sorts and not one: `sorted` here is the recency order, and the
         # `rows.sort` below is stable, so it lifts the running ones to the front
-        # without disturbing it.  (A third sort used to precede this one, on
-        # `(status != RUNNING, started_at)`, and its list was thrown away by the
-        # `sorted(...)` on the very next line — a statement that did nothing.)
+        # without disturbing it.
         rows = []
         for task in sorted(mine, key=lambda t: t.started_at, reverse=True):
             row = task.report()

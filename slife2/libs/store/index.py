@@ -129,13 +129,12 @@ def chunks(values: Sequence[Any]) -> Iterator[Sequence[Any]]:
 
 #: What a row carries before anything has measured it, while a page's
 #: similarities are being gathered.  Below every cosine there is, so a row
-#: nobody measured sorts under one the meaning leg scored minus something —
-#: and `max` can collect the best of several measurements without a branch.
+#: nobody measured sorts under one the meaning leg scored minus something — and
+#: `max` can collect the best of several measurements without a branch.
 #:
-#: **One sentinel, and it used to be two**: the collection seeded with `0.0`
-#: and the leg with `-1.0`, so a row the vector leg scored below zero was
-#: reported and ordered as `0.0` — a number `_nearest` never measured, on
-#: the line a model reads.
+#: **One sentinel, not two**: seeding the collection with `0.0` and the leg
+#: with `-1.0` reported a row the vector leg scored below zero as `0.0` — a
+#: number `_nearest` never measured, on the line a model reads.
 NO_SIMILARITY = -1.0
 
 
@@ -732,10 +731,10 @@ def embed_chunks(
         window.append(paragraph)
         size += len(paragraph)
     chunks.append("\n\n".join(window))
-    # The one chunk that can still be over the limit is a single paragraph
-    # longer than it, which the docstring above says is truncated rather than
-    # split.  Slicing here rather than at each append is what keeps that from
-    # being true of every chunk, which is the bug this widened.
+    # The one chunk that can still be over the limit is a single paragraph longer
+    # than it, which the docstring above says is truncated rather than split.
+    # Slicing here rather than at each append is what keeps that from being true
+    # of every chunk.
     return [chunk[:limit] for chunk in chunks]
 
 
