@@ -8,153 +8,37 @@ authors = [
     { name = "juzcn", email = "zhangjun@cueb.edu.cn" },
 ]
 requires-python = ">=3.13"
+# Every module this project imports is declared here, even one a dependency
+# already brings transitively.
 dependencies = [
-    # The MCP server framework and its client, used by every server and both
-    # hops.  `Context.report_progress` is what turns a tool call into a
-    # progress stream on the server side, and `Client(FastMCP)` is the in-memory
-    # transport every server test runs on.  Brings `mcp` transitively; nothing
-    # here imports `mcp` directly, so it is not listed.
-    # The floor is 4.1.1 because `slife2.clients.gateway.make_client` pins
-    # `Client(mode="legacy")`: that argument arrived with 4.1, and a 4.0.x
-    # client would reject it and fail every connect.
+    # 4.1.1 is the floor: make_client pins `Client(mode="legacy")`, which 4.0
+    # does not accept.
     "fastmcp>=4.1.1",
-    # The ASGI layer under it, imported *directly* by one plugin and nowhere
-    # else: the file tunnel serves `GET /share/{token}` beside its MCP
-    # endpoint, and a custom route is written as a Starlette handler
-    # (`Request` in, `Response` out).  It arrives with FastMCP either way, and
-    # is declared by the same rule as `httpx2` below — a module this project
-    # imports is a dependency this project states.
     "starlette>=1.7.0",
-    # The TUI.  Brings `rich` transitively; we do not import it.
     "textual>=8.2.8",
-    # The WeChat bridge, which is the one thing here that talks to somebody who
-    # is not a model: `slife2.plugins.wechat.ilink` makes plain HTTP requests, and this is the
-    # client FastMCP already brings — as a distribution named `httpx2`, imported
-    # under that name.  Declared rather than relied on transitively, by the same
-    # rule as the provider SDKs below: a module this project imports is a
-    # dependency this project states.
     "httpx2>=2.13.1",
-    # The login QR, drawn with half-block characters (`█▀▄`) so it can be
-    # scanned off the terminal a person is already looking at.
-    # `slife2-wechat` does not need it to *run* — without it the login hands
-    # over the URL instead of a code — which is why the import is inside the one
-    # function that draws.
     "qrcode>=8.0",
-    # slife2.yaml.  Comment-preserving, so a rewrite does not eat the file's
-    # explanation of itself.
     "ruamel.yaml>=0.19.0",
-    # Resolves `${VAR}` and `keyring:` references against the OS keyring, which
-    # is where provider API keys live.  Used rather than reimplemented.
     "credstore>=0.10.5",
-    # **The OS trust store, for every TLS client this package starts.**  The
-    # provider SDKs, the MCP client, media and the tunnels all verify against
-    # certifi by default, and certifi is a bundle that can lag — or be narrower
-    # than — the CA set the machine actually uses.  A task container's curl and
-    # apt trusted the provider's chain while the venv's certifi did not, which
-    # failed an embeddings call that was reachable.  `slife2/__init__.py`
-    # injects this at package import; declared here because the package imports
-    # it directly.
+    # Injects the OS trust store over certifi at package import.
     "truststore>=0.10.5",
-    # Provider SDKs.  Imported *only* by the LLM server processes — one per wire
-    # protocol, plus the embeddings server, so `openai` is imported by three of
-    # them and `anthropic` by one: the TUI, the agent loop and every shared
-    # module stay free of both, which is the whole point of putting the backends
-    # behind MCP.
     "openai>=2.46.0",
     "anthropic>=1.2.0",
-    # The fourth tunnel provider's own SDK, and the only dependency here that is
-    # *not* a model backend.  It embeds
-    # the ngrok agent as a native extension, so the `ngrok` provider needs no
-    # external binary where the other two need `ssh` or `cloudflared`.  The
-    # import is inside the one function that starts that tunnel
-    # (`slife2.plugins.file_tunnel.providers._import_ngrok`), by the same rule as
-    # `qrcode` below: a build without it runs every other provider and reports
-    # this one as unavailable when it is selected.
     "ngrok>=1.6.0",
     "jinja2>=3.1.0",
-    # Cron, for the scheduled tasks (`slife2.plugins.schedule.expressions`, SDD §9.4).
-    # The five fields are trivial and the corners are not: `day_or`, the DST rule,
-    # and `strict` cross-field validation, which is what rejects `0 9 31 2 *`
-    # before an enabled task that can never fire is written down.  Only
-    # `get_next`, `get_prev` and `is_valid` are used, and only from one module:
-    # `slife2.plugins.schedule.expressions` owns the timezone policy and the error
-    # contract, so nothing else in this project imports it.
     "croniter>=6.2.4",
-    # The vector index.  Not an SDK and not a server: a SQLite extension, loaded
-    # per connection by `slife2.libs.store.index`, which is why it is a dependency of the
-    # package rather than something a backend process holds.  A floor rather
-    # than a pin like everything else here, but note that it is still alpha —
-    # the DDL it accepts is probed at open time rather than assumed (see
-    # `slife2.libs.store.index.vector_ddl`), and `distance_metric` and `float[N]` are the
-    # parts of that alpha this project depends on.  Wheels are `py3-none-*` for
-    # every platform CI builds on, so there is no interpreter-specific tag to
-    # match.
+    # Alpha: the DDL it accepts is probed at open time, not assumed.
     "sqlite-vec>=0.1.9",
-    # **Never imported, and required on one platform.**  `zoneinfo` reads the
-    # system's IANA database where there is one — macOS and Linux have it — and
-    # has nothing to read on Windows, where this project is developed.  So
-    # `ZoneInfo("Asia/Shanghai")` raises `ZoneInfoNotFoundError` on a Windows
-    # machine without this package, which turns every named timezone in
-    # `slife2.plugins.schedule.expressions` into a failure nobody can reproduce
-    # from Linux.  The reason is invisible from an import that does not exist:
-    # `zoneinfo` loads it by name, from C.
+    # Never imported: it gives `zoneinfo` a database on Windows.
     "tzdata>=2026.5",
-    # The A2A mesh (`slife2.plugins.a2a`, SDD §9.2), and **the wire is not ours**.
-    # The published A2A-over-MQTT profile *is* the SDK: the topic tree, the
-    # retained agent card with presence carried by an MQTT user property, the
-    # JSON-RPC 2.0 envelopes whose `ResponseTopic`/`CorrelationData` properties
-    # carry the reply routing, the task lifecycle with its per-task dedup, and
-    # the requester's retry ladder.  What this project writes is the driver
-    # around it: interop with the rest of the ecosystem follows from the wire
-    # being somebody else's, and a self-built binding would be a second protocol
-    # wearing the name.  Imported only by `slife2/plugins/a2a/mesh.py`.
     "a2a-over-mqtt>=0.1.0",
-    # The MQTT client under that SDK, imported *directly* by the same module, for
-    # the one thing the SDK does not offer: its own `Requester` is
-    # connection-per-call, which is exactly wrong here — a send returns a task
-    # id and the result is pushed back later, possibly to a different
-    # correlation than the one it was sent under.  So the outbound half is a
-    # persistent `aiomqtt` client of our own, and the pre-join name probe is a
-    # second, short-lived one.  Declared by the same rule as `httpx2` above: a
-    # module this project imports is a dependency this project states.  It
-    # brings `paho-mqtt`, which is declared separately below for the one type
-    # `mesh.py` takes from it directly.
     "aiomqtt>=2.5.0",
-    # `aiomqtt`'s `subscribe(options=…)` takes paho's own
-    # `SubscribeOptions` and does not re-export it — and that is the only way
-    # to ask for MQTT v5's No Local, which is what keeps a member's broadcast
-    # from being delivered back to the member that published it
-    # (`slife2/plugins/a2a/mesh.py`).  So the type is imported directly from
-    # the library that defines it.
     "paho-mqtt>=2.1.0",
-    # The tokenizer `slife2.libs.turn.tokens` sizes a conversation with, and **the one
-    # dependency here that is not needed to run**.  It is imported inside the
-    # one function that resolves it, so a process that never estimates pays
-    # nothing; and the vocabulary it needs is *not* in the wheel — `tiktoken`
-    # fetches a few megabytes the first time anybody asks for an encoding, which
-    # is why a failure to get one is handled rather than raised: the script
-    # measure answers instead, and a machine with no network runs everything
-    # (`slife2.libs.turn.tokens` states the argument, including why `o200k_base` is the
-    # right base for endpoints that do not use it).  Declared as a plain
-    # dependency rather than an extra, because the fallback is a degradation
-    # rather than an alternative — an installation that skipped it would size
-    # every conversation by hand on every machine, not just the offline ones.
+    # The vocabulary is fetched on first use; a failed fetch degrades to the
+    # script measure.
     "tiktoken>=0.14.0",
-    # The docstring parser FastMCP already uses, imported directly by
-    # `slife2.libs.plugin.protocol` for the one thing FastMCP discards: a tool's
-    # `Returns:` section, which the middleware puts on `_meta` for the catalogue.
-    # The distribution is `griffelib`; the module it installs is `griffe`.  It
-    # arrives with FastMCP's own `server` extra today, and is declared by the same
-    # rule as `httpx2` and `paho-mqtt` above: a module this project imports is a
-    # dependency this project states.  The import is inside the one function that
-    # parses, so a process that never lists a tool pays nothing.
     "griffelib>=2.0.0",
-    # The job authoring check.  The `job-coding` skill tells the model to run
-    # these over the code it wrote and fix what they find; a normal dependency
-    # rather than a dev-group one, because the authoring loop is part of the
-    # installed product — a home with no development environment still has the
-    # tools the skill names.  The agent runs them through its shell/terminal
-    # capability; nothing in slife2 imports either.
+    # The job authoring loop's checks; nothing imports them.
     "ruff>=0.16.10",
     "pyright>=1.1.414",
 ]
@@ -169,12 +53,7 @@ classifiers = [
     "Topic :: Terminals",
 ]
 
-# One console script per plugin process started by name, rather than one script
-# with subcommands, so a process manager can start any plugin without passing it
-# an argument.  The subagent network is the one process with no script of its
-# own: it is the second entry point of the a2a module
-# (`python -m slife2.plugins.a2a.local_server`).  Each of these is a process
-# that speaks MCP; `slife2` is the only client.
+# One script per plugin process; each speaks MCP, and only `slife2` is a client.
 [project.scripts]
 slife2 = "slife2:main"
 slife2-agent = "slife2.plugins.agent.server:main"
@@ -201,13 +80,12 @@ slife2-llm-embeddings = "slife2.plugins.llm.embeddings_server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["slife2"]
 
+# The package and what an installed home is seeded from — a distribution
+# without skills/, jobs/ or the two home documents could not complete a setup.
 [tool.hatch.build.targets.sdist]
 include = [
     "/slife2",
     "/scripts",
-    # The content the installer seeds into a home: the playbooks and the
-    # code-defined jobs.  They are shipped, not project source, but a source
-    # distribution that could not seed them would be an incomplete install.
     "/skills",
     "/jobs",
     "/tests",
@@ -215,19 +93,12 @@ include = [
     "/SDD.md",
     "/LICENSE",
     "/pyproject.toml",
-    # The working config, checked in deliberately: it holds no secrets, because
-    # every key in it is a ${VAR} reference resolved at runtime.
     "/slife2.yaml",
-    # The model's guide to its tools: a home document beside the config, which
-    # the installer seeds and the system prompt includes.
     "/AGENTS.md",
 ]
 
 [build-system]
-# Unpinned deliberately. slife2 publishes with `uv publish`
-# (`.github/workflows/publish.yml`), which validates the wheel rather than the
-# metadata version, so there is no twine floor to keep in step and nothing to
-# cap.
+# Unpinned; publishing goes through `uv publish`, which does not need twine.
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
@@ -240,9 +111,7 @@ dev = [
 ]
 
 [tool.uv.workspace]
-# The workspace root is *also* a workspace member and must not list itself, so
-# `members` names only the additional packages.  slife2 is a workspace of one:
-# a sibling package joins by adding its directory and one entry here.
+# The root is a member already; this lists only additional packages.
 members = []
 
 [tool.pytest.ini_options]
@@ -250,39 +119,14 @@ minversion = "9.1"
 testpaths = ["tests"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "module"
-# **The suite is the thing this project evolves against, so the default
-# invocation is the fast one.**  Two lanes, one command apart:
-#
-#   `uv run pytest`        unit + integration, every module, across workers
-#   `uv run pytest -m e2e` the whole stack as processes (tests/e2e/, ~65s)
-#
-# `-n auto` is xdist: the suite is ~5 minutes in one process and ~40 seconds
-# across the cores, and a gate somebody waits five minutes for is a gate that
-# gets run less often than it should.  `-m "not e2e"` keeps the lane that starts
-# seventeen daemons out of that default — a later `-m` on the command line
-# replaces this one rather than adding to it, which is what makes the second
-# command above work.
-#
-# **A hang is a failure here, and it has to be a loud one.**  The way a test of
-# this system breaks is often not a wrong value or an exception but a wait that
-# never ends — a lock held across a turn that is itself waiting, a background
-# task nobody cancels — and a wedged lane costs the whole CI job rather than the
-# one test, reporting nothing: measured once at 100% of the dots and no summary,
-# with the culprit only findable by bisecting by hand.  `faulthandler` dumps
-# every thread's stack after this many seconds and exits, so the same defect is
-# a named traceback in three minutes.  The bound is sized for the fast lane,
-# where the slowest test is ~7 s, so nothing legitimate comes near it.  **The
-# e2e lane raises it per test** (`tests/e2e/conftest.py`): there a daemon that
-# will not come up must reach `_wait_ready`'s own diagnosis — which names the
-# server and its log — instead of being pre-empted by this watchdog.
+# The fast lane by default; `-m e2e` replaces the marker filter, which is what
+# asks for the process-level lane.  A hang exits with every thread's stack
+# after the bound instead of wedging the job with no summary at all.
 addopts = "-q --tb=short --strict-markers --strict-config --no-header --color=yes --durations=10 -n auto -m 'not e2e'"
 faulthandler_timeout = 180
 faulthandler_exit_on_timeout = true
 filterwarnings = [
-    # CPython 3.13+: unittest.mock._AsyncMockMixin creates unawaited
-    # coroutine wrappers at class-definition time.  GC may collect them
-    # during any module import — not just unittest.mock.
-    # https://github.com/python/cpython/issues/126242
+    # CPython 3.13 async-mock wrappers; python/cpython#126242
     "ignore:coroutine .* was never awaited:RuntimeWarning",
 ]
 markers = [
@@ -296,45 +140,23 @@ markers = [
 [tool.ruff]
 line-length = 88
 target-version = "py313"
-# skills/ is *content*, not code this project ships: each skill is a directory
-# somebody wrote or downloaded, scripts and all, and ruff has no business
-# reformatting a playbook whose upstream would be updated from somewhere else.
-# It is the same rule the formatter follows for generated code — the file is
-# not ours to have an opinion about.
-#
-# jobs/ is the home's code the model wrote for itself (SDD §2.6): user data
-# like agents/, not project source like slife2/.  The author's own style is
-# theirs; the runtime gate is load/schema, not lint.  `ruff check .` in CI is
-# the only project gate that scans the repository root, so this is what keeps a
-# job created in a development checkout from failing the build.
-#
-# tools/ is where slife2 writes the utilities it codes for itself: a script
-# composed for one job (a lecture's markdown to a PDF), with the paths it was
-# asked to use and nothing importing it.  That is jobs/' condition one directory
-# over — free-form code, not project source — so the author's style is theirs
-# and the gate stays on what this project ships.
+# Content, not project source: skills and jobs are somebody else's playbooks and
+# the home's own code, and tools/ is what the model composes for one job.
 extend-exclude = ["skills", "jobs", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "BLE"]
-# BLE001 is the one rule here that is a *convention* rather than a style: this
-# codebase catches broadly in the places where a peer's failure is data, and
-# every one of those says why on the line — which is what the rule enforces.
-# The annotations were already written before the rule was switched on, so
-# several of them named a check that never ran.
-# The formatter owns line width: it wraps what it can and leaves long strings
-# and URLs alone, so E501 would only ever fire on lines it cannot fix.
+# BLE001: every blanket catch here says why on the line.  Line width is the
+# formatter's to own.
 ignore = ["E501"]
 
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 include = ["slife2"]
-# `jobs/**` is deliberately not excluded here.  The build checks `slife2` only —
-# `include` says that — but the authoring skill tells the model to run
-# `pyright <job file>` and fix what it finds; that explicit path has to be
-# analysed, which is what the editor's open-file pass does too.  The CI is
-# unaffected: it runs `pyright` with this config and no file argument.
+# tests/ use deliberate doubles.  jobs/ is not project source, but the authoring
+# skill runs `pyright <job file>` explicitly, so the path must analyse; CI runs
+# this config with no file argument and stays on `slife2`.
 exclude = ["**/__pycache__/**", "**/.venv/**", ".venv/**", "tests/**", "**/node_modules", "**/.*"]
 reportMissingImports = true
 reportMissingTypeStubs = false
