@@ -307,7 +307,13 @@ target-version = "py313"
 # theirs; the runtime gate is load/schema, not lint.  `ruff check .` in CI is
 # the only project gate that scans the repository root, so this is what keeps a
 # job created in a development checkout from failing the build.
-extend-exclude = ["skills", "jobs"]
+#
+# tools/ is where slife2 writes the utilities it codes for itself: a script
+# composed for one job (a lecture's markdown to a PDF), with the paths it was
+# asked to use and nothing importing it.  That is jobs/' condition one directory
+# over — free-form code, not project source — so the author's style is theirs
+# and the gate stays on what this project ships.
+extend-exclude = ["skills", "jobs", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "BLE"]
