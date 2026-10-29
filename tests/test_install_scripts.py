@@ -648,6 +648,14 @@ def test_uv_tool_list_tolerates_a_warning_on_stderr(tmp_path: Path) -> None:
     )
 
 
+def _powershell_function(text: str, name: str) -> str:
+    match = re.search(
+        rf"^function {re.escape(name)}.*?^\}}", text, re.MULTILINE | re.DOTALL
+    )
+    assert match, f"{name} is missing from install.ps1"
+    return match.group(0)
+
+
 def _ensure_python_function(path: Path) -> str:
     name = "Ensure-Python" if path.suffix == ".ps1" else "ensure_python"
     pattern = (
@@ -655,11 +663,18 @@ def _ensure_python_function(path: Path) -> str:
         if path.suffix == ".ps1"
         else rf"^{name}\(\) \{{.*?^\}}"
     )
-    match = re.search(
-        pattern, path.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL
-    )
+    text = path.read_text(encoding="utf-8")
+    match = re.search(pattern, text, re.MULTILINE | re.DOTALL)
     assert match, f"{name} is missing from {path.name}"
-    return match.group(0) + "\n"
+    functions = [match.group(0)]
+    if path.suffix == ".sh":
+        # The same predicate the PowerShell side runs: a `python3` that starts.
+        helper = re.search(
+            r"^python3_runs\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL
+        )
+        assert helper, "python3_runs is missing from install.sh"
+        functions.insert(0, helper.group(0))
+    return "\n".join(functions) + "\n"
 
 
 def test_the_shell_installer_falls_back_for_a_uv_without_default(
@@ -693,6 +708,7 @@ done
 exit 1
 """,
     )
+    _write_executable(stub_bin / "python3", "#!/bin/sh\nexit 0\n")
 
     function_file = tmp_path / "function.sh"
     function_file.write_text(_ensure_python_function(SHELL), encoding="utf-8")
@@ -818,19 +834,34 @@ def test_the_powershell_installer_falls_back_for_a_uv_without_default(
         "exit /b 1\r\n",
         encoding="utf-8",
     )
+    (stub_bin / "python3.cmd").write_text(
+        "@echo off\r\nexit /b 0\r\n", encoding="utf-8"
+    )
 
     text = POWERSHELL.read_text(encoding="utf-8")
     quiet = re.search(r"^function Invoke-Quiet.*?^\}", text, re.MULTILINE | re.DOTALL)
     assert quiet, "Invoke-Quiet is missing from install.ps1"
     function_file = tmp_path / "function.ps1"
     function_file.write_text(
-        quiet.group(0) + "\n" + _ensure_python_function(POWERSHELL), encoding="utf-8"
+        quiet.group(0)
+        + "\n"
+        + _powershell_function(text, "Start-DotSpinner")
+        + "\n"
+        + _powershell_function(text, "Stop-DotSpinner")
+        + "\n"
+        + _powershell_function(text, "Test-Python3")
+        + "\n"
+        + _ensure_python_function(POWERSHELL),
+        encoding="utf-8",
     )
     harness = tmp_path / "harness.ps1"
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         "function Say([string]$Message) { }\n"
         "function Update-ProcessPath { }\n"
+        # The real Add-UserPath writes the caller's user PATH; the harness must
+        # not.
+        "function Add-UserPath([string]$Directory) { }\n"
         "function Die([string]$Message) { throw $Message }\n"
         f". '{function_file}'\n"
         f"$env:PATH = '{stub_bin};' + $env:PATH\n"
@@ -883,13 +914,23 @@ def test_the_powershell_installer_leaves_an_installed_python_alone(
     assert quiet, "Invoke-Quiet is missing from install.ps1"
     function_file = tmp_path / "function.ps1"
     function_file.write_text(
-        quiet.group(0) + "\n" + _ensure_python_function(POWERSHELL), encoding="utf-8"
+        quiet.group(0)
+        + "\n"
+        + _powershell_function(text, "Start-DotSpinner")
+        + "\n"
+        + _powershell_function(text, "Stop-DotSpinner")
+        + "\n"
+        + _powershell_function(text, "Test-Python3")
+        + "\n"
+        + _ensure_python_function(POWERSHELL),
+        encoding="utf-8",
     )
     harness = tmp_path / "harness.ps1"
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         "function Say([string]$Message) { Write-Output $Message }\n"
         "function Update-ProcessPath { }\n"
+        "function Add-UserPath([string]$Directory) { }\n"
         "function Die([string]$Message) { throw $Message }\n"
         f". '{function_file}'\n"
         f"$env:PATH = '{stub_bin};' + $env:PATH\n"
@@ -911,6 +952,153 @@ def test_the_powershell_installer_leaves_an_installed_python_alone(
     assert log.read_text(encoding="utf-8").splitlines() == [
         "python find 3.13 --no-python-downloads"
     ]
+
+
+def test_python3_means_a_name_that_runs(tmp_path: Path) -> None:
+    """**`Get-Command python3` answers yes for the Windows Store's stub.**
+
+    A stock Windows 11 ships `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python3.exe`,
+    which is on PATH and exits 9009 with "Python was not found".  The installer
+    took that for an installed interpreter and failed later, at the one check
+    that actually runs the command.  Being on PATH is not the question; running
+    is.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(text, "Test-Python3"), encoding="utf-8"
+    )
+
+    store_bin = tmp_path / "store-bin"
+    store_bin.mkdir()
+    (store_bin / "python3.cmd").write_text(
+        "@echo off\r\n"
+        "echo Python was not found; run without arguments to install from the "
+        "Microsoft Store 1>&2\r\n"
+        "exit /b 9009\r\n",
+        encoding="utf-8",
+    )
+    real_bin = tmp_path / "real-bin"
+    real_bin.mkdir()
+    (real_bin / "python3.cmd").write_text(
+        "@echo off\r\necho Python 3.13.0\r\nexit /b 0\r\n", encoding="utf-8"
+    )
+
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{function_file}'\n"
+        f"$env:PATH = '{store_bin};' + $env:PATH\n"
+        'Write-Output ("STORE=" + (Test-Python3))\n'
+        f"$env:PATH = '{real_bin};' + $env:PATH\n"
+        'Write-Output ("REAL=" + (Test-Python3))\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert "STORE=False" in result.stdout, result.stdout + result.stderr
+    assert "REAL=True" in result.stdout, result.stdout + result.stderr
+
+
+def test_the_powershell_installer_puts_its_directory_first(tmp_path: Path) -> None:
+    """**A name resolves by the first PATH entry that holds it.**
+
+    `.local\\bin` is where uv writes the tool shims and the `--default` Python
+    launchers.  When it already appeared in the user PATH but behind
+    `%LOCALAPPDATA%\\Microsoft\\WindowsApps`, adding it only when absent left
+    the Store's `python3.exe` alias winning in every new shell.
+    """
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is not available")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(text, "Get-PathWithDirectoryFirst"), encoding="utf-8"
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{function_file}'\n"
+        "$path = 'C:\\Dev\\bin;C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps;"
+        "C:\\Users\\me\\.local\\bin'\n"
+        "Write-Output (Get-PathWithDirectoryFirst $path 'C:\\Users\\me\\.local\\bin')\n"
+        "Write-Output (Get-PathWithDirectoryFirst '' 'C:\\Users\\me\\.local\\bin')\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    first, second = result.stdout.splitlines()[-2:]
+    assert first == (
+        "C:\\Users\\me\\.local\\bin;C:\\Dev\\bin;"
+        "C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps"
+    ), first
+    assert second == "C:\\Users\\me\\.local\\bin", second
+
+
+def test_a_stage_shows_liveness_while_the_command_runs(tmp_path: Path) -> None:
+    """**A stage's output is in a log, so the line itself has to move.**
+
+    install.sh's `stage` prints a dot a second while the command runs.  The
+    PowerShell side printed the step's message and then nothing until the
+    command ended, which is indistinguishable from a hung install — the
+    question a first run on Windows actually produced.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(text, "Start-DotSpinner")
+        + "\n"
+        + _powershell_function(text, "Stop-DotSpinner"),
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{function_file}'\n"
+        "Write-Host '  working' -NoNewline\n"
+        "$spinner = Start-DotSpinner\n"
+        "Start-Sleep -Milliseconds 2400\n"
+        "Stop-DotSpinner $spinner\n"
+        "Write-Host 'DONE'\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    line = result.stdout.splitlines()[0]
+    assert line.startswith("  working"), result.stdout
+    dots = line[len("  working") : line.index("DONE")]
+    assert dots and set(dots) == {"."}, result.stdout
 
 
 def test_an_inline_installer_run_returns_to_the_caller(tmp_path: Path) -> None:

@@ -105,6 +105,9 @@ those programs are required as well. The included `baidu-search` skill, for
 example, declares `python3`. The installer ensures the `npx` and `uvx` launchers
 exist; the packages those launchers fetch are downloaded on first use.
 
+On Windows, `python3` comes from uv's `--default` launchers in
+`%USERPROFILE%\.local\bin`.
+
 ## Installation
 
 ### One-click installation

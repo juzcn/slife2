@@ -31,18 +31,68 @@ function Step([string]$Number, [string]$Message) { Write-Host ""; Write-Host "[$
 function Fail([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; $script:Failed = $true }
 function Die([string]$Message) { throw [System.Exception]::new($Message) }
 
-function Invoke-Quiet([scriptblock]$Body, [switch]$Silent) {
+function Start-DotSpinner {
+    # **A step that runs for a minute must look alive.**  The command's output
+    # is going to a log file (Invoke-Quiet), so without something moving the
+    # terminal shows one line and no sign of work — which is what a hung
+    # install looks like.  install.sh's `stage` prints a dot a second for the
+    # same reason; a runspace is the thread that can do it while the calling
+    # thread waits on the command.
+    $stop = New-Object System.Threading.ManualResetEvent($false)
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.Open()
+    $powershell = [powershell]::Create()
+    $powershell.Runspace = $runspace
+    [void]$powershell.AddScript({
+        param($stop)
+        while (-not $stop.WaitOne(1000)) { [Console]::Out.Write('.') }
+    }).AddArgument($stop)
+    return [pscustomobject]@{
+        Stop = $stop
+        PowerShell = $powershell
+        Handle = $powershell.BeginInvoke()
+        Runspace = $runspace
+    }
+}
+
+function Stop-DotSpinner($Spinner) {
+    [void]$Spinner.Stop.Set()
+    try { [void]$Spinner.PowerShell.EndInvoke($Spinner.Handle) } catch { }
+    $Spinner.PowerShell.Dispose()
+    $Spinner.Runspace.Dispose()
+}
+
+function Invoke-Quiet([scriptblock]$Body, [string]$Message, [switch]$Silent) {
     $log = Join-Path $env:TEMP ("slife2-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.log')
     # **Native stderr is output, not a failure.**  With the caller's
     # `$ErrorActionPreference = 'Stop'`, Windows PowerShell 5.1 turns a native
     # command's stderr into an error record once `*>` redirects it, and stops
     # the function: uv's "experimental option" warning failed the Python
     # install.  The exit code is the only verdict this function is entitled to.
+    #
+    # **A message makes the step a stage, exactly as in install.sh.**  The
+    # line is printed without a newline, a dot lands every second while the
+    # command runs, and the newline closes it — dots only when stdout is a
+    # terminal, so a captured run stays one line per step.  Without `-Message`
+    # the call is a probe: silent, with the failure tail suppressed by
+    # `-Silent`.
+    if ($Message) { Write-Host "  $Message" -NoNewline }
+    $spinner = $null
+    if ($Message -and -not [Console]::IsOutputRedirected) {
+        # Cosmetic; a runspace that cannot start must not fail the install.
+        try { $spinner = Start-DotSpinner } catch { $spinner = $null }
+    }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Body *> $log
-        $code = $LASTEXITCODE
+        try {
+            & $Body *> $log
+            $code = $LASTEXITCODE
+        }
+        finally {
+            if ($spinner) { Stop-DotSpinner $spinner }
+            if ($Message) { Write-Host '' }
+        }
         if ($code -ne 0) {
             if (-not $Silent) {
                 Get-Content $log -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
@@ -73,6 +123,29 @@ function Get-UvTools {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { return @(& uv tool list 2>$null) }
+    finally { $ErrorActionPreference = $previous }
+}
+
+function Test-Python3 {
+    # **The Store's alias is not an interpreter.**  Every Windows 11 install
+    # ships `%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe` — a stub that is
+    # on PATH and exits 9009 with "Python was not found".  `Get-Command
+    # python3` therefore answers yes for a name that cannot run a script, and
+    # the miss only surfaced at the first real run (the `baidu-search` skill's
+    # `python3 scripts/search.py`, or this installer's own verification).
+    # Running the command is the only check that tells the stub from Python.
+    # The application, not any profile function of the same name: a function
+    # sets no `$LASTEXITCODE`, and the check would read a stale one.
+    $command = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $command) { return $false }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $command.Source --version *> $null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch { return $false }
     finally { $ErrorActionPreference = $previous }
 }
 
@@ -137,14 +210,28 @@ function Resolve-DataHome {
     else { $script:State = Join-Path $script:HomeDir '.install-state.tsv' }
 }
 
+function Get-PathWithDirectoryFirst([string]$Path, [string]$Directory) {
+    # **A directory this installer owns goes first.**  Windows resolves a name
+    # by the first PATH entry that holds it, and
+    # `%LOCALAPPDATA%\Microsoft\WindowsApps` — where the Store's `python3.exe`
+    # alias lives (see Test-Python3) — sits near the front of a default user
+    # PATH.  An entry that is only added when absent stays behind that alias,
+    # which is how `python3` kept resolving to the stub on every new shell.
+    if (-not $Path) { return $Directory }
+    $entries = @($Path.Split(';') | Where-Object { $_ -and $_ -ne $Directory })
+    return ((@($Directory) + $entries) -join ';')
+}
+
 function Add-UserPath([string]$Directory) {
     if (-not $Directory) { return }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not $userPath) { $userPath = '' }
-    if ($userPath.Split(';') -notcontains $Directory) {
-        [Environment]::SetEnvironmentVariable('Path', "$Directory;$userPath", 'User')
-        $env:Path = "$Directory;$env:Path"
+    $entries = @($userPath.Split(';') | Where-Object { $_ })
+    if ($entries.Count -eq 0 -or $entries[0] -ne $Directory) {
+        [Environment]::SetEnvironmentVariable(
+            'Path', (Get-PathWithDirectoryFirst $userPath $Directory), 'User')
     }
+    $env:Path = Get-PathWithDirectoryFirst $env:Path $Directory
 }
 
 function Update-ProcessPath {
@@ -210,7 +297,6 @@ function Add-Owned([string]$Manager, [string]$Package, [string]$Tool) {
 function Ensure-Uv {
     Update-ProcessPath
     if (Get-Command uv -ErrorAction SilentlyContinue) {
-        Say '  updating uv'
         [void](Invoke-Quiet { & uv self update } -Silent)
         return
     }
@@ -234,20 +320,25 @@ function Ensure-Python {
     # requirement; moving to a newer patch is the operator's call
     # (`uv python upgrade 3.13`).
     $installed = Invoke-Quiet { & uv python find 3.13 --no-python-downloads } -Silent
-    if ($installed -and (Get-Command python3 -ErrorAction SilentlyContinue)) {
+    if ($installed -and (Test-Python3)) {
         Say '  Python 3.13 is already installed'
         Update-ProcessPath
         return
     }
-    Say '  installing Python 3.13'
     # **`--default` was behind `--preview` in uv 0.7.**  An older uv still
     # installs 3.13 with the preview flag, so retry rather than failing the run
     # on a flag it does not know.
-    if (-not (Invoke-Quiet { & uv python install 3.13 --default } -Silent)) {
-        if (-not (Invoke-Quiet { & uv python install 3.13 --preview --default })) {
+    if (-not (Invoke-Quiet { & uv python install 3.13 --default } -Message 'installing Python 3.13' -Silent)) {
+        if (-not (Invoke-Quiet { & uv python install 3.13 --preview --default } -Message 'installing Python 3.13')) {
             Die 'Python 3.13 could not be installed'
         }
     }
+    # **The launchers must outrank the Store alias.**  `--default` writes
+    # `python.exe`, `python3.exe` and `python3.13.exe` into `~\.local\bin`.
+    # The alias in WindowsApps carries two of those names and comes first in a
+    # default user PATH, so the directory has to lead the PATH for `python3`
+    # to mean this interpreter in a shell the installer did not start.
+    Add-UserPath (Join-Path $env:USERPROFILE '.local\bin')
     Update-ProcessPath
 }
 
@@ -279,8 +370,7 @@ function Download-Source {
 
 function Install-SlifeTool {
     $wasInstalled = [bool]((Get-UvTools) -match '^slife2\s')
-    Say '  installing slife2'
-    if (-not (Invoke-Quiet { & uv tool install --python 3.13 --force $script:SourceDir })) {
+    if (-not (Invoke-Quiet { & uv tool install --python 3.13 --force $script:SourceDir } -Message 'installing slife2')) {
         Die 'slife2 could not be installed'
     }
     if (-not $wasInstalled) { Add-Owned 'uv-tool' 'slife2' 'slife2' }
@@ -293,8 +383,7 @@ function Install-SlifeTool {
 
 function Ensure-Credstore {
     if (Get-Command credstore -ErrorAction SilentlyContinue) { return }
-    Say '  installing credstore'
-    if (-not (Invoke-Quiet { & uv tool install --python 3.13 credstore })) {
+    if (-not (Invoke-Quiet { & uv tool install --python 3.13 credstore } -Message 'installing credstore')) {
         Die 'credstore could not be installed'
     }
     Update-ProcessPath
@@ -304,8 +393,9 @@ function Ensure-Credstore {
 function Ensure-Venv {
     $script:Py = Join-Path $script:Root '.venv\Scripts\python.exe'
     if (-not (Test-Path $script:Py)) {
-        Say '  creating the virtualenv'
-        if (-not (Invoke-Quiet { & uv venv --python 3.13 })) { Die 'the virtualenv could not be created' }
+        if (-not (Invoke-Quiet { & uv venv --python 3.13 } -Message 'creating the virtualenv')) {
+            Die 'the virtualenv could not be created'
+        }
     }
     & $script:Py -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)'
     if ($LASTEXITCODE -ne 0) { Die 'the existing .venv uses another Python; rebuild it with: uv venv --python 3.13' }
@@ -314,8 +404,9 @@ function Ensure-Venv {
 }
 
 function Sync-Checkout {
-    Say '  syncing dependencies'
-    if (-not (Invoke-Quiet { & uv sync --upgrade --inexact })) { Die 'uv sync failed' }
+    if (-not (Invoke-Quiet { & uv sync --upgrade --inexact } -Message 'syncing dependencies')) {
+        Die 'uv sync failed'
+    }
 }
 
 function Seed-Config {
@@ -460,13 +551,11 @@ function Ensure-Mosquitto {
 function Ensure-UvTool([string]$Executable, [string]$Python) {
     if (Get-Command $Executable -ErrorAction SilentlyContinue) {
         if ((Get-UvTools) -match "^$Executable\s") {
-            Say "  upgrading $Executable"
-            [void](Invoke-Quiet { & uv tool upgrade $Executable })
+            [void](Invoke-Quiet { & uv tool upgrade $Executable } -Message "upgrading $Executable")
         }
         return
     }
-    Say "  installing $Executable"
-    if (Invoke-Quiet { & uv tool install --python $Python $Executable }) {
+    if (Invoke-Quiet { & uv tool install --python $Python $Executable } -Message "installing $Executable") {
         [void](Invoke-Quiet { & uv tool update-shell })
         Update-ProcessPath
         Add-Owned 'uv-tool' $Executable $Executable
@@ -483,7 +572,7 @@ function Install-Dependencies([object[]]$Requirements) {
         if ($seen.ContainsKey($tool)) { continue }
         $seen[$tool] = $true
         switch ($tool) {
-            'python3' { if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Fail 'python3 is missing' } }
+            'python3' { if (-not (Test-Python3)) { Fail 'python3 does not run' } }
             'uvx' { if (-not (Get-Command uvx -ErrorAction SilentlyContinue)) { Fail 'uvx is missing' } }
             'mosquitto' { Ensure-Mosquitto }
             'cloudflared' { Ensure-Cloudflared }
@@ -528,10 +617,7 @@ function Invoke-Verification([object[]]$Requirements) {
         & uvx --version | Out-Null; if ($LASTEXITCODE -ne 0) { Fail 'uvx does not run' }
     }
     else { Fail 'uvx is missing' }
-    if (Get-Command python3 -ErrorAction SilentlyContinue) {
-        & python3 --version | Out-Null; if ($LASTEXITCODE -ne 0) { Fail 'python3 does not run' }
-    }
-    else { Fail 'python3 is missing' }
+    if (-not (Test-Python3)) { Fail 'python3 does not run' }
     & $script:Py -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)'
     if ($LASTEXITCODE -ne 0) { Fail 'Python 3.13 is not available' }
     & $script:Py -c "import sqlite3, sqlite_vec; c = sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)"
