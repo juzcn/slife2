@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Document** | Software Design Description (SDD) |
-| **Version** | 0.3.0 |
-| **Date** | 2026-10-24 |
+| **Version** | 0.4.0 |
+| **Date** | 2026-10-29 |
 | **Status** | Normative |
 | **Audience** | Developers, operators, and reviewers of slife2 |
 
@@ -53,7 +53,7 @@ refactored is not a design fact.
 
 ### 1.1 Purpose
 
-This document defines the software design of slife2 version 0.3.0. It is written
+This document defines the software design of slife2 version 0.4.0. It is written
 for a person who will change the code or operate the system. It states:
 
 - the system's architecture and process model;
