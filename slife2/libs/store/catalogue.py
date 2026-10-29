@@ -566,6 +566,11 @@ class ToolStore:
         #: see `_ensure_file`.
         self._identity: tuple[int, int] | None = None
         self._schema_lock = threading.Lock()
+        #: **This process's writers queue here.**  One file has one writing
+        #: *process* by design — the hub — but not one writing coroutine: a
+        #: start-up lists every source at once, so a dozen merges reach the
+        #: file together.  See `_connect`'s `write=`.
+        self._write_lock = threading.Lock()
         self._ensure_schema()
         # Built means a process has just started, and a verdict this file
         # carries from an older run may be one nothing can justify any more —
@@ -578,7 +583,7 @@ class ToolStore:
             self.seed_autoload()
 
     @contextlib.contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         """One connection for this call, closed on the way out.
 
         The same correction `slife2.libs.store.db.TurnStore._connect` carries, and
@@ -589,14 +594,27 @@ class ToolStore:
         by slife2 itself, so nothing here met the turns' version of that; the
         lifetime is stated once for both stores so that "a connection per call"
         means the same thing in both.
+
+        **`write=True` queues this process's writers.**  The file has one
+        writing *process* by design — the hub — but not one writing *coroutine*:
+        a start-up asks every source for its list at once, so a dozen merges
+        reach the file together.  SQLite arbitrated that with
+        `storage.sqlite_busy`, a wall-clock promise a loaded machine can break —
+        a Windows runner starved two of sixteen writers past it, and `database
+        is locked` was read as a catalogue that was not working, which fails the
+        whole list.  A lock makes our own writers queue instead of racing the
+        timeout; the timeout stays for what it was written for, the file's
+        *other* processes.
         """
-        connection = connect_to(self.path)
-        try:
-            with connection:
-                self._ensure_file(connection)
-                yield connection
-        finally:
-            connection.close()
+        lock = self._write_lock if write else contextlib.nullcontext()
+        with lock:
+            connection = connect_to(self.path)
+            try:
+                with connection:
+                    self._ensure_file(connection)
+                    yield connection
+            finally:
+                connection.close()
 
     # --- the file -------------------------------------------------------------
 
@@ -960,7 +978,7 @@ class ToolStore:
         """
         inserted: list[str] = []
         updated: list[str] = []
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             for entry in plan["inserts"]:
                 try:
                     cursor = connection.execute(
@@ -1150,7 +1168,7 @@ class ToolStore:
             raise ValueError(
                 f"{state!r} is not a verdict; use enabled, error or disabled"
             )
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             cursor = connection.execute(
                 "UPDATE tool SET status = ? WHERE source_id = ? AND status != ?",
                 (state, source, STATUS_DISABLED),
@@ -1180,7 +1198,7 @@ class ToolStore:
         Returns the names removed — for the log line, and so a caller can say
         what went rather than only that something did.
         """
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             names = [
                 str(row["name"])
                 for row in connection.execute(
@@ -1252,7 +1270,7 @@ class ToolStore:
             # the state the method has (SDD Appendix C).
             return {"forgotten": 0}
         known = self.known
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             where = f"category IN ({_in_list(FUNCTION_CATEGORIES)})"
             if known:
                 where += f" AND source_id NOT IN ({_marks(known)})"
@@ -1298,7 +1316,7 @@ class ToolStore:
             return {"loaded": 0, "unloaded": 0}
         loaded = unloaded = 0
         stamp = now()
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             for chunk in chunks(sorted(self.autoload)):
                 cursor = connection.execute(
                     f"UPDATE tool SET load_status = ?, last_loaded = ?"
@@ -1385,7 +1403,7 @@ class ToolStore:
         """
         if load_status not in (LOADED, UNLOADED):
             raise ValueError(f"{load_status!r} is not a load state")
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             row = connection.execute(
                 "SELECT * FROM tool WHERE name = ?", (name,)
             ).fetchone()
@@ -1428,7 +1446,7 @@ class ToolStore:
         `tool_search` without loading it, and that call is evidence about the
         tool the next eviction should see.
         """
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             cursor = connection.execute(
                 "UPDATE tool SET last_used = ? WHERE name = ?", (now(), name)
             )
@@ -1510,7 +1528,7 @@ class ToolStore:
         if not live:
             return []
         where = _injectable_sql(live)
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             held = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM tool WHERE {where}", live
@@ -2160,7 +2178,7 @@ class ToolStore:
         existed.
         """
         identity = _vector_identity(embedder)
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             rebuilt = rebuild_vector_index(
                 connection,
                 vec_table="tool_vec",
@@ -2176,7 +2194,7 @@ class ToolStore:
 
     def _place(self, vectors: Mapping[str, list[list[float]]]) -> None:
         """Write a batch of vectors, in one transaction."""
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             for name, rows in vectors.items():
                 _write_tool_vectors(connection, name, rows)
 
@@ -2202,7 +2220,7 @@ class ToolStore:
         whole.
         """
         stamp = f"{textindex.RULES_VERSION}|tool-fields/{TOOL_FTS_VERSION}"
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             if index_meta(connection, "meta").get("text_version", "") == stamp:
                 return
             connection.execute("DROP TABLE IF EXISTS tool_fts")

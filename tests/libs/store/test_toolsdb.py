@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
+import time
 
 import pytest
 
+import slife2.helpers.timeouts as _T
 from slife2.libs.store import textindex
 from slife2.libs.store.catalogue import (
     LOADED,
@@ -190,6 +193,56 @@ def test_a_name_claimed_between_the_plan_and_the_write_is_the_same_refusal(
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"], (
         "the loser's transaction rolled back whole"
     )
+
+
+def test_a_second_writer_queues_instead_of_meeting_the_busy_timeout(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A start-up lists every source at once, so its merges are concurrent.**
+
+    The file has one writing *process* by design — the hub — which is not the
+    same as one writing *coroutine*: sixteen sources answer together, and
+    SQLite arbitrated the sixteen merges with `storage.sqlite_busy`, a
+    wall-clock promise a loaded runner broke.  Two of sixteen Windows CI
+    writers met the timeout five seconds in, and `database is locked` is read
+    as a catalogue that is not working, which fails the whole list.  The store
+    queues its own writers now; this is that queue, with the timeout cut to ten
+    milliseconds so a writer that is *not* queued fails while the first one is
+    still inside its transaction.
+    """
+    monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 0.01)
+    store = store_at(tmp_path)
+    started = threading.Event()
+
+    def holding() -> None:
+        with store._connect(write=True) as connection:
+            connection.execute(
+                "INSERT INTO meta (key, value) VALUES ('probe', 'held')"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
+            started.set()
+            # The transaction is open across this sleep, which is the window a
+            # second writer would meet as SQLITE_BUSY if the store did not
+            # queue it.
+            time.sleep(0.2)
+
+    first = threading.Thread(target=holding)
+    first.start()
+    try:
+        assert started.wait(5), "the first writer never opened its transaction"
+        with store._connect(write=True) as connection:
+            connection.execute(
+                "INSERT INTO meta (key, value) VALUES ('probe', 'queued')"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
+    finally:
+        first.join()
+
+    with store._connect() as connection:
+        value = connection.execute(
+            "SELECT value FROM meta WHERE key = 'probe'"
+        ).fetchone()[0]
+    assert value == "queued", "both writes landed, and in order"
 
 
 def test_a_tool_whose_name_is_whitespace_is_no_name_either(tmp_path) -> None:
