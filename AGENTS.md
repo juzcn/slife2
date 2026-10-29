@@ -39,8 +39,7 @@ The tool descriptions are the authority on each tool. This page is what no singl
 
 ## External tools
 
-The names the shipped `slife2.yaml` configures. The catalogue is the authority:
-`tool_search` finds anything an operator adds or removes after install.
+The names the shipped `slife2.yaml` configures. 
 
 - **MCP** (`{server}__{tool}`): serper, fetch, tavily-mcp, duckduckgo-search,
   amap-maps, playwright, context7, chrome-devtools, citecheck, mcp-pandoc,
