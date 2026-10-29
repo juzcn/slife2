@@ -37,6 +37,20 @@ The tool descriptions are the authority on each tool. This page is what no singl
 | CLI | `cli_list`, `cli_set`, `cli_remove`, `cli_set_enabled` |
 | Models | `model_list`, `model_set`, `model_remove`, `model_switch` |
 
+## External tools
+
+The names the shipped `slife2.yaml` configures. The catalogue is the authority:
+`tool_search` finds anything an operator adds or removes after install.
+
+- **MCP** (`{server}__{tool}`): serper, fetch, tavily-mcp, duckduckgo-search,
+  amap-maps, playwright, context7, chrome-devtools, citecheck, mcp-pandoc,
+  markitdown, office-word-mcp, excel-mcp, pdf-toolkit, arxiv, crossref,
+  google-scholar, desktop-commander, deepseek-search, baidu-search.
+- **REST API** (`{server}__{operation}`): github, mcp-registry.
+- **CLI** (`cli:<name>`): yt-dlp, browser-harness, rg.
+- **Skills** (`skill:<name>`): baidu-search, browser-harness,
+  browser-harness-headless, job-coding.
+
 ## Harness tools
 
 The harness's tools are the `_`-prefixed ones; the system invokes them automatically.
