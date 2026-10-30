@@ -40,7 +40,6 @@ from slife2.libs.plugin.family import (
     apply_and_report,
     build_family_server,
     list_entries,
-    list_entry_tools,
     prepare_entry,
     remove_entry,
     state_word,
@@ -271,27 +270,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             and `tools` or `error` when the link has one of them.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
-
-    @mcp.tool(name="mcp_list_tools", meta=FOR_THE_MODEL)
-    async def mcp_list_tools(
-        name: str, limit: int = 0, offset: int = 0
-    ) -> dict[str, Any]:
-        """List the tools one MCP server offers.
-
-        These are the names to call them by, each `{name}__{tool}`.
-
-        Args:
-            name: The server — the key it is written under.
-            limit: How many tools this page may hold. Omit for the cap.
-            offset: How many tools to skip — that is how you page.
-
-        Returns:
-            `name`, `state` (`ready`, `connecting`, `failed`, `idle` or `off`),
-            `tools` — `name` and `description` per tool — `total`, `limit` and
-            `offset`, and `error` when the link has one. An empty `tools` with a
-            `state` other than `ready` is why it is empty.
-        """
-        return await list_entry_tools(homes.current(), name, limit, offset, words=WORDS)
 
 
 def build_server(

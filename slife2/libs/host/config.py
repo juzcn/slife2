@@ -1615,12 +1615,17 @@ DEFAULT_TOOL_LOAD = 100
 #: The tools every configuration starts with in the model's list, **and the one
 #: part of `tool_load.autoload` that is not the operator's choice**.
 #:
-#: Each is here because something *else* refers to it by name, so a list without
-#: it would not be a smaller list — it would be a broken one:
+#: Each is here because something *else* refers to it by name, or because a model
+#: without it cannot reach what it can see — so a list without one would not be
+#: a smaller list, it would be a broken one:
 #:
 #: * `tool_search` and `func_tool_load` are how a model reaches anything that is
 #:   not already in front of it.  A model that has quietly lost them has no way
 #:   to find the rest, which is the failure SDD §7.1 is built around.
+#: * `tool_list` is the other way to reach the rest: what is installed, in
+#:   pages, with no words needed.  A model that has lost it can reach only what
+#:   it can describe, so a tool whose name it does not know is a tool it cannot
+#:   ask for.
 #: * `_func_tool_unload` and `_check_new_input` are written into conversations as
 #:   tool pairs — the turn-boundary trim and a message delivered inside a running
 #:   turn.  A pair names a tool the request declares, so a request that omitted
@@ -1638,6 +1643,7 @@ DEFAULT_TOOL_LOAD = 100
 #: (`ALWAYS_LOADED`).
 REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "tool_search",
+    "tool_list",
     "func_tool_load",
     "_func_tool_unload",
     "_check_new_input",

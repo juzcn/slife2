@@ -25,6 +25,7 @@ import pytest
 import slife2.helpers.timeouts as _T
 from slife2.libs.store import textindex
 from slife2.libs.store.catalogue import (
+    DEFAULT_TOOL_PAGE,
     LOADED,
     NOT_APPLICABLE,
     STATUS_DISABLED,
@@ -1466,11 +1467,17 @@ def test_a_row_with_nothing_to_embed_is_still_found_by_keyword(tmp_path) -> None
     assert "similarity" in found["results"][0], found["results"][0]
 
 
-def test_an_empty_query_browses_and_the_filters_narrow(tmp_path) -> None:
-    """No query is not no results, and a filter is a question of its own.
+def test_a_listing_is_a_page_and_a_search_needs_something_to_look_for(
+    tmp_path,
+) -> None:
+    """**No query is not no results, and the browse is its own question now.**
 
-    Browsing is how "what is installed" and "what is switched off" become
-    answerable — a row that cannot be found by text is still a row.
+    "What is installed" and "what is switched off" are one listing with
+    different filters: every row a filter keeps is equally the answer, so there
+    is no ranking and the page's order is the only order.  A search that
+    quietly browsed answered a question it was not asked, with the search's
+    `limit` and none of a page's arithmetic — so a search with neither input is
+    refused, and the page is here.
     """
     store = store_at(tmp_path)
     merge(store, "arxiv", "mcp", [tool("arxiv__search")])
@@ -1480,16 +1487,69 @@ def test_an_empty_query_browses_and_the_filters_narrow(tmp_path) -> None:
         "mcp",
         [{**tool("filesystem__read"), "status": STATUS_DISABLED}],
     )
-    browsed = asyncio.run(store.search(embedder=EMBEDDER))
-    assert browsed["browsed"] is True
-    assert [row["name"] for row in browsed["results"]] == [
+    browsed = store.page()
+    assert [row["name"] for row in browsed["tools"]] == [
         "arxiv__search",
         "filesystem__read",
     ]
+    assert (browsed["total"], browsed["limit"], browsed["offset"]) == (
+        2,
+        DEFAULT_TOOL_PAGE,
+        0,
+    )
 
-    off = asyncio.run(store.search(embedder=EMBEDDER, status=STATUS_DISABLED))
-    assert [row["name"] for row in off["results"]] == ["filesystem__read"]
-    assert off["results"][0]["status"] == STATUS_DISABLED
+    off = store.page(status=STATUS_DISABLED)
+    assert [row["name"] for row in off["tools"]] == ["filesystem__read"]
+    assert off["tools"][0]["status"] == STATUS_DISABLED
+
+    with pytest.raises(ValueError, match="needs a word or a sentence"):
+        asyncio.run(store.search(embedder=EMBEDDER))
+
+
+def test_a_page_says_how_much_is_behind_it(tmp_path) -> None:
+    """**A cap announced, and an `offset` that resumes where this page stopped.**
+
+    `total` is the whole answer under the filters, not the page's length, and
+    the order is total — category, source, name, with the name being the
+    primary key — so two pages cannot drop or repeat a row between them.
+    """
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "arxiv",
+        "mcp",
+        [tool("arxiv__search"), tool("arxiv__fetch")],
+    )
+    first = store.page(limit=1, offset=0)
+    second = store.page(limit=1, offset=1)
+
+    assert (first["total"], second["total"]) == (2, 2), "the whole count, twice"
+    assert (first["limit"], first["offset"]) == (1, 0)
+    assert (second["limit"], second["offset"]) == (1, 1)
+    assert [first["tools"][0]["name"], second["tools"][0]["name"]] == [
+        "arxiv__fetch",
+        "arxiv__search",
+    ], "category, source, then name — and the name is unique"
+
+
+def test_a_listing_calls_every_row_a_tool_and_carries_no_score(tmp_path) -> None:
+    """A skill, a CLI entry and a plugin tool are the same rows here.
+
+    The listing is the catalogue's answer, not the model's list: a document
+    family has no load state and is still a row, and the fields are the ones a
+    search result is read by minus the two that are a search's (`schema_bytes`
+    and, for a search, `similarity`).
+    """
+    store = store_at(tmp_path)
+    merge(store, "skills", "skill", [tool("skill:browser", "Drive a browser.")])
+    merge(store, "cli", "cli", [tool("cli:yt-dlp", "Download a video.")])
+    merge(store, "context", "plugin", [tool("turn_read", "Read a turn.")])
+
+    found = store.page()
+    assert found["total"] == 3, "every category, and every source"
+    assert {row["category"] for row in found["tools"]} == {"skill", "cli", "plugin"}
+    assert all("schema_bytes" not in row for row in found["tools"])
+    assert all("similarity" not in row for row in found["tools"])
 
 
 def test_the_catalogue_is_one_file_for_the_whole_data_directory(

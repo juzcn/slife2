@@ -472,7 +472,7 @@ context:
 
 tool_load:
   threshold: 100             # 超出后逐出最久未使用的已加载工具
-  autoload: [tool_search, func_tool_load, _func_tool_unload,
+  autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
              _check_new_input, skill_use, check_async, cancel_async,
              turn_read]                                # 且永不被逐出
 
@@ -514,8 +514,8 @@ skills:
 
 | 配置节或文件夹 | 工具 |
 |---|---|
-| `mcp:` | `mcp_set`、`mcp_list`、`mcp_list_tools`、`mcp_remove`、`mcp_set_enabled` |
-| `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_list_tools`、`rest_api_remove`、`rest_api_set_enabled` |
+| `mcp:` | `mcp_set`、`mcp_list`、`mcp_remove`、`mcp_set_enabled` |
+| `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_remove`、`rest_api_set_enabled` |
 | `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
 | `jobs/`（文件夹） | `job_set`、`job_list`、`job_read`、`job_run`、`job_remove` |
@@ -555,16 +555,18 @@ agent 参数：模型只能读取自己的历史。
 `slife2-restapi-tools` 持有 `rest-api:` 连接；hub 合并它们声明的来源、命名工具、
 把关并把调用路由回来源。
 
-hub 提供三个集合级工具：
+hub 提供四个集合级工具：
 
 - `tool_search` 按关键词和语义搜索整个目录。传 `unloaded_only` 可排除已经在清单中的
   工具；skill 和 CLI 条目没有加载状态，未加载的 job 也还没进清单，所以它们仍然包含
   在内。
+- `tool_list` 分页列出整个目录——所有工具、skill、CLI 条目和 job——用于没有词可以搜索
+  的时候。可按 `category` 和 `source` 过滤，回答里带 `total`、`limit` 和 `offset`。
 - `func_tool_load` 将一个或多个工具放入模型看到的清单。
 - `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
 
-模型可以调用 `tool_search` 返回的名字而不加载它，但加载会让它保留在每次请求随附的
-清单中。`tool_load.autoload` 列出启动即加载的工具，按模型调用它们的名字——plugin 的
+模型可以调用 `tool_search` 或 `tool_list` 返回的名字而不加载它，但加载会让它保留在
+每次请求随附的清单中。`tool_load.autoload` 列出启动即加载的工具，按模型调用它们的名字——plugin 的
 裸名字（`turn_read`）或外部 server 的 `{server}__{tool}`。其余工具按需发现和加载。
 
 调用一个目录仍在启动中的工具会回答 "not in the catalogue yet"；几秒后重试，而不是

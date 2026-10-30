@@ -1119,11 +1119,12 @@ Every question about the set — what exists, what the model is holding, what a
 name resolves to, what the budget takes back, who may call what — is a question
 about the whole list, so it is answered in one place.
 
-The hub serves three set-level tools:
+The hub serves four set-level tools:
 
 | Tool | Purpose |
 |---|---|
 | `tool_search` | Search the whole catalogue by keywords and by meaning. |
+| `tool_list` | Page the catalogue — every category, every source — with `category`/`source` filters. |
 | `func_tool_load` | Put one or more tools into the model's list. |
 | `_func_tool_unload` | Remove tools from the list; the harness also calls it at a turn boundary to enforce the budget. |
 
@@ -1194,18 +1195,18 @@ Initial state:
 
 - The tools named in `tool_load.autoload` are loaded, by the name the model
   calls them: a plugin's bare name or an external server's `{server}__{tool}`.
-- The names the system itself refers to (the two list tools, the two harness
-  pairs, `skill_use`, and the two background-call tools) are required in that
-  list; a configuration that omits one fails the start.
+- The names the system itself refers to (the four set-level tools, the two
+  harness pairs, `skill_use`, and the two background-call tools) are required in
+  that list; a configuration that omits one fails the start.
 - Everything else, a plugin's tools included, is discoverable but not loaded.
   One tool the model never calls is a prompt spent on every request. A call to
   one is checked against its catalogue row and, when it fits the row's current
   schema, the harness loads it and runs it in the same turn.
 
-A model can call a name returned by `tool_search` without loading it: the call
-is validated against the schema the catalogue holds *now*, loaded by the harness
-(`tool_load`) and run. Loading is what keeps the tool in the list sent with each
-request. A call that does not fit — the schema changed since the model last saw
+A model can call a name returned by `tool_search` or `tool_list` without loading
+it: the call is validated against the schema the catalogue holds *now*, loaded
+by the harness (`tool_load`) and run. Loading is what keeps the tool in the list
+sent with each request. A call that does not fit — the schema changed since the model last saw
 it, or its arguments could not be read — is not run; it takes the load hint,
 which is how the model reads the current schema.
 
@@ -1276,6 +1277,32 @@ first would drop rows the filter would have kept.
 and is never in the model's list — and an unloaded job are still found. The
 default stays the whole catalogue: the best answer may be a tool the model
 already holds, and `loaded` on the row says so.
+
+**Listing is the other question, and it is `tool_list`.** A search ranks what
+matches a question; a listing pages what exists, for a caller with no words to
+search with. They are separate tools because one answer cannot be both: a
+listing has no score and no confidence, and its order — category, then source,
+then name — is the only order it has. The name is last because it is the primary
+key, which is what makes the order total and two pages unable to drop or repeat
+a row between them.
+
+`category` and `source` narrow a listing and are applied in SQL, so `total`
+counts what the filters match. `total`, `limit` and `offset` follow §7.6's page
+rule; `limit` omitted is 20, and the cap is 200. The rows carry the same fields
+a search result does, minus `meaning` and `matched`. A skill, a CLI entry and a
+job are rows like any other; `loaded` is true only for a row in the model's
+list, so a category with no load state is not a missing field.
+
+A category outside the closed set is refused rather than answered with
+`total: 0`: an empty page is a confident "nothing is installed", and a typo must
+not produce one. `source` is not validated the same way — an entry that is
+connecting or switched off has no rows yet, so an empty page is a true answer
+about the catalogue rather than a wrong one about the source.
+
+A family no longer serves a listing of one server's tools (`mcp_list_tools`,
+`rest_api_list_tools` are gone): those are catalogue rows, and this one pager
+answers for every source. A search with no input names `tool_list` in its
+refusal, since it is the tool that caller wanted.
 
 ### 7.6 Result contract
 
@@ -2298,7 +2325,6 @@ The following are not implemented in this version:
 | Executing `cli:` entries | The entry is already a catalogue row; execution is an argv, not a shell. | Entries are catalogued and discoverable; no tool runs them. |
 | Executing playbook scripts | Same shape as the `cli:` entry, plus `skills:` environment injection. | `skill_use` returns the playbook text; the model runs commands itself. |
 | Fetching a URL in `file_save` | Not designed yet. | `file_save` copies local files only. |
-| A listing tool | "What is installed" is a browse, not a search. | A model must search instead of listing. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
 | The pass behind the context ceiling | The selection is bounded by construction. | A very large turn can exceed the ceiling until the next selection. |

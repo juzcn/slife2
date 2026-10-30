@@ -69,20 +69,18 @@ from slife2.libs.plugin.protocol import (
 
 logger = logging.getLogger(__name__)
 
-#: How many of one server's tools a `*_list_tools` hands over in one page.  The
-#: cap follows from what a published server can carry — four figures of tools
-#: (github: 1239) — because handing them all over spends the model's context on
-#: names it never asked for.  The read is uncapped — the catalogue needs every tool.
-TOOL_LIST_LIMIT = 20
-
 #: How many entries one `*_list` hands over in one page.
 #:
-#: **A cap rather than a preference**, and the same one `TOOL_LIST_LIMIT` is: a
-#: `limit` comes from a model, and a section an operator has let grow to a
-#: hundred entries is a listing that would spend a context on names.  Both
-#: listings answer `total`, which is the *whole* count and not the page's, so a
-#: page says what it left behind and `offset` reaches it — hiding rows with
-#: nothing saying they were hidden is the one thing a browse must not do.
+#: **A cap rather than a preference**: a `limit` comes from a model, and a
+#: section an operator has let grow to a hundred entries is a listing that would
+#: spend a context on names.  The listing answers `total`, which is the *whole*
+#: count and not the page's, so a page says what it left behind and `offset`
+#: reaches it — hiding rows with nothing saying they were hidden is the one
+#: thing a browse must not do.
+#:
+#: A *source's* tools are not listed here any more: they are catalogue rows, and
+#: the hub answers them for every source at once (`tool_list`, and
+#: `slife2.libs.store.catalogue.ToolStore.page`).
 LIST_PAGE = 50
 
 
@@ -113,9 +111,9 @@ def listed[T](
     """A listing's answer: `key`'s page, what there is in all, and where this is.
 
     One builder for the four listings that answer rows (`mcp_list`,
-    `rest_api_list`, `cli_list`, `skill_list`) and the two that answer tools,
-    because they are one shape with one fact under it:
-    `offset + len(key) < total` is how a model knows it has not seen everything.
+    `rest_api_list`, `cli_list`, `skill_list`), because they are one shape with
+    one fact under it: `offset + len(key) < total` is how a model knows it has
+    not seen everything.
     """
     page, size, start = page_of(rows, limit, offset, cap=cap)
     return {key: page, "total": len(rows), "limit": size, "offset": start}
@@ -891,8 +889,10 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
         "state": one.state,
     }
     if one.usable:
-        # The count key is the unit's plural, so the number here and the rows a
-        # `*_list_tools` hands over are named the same thing.
+        # The count key is the unit's plural — `tools` here, `operations` next
+        # door — because an entry's own report speaks the family's word for what
+        # it exposes.  The unified listing calls every row a tool; this number is
+        # about one entry and what its kind of thing is called.
         report[f"{words.unit}s"] = len(one.rows or [])
     else:
         # What it said the last time it failed, or `""` for one that has not
@@ -918,45 +918,6 @@ async def apply_and_report(
     if settings.enabled:
         await settled(one)
     return entry_report(one, settings.name, words=words)
-
-
-def tools_payload(
-    one: Held, name: str, limit: int, offset: int, *, words: FamilyWords
-) -> dict[str, Any]:
-    """One server's tools, as one page, with the state it was read in.
-
-    **Three ways to have no tools, and the state says which.**  A switched-off
-    entry, one that is not answering and one that answered with nothing all have
-    an empty page, and folding them together would make this plugin tell a model
-    two things about one entry — the model is the party that cannot check, so it
-    is the party the disagreement costs.  The state is the answer, in the same
-    words the listing and the hub use, so there is nothing to go and ask.
-
-    The cap is announced rather than applied quietly (`total`), because a
-    trimmed list that reads as the whole list is a model concluding a server
-    cannot do something it can.
-
-    `name` is the name in the model's own tool list — what a call to one of
-    these is made with — and the far end's name for it is deliberately not
-    repeated: it is what the plugin routes by, and a model that used it would be
-    naming a tool that has no such spelling in its list.
-    """
-    rows = list(one.rows or [])
-    page = [
-        {
-            "name": str(row.get("name") or ""),
-            "description": str(row.get("description") or ""),
-        }
-        for row in rows
-    ]
-    answer: dict[str, Any] = {
-        "name": name,
-        "state": one.state,
-        **listed(page, f"{words.unit}s", limit, offset, cap=TOOL_LIST_LIMIT),
-    }
-    if one.error:
-        answer["error"] = one.error
-    return answer
 
 
 def refusal(config: Config, name: str) -> str | None:
@@ -1036,8 +997,10 @@ class FamilyWords:
     """One entry, singular with its article: `a server` or `an API`."""
 
     unit: str
-    """What one exposed item is: `tool` or `operation`.  It names the key a
-    `*_list_tools` page sits under, and the count an entry report carries."""
+    """What one exposed item is: `tool` or `operation`.  It names the count an
+    entry report carries — `tools` for a server, `operations` for an API.  The
+    *rows* a family exposes are listed by the hub (`tool_list`), which calls
+    every catalogue row a tool."""
 
     list_tool: str
     """The listing tool's name, so a refusal can point at it."""
@@ -1206,29 +1169,6 @@ async def switch_entry(
     if enabled:
         await settled(one)
     return entry_report(one, name, words=words)
-
-
-async def list_entry_tools(
-    family: Family, name: str, limit: int, offset: int, *, words: FamilyWords
-) -> dict[str, Any]:
-    """The `*_list_tools` answer: one entry's exposed items, as one page.
-
-    A name this process does not hold is refused rather than answered with an
-    empty page: the entry exists nowhere this can look, and `total: 0` would read
-    as a server that offers nothing.
-    """
-    one = family.held(name)
-    if one is None:
-        raise ToolError(
-            f"'{name}' is not {words.entry} this process holds — "
-            f"see `{words.list_tool}`."
-        )
-    # Waits for the link, for the reason `list_entries` does: what this reports
-    # is the items the entry *offers*, and a page that is empty because the link
-    # is still coming up is a different answer from one that answered with
-    # nothing — and `state` is which of them it is.
-    await settled(one)
-    return tools_payload(one, name, limit, offset, words=words)
 
 
 @dataclass

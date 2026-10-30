@@ -43,7 +43,6 @@ from slife2.libs.plugin.family import (
     apply_and_report,
     build_family_server,
     list_entries,
-    list_entry_tools,
     prepare_entry,
     remove_entry,
     state_word,
@@ -315,28 +314,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             changed only the switch.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
-
-    @mcp.tool(name="rest_api_list_tools", meta=FOR_THE_MODEL)
-    async def rest_api_list_tools(
-        name: str, limit: int = 0, offset: int = 0
-    ) -> dict[str, Any]:
-        """List the operations one REST API exposes.
-
-        These are the names to call them by, each `{name}__{operation}`, one per
-        endpoint in the spec.
-
-        Args:
-            name: The API — the key it is written under.
-            limit: How many operations this page may hold. Omit for the cap.
-            offset: How many operations to skip — that is how you page.
-
-        Returns:
-            `name`, `state` (`ready`, `connecting`, `failed`, `idle` or `off`),
-            `operations` — `name` and `description` per operation — `total`,
-            `limit` and `offset`, and `error` when the link has one. An empty
-            `operations` with a `state` other than `ready` is why it is empty.
-        """
-        return await list_entry_tools(homes.current(), name, limit, offset, words=WORDS)
 
 
 def build_server(

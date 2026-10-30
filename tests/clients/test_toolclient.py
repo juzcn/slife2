@@ -352,6 +352,7 @@ async def test_the_two_halves_agree_over_a_real_hop() -> None:
             "func_tool_load",
             "skill_list",
             "skill_use",
+            "tool_list",
             "tool_search",
         ]
         text, ok = await registry.execute(

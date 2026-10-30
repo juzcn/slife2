@@ -46,7 +46,7 @@ from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
-from slife2.libs.store.catalogue import LOADED, UNLOADED, ToolStore
+from slife2.libs.store.catalogue import DEFAULT_TOOL_PAGE, LOADED, UNLOADED, ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
     MATCH_FLOOR,
@@ -55,6 +55,7 @@ from slife2.plugins.toolhub.server import (
     WEAK_FLOOR,
     Catalogue,
     _confidence,
+    _page_answer,
     _parameters,
     configured_sources,
     model_name,
@@ -197,7 +198,7 @@ def names(payload: dict[str, Any]) -> set[str]:
 async def call(hub: Client, name: str, arguments: dict[str, Any] | None = None):
     """Run one of the model's tools, the way the agent does.
 
-    Through `call_tool` and not directly: the hub's own tool surface is three
+    Through `call_tool` and not directly: the hub's own tool surface is four
     tools, and `{server}__{tool}` names exist only inside the list it hands out.
     """
     result = await hub.call_tool(
@@ -634,11 +635,11 @@ async def test_tool_load_refuses_a_document_family_like_the_model_s_load(
 async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
     """The set-level tools, and why they are the ones that stayed.
 
-    `tool_search`, `func_tool_load` and `_func_tool_unload` are questions about
-    the *whole* catalogue — what exists, what the model is holding, what the
-    budget takes back — so the process that owns the set answers them and no
-    plugin can.  Their names carry no server because there is none to name:
-    they are functions in this process, and the row says so.
+    `tool_search`, `tool_list`, `func_tool_load` and `_func_tool_unload` are
+    questions about the *whole* catalogue — what exists, what the model is
+    holding, what the budget takes back — so the process that owns the set
+    answers them and no plugin can.  Their names carry no server because there
+    is none to name: they are functions in this process, and the row says so.
     """
     async with Client(hub_for()) as hub:
         listed = await hub.call_tool("list_tools", {})
@@ -647,7 +648,12 @@ async def test_a_local_tool_is_served_by_the_hub_itself() -> None:
     served_here = {
         tool["name"] for tool in listed.data["tools"] if tool["server"] == "toolhub"
     }
-    assert served_here == {"tool_search", "func_tool_load", "_func_tool_unload"}
+    assert served_here == {
+        "tool_search",
+        "tool_list",
+        "func_tool_load",
+        "_func_tool_unload",
+    }
     search = next(one for one in listed.data["tools"] if one["name"] == "tool_search")
     assert search["tool"] == "tool_search"
     # The two inputs, and not the single `query` that preceded them: the keyword
@@ -1424,17 +1430,18 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
     which ranks, and listing everything, which cannot.  The listing is a
     different question with a different shape, so the search declines it.
 
-    **And it names nothing else.**  The refusal used to end "ask for the list",
-    pointing at a tool it cannot see; a real turn's log has the model following
-    that pointer into `skill_use` with an invented name, and getting "no skill
-    called '__list__'".  What is asserted here is that the refusal says which of
-    the two inputs would have been a search, and that it promises no other tool.
+    **And it names the tool that does the listing.**  The refusal used to end
+    "ask for the list", pointing at a tool that did not exist; a real turn's log
+    has the model following that pointer into `skill_use` with an invented name,
+    and getting "no skill called '__list__'".  Now there is one, and it is in the
+    model's list from the first turn — so the sentence names a tool the request
+    declares, which is the thing the old pointer could not do.
 
     Both fields empty is the case the schema's `required` invites — a model can
     fill one with `[]` — and it is refused rather than answered with a page,
     which matters more than it looks: the request that produced this behaviour
     in the wild was a model reading the catalogue ten rows at a time to answer
-    "what tools do you have".
+    "what tools do you have", which is exactly what `tool_list` is for.
     """
     async with Client(hub_for()) as hub:
         omitted = await call(hub, "tool_search", {})
@@ -1449,9 +1456,7 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
         assert "keywords" in answer["text"] and "sentences" in answer["text"], (
             "and it names the two inputs that would have been one"
         )
-        assert "list" not in answer["text"].lower(), (
-            "and it sends the model to no other tool"
-        )
+        assert "tool_list" in answer["text"], "and the tool that browses instead"
 
 
 @pytest.mark.asyncio
@@ -1612,6 +1617,117 @@ async def test_tool_search_unloaded_only_hides_what_the_list_already_holds() -> 
     only_names = {row["name"] for row in json.loads(only["text"])["results"]}
     assert "fake__echo" in everything_names, "the loaded tool is part of the default"
     assert "fake__echo" not in only_names, "and the flag is what hides it"
+
+
+@pytest.mark.asyncio
+async def test_tool_list_pages_the_catalogue_and_names_each_row() -> None:
+    """**The browse, and the fields a chooser reads.**
+
+    A search needs a question; this needs none, which is what makes a tool
+    findable when its name or its subject is not yet known.  The answer is a
+    page — the one shape every listing in this system answers with (SDD §7.6) —
+    and every row carries the fields a search result does, minus the two that
+    are a search's: a listing ranks nothing, so `meaning` and `matched` would be
+    a number and a mark that ordered nothing.
+
+    The hub's own tools are rows, so the listing includes `tool_list` itself —
+    that is what makes one query enough to answer "what may the model call".
+    """
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()})
+    ) as hub:
+        listed = await call(hub, "tool_list", {})
+        ours = await call(hub, "tool_list", {"source": "toolhub"})
+        source = await call(hub, "tool_list", {"source": "fake"})
+
+    page = json.loads(listed["text"])
+    assert page["total"] > len(page["tools"]), "the catalogue is larger than a page"
+    assert (page["limit"], page["offset"]) == (DEFAULT_TOOL_PAGE, 0)
+
+    assert {row["name"] for row in json.loads(ours["text"])["tools"]} == {
+        "tool_search",
+        "tool_list",
+        "func_tool_load",
+        "_func_tool_unload",
+    }, "the hub's own tools are rows too"
+
+    one_source = json.loads(source["text"])
+    assert {row["name"] for row in one_source["tools"]} == {
+        "fake__echo",
+        "fake__boom",
+        "fake__read_file",
+    }
+    assert one_source["total"] == 3, "the filter decides the count too"
+    row = next(one for one in one_source["tools"] if one["name"] == "fake__echo")
+    assert row["category"] == "mcp" and row["source"] == "fake"
+    assert row["status"] == "enabled"
+    assert row["loaded"] is True, "the fake server's tools are in the model's list"
+    assert "meaning" not in row and "matched" not in row, "a listing ranks nothing"
+
+
+@pytest.mark.asyncio
+async def test_tool_list_narrows_by_category_and_refuses_one_it_does_not_know() -> None:
+    """The category is a closed domain, and a typo in it is refused.
+
+    A search's filters match nothing on a typo and the page says so; a listing
+    with one would answer `total: 0`, which reads as a confident "nothing is
+    installed" about a category that does not exist.  So the known words are in
+    the refusal, and they are the correction.
+    """
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()})
+    ) as hub:
+        mcp = await call(hub, "tool_list", {"category": "mcp"})
+        plugins = await call(hub, "tool_list", {"category": "plugin"})
+        unknown = await call(hub, "tool_list", {"category": "nonsense"})
+
+    assert {row["category"] for row in json.loads(mcp["text"])["tools"]} == {"mcp"}
+    assert {row["category"] for row in json.loads(plugins["text"])["tools"]} == {
+        "plugin"
+    }
+    assert "cli_list" in {row["name"] for row in json.loads(plugins["text"])["tools"]}
+    assert unknown["ok"] is False, "not an empty page"
+    assert "nonsense" in unknown["text"] and "skill" in unknown["text"], (
+        "the wrong word and the known ones"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_list_pages_by_offset_and_says_what_it_left_behind() -> None:
+    """`total` is the whole answer under the filters, and `offset` resumes.
+
+    The order is total — category, source, name, the name being the primary key
+    — so two pages cannot drop or repeat a row between them.
+    """
+    async with Client(
+        hub_for(connected={"fake": lambda settings: upstream_server()})
+    ) as hub:
+        first = json.loads(
+            (await call(hub, "tool_list", {"source": "fake", "limit": 1}))["text"]
+        )
+        second = json.loads(
+            (await call(hub, "tool_list", {"source": "fake", "limit": 1, "offset": 1}))[
+                "text"
+            ]
+        )
+
+    assert (first["total"], second["total"]) == (3, 3)
+    assert (first["limit"], first["offset"]) == (1, 0)
+    assert (second["limit"], second["offset"]) == (1, 1)
+    assert first["tools"][0]["name"] != second["tools"][0]["name"], "the page moved"
+
+
+def test_a_listing_that_cannot_be_read_is_not_an_empty_catalogue() -> None:
+    """A broken read is a failure, not the verdict "nothing is installed".
+
+    `total: 0` is a sentence a model acts on — it stops looking — so only a
+    readable empty page may say it.  The raise is what `call_tool` turns into
+    `ok` false, which the model reads as a failure it can retry (SDD Appendix C).
+    """
+    with pytest.raises(ConnectionError, match="could not read"):
+        _page_answer({"total": 0, "limit": 20, "offset": 0})
+    with pytest.raises(ConnectionError, match="could not read"):
+        _page_answer({"tools": [], "total": "many", "limit": 20, "offset": 0})
 
 
 def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:
@@ -2299,6 +2415,7 @@ async def test_a_broken_upstream_leaves_the_hub_working() -> None:
     }
     assert served_here == {
         "tool_search",
+        "tool_list",
         "func_tool_load",
         "_func_tool_unload",
     }
@@ -3062,11 +3179,12 @@ async def test_a_configured_entry_becomes_a_process_that_answers(tmp_path) -> No
         listed = await client.call_tool("list_tools", {})
         assert names(listed.data) == {
             # The config's required names that have a row here: the hub's own
-            # three, and the playbook reader.  `_check_new_input` is required
+            # four, and the playbook reader.  `_check_new_input` is required
             # too, but this test's `agent` plugin is a blank one, so nothing
             # serves it — a name in the list with no row is a no-op.
             "_func_tool_unload",
             "skill_use",
+            "tool_list",
             "tool_search",
             "func_tool_load",
         }

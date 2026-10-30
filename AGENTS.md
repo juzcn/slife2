@@ -3,7 +3,7 @@
 The Tools catalogue is the authority on each tool. It holds all tools including built-in tools (bare names like `turn_read`), external MCP and REST tools (`{server}__{tool}`), jobs (`job__<name>`), harness tools (`_`-prefixed), skills (`skill:<name>`) and CLI entries (`cli:<name>`).
 
 - Every function tool also takes `_timeout`, `_async` and `_approve`; the harness strips them before dispatch. With `_async` the result arrives later — never wait for it; end the turn. `_approve` asks only when someone can answer.
-- `tool_search` finds names, use `func_tool_load` to make it appear in the model's tool list if it is not already loaded.
+- `tool_search` finds names by what a tool does; `tool_list` pages everything installed when you have no words to search with; use `func_tool_load` to make a tool appear in the model's tool list if it is not already loaded.
 - If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set`, `rest_api_set`, `skill_set`, `cli_set`.
 - You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
 - You can turn a workflow into a skill: `skill_draft` returns the files, then `skill_set` installs the drafted one.
@@ -13,7 +13,7 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 
 | Category | Tools |
 |---|---|
-| Tools | `tool_search`, `func_tool_load` |
+| Tools | `tool_search`, `tool_list`, `func_tool_load` |
 | Memory | `turn_list`, `turn_read`, `turn_search`, `turn_summarize` |
 | Cabinet | `note_edit`, `note_remove`, `note_read`, `note_list`, `diary_write`, `diary_read`, `diary_list`, `file_save`, `file_remove`, `file_read`, `file_list`, `report_save`, `report_read`, `report_list`, `cabinet_search`, `cabinet_summarize`, `dump_read` |
 | Subagents | `subagent_set`, `subagent_remove`, `subagent_list`, `subagent_send_message`, `subagent_task_response`, `subagent_continue_task`, `subagent_broadcast`, `subagent_task_list`, `subagent_cancel_task`, `subagent_group_set`, `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`, `subagent_group_leave`, `subagent_group_send_message` |
@@ -25,8 +25,8 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 | Jobs | `job_list`, `job_read`, `job_set`, `job_remove`, `job_run`, `job__<name>` |
 | Schedule | `schedule_set`, `schedule_remove`, `schedule_list`, `schedule_runs`, `schedule_run_now`, `schedule_run_skip` |
 | WeChat | `wechat_login`, `wechat_check_status`, `wechat_send_message`, `wechat_logout` |
-| MCP | `mcp_list`, `mcp_set`, `mcp_remove`, `mcp_set_enabled`, `mcp_list_tools` |
-| REST API | `rest_api_list`, `rest_api_set`, `rest_api_remove`, `rest_api_set_enabled`, `rest_api_list_tools` |
+| MCP | `mcp_list`, `mcp_set`, `mcp_remove`, `mcp_set_enabled` |
+| REST API | `rest_api_list`, `rest_api_set`, `rest_api_remove`, `rest_api_set_enabled` |
 | CLI | `cli_list`, `cli_set`, `cli_remove`, `cli_set_enabled` |
 | Models | `model_list`, `model_set`, `model_remove`, `model_switch` |
 

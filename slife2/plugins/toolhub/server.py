@@ -73,14 +73,15 @@ starts, so the hub cannot drift from the set of processes that exist.
 The list the model gets is not everything
 -----------------------------------------
 **What goes out with a request is the tools the model has *loaded*, not the tools
-that exist.**  Two tools find and load (`tool_search`, `func_tool_load`), one
-reads a skill, and everything else arrives on demand: a server with ninety tools
-is a catalogue entry until one of them is wanted, and so is a plugin's tool the
-operator did not put in `tool_load.autoload` — the list of names that are wanted
-every turn, and the only tools the budget may never take back.  The catalogue is
-where that state lives, in the home's own `agents/tools.db`, so a tool loaded in
-one conversation is loaded for the next, and a tool loaded yesterday is still loaded
-after a restart — the two things a snapshot in this process could never do.
+that exist.**  Three tools find, list and load (`tool_search`, `tool_list`,
+`func_tool_load`), one reads a skill, and everything else arrives on demand: a
+server with ninety tools is a catalogue entry until one of them is wanted, and
+so is a plugin's tool the operator did not put in `tool_load.autoload` — the
+list of names that are wanted every turn, and the only tools the budget may
+never take back.  The catalogue is where that state lives, in the home's own
+`agents/tools.db`, so a tool loaded in one conversation is loaded for the next,
+and a tool loaded yesterday is still loaded after a restart — the two things a
+snapshot in this process could never do.
 
 The budget that bounds it is enforced by the *harness*, not by the gate:
 `_func_tool_unload` is called by the agent server before it saves a turn, and the
@@ -113,9 +114,10 @@ search reads.
 `skill_use` used to be the exception, and it is one no longer: a skill is a
 document and `slife2-skills` serves it (`slife2.plugins.skills.server`), because a family
 that owns a config section *and* its own tool is a family whose next change has
-somewhere to land.  So the hub's own tools are exactly the set-level three —
-`tool_search`, `func_tool_load`, `_func_tool_unload` — and they are named as
-themselves rather than `{server}__{tool}`, because there is no server to name.
+somewhere to land.  So the hub's own tools are exactly the set-level four —
+`tool_search`, `tool_list`, `func_tool_load`, `_func_tool_unload` — and they
+are named as themselves rather than `{server}__{tool}`, because there is no
+server to name.
 Neither are ours for the neighbouring reason that the server is slife2:
 `turn_read`, not `context__turn_read`.  `model_name` is that rule and SDD
 SDD §7.1 is the argument for it.
@@ -226,7 +228,7 @@ from slife2.libs.plugin.protocol import (
 from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
-from slife2.libs.store.catalogue import ToolStore
+from slife2.libs.store.catalogue import CATEGORIES, ToolStore
 from slife2.libs.store.index import Embedder
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
@@ -243,10 +245,11 @@ SERVER_NAME = TOOLHUB_SERVER_NAME
 #: about.
 #:
 #: It is also the name the hub's **own** tools are catalogued under.  They are
-#: this plugin's tools, served by this process: `tool_search`, `func_tool_load`
-#: and `_func_tool_unload` — the set-level three, and nothing else.  Being rows
-#: like everything else is what makes one query enough to answer "what may the
-#: model call", and it is why nothing here has to remember a list of its own.
+#: this plugin's tools, served by this process: `tool_search`, `tool_list`,
+#: `func_tool_load` and `_func_tool_unload` — the set-level four, and nothing
+#: else.  Being rows like everything else is what makes one query enough to
+#: answer "what may the model call", and it is why nothing here has to remember
+#: a list of its own.
 CONFIG_KEY = "toolhub"
 
 #: The catalogue's vocabulary, in the three words this process has to say out
@@ -280,10 +283,17 @@ JOB = "job"
 #: against what this process is actually connected to.
 DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST, JOB})
 
-#: The two tools this process serves a *model* to manage its own tool list.
-#: Named here because they are also what the hub will not let go of: see
+#: The tools this process serves a *model* to read and manage its own tool
+#: list.  Named here because they are also what the hub will not let go of: see
 #: `ALWAYS_LOADED`.
+#:
+#: **`tool_list` is the browse, and `tool_search` is the other half.**  One
+#: ranks what matches a question; the other pages what exists, in an order the
+#: caller can resume.  They were one tool until the search's empty input quietly
+#: meant "the whole catalogue", which is a different question with a different
+#: answer shape (SDD §7.5).
 TOOL_SEARCH = "tool_search"
+TOOL_LIST = "tool_list"
 FUNC_TOOL_LOAD = "func_tool_load"
 
 #: The tool that reads a playbook, which **`slife2-skills` serves and this
@@ -333,9 +343,9 @@ JOB_SOURCE = _JOB_SOURCE
 FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 
 #: What a model may not take out of its own list: the tools something *else*
-#: refers to by name.  The three this process serves are how a tool list is
-#: managed at all; `skill_use` is what every session reaches for; the rest are
-#: the agent process's — `_check_new_input`, the pair a mid-turn delivery is
+#: refers to by name.  The four this process serves are how a tool list is read
+#: and managed at all; `skill_use` is what every session reaches for; the rest
+#: are the agent process's — `_check_new_input`, the pair a mid-turn delivery is
 #: written under, and the two background-call tools that consume an `_async`
 #: task id.
 #:
@@ -348,6 +358,7 @@ FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
 ALWAYS_LOADED = frozenset(
     {
         TOOL_SEARCH,
+        TOOL_LIST,
         FUNC_TOOL_LOAD,
         FUNC_TOOL_UNLOAD,
         SKILL_USE,
@@ -915,6 +926,16 @@ class Catalogue:
         """
         store = await self.store()
         return await store.search(embedder=await self._embedder(), **arguments)
+
+    async def page(self, **arguments: Any) -> dict[str, Any]:
+        """One page of the catalogue.  See `ToolStore.page`.
+
+        **No embedder, and that is the whole of the difference.**  A listing is
+        not looking for anything, so there is no vector and no model call: it is
+        the one set-level answer that costs a query and nothing else, which is
+        what makes it safe to put in a model's list on every request.
+        """
+        return await off_loop((await self.store()).page, **arguments)
 
     async def set_load(self, name: str, load_status: str) -> dict[str, Any]:
         """Move one tool in or out of the model's list.
@@ -1638,12 +1659,13 @@ class Upstream:
 class LocalTool:
     """A tool the hub serves itself, because there is nothing else that could.
 
-    The three that find, load and trim tools are the case, and they are the whole
-    of it: each is a question about the *whole* catalogue, so the process that
-    owns the set answers it and no plugin can.  None of them has a process to
-    start, a credential to hold or an address to configure: what an `Upstream`
-    exists for — a connection — has nothing to describe.  What is left is a
-    name, the schema the model reads, and the body that answers a call.
+    The four that find, list, load and trim tools are the case, and they are the
+    whole of it: each is a question about the *whole* catalogue, so the process
+    that owns the set answers it and no plugin can.  None of them has a process
+    to start, a credential to hold or an address to configure: what an
+    `Upstream` exists for — a connection — has nothing to describe.  What is
+    left is a name, the schema the model reads, and the body that answers a
+    call.
 
     **A local tool's name is its own**, `tool_search`, the way every tool of ours
     is (`model_name`) — and it is routed *before* the catalogue is asked, which
@@ -1669,15 +1691,16 @@ class LocalTool:
 
 #: How many rows one search answers with.  The harness's number, not the
 #: model's: `limit` was a parameter until a model asked for the catalogue a page
-#: at a time.  A search finds *a* tool; enumerating the catalogue is a different
-#: tool's question.
+#: at a time.  A search finds *a* tool; enumerating the catalogue is
+#: `tool_list`'s question, and that one takes a `limit`.
 SEARCH_LIMIT = 10
 
 #: **Two inputs, because the two legs want different things.**  Filters and a
 #: single `query` were removed: five filters are five ways to ask a question that
 #: is not "find me the tool that does this" (narrowing to one server or to the
-#: switched-off rows is *reading* the catalogue, a list with no ranking — SDD
-#: §14.2), and one string went to both legs, one of which cannot read a sentence.
+#: switched-off rows is *reading* the catalogue, a list with no ranking — that is
+#: `tool_list`, SDD §7.5), and one string went to both legs, one of which cannot
+#: read a sentence.
 #:
 #: The inputs are one call apart, not one being the other's poor relation: a
 #: compact word list embeds as well as the sentence taken from it (36 of 36 on
@@ -1739,6 +1762,60 @@ TOOL_SEARCH_DESCRIPTION = (
     "`confidence` says whether the page is `sure`, `weak` or `none`."
 )
 
+#: The listing's inputs, and **all four are optional**: unlike a search, every
+#: one of them has a meaningful default — everything, from the top.  `category`
+#: is a closed domain and is given as one (`enum`), because a typo in it would
+#: otherwise be a confident empty page; the tool refuses a value outside it as
+#: well, since a local tool's schema is shown to a model and not enforced for it
+#: (`call_tool` hands the body the arguments it was given).
+TOOL_LIST_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "category": {
+            "type": "string",
+            "enum": sorted(CATEGORIES),
+            "description": (
+                "Only one category: `plugin` for slife2's own tools, `mcp` or "
+                "`rest` for an external server's, `skill` for playbooks, `cli` "
+                "for installed commands, `job` for code you wrote. Omit for "
+                "every one."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "description": (
+                "Only one source, as a row's `source` field names it — "
+                "`arxiv`, `skills`, `jobs`. Omit for every source."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "How many rows this page may hold. Omit for 20; at most 200. "
+                "`total` says how many there are, so a smaller page says what "
+                "it left behind."
+            ),
+        },
+        "offset": {
+            "type": "integer",
+            "description": "How many rows to skip — that is how you page.",
+        },
+    },
+}
+
+#: What a listing is for, said in the model's terms: **it is the browse, and
+#: search is the lookup**.  A model that cannot name what it wants has no way to
+#: ask a search; this is the answer to "what is on this machine", and it is why
+#: the two tools are separate rather than one with an empty-input mode.
+TOOL_LIST_DESCRIPTION = (
+    "List the catalogue: every tool, skill, CLI entry and job installed on "
+    "this machine, whether or not it is in your list. `tool_search` finds a "
+    "tool by what it does; this pages what exists, for when you do not have the "
+    "words to search with. Rows carry the same fields a search result does but "
+    "no score — a listing ranks nothing. The answer is one page: `total` is how "
+    "many the filters match, and `limit`/`offset` are how to read the rest."
+)
+
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1798,7 +1875,8 @@ def local_tools(
     live_sources: Callable[[], list[str]],
     refresh_declared: Callable[[], Awaitable[None]],
 ) -> list[LocalTool]:
-    """What this process serves a model itself: the three it manages tools with.
+    """What this process serves a model itself: the four it reads and manages
+    tools with.
 
     **These are the set-level tools, and that is why they are here.**  Which
     tools exist, which of them the model is holding, and what the budget takes
@@ -1813,8 +1891,12 @@ def local_tools(
     it *does* is the store's: the two legs, the fusion and the filters all happen
     there, and this half turns rows into text a model reads.
 
-    **Load one** — `func_tool_load`, whose answer is likewise the store's verdict
-    phrased for a model.
+    **Enumerate them** — `tool_list`, the browse.  A search needs a question
+    the model can phrase; a listing needs none, which is what makes a tool
+    findable when its name or its subject is not yet known.  It is also where
+    the per-family `*_list_tools` tools went: a server's tools are catalogue
+    rows like any other, so one pager answers for all of them instead of each
+    family keeping a second one (`slife2.libs.store.catalogue.ToolStore.page`).
 
     **Trim the list** — `_func_tool_unload`, the one of the three with a second
     caller.  With no names it is the *budget*: the agent server calls it that way
@@ -1826,11 +1908,11 @@ def local_tools(
     model's tool list declares — `_func_tool_unload` argues that, and it is the
     one caller that made this the third rather than the second.
 
-    `refresh_declared` is handed in rather than reached for because a search is
-    where a family that declares rows has to be current: dropping a directory
-    into `<data>/skills/` is the whole of installing a skill, and a row that
-    appeared only at the next hub start would make a new playbook readable and
-    unfindable at the same time.  See `Upstream.declare`.
+    `refresh_declared` is handed in rather than reached for because a search or
+    a listing is where a family that declares rows has to be current: dropping a
+    directory into `<data>/skills/` is the whole of installing a skill, and a row
+    that appeared only at the next hub start would make a new playbook readable
+    and unfindable at the same time.  See `Upstream.declare`.
     """
 
     async def search(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1854,14 +1936,16 @@ def local_tools(
             # the tool that finds by meaning declines to be the tool that
             # enumerates.
             #
-            # **And it does not say where else to look.**  A tool's own answer
-            # promising that somebody else can do the job is a promise it cannot
-            # keep; when there is a tool that enumerates, the sentence can name it.
+            # **And it names the tool that enumerates**, which it could not do
+            # before there was one: `tool_list` exists for exactly this caller —
+            # one with no words to search by — and a refusal owes the caller the
+            # step that does what it asked.
             raise ToolError(
                 "tool_search needs something to look for: `sentences` is what you "
                 "want to do ('take a screenshot of a page') and `keywords` are "
                 "words a tool's own text would carry ('screenshot'). Give one of "
-                "them — both empty is not a search."
+                "them — both empty is not a search. To see everything installed "
+                "instead, use `tool_list`."
             )
         # **A keywords-only call reaches both legs, and the rule is the store's.**
         # `ToolStore.search` turns words with no sentence into a sentence of them
@@ -1878,6 +1962,32 @@ def local_tools(
             unloaded_only=arguments.get("unloaded_only") is True,
         )
         return _results(found)
+
+    async def page(arguments: dict[str, Any]) -> dict[str, Any]:
+        category = str(arguments.get("category") or "").strip()
+        if category and category not in CATEGORIES:
+            # **Refused, unlike a search's filters**, and before any work: a
+            # search with a typo in a filter is a page a model reads and
+            # corrects, while a listing with one is `total: 0` — a confident
+            # "nothing is installed" about a category that does not exist.  The
+            # known words are in the refusal because they are the correction.
+            raise ToolError(
+                f"{category!r} is not a tool category; known: "
+                + ", ".join(sorted(CATEGORIES))
+                + " — leave `category` empty to list all of them"
+            )
+        # The declarations are refreshed for the reason a search refreshes
+        # them: a skill dropped into `<data>/skills/` and an `mcp:` entry added
+        # a moment ago are both found by looking, and a browse that could not
+        # see either would be reporting a catalogue one edit behind.
+        await refresh_declared()
+        found = await catalogue.page(
+            category=category,
+            source_id=str(arguments.get("source") or "").strip(),
+            limit=_whole(arguments, "limit"),
+            offset=_whole(arguments, "offset"),
+        )
+        return _page_answer(found)
 
     async def load(arguments: dict[str, Any]) -> dict[str, Any]:
         names = _names_of(arguments)
@@ -1927,6 +2037,16 @@ def local_tools(
                 parameters=TOOL_SEARCH_PARAMETERS,
             ),
             run=search,
+        ),
+        LocalTool(
+            tool=UpstreamTool(
+                name=TOOL_LIST,
+                server=CONFIG_KEY,
+                tool=TOOL_LIST,
+                description=TOOL_LIST_DESCRIPTION,
+                parameters=TOOL_LIST_PARAMETERS,
+            ),
+            run=page,
         ),
         LocalTool(
             tool=UpstreamTool(
@@ -2136,6 +2256,33 @@ def _names_of(arguments: Mapping[str, Any]) -> list[str]:
     return _listed(arguments.get("names"))
 
 
+def _whole(arguments: Mapping[str, Any], key: str) -> int:
+    """One page number a listing was given, or `0` for "not given".
+
+    **A local tool's schema is shown to a model and not enforced for it**:
+    `call_tool` hands the body whatever `arguments` came with, so a `limit`
+    arrives as the integer the schema asked for or as whatever the model wrote.
+    A quoted number is read as the number it means (`_listed` makes the same
+    accommodation for one string where an array was asked for), and anything
+    else is refused with a sentence rather than silently taken as the default —
+    a page size nobody applied is the confident-empty-page failure from the
+    other side.
+    """
+    given = arguments.get(key)
+    if given is None or (isinstance(given, str) and not given.strip()):
+        return 0
+    if isinstance(given, bool):
+        raise ToolError(f"`{key}` is a whole number; {given!r} is not one")
+    if isinstance(given, float) and given.is_integer():
+        return int(given)
+    if isinstance(given, int):
+        return given
+    try:
+        return int(str(given).strip())
+    except ValueError:
+        raise ToolError(f"`{key}` is a whole number; {given!r} is not one") from None
+
+
 #: Where "the meaning leg is sure" begins, and where "it found nothing" ends.
 #:
 #: Measured with the real embedder: 36 answerable queries scored 0.477-0.782 and
@@ -2202,6 +2349,33 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _listing(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One catalogue row, with the fields a search result is read by.
+
+    **The same names as `_record`** — `name`, `category`, `source`, `status`,
+    `loaded`, `description` — because a model that has read one of these answers
+    should not have to learn a second vocabulary for the other.  `matched` and
+    `meaning` are the search's and are absent here for the reason the listing
+    ranks nothing (`slife2.libs.store.catalogue._listing_dict`).
+
+    `description` stays, and is never cut, for the reason `_record` gives: it is
+    the one thing a model chooses by, and a listing of names alone would send it
+    back to `tool_search` for every row it saw.
+
+    `loaded` is true only for a row in the model's list.  A skill and a CLI
+    entry carry `n/a` in the catalogue and are false here — they have no load
+    state at all, which `TOOL_LIST_DESCRIPTION` says in the model's words.
+    """
+    return {
+        "name": str(row.get("name") or ""),
+        "category": str(row.get("category") or ""),
+        "source": str(row.get("source_id") or ""),
+        "status": str(row.get("status") or ""),
+        "loaded": row.get("load_status") == "loaded",
+        "description": str(row.get("description") or ""),
+    }
+
+
 def _confidence(rows: Sequence[Mapping[str, Any]], best: float) -> str:
     """How sure this page is, as one of three words.
 
@@ -2261,6 +2435,48 @@ def _results(found: Mapping[str, Any]) -> dict[str, Any]:
         "best": best,
         "confidence": _confidence(rows, best),
     }
+
+
+def _page_answer(found: Mapping[str, Any]) -> dict[str, Any]:
+    """A listing's page, as the object a model reads.
+
+    **The one page shape this system answers with** (SDD §7.6): the rows under
+    the noun, `total` for what the filters matched, and the `limit`/`offset`
+    that describe this page.  The numbers are the *applied* ones — the store's,
+    not the caller's — because a caller pages by `offset`, and an answer that
+    echoed a size it did not apply would make the caller's own arithmetic skip
+    the rows in between.
+
+    `tools` is the key for every category, the two document families included:
+    a playbook and a command are rows the catalogue holds, and the model's word
+    for one is the listing's word.  Nothing about a *source* rides beside the
+    rows — `state` and `error` describe a connection, and a row's own `status`
+    is the catalogue's record of whether its owner is answering, which is what
+    this answer owns.
+
+    **A listing that cannot be read is not an empty catalogue.**  An answer with
+    no `tools` list, or with numbers that are not numbers, raises: a `total: 0`
+    that came from a broken read is a confident "nothing is installed", which is
+    the one thing a browse must never say falsely (SDD Appendix C, "a failure is
+    not a verdict").  `call_tool` turns the raise into `ok` false.
+    """
+    rows = found.get("tools")
+    if not isinstance(rows, list):
+        raise ConnectionError(
+            f"tool_list could not read the catalogue's answer — `tools` came "
+            f"back as {rows!r}"
+        )
+    try:
+        page = {
+            "total": int(found["total"]),
+            "limit": int(found["limit"]),
+            "offset": int(found["offset"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConnectionError(
+            f"tool_list could not read the catalogue's page — {exc}"
+        ) from None
+    return {"tools": [_listing(row) for row in rows], **page}
 
 
 def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
@@ -3026,9 +3242,9 @@ def build_server(
         loaded is not in this answer, and it is found with `tool_search` and put
         here with `func_tool_load` — which is what keeps the list that goes out
         with every request from growing to the size of everything installed.
-        The four tools that find, load and trim are always in it: they are the
+        The tools that find, list, load and trim are always in it: they are the
         mechanism, and a budget that could take them away would leave the model
-        holding a set it cannot change.
+        holding a set it can neither read whole nor change.
 
         A plugin's tools are left out unless they declare themselves the
         model's (`slife2.libs.plugin.audience`); a tool server's are all offered, because the

@@ -425,9 +425,9 @@ def test_the_autoload_list_defaults_to_the_names_the_system_works_by(
 
     `tool_load.autoload` names the tools that start in the model's list, and a
     plugin's tools are not there by default any more.  What must be there is the
-    set the system refers to by name; a config that leaves one out is refused
-    here rather than at the first turn whose harness pair names a tool the
-    request does not declare.
+    set the system works by; a config that leaves one out is refused here rather
+    than at the first turn whose harness pair names a tool the request does not
+    declare.
     """
     from slife2.libs.host.config import REQUIRED_AUTOLOAD
 
@@ -457,9 +457,10 @@ def test_the_required_autoload_is_what_the_hub_never_lets_go() -> None:
 
     `REQUIRED_AUTOLOAD` is what the config insists starts loaded;
     `ALWAYS_LOADED` is what the hub refuses to let the model unload.  They are
-    the same names because they are the same fact — "something else refers to
-    this tool by name" — seen from the two processes that have to act on it, and
-    the config module cannot import a server to read the other spelling.
+    the same names because they are the same fact — "the system needs this tool
+    to be reachable or manageable" — seen from the two processes that have to
+    act on it, and the config module cannot import a server to read the other
+    spelling.
     """
     from slife2.libs.host.config import REQUIRED_AUTOLOAD
     from slife2.plugins.toolhub.server import ALWAYS_LOADED

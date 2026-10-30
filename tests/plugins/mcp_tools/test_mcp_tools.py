@@ -189,7 +189,6 @@ async def test_setting_a_server_writes_it_and_connects_it(isolated_runtime) -> N
             client, "mcp_set", name="added", command="in-memory", description="Added."
         )
         listed = await ask(client, "mcp_list")
-        tools = await ask(client, "mcp_list_tools", name="added")
 
     assert answer["state"] == "ready", "the word the hub answers `servers` with"
     assert answer["tools"] == 2, answer
@@ -199,8 +198,6 @@ async def test_setting_a_server_writes_it_and_connects_it(isolated_runtime) -> N
         "added",
         "existing",
     }
-    assert {one["name"] for one in tools["tools"]} == {"added__echo", "added__second"}
-    assert tools["total"] == 2
 
 
 @pytest.mark.asyncio
@@ -213,12 +210,10 @@ async def test_setting_it_again_does_not_rebuild_the_link(isolated_runtime) -> N
     sides here go through the config layer and are both resolved.
     """
     async with Client(family(isolated_runtime)) as client:
-        await ask(client, "mcp_set", name="added", command="in-memory")
-        first = await ask(client, "mcp_list_tools", name="added")
-        await ask(client, "mcp_set", name="added", command="in-memory")
-        again = await ask(client, "mcp_list_tools", name="added")
+        first = await ask(client, "mcp_set", name="added", command="in-memory")
+        again = await ask(client, "mcp_set", name="added", command="in-memory")
 
-    assert first["total"] == 2 and again["total"] == 2
+    assert first["tools"] == 2 and again["tools"] == 2, "both report what it offers"
     assert written(isolated_runtime).count("  added:") == 1, "one entry, not two"
 
 
@@ -316,13 +311,10 @@ async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) 
         await ask(client, "mcp_set", name="added", command="in-memory")
         answer = await ask(client, "mcp_remove", name="added")
         listed = await ask(client, "mcp_list")
-        with pytest.raises(ToolError) as gone:
-            await client.call_tool("mcp_list_tools", {"name": "added"})
 
     assert answer == {"name": "added", "removed": True}
     assert "added" not in section(isolated_runtime)
     assert "added" not in {row["name"] for row in listed["servers"]}
-    assert "not a server this process holds" in str(gone.value)
 
 
 @pytest.mark.asyncio
@@ -347,19 +339,10 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
 
     The entry stays, the link goes, and every answer says `off` rather than
     `failed`: a server nobody asked to connect has not failed at anything.
-
-    **And `mcp_list_tools` says the same thing**, which is what the assertions
-    below it are for.  A switched-off entry has no link, so it has no error
-    either, and the tool's fallback read those two as "it is not answering yet"
-    — one entry with three accounts: `[off]` in the listing, `off` in its own
-    state, and a sentence telling the model to wait for a connection
-    `enabled: false` promises will never be opened.  There is one word for it
-    now, and it is the listing's own: `state`.
     """
     async with Client(family(isolated_runtime)) as client:
         off = await ask(client, "mcp_set_enabled", name="existing", enabled=False)
         listed = await ask(client, "mcp_list")
-        tools = await ask(client, "mcp_list_tools", name="existing")
         # Read the file while it is off: turning it back on removes the flag, so
         # this is the only moment the written `enabled: false` exists.
         written_off = section(isolated_runtime)["existing"]
@@ -369,24 +352,9 @@ async def test_switching_one_off_keeps_the_entry_and_stops_the_server(
     assert off["state"] == "off" and off["enabled"] is False
     assert written_off["enabled"] is False
     assert [row["state"] for row in listed["servers"]] == ["off"]
-    assert tools["state"] == "off", "the word the listing's own row carries"
-    assert tools["tools"] == [] and tools["total"] == 0
-    assert "error" not in tools, "there is no link to be waiting for"
     assert on["state"] == "ready" and on["tools"] == 2
     assert [row["state"] for row in back["servers"]] == ["ready"]
     assert "enabled" not in section(isolated_runtime)["existing"], "on is the default"
-
-
-@pytest.mark.asyncio
-async def test_the_cap_says_how_much_is_behind_it(isolated_runtime) -> None:
-    """A listing is capped for the caller's context, and a cap that is not
-    announced reads as the whole list."""
-    async with Client(family(isolated_runtime)) as client:
-        tools = await ask(client, "mcp_list_tools", name="existing", limit=1)
-
-    assert tools["total"] == 2, "the whole count, not the page's"
-    assert tools["limit"] == 1 and tools["offset"] == 0
-    assert len(tools["tools"]) == 1
 
 
 # --- and it reaches the model -------------------------------------------------
@@ -399,12 +367,13 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
     These are the first tools this plugin offers the model — until now it only
     held other people's — so they arrive through the hub like a plugin's tools
     do, by their own bare names.  The listing and the call pair stay invisible:
-    the model gets the tools of the *entries*, not the plugin's own API.
+    the model gets the tools of the *entries*, not the plugin's own API.  What
+    an entry *offers* is a hub question now (`tool_list`).
 
     **Asked through the hub's own `list_tools`, and not `Client(hub).list_tools()`**:
-    the hub serves three tools of its own and the model's list is the *payload*
-    of one of them.  The first is what a peer can call; the second is what a
-    model is given, and only the second is this test's subject.
+    the hub serves its set-level tools itself and the model's list is the
+    *payload* of one of them.  The first is what a peer can call; the second is
+    what a model is given, and only the second is this test's subject.
     """
     write_config(isolated_runtime)
     config: Config = load()
@@ -418,7 +387,6 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
             autoload=(
                 *config.tool_load.autoload,
                 "mcp_list",
-                "mcp_list_tools",
                 "mcp_set",
                 "mcp_remove",
                 "mcp_set_enabled",

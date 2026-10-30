@@ -417,10 +417,11 @@ tool_result:
 
 # `note_edit` is the tool the turn test asks the model for, so it is in the
 # list the model is offered.  Every other cabinet tool is on demand, which is
-# what a plugin's tools are now; the seven below are what the system works by.
+# what a plugin's tools are now; the first eight are what the system works by.
 tool_load:
   autoload:
     - tool_search
+    - tool_list
     - func_tool_load
     - _func_tool_unload
     - _check_new_input

@@ -154,11 +154,13 @@ tool_load:
   # turn boundary. Nothing in `autoload` below is ever evicted.
   threshold: 100
   # The tools that start in the model's list, by the name the model calls them.
-  # Everything else — a plugin's tools included — is found with `tool_search`
-  # and loaded with `func_tool_load`, and is evicted when unused. The first seven
-  # are what the system works by; a list without them fails the start.
+  # Everything else — a plugin's tools included — is found with `tool_search`,
+  # listed with `tool_list`, and loaded with `func_tool_load`, and is evicted
+  # when unused. The first eight are what the system works by; a list without
+  # them fails the start.
   autoload:
     - tool_search
+    - tool_list
     - func_tool_load
     - _func_tool_unload
     - _check_new_input

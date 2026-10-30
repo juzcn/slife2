@@ -397,22 +397,6 @@ async def test_the_listing_shows_the_spec_and_not_the_proxy(isolated_runtime) ->
 
 
 @pytest.mark.asyncio
-async def test_the_operations_are_listed_and_capped(isolated_runtime) -> None:
-    """One page shape, this family's word for what a row is."""
-    async with Client(family(isolated_runtime)) as client:
-        all_of_them = await ask(client, "rest_api_list_tools", name="registry")
-        capped = await ask(client, "rest_api_list_tools", name="registry", limit=1)
-
-    assert {one["name"] for one in all_of_them["operations"]} == {
-        "registry__list_things",
-        "registry__get_thing",
-    }
-    assert all_of_them["total"] == 2 and all_of_them["state"] == "ready"
-    assert capped["total"] == 2, "the whole count, not the page's"
-    assert (capped["limit"], capped["offset"], len(capped["operations"])) == (1, 0, 1)
-
-
-@pytest.mark.asyncio
 async def test_removing_and_switching_behave_as_they_do_next_door(
     isolated_runtime,
 ) -> None:

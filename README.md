@@ -520,7 +520,7 @@ context:
 
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
-  autoload: [tool_search, func_tool_load, _func_tool_unload,
+  autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
              _check_new_input, skill_use, check_async, cancel_async,
              turn_read]                                # and never evicted
 
@@ -564,8 +564,8 @@ its own tools:
 
 | Section or folder | Tools |
 |---|---|
-| `mcp:` | `mcp_set`, `mcp_list`, `mcp_list_tools`, `mcp_remove`, `mcp_set_enabled` |
-| `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_list_tools`, `rest_api_remove`, `rest_api_set_enabled` |
+| `mcp:` | `mcp_set`, `mcp_list`, `mcp_remove`, `mcp_set_enabled` |
+| `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_remove`, `rest_api_set_enabled` |
 | `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
 | `jobs/` (a folder) | `job_set`, `job_list`, `job_read`, `job_run`, `job_remove` |
@@ -611,19 +611,22 @@ as `[Wechat:{…}]`, was written by a sender and is stored with the message.
 connections and `slife2-restapi-tools` the `rest-api:` connections; the hub
 merges what they declare, names the tools, gates them, and routes calls back.
 
-The hub serves three set-level tools:
+The hub serves four set-level tools:
 
 - `tool_search` searches the whole catalogue by keyword and by meaning. Pass
   `unloaded_only` to leave out the tools already in the list; skills and CLI
   entries have no load state, and an unloaded job is not loaded yet, so all of
   them are still included.
+- `tool_list` pages the catalogue — every tool, skill, CLI entry and job — for
+  when there is no word to search with. It filters by `category` and `source`
+  and answers `total`, `limit` and `offset`.
 - `func_tool_load` puts one or more tools into the list shown to the model.
 - `_func_tool_unload` removes tools from that list. The harness also calls it at
   a turn boundary to enforce the budget.
 
-A model can call a name returned by `tool_search` without loading it: when the
-call fits the tool's current catalogue schema, the harness loads it and runs it
-in the same turn. A call that does not fit — an unreadable argument list, or an
+A model can call a name returned by `tool_search` or `tool_list` without loading
+it: when the call fits the tool's current catalogue schema, the harness loads it
+and runs it in the same turn. A call that does not fit — an unreadable argument list, or an
 outdated schema — is answered with the load hint instead. Loading is what keeps
 the tool in the list sent with every request. `tool_load.autoload` names the
 tools that start loaded, by the name the model calls them — a plugin's bare name

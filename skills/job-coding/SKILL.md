@@ -134,8 +134,9 @@ Never write a tool name or schema from memory:
 
 - `tool_search(sentences=[...], keywords=[...])` finds hub tools by what they do;
   the result includes the schema.
-- `mcp_list` / `mcp_list_tools` probe an external server's real tools and
-  schemas.
+- `mcp_list` / `rest_api_list` list the configured sources and their state;
+  `tool_list(source=...)` pages the real tools one offers, and loading one with
+  `func_tool_load` puts its schema in front of you.
 - `model_list` lists providers and model refs.
 - `servers()` (in the job, or the config at authoring time) names the plugin
   keys.

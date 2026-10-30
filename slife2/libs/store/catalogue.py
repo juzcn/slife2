@@ -249,10 +249,17 @@ _FTS_SCHEMA = (
     f"{', '.join(_FTS_FIELDS)}, {textindex.FTS_TOKENIZE})"
 )
 
-#: How many rows a tool search may return.  A cap rather than a preference:
-#: `limit` arrives from a model, and a model that asks for the whole catalogue
-#: should get a page and be told how many there are.
+#: How many rows one page may hold — a search's, and the listing's.  A cap
+#: rather than a preference: `limit` arrives from a model, and a model that asks
+#: for the whole catalogue should get a page and be told how many there are.
 MAX_TOOL_PAGE = 200
+
+#: What a listing hands over when the caller names no size.  **Not the cap.**
+#: A search answers ten because it is looking for *a* tool; a browse is read as
+#: a page of names, and a hundred and twenty of them is a context spent on a
+#: list nobody asked to read at once.  The row count the catalogue holds is in
+#: `total`, so a page this size says how much is behind it.
+DEFAULT_TOOL_PAGE = 20
 
 #: The category list the DDL's `CHECK` is built from, so the two cannot drift:
 #: the constant is the one statement of which categories exist, and the live
@@ -467,6 +474,23 @@ def _search_dict(
     if matched_in is not None:
         found["matched_in"] = matched_in
     return found
+
+
+def _listing_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """One row of a listing: the same columns a search result is chosen by.
+
+    **No score and no evidence marker**, because a listing ranks nothing: the
+    order is the page's (`category, source_id, name`), so a number here would be
+    a number that did not order what the reader sees — the one property a search
+    result keeps and this answer must not pretend to. `schema_bytes` is left out
+    for the neighbouring reason: it is a search's hint about whether a row
+    declares anything, and a listing is not choosing between rows.
+
+    The values are the stored ones, in the column names `_SEARCH_COLUMNS` gives,
+    because the wording a model reads is the hub's (`slife2.plugins.toolhub.server`) and
+    this layer answers facts.
+    """
+    return {column: str(row[column]) for column in _SEARCH_COLUMNS}
 
 
 class ToolStore:
@@ -1666,11 +1690,13 @@ class ToolStore:
         a row's place no longer depends on which question found it.  They are one
         `embed` call whatever there are of them; the model is asked for a batch.
 
-        **Both empty is a browse, not an empty answer.**  Nothing asks for the
-        whole catalogue by accident, and a list of what exists is how a model or
-        a person finds out what a category holds — which is why the store still
-        answers it, and why the tool does not (`tool_search` refuses it: a
-        listing is a different question with a different shape, SDD §14.2).
+        **Both empty is refused, and the browse is `page`.**  A list of what
+        exists is a different question with a different shape: it ranks nothing,
+        it filters rather than matches, and it pages by `offset`.  Answering it
+        here used to be a convenience, and it made one method two answers — the
+        tool refused what the store quietly performed, and the store's version
+        had the search's `limit` and none of a page's arithmetic.  One browse,
+        in the method that is not looking for anything.
 
         The filters narrow and never decide: a search with a category is about
         that category, and one with `status='disabled'` is how "it exists but is
@@ -1692,11 +1718,10 @@ class ToolStore:
         if unloaded_only:
             clauses.append(f"load_status != '{LOADED}'")
         if not keywords and not any(s.strip() for s in sentences):
-            rows = [
-                _search_dict(row)
-                for row in await asyncio.to_thread(self._browse, limit, clauses, values)
-            ]
-            return {"results": rows, "browsed": True}
+            raise ValueError(
+                "a search needs a word or a sentence; the catalogue's own "
+                "listing is `ToolStore.page`"
+            )
 
         # **The words are a sentence when they are all there is.**  A
         # keywords-only call used to reach the keyword leg alone, which found 23
@@ -1805,7 +1830,77 @@ class ToolStore:
                 )
                 for row in rows
             ],
-            "browsed": False,
+        }
+
+    def page(
+        self,
+        *,
+        category: str = "",
+        source_id: str = "",
+        status: str = "",
+        load_status: str = "",
+        limit: int = 0,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """The catalogue as one page — the browse a search is not.
+
+        **No ranking, because nothing here is a match.**  Every row a filter
+        keeps is equally the answer to "what is installed", so the order is the
+        page's own: category, then source, then name.  Source inside category is
+        what makes "what does `arxiv` offer" a contiguous run rather than a
+        scatter; the name is last because it is the primary key, which is what
+        makes the order total — a page that ties would drop or repeat a row
+        between two `offset`s, and paging is the one thing this answer exists to
+        support.
+
+        **Every category and every source, and every status.**  A skill, a CLI
+        entry and a job are catalogue rows and belong in "what is installed"; a
+        row whose source is switched off or not answering keeps its place with
+        `status` saying which (`disabled`, `error`), because the alternative is a
+        browse that hides the tools a model is looking for exactly when
+        something is wrong.  `load_status` travels for the hub to render as
+        `loaded`; this layer does not decide what a model is told.
+
+        **`total` counts what the filters match, not the page.**  It is the
+        whole answer to "is there more", and `offset` is how the rest is read —
+        a cap announced, never applied quietly (SDD §7.6).
+
+        **`status` and `load_status` are here although the model's tool does not
+        offer them.**  They are the closed domains a caller diagnosing a
+        catalogue asks by — "what is switched off", "what is not in the list" —
+        and they were this browse's filters before the browse moved here from
+        `search`.
+
+        **A `limit` of zero or less is the default page, not one row and not the
+        cap.**  The same convention every listing in this system uses
+        (`slife2.libs.plugin.family.page_of`), and the reason it is a convention:
+        a caller that names no size must not get the smallest legal page.
+        """
+        size = DEFAULT_TOOL_PAGE if limit <= 0 else page_limit(limit, MAX_TOOL_PAGE)
+        start = max(0, int(offset))
+        clauses, values = _tool_filters(
+            category=category,
+            source_id=source_id,
+            status=status,
+            load_status=load_status,
+        )
+        where = filter_clause(clauses)
+        with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM tool {where}", values
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"SELECT * FROM tool {where}"
+                " ORDER BY category, source_id, name LIMIT ? OFFSET ?",
+                (*values, size, start),
+            ).fetchall()
+        return {
+            "tools": [_listing_dict(row) for row in rows],
+            "total": total,
+            "limit": size,
+            "offset": start,
         }
 
     def _matched_in_line(self, expression: str, rowids: Sequence[int]) -> set[int]:
@@ -1865,17 +1960,6 @@ class ToolStore:
                 tuple(rowids),
             ).fetchall()
         return meanings_by_cosine(rows, "rowid", queries)
-
-    def _browse(
-        self, limit: int, clauses: list[str], values: list[Any]
-    ) -> list[sqlite3.Row]:
-        where = filter_clause(clauses)
-        with self._connect() as connection:
-            return connection.execute(
-                f"SELECT rowid AS rowid, * FROM tool {where}"
-                " ORDER BY category, name LIMIT ?",
-                (*values, limit),
-            ).fetchall()
 
     def _keyword_hits(
         self, expression: str, limit: int, clauses: list[str], values: list[Any]
