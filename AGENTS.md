@@ -6,7 +6,8 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 - `tool_search` finds names, use `func_tool_load` to make it appear in the model's tool list if it is not already loaded.
 - If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set`, `rest_api_set`, `skill_set`, `cli_set`.
 - You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
-- Prefer a dedicated tool over a shell command or ad-hoc code. Read a refusal and correct the call.
+- You can turn a workflow into a skill: `skill_draft` returns the files, then `skill_set` installs a drafted one.
+- Prefer a dedicated tool over a shell command or ad-hoc code. 
 
 ## Built-in tools
 
