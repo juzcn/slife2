@@ -601,7 +601,56 @@ async def test_tool_exists_says_starting_while_a_source_is_connecting() -> None:
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
         missing = await hub.call_tool("tool_exists", {"name": "somewhere__tool"})
 
-    assert missing.data == {"exists": False, "starting": True}
+    assert missing.data == {"exists": False, "starting": True, "tool": None}
+
+
+@pytest.mark.asyncio
+async def test_tool_exists_carries_the_definition_the_call_is_checked_against() -> None:
+    """**The row, not the model's memory, is the schema a call must fit.**
+
+    The harness's next question after "does it exist" is "does this call fit
+    what the tool is *now*"; answering it with the same row is what keeps a tool
+    that changed since the model saw it from being run on the old shape.
+    """
+    async with Client(hub_for()) as hub:
+        unloaded = await hub.call_tool("tool_exists", {"name": "turn_search"})
+
+    definition = unloaded.data["tool"]
+    assert definition["name"] == "turn_search"
+    assert definition["parameters"]["type"] == "object"
+    assert definition["parameters"]["properties"], "the advertised schema, not {}"
+
+
+@pytest.mark.asyncio
+async def test_tool_load_is_the_same_verdict_as_func_tool_load() -> None:
+    """**The harness's load is the model's load, without the model turn.**
+
+    It writes the same catalogue state and answers the same verdict, so the
+    next request carries the tool and a refusal reads exactly as it would have
+    from `func_tool_load`.
+    """
+    async with Client(hub_for()) as hub:
+        loaded = await hub.call_tool("tool_load", {"name": "turn_search"})
+        listed = await hub.call_tool("list_tools", {})
+
+    assert loaded.data == {"loaded": ["turn_search"], "refused": []}
+    assert "turn_search" in {tool["name"] for tool in listed.data["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_tool_load_refuses_a_document_family_like_the_model_s_load(
+    isolated_runtime: Path,
+) -> None:
+    write_skill(isolated_runtime, "browser-harness", description="Drive a browser.")
+    hub = hub_with_documents(
+        {"yt-dlp": {"command": "yt-dlp", "description": "Download video."}}
+    )
+
+    async with Client(hub) as client:
+        answer = await client.call_tool("tool_load", {"name": "cli:yt-dlp"})
+
+    assert answer.data["loaded"] == []
+    assert "a command already installed" in answer.data["refused"][0]["reason"]
 
 
 @pytest.mark.asyncio

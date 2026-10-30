@@ -621,10 +621,13 @@ The hub serves three set-level tools:
 - `_func_tool_unload` removes tools from that list. The harness also calls it at
   a turn boundary to enforce the budget.
 
-A model can call a name returned by `tool_search` without loading it, but loading
-is what keeps it in the list sent with every request. `tool_load.autoload` names
-the tools that start loaded, by the name the model calls them — a plugin's bare
-name (`turn_read`) or an external server's `{server}__{tool}`. Everything else is
+A model can call a name returned by `tool_search` without loading it: when the
+call fits the tool's current catalogue schema, the harness loads it and runs it
+in the same turn. A call that does not fit — an unreadable argument list, or an
+outdated schema — is answered with the load hint instead. Loading is what keeps
+the tool in the list sent with every request. `tool_load.autoload` names the
+tools that start loaded, by the name the model calls them — a plugin's bare name
+(`turn_read`) or an external server's `{server}__{tool}`. Everything else is
 discovered and loaded on demand.
 
 A call for a tool whose catalogue is still starting answers "not in the catalogue

@@ -72,8 +72,9 @@ import slife2.helpers.timeouts as _T
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
+    acquire_tool,
     remote_tools,
-    tool_exists,
+    tool_lookup,
     trim_answer,
     unload_tools,
 )
@@ -104,7 +105,7 @@ from slife2.libs.turn.context import context_usage, turn_prompt_note, with_lead
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import render_instruction, render_system_prompt
-from slife2.libs.turn.tools import CatalogueAnswer, ToolRegistry
+from slife2.libs.turn.tools import CatalogueAnswer, Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -479,11 +480,18 @@ def build_server(
 
         async def catalogue_has(name: str) -> CatalogueAnswer:
             """What the catalogue says about a name outside this request's list."""
-            return await tool_exists(await hub(), name)
+            return (await tool_lookup(await hub(), name, task.identity)).answer
+
+        async def catalogue_acquire(
+            name: str, arguments: dict[str, Any]
+        ) -> Tool | None:
+            """The same name, made runnable when the call fits its current schema."""
+            return await acquire_tool(await hub(), name, arguments, task.identity)
 
         return ToolRegistry(
             await remote_tools(await hub(), task.identity),
             exists=catalogue_has,
+            acquire=catalogue_acquire,
         )
 
     async def model_for(task: AgentTask) -> LLMBackend:

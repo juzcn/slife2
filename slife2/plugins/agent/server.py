@@ -103,8 +103,9 @@ from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
     ToolListing,
+    acquire_tool,
     remote_catalogue,
-    tool_exists,
+    tool_lookup,
     trim_answer,
     unload_tools,
 )
@@ -184,6 +185,7 @@ from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import (
     CHECK_NEW_INPUT,
     CatalogueAnswer,
+    Tool,
     ToolFailed,
     ToolRegistry,
 )
@@ -1456,7 +1458,19 @@ def build_server(
             and a name the catalogue is still being written for is told to retry
             — the three sentences `ToolRegistry._unknown` keeps apart.
             """
-            return await tool_exists(await hub(), name)
+            return (await tool_lookup(await hub(), name, client_id)).answer
+
+        async def catalogue_acquire(
+            name: str, arguments: dict[str, Any]
+        ) -> Tool | None:
+            """The same name, made runnable when the call fits its current schema.
+
+            `acquire_tool` loads it — the tool is in the next request's list —
+            and the call runs in this turn.  `None` hands the name back to the
+            three sentences, which is where a call that no longer fits the row,
+            or a name the hub will not load, belongs.
+            """
+            return await acquire_tool(await hub(), name, arguments, client_id)
 
         found = await turn_tools(client_id)
         if observer is not None:
@@ -1464,7 +1478,9 @@ def build_server(
                 observer,
                 ToolsCounted(total=found.total, loaded=len(found.tools)),
             )
-        return ToolRegistry(found.tools, exists=catalogue_has)
+        return ToolRegistry(
+            found.tools, exists=catalogue_has, acquire=catalogue_acquire
+        )
 
     def turn_annotation(
         messages: list[dict[str, Any]],

@@ -1896,34 +1896,7 @@ def local_tools(
                 f"({len(names)} given): the list is trimmed to the budget at "
                 f"every turn boundary, so load the ones you want now."
             )
-        loaded: list[str] = []
-        refused: list[dict[str, str]] = []
-        for name in names:
-            answer = await catalogue.set_load(name, "loaded")
-            close = (
-                close_names(name, await catalogue.names())
-                if answer.get("outcome") == "unknown"
-                else ()
-            )
-            reason = _load_refusal(name, answer, close)
-            if reason:
-                refused.append({"name": name, "reason": reason})
-            else:
-                loaded.append(name)
-        # **A name that cannot be loaded is a verdict, not a failure.**  The
-        # call did what a load does: it asked the catalogue about every name and
-        # got an answer for each.  Marking the call failed would make *that*
-        # answer an error, and the four `refused` reasons are exactly what the
-        # model has to read to correct itself — a server that is switched off, a
-        # server that is not answering, a playbook that is read with `skill_use`,
-        # a name nothing holds.  What *is* a failure is a call that cannot be
-        # made at all: no names, or too many to be one call.
-        #
-        # The key is `refused` and not `failed` for the model's sake: an empty
-        # `failed` read as "something failed, and it wasn't you" — the answer to
-        # a load that worked — where an empty `refused` is the same fact in a
-        # word that does not borrow the call's own verdict.
-        return {"loaded": loaded, "refused": refused}
+        return await load_tools(catalogue, names)
 
     async def unload(arguments: dict[str, Any]) -> dict[str, Any]:
         """Take tools out of the model's list, by name or by budget.
@@ -1977,6 +1950,42 @@ def local_tools(
             run=unload,
         ),
     ]
+
+
+async def load_tools(catalogue: Catalogue, names: Sequence[str]) -> dict[str, Any]:
+    """Load tools into the model's list — the one body of a load.
+
+    **Two callers, one meaning.**  The model's `func_tool_load` and the
+    harness's `tool_load` ask the same question about the same rows; the second
+    exists so a call that fits a catalogued tool can run without the model
+    spending a turn on the load itself.  The answer is the hub's, not either
+    caller's: `loaded` and `refused` are verdicts, and a refusal carries the
+    sentence the model acts on.
+
+    A name that cannot be loaded is a verdict, not a failure.  The call did what
+    a load does: it asked the catalogue about every name and got an answer for
+    each.  Marking the call failed would make *that* answer an error, and the
+    four `refused` reasons are exactly what the model has to read to correct
+    itself — a server that is switched off, a server that is not answering, a
+    playbook that is read with `skill_use`, a name nothing holds.  What *is* a
+    failure is a call that cannot be made at all, and the model's
+    `func_tool_load` refuses an empty or over-long list before reaching here.
+    """
+    loaded: list[str] = []
+    refused: list[dict[str, str]] = []
+    for name in names:
+        answer = await catalogue.set_load(name, "loaded")
+        close = (
+            close_names(name, await catalogue.names())
+            if answer.get("outcome") == "unknown"
+            else ()
+        )
+        reason = _load_refusal(name, answer, close)
+        if reason:
+            refused.append({"name": name, "reason": reason})
+        else:
+            loaded.append(name)
+    return {"loaded": loaded, "refused": refused}
 
 
 async def unload_tools(
@@ -3369,16 +3378,46 @@ def build_server(
         — is one the model should retry rather than replace.  `starting` is that
         second fact, and it is only meaningful when `exists` is false.
 
+        **A present row carries its advertised definition**, because the
+        harness's next question is whether the call fits the tool as it is
+        *now*.  The row is the authority and the model's history is not: a tool
+        whose schema changed since the model last saw it must send the model
+        back through `func_tool_load`, where it reads the current schema.  A
+        definition this process cannot build from the row (a stored schema that
+        does not parse) is omitted rather than raised: the existence answer is
+        still true, and the next real listing fails with the damage named.
+
         Returns:
             `exists` — whether the catalogue holds a row under this name, loaded
             or not; `starting` — whether the catalogue is still being written,
-            so a missing row may arrive without anything being wrong.
+            so a missing row may arrive without anything being wrong; `tool` —
+            the row's advertised definition, or null.
         """
         found = await catalogue.route(name)
+        definition: dict[str, Any] | None = None
+        if found is not None:
+            try:
+                definition = _from_row(found).to_wire()
+            except ConnectionError as exc:
+                logger.warning("the row for %r cannot be served: %s", name, exc)
         return {
             "exists": found is not None,
             "starting": found is None and catalogue_starting(),
+            "tool": definition,
         }
+
+    @mcp.tool(name="tool_load")
+    async def tool_load(name: str) -> dict[str, Any]:
+        """Load one tool into the model's list — the harness's call.
+
+        **The load `func_tool_load` performs, without a model turn.**  The
+        registry calls it when a model asks for a catalogued tool that fits its
+        current schema: the tool enters the list the next request carries, and
+        the call itself runs in this turn.  The answer is the same verdict
+        `func_tool_load` gives — `loaded`, and `refused` with the sentence the
+        model would have read.
+        """
+        return await load_tools(catalogue, [name])
 
     @mcp.tool
     async def _func_tool_unload(names: list[str] | None = None) -> dict[str, Any]:

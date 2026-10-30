@@ -21,7 +21,8 @@ near side of a protocol boundary, in the process that asks.
 
 The contract
 ------------
-Three tool names, one payload shape, and one rule about failure:
+A handful of harness calls — `list_tools`, `call_tool`, `tool_exists`,
+`tool_load` — one payload shape, and one rule about failure:
 
 * `list_tools` → `{"tools": [UpstreamTool, ...], "total": int}`, the whole set
   in one call, and the size of the catalogue it was chosen from.  One call
@@ -34,6 +35,11 @@ Three tool names, one payload shape, and one rule about failure:
   exception**: an upstream that refused the call is one caller's bad data, which
   the model gets to read and act on.  `ok` is carried separately so the
   transcript can still show the call as failed — see `slife2.libs.turn.tools.ToolFailed`.
+* `tool_exists` → the three-value catalogue answer plus, when the row is
+  present, its advertised definition.  `acquire_tool` is the one reader that
+  uses the definition: a call outside the request's list runs only if its
+  arguments fit the schema the row carries *now*, and the tool is loaded
+  (`tool_load`) on the same pass so the next request advertises it.
 * Anything that *is* broken about the hub — unreachable, or answering with a
   shape this build does not know — raises.  That is the same line every other
   hop in this system draws: a peer that is gone fails the turn, and a peer that
@@ -45,6 +51,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from jsonschema import validate
+from jsonschema.exceptions import ValidationError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.plugin.audience import client_meta
@@ -303,9 +312,29 @@ async def unload_tools(client: Client) -> dict[str, Any]:
 
 
 TOOL_EXISTS = "tool_exists"
+TOOL_LOAD = "tool_load"
 
 
-async def tool_exists(client: Client, name: str) -> CatalogueAnswer:
+@dataclass(frozen=True)
+class CatalogueLookup:
+    """What the catalogue says about a name, and the row it says it with.
+
+    **The three-value answer and the definition are one ask.**  The harness
+    needs the first to phrase a hint and the second to decide whether a call
+    outside the request's list can run as it stands; asking twice would let the
+    two answers describe different moments.
+    """
+
+    answer: CatalogueAnswer
+    #: The advertised definition, when the row is present and its schema is
+    #: readable.  `None` for an absent row and for an older hub that answers the
+    #: three values alone; the caller then cannot check a call against it.
+    tool: UpstreamTool | None = None
+
+
+async def tool_lookup(
+    client: Client, name: str, client_id: tuple[str, str] | None = None
+) -> CatalogueLookup:
     """What the hub's catalogue says about this name.
 
     **The harness's error path**, for a model call that named a tool outside the
@@ -321,26 +350,138 @@ async def tool_exists(client: Client, name: str) -> CatalogueAnswer:
     whole answer — reading an absent `starting` as `false` keeps that hint
     working; a value of the wrong type is damage and raises.
 
-    A hub that cannot be read raises `UnreadableAnswer`; the registry catches it,
-    because the call has already failed and its explanation may not turn that
-    into a turn failure.
+    `client_id` is the conversation this question is for; the hub's catalogue is
+    one file per home, and the identity is what makes it answer for the right
+    one.  A hub that cannot be read raises `UnreadableAnswer`; the registry
+    catches it, because the call has already failed and its explanation may not
+    turn that into a turn failure.
     """
     answer = tool_payload(
         await client.call_tool(
-            TOOL_EXISTS, {"name": name}, timeout=_T.timeouts.work.hub
+            TOOL_EXISTS,
+            {"name": name},
+            meta=client_meta(*client_id) if client_id else None,
+            timeout=_T.timeouts.work.hub,
         )
     )
     exists = answer.get("exists")
     if not isinstance(exists, bool):
         raise unreadable("the toolhub", "say whether it holds a tool", answer)
     if exists:
-        return CATALOGUE_PRESENT
+        definition = _definition(answer.get("tool"))
+        if definition is not None and definition.name != name:
+            raise unreadable("the toolhub", "return this tool's definition", answer)
+        return CatalogueLookup(CATALOGUE_PRESENT, definition)
     starting = answer.get("starting")
     if starting is None:
-        return CATALOGUE_MISSING
+        return CatalogueLookup(CATALOGUE_MISSING)
     if not isinstance(starting, bool):
         raise unreadable("the toolhub", "say whether it is still starting", answer)
-    return CATALOGUE_STARTING if starting else CATALOGUE_MISSING
+    return CatalogueLookup(CATALOGUE_STARTING if starting else CATALOGUE_MISSING)
+
+
+def _definition(raw: Any) -> UpstreamTool | None:
+    """The row's advertised definition, or `None` when the hub did not send one.
+
+    Absent is the older hub (the three values were its whole answer), and it is
+    also the hub's answer for a row whose stored schema it cannot read: either
+    way there is nothing to check a call against, and the caller falls back to
+    the hint.  A *present* value with the wrong shape is damage, not a tool —
+    and the arguments field in particular, because `from_wire` tolerates a
+    non-mapping as `{}` and `{}` here means "no schema to check", which would
+    turn a broken answer into a call that runs unchecked.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not str(raw.get("name") or ""):
+        raise unreadable("the toolhub", "return a tool's definition", raw)
+    parameters = raw.get("parameters")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise unreadable("the toolhub", "return a tool's parameters", raw)
+    return UpstreamTool.from_wire(raw)
+
+
+async def load_tool(
+    client: Client, name: str, client_id: tuple[str, str] | None = None
+) -> bool:
+    """Load one tool into the model's list, and say whether it landed.
+
+    **The harness's load**, for a call that fit a catalogued tool the model had
+    not loaded: the tool goes into the list the next request carries, and the
+    call itself runs in this turn instead of costing the model one of its own.
+    A name the hub refused — a server that is down, a disabled entry, a playbook
+    — answers `False`, and the caller falls back to the three-case sentence.
+
+    `client_id` names the conversation, and with it the home whose catalogue is
+    written: a load is a write, and one aimed at the wrong home is a model
+    shown a tool its own request will not carry.
+    """
+    answer = tool_payload(
+        await client.call_tool(
+            TOOL_LOAD,
+            {"name": name},
+            meta=client_meta(*client_id) if client_id else None,
+            timeout=_T.timeouts.work.hub,
+        )
+    )
+    loaded = answer.get("loaded")
+    refused = answer.get("refused")
+    if not isinstance(loaded, list) or not isinstance(refused, list):
+        raise unreadable("the toolhub", "say whether it loaded a tool", answer)
+    return name in [str(one) for one in loaded]
+
+
+async def acquire_tool(
+    client: Client,
+    name: str,
+    arguments: dict[str, Any],
+    client_id: tuple[str, str] | None = None,
+) -> Tool | None:
+    """A catalogued tool this call may run, or `None` when it may not.
+
+    **The row's schema, not the conversation's memory, is the authority.**  A
+    name outside the request's list can be one the model called before, with
+    arguments copied from the history — but the tool may have changed since,
+    and a call that no longer fits its current schema must go back through the
+    load hint, where the model reads the schema that is true now.  Only an
+    empty stored schema (the catalogue's spelling of "nothing to declare") is
+    taken as "any arguments fit".
+
+    Loading is the second half and deliberately behind the check: a call that
+    does not fit must not change the model's list.  The returned `Tool` runs
+    through the same proxy every listed tool does, so the registry has no
+    second execution path.
+    """
+    found = await tool_lookup(client, name, client_id)
+    if found.answer != CATALOGUE_PRESENT or found.tool is None:
+        return None
+    if not arguments_fit(name, found.tool.parameters, arguments):
+        return None
+    if not await load_tool(client, name, client_id):
+        return None
+    return Tool(spec=found.tool.spec(), run=_proxy(client, name, client_id))
+
+
+def arguments_fit(
+    name: str, parameters: dict[str, Any], arguments: dict[str, Any]
+) -> bool:
+    """Whether these arguments fit a tool's declared schema.
+
+    **A schema this build cannot read or resolve is a no.**  The caller's next
+    step is the load hint, and the tool's own server still validates the call
+    once the model has seen the schema — failing closed here only costs the
+    model the shortcut, never a call it was told would work.
+    """
+    if not parameters:
+        return True
+    try:
+        validate(instance=arguments, schema=parameters)
+    except ValidationError:
+        return False
+    except Exception as exc:  # noqa: BLE001 - an unreadable schema is a no
+        logger.info("the stored schema for %r could not be checked: %s", name, exc)
+        return False
+    return True
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
@@ -419,11 +560,18 @@ __all__ = [
     "FUNC_TOOL_UNLOAD",
     "LIST_TOOLS",
     "SEPARATOR",
+    "TOOL_EXISTS",
+    "TOOL_LOAD",
+    "CatalogueLookup",
     "ToolCounts",
     "ToolListing",
     "UpstreamTool",
+    "acquire_tool",
+    "arguments_fit",
+    "load_tool",
     "remote_catalogue",
     "remote_tools",
+    "tool_lookup",
     "trim_answer",
     "unload_tools",
 ]

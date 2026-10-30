@@ -1200,12 +1200,17 @@ Initial state:
 - The names the system itself refers to (the two list tools, the two harness
   pairs, `skill_use`, and the two background-call tools) are required in that
   list; a configuration that omits one fails the start.
-- Everything else, a plugin's tools included, is discoverable but not callable
-  until loaded. One tool the model never calls is a prompt spent on every
-  request.
+- Everything else, a plugin's tools included, is discoverable but not loaded.
+  One tool the model never calls is a prompt spent on every request. A call to
+  one is checked against its catalogue row and, when it fits the row's current
+  schema, the harness loads it and runs it in the same turn.
 
-A model can call a name returned by `tool_search` without loading it, but
-loading is what keeps it in the list sent with each request.
+A model can call a name returned by `tool_search` without loading it: the call
+is validated against the schema the catalogue holds *now*, loaded by the harness
+(`tool_load`) and run. Loading is what keeps the tool in the list sent with each
+request. A call that does not fit — the schema changed since the model last saw
+it, or its arguments could not be read — is not run; it takes the load hint,
+which is how the model reads the current schema.
 
 The loaded set is bounded by `tool_load.threshold` (default 100 function tools).
 Over the limit, the least recently **called** tools are unloaded; the names in
@@ -1217,12 +1222,17 @@ Nothing is written when nothing was removed. Recency is learned by the hub: it
 stamps `last_used` beside the call it just routed, including a refused call,
 before returning the answer, so the stamp cannot land after the trim.
 
-A call naming a tool outside the request's list is answered by the registry's
-error path, which asks the hub (`tool_exists`). The answer has three values:
-`present` (load it with `func_tool_load`), `missing` (no row; `tool_search` finds
-what does the job), and `starting` (the catalogue is still being written, so
-retry). The third exists because a first turn can land inside the merge pass;
-without it a transient absence read as a capability the machine lacks.
+A call naming a tool outside the request's list is first checked against the
+catalogue row: if the row exists and the call fits its current schema, the
+harness loads it (`tool_load`) and runs it in the same turn. Only a call that
+cannot be resolved that way — an unreadable argument list, a schema it no longer
+fits, a row that cannot be loaded — reaches the registry's error path, which
+asks the hub (`tool_exists`). The answer has three values: `present` (load it
+with `func_tool_load`, which is what puts the current schema in front of the
+model), `missing` (no row; `tool_search` finds what does the job), and `starting`
+(the catalogue is still being written, so retry). The third exists because a
+first turn can land inside the merge pass; without it a transient absence read
+as a capability the machine lacks.
 
 ### 7.5 Catalogue search
 

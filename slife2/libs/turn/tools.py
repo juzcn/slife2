@@ -528,6 +528,7 @@ class ToolRegistry:
         tools: list[Tool] | None = None,
         *,
         exists: Callable[[str], Awaitable[CatalogueAnswer]] | None = None,
+        acquire: Callable[[str, dict[str, Any]], Awaitable[Tool | None]] | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {t.spec.name: t for t in tools or []}
         #: How to ask the catalogue about a name outside this request's list —
@@ -535,6 +536,12 @@ class ToolRegistry:
         #: is a caller with no hub (a unit test), which keeps the sentence that
         #: covers every cause.
         self._exists = exists
+        #: How to make a catalogued name callable when the model named one this
+        #: request does not carry.  The callback answers a `Tool` when the call
+        #: fits the row's current schema — it loads it first — and `None` when
+        #: it does not, which leaves the name to `_unknown`'s three answers.
+        #: `None` is a caller with no hub, like `exists`.
+        self._acquire = acquire
         #: Built once, because `specs` is read at the top of every step of every
         #: turn: augmenting sixty schemas per request would be paying the
         #: per-request tax this design already pays twice (see `META_PROPERTIES`).
@@ -562,6 +569,37 @@ class ToolRegistry:
         tool = self._tools.get(name)
         return tool.spec if tool is not None else None
 
+    async def acquire(self, name: str, arguments: dict[str, Any]) -> bool:
+        """Make a catalogued tool callable for this request, if the caller can.
+
+        **A name outside the list is not necessarily an unknown tool.**  When
+        the hub holds a row for it and the call fits the row's *current* schema
+        — the caller's `acquire` callback is what checks — the tool is loaded
+        and added here, and the loop runs it through the ordinary path.  The
+        model gets its answer without spending a call on `func_tool_load`, and
+        the schema that justified the call is the schema the hub holds now, not
+        the one the conversation remembers.
+
+        A callback that returns `None` leaves the name alone: `execute` then
+        answers it through `_unknown`, whose three sentences are unchanged.  A
+        callback that fails is a hint that could not be asked, the same rule
+        `_unknown` follows — the call has already failed, and its explanation
+        may not become a turn failure.
+        """
+        if name in self._tools or self._acquire is None:
+            return name in self._tools
+        try:
+            found = await self._acquire(name, arguments)
+        except Exception as exc:  # noqa: BLE001 - a hint, not the call
+            logger.info("could not acquire %r: %s", name, exc)
+            return False
+        if found is None:
+            return False
+        self._tools[found.spec.name] = found
+        self._advertised.append(advertised(found.spec))
+        logger.info("acquired %r for a call outside the request's list", name)
+        return True
+
     async def execute(self, call: ToolCall) -> tuple[str, bool]:
         """Run a call, returning `(result_text, ok)`.
 
@@ -575,21 +613,24 @@ class ToolRegistry:
         carries `error` from the hop that decoded it (`ToolCall.from_wire` or
         the LLM server's accumulator), and the tool would otherwise be handed an
         empty dict — defaults the model never chose — so the sentence is the
-        answer and the lookup and dispatch are skipped (SDD Appendix C: the call
-        is not dispatched, and the error is its result).
+        answer and the dispatch is skipped (SDD Appendix C: the call is not
+        dispatched, and the error is its result).  The *name* is still looked
+        up when it is outside the list: a call that named a catalogued tool and
+        could not be read wants the catalogue's next step as well, because the
+        parse error alone does not tell the model where to go.
 
         The answer is rendered here rather than by each tool (`as_tool_text`),
         which is what lets a tool answer an object: what a model's message
         carries is text on every wire, and the tool that produced the fields has
         nothing to do with that.
         """
+        tool = self._tools.get(call.name)
+        if tool is None:
+            return await self._unknown(call)
+
         if call.error is not None:
             logger.info("tool call %s was not dispatched: %s", call.name, call.error)
             return f"Error: {call.error}", False
-
-        tool = self._tools.get(call.name)
-        if tool is None:
-            return await self._unknown(call.name)
 
         try:
             return as_tool_text(await tool.run(call.arguments)), True
@@ -623,20 +664,26 @@ class ToolRegistry:
             logger.warning("tool %s raised: %s", call.name, exc, exc_info=exc)
             return f"Error: {type(exc).__name__}: {exc}", False
 
-    async def _unknown(self, name: str) -> tuple[str, bool]:
+    async def _unknown(self, call: ToolCall) -> tuple[str, bool]:
         """The sentence for a call outside the request's list, and `ok=False`.
 
         **Three causes, three next steps.**  A name the catalogue holds was
         unloaded from this request — the budget's doing, and `func_tool_load`
-        puts it back.  A name the catalogue does not hold is a capability this
-        machine lacks, and searching for *it* is a dead end: `tool_search` finds
-        a tool that does the job instead.  And a name whose row is still being
-        written — the hub merges one source at a time, and a session's first
-        turn can land inside that pass — is one to ask for again in a moment:
-        telling the model it does not exist there sends it searching for a name
-        it is about to have.  The registry cannot tell them apart from its own
-        list, so it asks the hub (`exists`), and the hub's three answers are
+        puts it back — or it is one whose current schema this call does not fit.
+        A name the catalogue does not hold is a capability this machine lacks,
+        and searching for *it* is a dead end: `tool_search` finds a tool that
+        does the job instead.  And a name whose row is still being written — the
+        hub merges one source at a time, and a session's first turn can land
+        inside that pass — is one to ask for again in a moment: telling the
+        model it does not exist there sends it searching for a name it is about
+        to have.  The registry cannot tell them apart from its own list, so it
+        asks the hub (`exists`), and the hub's three answers are
         `CatalogueAnswer`'s.
+
+        **The present answer is what `acquire` could not take.**  A call that
+        fits its row runs without reaching here; this is what is left for a call
+        whose arguments could not be read or no longer fit the schema, and
+        loading is how the model reads the schema that is true now.
 
         **The way back, not the whole list.**  The error is a feedback channel:
         naming the loaded set put up to a hundred names into a result the model
@@ -647,6 +694,8 @@ class ToolRegistry:
         A hub that cannot answer leaves the both-cases sentence: the call has
         already failed, and its explanation may not become a turn failure.
         """
+        name = call.name
+        detail = ""
         if self._exists is not None:
             try:
                 found = await self._exists(name)
@@ -654,28 +703,28 @@ class ToolRegistry:
                 logger.info("could not ask the catalogue about %r: %s", name, exc)
                 found = None
             if found == CATALOGUE_PRESENT:
-                return (
-                    f"Error: tool {name!r} is in the catalogue but not in your "
-                    f"list. Load it with func_tool_load, then call it.",
-                    False,
+                detail = (
+                    f"tool {name!r} is in the catalogue but not in your "
+                    f"list. Load it with func_tool_load, then call it."
                 )
-            if found == CATALOGUE_STARTING:
-                return (
-                    f"Error: tool {name!r} is not in the catalogue yet — the "
+            elif found == CATALOGUE_STARTING:
+                detail = (
+                    f"tool {name!r} is not in the catalogue yet — the "
                     f"catalogue is still loading. Retry this call in a few "
                     f"seconds; if it is still missing, use tool_search to find "
-                    f"a tool that does this.",
-                    False,
+                    f"a tool that does this."
                 )
-            if found == CATALOGUE_MISSING:
-                return (
-                    f"Error: no tool named {name!r} exists in the catalogue. "
+            elif found == CATALOGUE_MISSING:
+                detail = (
+                    f"no tool named {name!r} exists in the catalogue. "
                     f"Use tool_search to find a tool that does this, then load "
-                    f"it with func_tool_load.",
-                    False,
+                    f"it with func_tool_load."
                 )
-        return (
-            f"Error: unknown tool {name!r} — not in your tool list. "
-            f"Find it with tool_search, then load it with func_tool_load.",
-            False,
-        )
+        if not detail:
+            detail = (
+                f"unknown tool {name!r} — not in your tool list. "
+                f"Find it with tool_search, then load it with func_tool_load."
+            )
+        if call.error is not None:
+            return f"Error: {call.error}\n{detail}", False
+        return f"Error: {detail}", False

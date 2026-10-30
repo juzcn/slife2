@@ -68,6 +68,7 @@ from slife2.libs.turn.context import (
 from slife2.libs.turn.events import (
     MessageCutIn,
     TextDelta,
+    ToolCallFinished,
     ToolsCounted,
     TurnEvent,
     TurnFinished,
@@ -3125,8 +3126,32 @@ async def send_with_progress(
 
 @pytest.mark.asyncio
 async def test_events_arrive_as_progress_notifications(context, hub) -> None:
+    # **A tool that is already in the list**, because this test also asserts
+    # that the count is the hub's list: `skill_list` is loaded on demand, and a
+    # call to it would change the list between the two counts (the harness
+    # loads a catalogued name the call fits).  `tool_search` is always loaded.
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="tool_search",
+                        arguments={"sentences": ["anything"]},
+                    ),
+                ),
+                stop_reason="tool_calls",
+            ),
+            chunks=[Chunk(text="checking")],
+        ),
+        ScriptedTurn(
+            result=StreamChatResult(text="It is 42.", stop_reason="stop"),
+            chunks=[Chunk(text="It is 42.")],
+        ),
+    )
     server = build_server(
-        config(), context_client=context, hub_client=hub, backend=tool_then_answer()
+        config(), context_client=context, hub_client=hub, backend=backend
     )
     seen: list[TurnEvent] = []
 
@@ -3150,9 +3175,9 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     assert kinds[-1] == "TurnFinished"
 
     # **The size of the catalogue, not the length of the list beside it.**
-    # This turn's model list is `tool_then_answer`'s tools, which is a handful;
-    # the count is the hub's own whole-catalogue answer, and it is asked again
-    # with each model call — two of them here.
+    # This turn's model list is the hub's loaded set, which is a handful; the
+    # count is the hub's own whole-catalogue answer, and it is asked again with
+    # each model call — two of them here.
     counted = [event for event in seen if isinstance(event, ToolsCounted)]
     catalogued = await hub.call_tool("list_tools", {})
     assert [event.total for event in counted] == [catalogued.data["total"]] * 2
@@ -3163,6 +3188,50 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]
     assert finished.iterations == 2  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_a_catalogued_tool_is_loaded_and_run_without_a_load_turn(
+    context, hub
+) -> None:
+    """**The harness invokes the load; the model does not spend a call on it.**
+
+    `skill_list` is a catalogue row outside the request's list.  The call fits
+    its current schema, so the turn loads it, runs it, and the next request
+    advertises it — no `func_tool_load` call of the model's own.  A call that
+    does not fit takes the unchanged hint instead.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(ToolCall(id="c1", name="skill_list", arguments={}),),
+                stop_reason="tool_calls",
+            ),
+            chunks=[Chunk(text="checking")],
+        ),
+        ScriptedTurn(
+            result=StreamChatResult(text="done.", stop_reason="stop"),
+            chunks=[Chunk(text="done.")],
+        ),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    seen: list[TurnEvent] = []
+
+    async def on_progress(progress, total, message):
+        event = decode(message or "")
+        if event is not None:
+            seen.append(event)
+
+    await send_with_progress(server, "list the skills", on_progress)
+
+    finished = [event for event in seen if isinstance(event, ToolCallFinished)]
+    assert finished and finished[0].ok is True, "the tool ran, not the load hint"
+    assert "skill_list" in {spec.name for spec in backend.calls[1][1]}
+    listed = await hub.call_tool("list_tools", {})
+    assert "skill_list" in {tool["name"] for tool in listed.data["tools"]}
 
 
 @pytest.mark.asyncio

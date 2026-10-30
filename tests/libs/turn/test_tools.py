@@ -186,6 +186,113 @@ async def test_a_catalogue_that_cannot_answer_leaves_the_both_cases_sentence() -
 
 
 @pytest.mark.asyncio
+async def test_acquire_makes_a_catalogued_tool_runnable() -> None:
+    """**The harness invokes the load, and the call runs in the same turn.**
+
+    The callback is handed the arguments the loop stripped of its meta
+    parameters, and the tool it returns is the ordinary kind: the registry
+    advertises it, `spec_of` answers for it, and `execute` runs it through the
+    same body every listed tool has.
+    """
+
+    async def acquire(name: str, arguments: dict) -> Tool | None:
+        assert (name, arguments) == ("late", {"e": "1"})
+        return Tool(spec=spec("late"), run=_ok)
+
+    found = ToolRegistry([], acquire=acquire)
+
+    assert await found.acquire("late", {"e": "1"}) is True
+    assert "late" in {one.name for one in found.specs}
+    assert found.spec_of("late") is not None
+    assert await found.execute(ToolCall(id="c1", name="late")) == ("fine", True)
+
+
+@pytest.mark.asyncio
+async def test_acquire_is_not_asked_for_a_tool_already_in_the_list() -> None:
+    async def acquire(_name: str, _arguments: dict) -> Tool | None:
+        raise AssertionError("a listed tool must not be acquired again")
+
+    found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], acquire=acquire)
+
+    assert await found.acquire("ok", {}) is True
+
+
+@pytest.mark.asyncio
+async def test_a_refused_acquire_leaves_the_three_case_sentence() -> None:
+    """A call that does not fit its row is answered, not run — and the hint is
+    the unchanged one."""
+
+    async def acquire(_name: str, _arguments: dict) -> Tool | None:
+        return None
+
+    async def present(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_PRESENT
+
+    found = ToolRegistry([], exists=present, acquire=acquire)
+
+    assert await found.acquire("peer_agent_send_message", {"e": "1"}) is False
+    text, ok = await found.execute(
+        ToolCall(id="c1", name="peer_agent_send_message", arguments={"e": "1"})
+    )
+
+    assert ok is False
+    assert "in the catalogue" in text
+    assert "func_tool_load" in text
+
+
+@pytest.mark.asyncio
+async def test_an_acquire_that_fails_is_a_hint_not_a_turn_failure() -> None:
+    """The call has already failed; its explanation may not fail the turn."""
+
+    async def broken(_name: str, _arguments: dict) -> Tool | None:
+        raise RuntimeError("the hub is gone")
+
+    async def present(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_PRESENT
+
+    found = ToolRegistry([], exists=present, acquire=broken)
+
+    assert await found.acquire("peer_agent_send_message", {}) is False
+    text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
+    assert ok is False
+    assert "in the catalogue" in text
+
+
+@pytest.mark.asyncio
+async def test_unreadable_arguments_on_a_catalogued_name_keep_the_load_hint() -> None:
+    """**The schema may have changed under the model's history.**
+
+    A call whose arguments did not survive the wire cannot be checked against
+    the row's current schema — so it is not run, and the model is told both why
+    it did not run and the one step that puts the current schema in front of
+    it.  This is the parse-error arm of the same rule `acquire` applies to a
+    readable call.
+    """
+
+    async def present(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_PRESENT
+
+    found = ToolRegistry([], exists=present)
+    text, ok = await found.execute(
+        ToolCall(id="c1", name="peer_agent_send_message", error="its arguments are not JSON")
+    )
+
+    assert ok is False
+    assert "its arguments are not JSON" in text
+    assert "in the catalogue" in text
+    assert "func_tool_load" in text
+
+
+@pytest.mark.asyncio
+async def test_unreadable_arguments_on_a_known_tool_stay_the_parse_error() -> None:
+    text, ok = await registry().execute(
+        ToolCall(id="c1", name="ok", error="its arguments are not JSON")
+    )
+
+    assert (text, ok) == ("Error: its arguments are not JSON", False)
+
+
+@pytest.mark.asyncio
 async def test_a_raising_tool_becomes_an_error_result() -> None:
     text, ok = await registry().execute(ToolCall(id="c1", name="raises"))
     assert ok is False

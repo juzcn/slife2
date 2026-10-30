@@ -40,7 +40,13 @@ from slife2.libs.turn.messages import (
     ToolSpec,
     Usage,
 )
-from slife2.libs.turn.tools import INTERRUPTED, Tool, ToolRegistry
+from slife2.libs.turn.tools import (
+    CATALOGUE_PRESENT,
+    INTERRUPTED,
+    CatalogueAnswer,
+    Tool,
+    ToolRegistry,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -368,6 +374,60 @@ async def test_parallel_tool_calls_all_run() -> None:
     await AgentLoop(backend, registry()).run_turn(messages, "add", ListObserver())
 
     assert [m.content for m in messages if m.role == "tool"] == ["2", "4"]
+
+
+async def test_a_catalogued_tool_is_acquired_and_run_in_the_same_turn() -> None:
+    """**The harness invokes the load, so the model spends no call on it.**
+
+    The name is outside the request's list; `acquire` is the caller's check
+    against the catalogue row and returns the tool the load made available.
+    From there the call takes the ordinary path — announced, timed, fitted,
+    answered — and the tool is in the list the *next* request carries.
+    """
+    acquired: list[tuple[str, dict[str, Any]]] = []
+
+    async def weather(_arguments: dict[str, Any]) -> str:
+        return "sunny"
+
+    async def acquire(name: str, arguments: dict[str, Any]) -> Tool | None:
+        acquired.append((name, arguments))
+        return a_tool("weather", weather) if name == "weather" else None
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="weather", arguments={"city": "北京"})),
+        text_turn("sunny."),
+    )
+    found = ToolRegistry(tools(), acquire=acquire)
+    messages: list[Message] = []
+
+    await AgentLoop(backend, found).run_turn(messages, "weather?", ListObserver())
+
+    assert acquired == [("weather", {"city": "北京"})]
+    assert [m.content for m in messages if m.role == "tool"] == ["sunny"]
+    assert "weather" in {spec.name for spec in backend.calls[1][1]}
+
+
+async def test_a_refused_acquire_leaves_the_call_to_the_unknown_path() -> None:
+    """The three sentences are unchanged; a call that does not fit is one of them."""
+
+    async def acquire(_name: str, _arguments: dict[str, Any]) -> Tool | None:
+        return None
+
+    async def present(_name: str) -> CatalogueAnswer:
+        return CATALOGUE_PRESENT
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="weather", arguments={"city": "北京"})),
+        text_turn("right."),
+    )
+    found = ToolRegistry(tools(), acquire=acquire, exists=present)
+    messages: list[Message] = []
+
+    await AgentLoop(backend, found).run_turn(messages, "weather?", ListObserver())
+
+    (answer,) = [m.content for m in messages if m.role == "tool"]
+    assert "in the catalogue" in (answer or "")
+    assert "func_tool_load" in (answer or "")
 
 
 async def test_tool_result_preview_is_truncated_but_the_model_gets_it_all() -> None:

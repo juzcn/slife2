@@ -21,9 +21,15 @@ from slife2.clients.toolclient import (
     CALL_TOOL,
     FUNC_TOOL_UNLOAD,
     LIST_TOOLS,
+    TOOL_EXISTS,
+    TOOL_LOAD,
     UpstreamTool,
+    acquire_tool,
+    arguments_fit,
+    load_tool,
     remote_catalogue,
     remote_tools,
+    tool_lookup,
     trim_answer,
     unload_tools,
 )
@@ -52,7 +58,14 @@ class FakeHub:
     answers with something this build cannot read.
     """
 
-    def __init__(self, *, tools: list[dict[str, Any]] | None = None, junk: Any = None):
+    def __init__(
+        self,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        junk: Any = None,
+        catalogue: dict[str, dict[str, Any]] | None = None,
+        refuse_load: set[str] | None = None,
+    ):
         self.tools = (
             tools
             if tools is not None
@@ -70,6 +83,10 @@ class FakeHub:
             ]
         )
         self.junk = junk
+        #: What `tool_exists` answers, by name.  Absent means "no row".
+        self.catalogue = catalogue or {}
+        self.refuse_load = refuse_load or set()
+        self.loaded: list[str] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
@@ -85,6 +102,21 @@ class FakeHub:
             )
         if name == CALL_TOOL:
             return answer({"text": "answered", "ok": True})
+        if name == TOOL_EXISTS:
+            target = str((arguments or {}).get("name") or "")
+            return answer(
+                self.catalogue.get(
+                    target, {"exists": False, "starting": False, "tool": None}
+                )
+            )
+        if name == TOOL_LOAD:
+            target = str((arguments or {}).get("name") or "")
+            if target in self.refuse_load:
+                return answer(
+                    {"loaded": [], "refused": [{"name": target, "reason": "no"}]}
+                )
+            self.loaded.append(target)
+            return answer({"loaded": [target], "refused": []})
         raise AssertionError(f"the agent asked for {name!r}")
 
 
@@ -515,3 +547,153 @@ def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:
     assert "sqlite3" not in vars(hub), "no SQL of the hub's own"
     assert "slife2" not in vars(hub), "the store, and not the package around it"
     assert hub.ToolStore is catalogue.ToolStore, "the one store, and this process's"
+
+
+# --- the catalogue lookup and the harness's load ------------------------------
+
+
+def a_row() -> dict[str, Any]:
+    """A catalogue answer for one present tool, in the hub's wire shape."""
+    return {
+        "exists": True,
+        "starting": False,
+        "tool": UpstreamTool(
+            name="fake__late",
+            server="fake",
+            tool="late",
+            description="[fake] Late.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        ).to_wire(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_lookup_reads_the_definition_beside_the_answer() -> None:
+    hub = FakeHub(catalogue={"fake__late": a_row()})
+
+    found = await tool_lookup(hub, "fake__late")
+
+    assert found.answer == "present"
+    assert found.tool is not None
+    assert found.tool.name == "fake__late"
+    assert found.tool.parameters["required"] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_an_older_hub_answers_without_a_definition() -> None:
+    hub = FakeHub(catalogue={"fake__late": {"exists": True, "starting": False}})
+
+    found = await tool_lookup(hub, "fake__late")
+
+    assert found.answer == "present"
+    assert found.tool is None, "the three values are still the whole answer"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_definition_is_damage_not_a_missing_tool() -> None:
+    hub = FakeHub(
+        catalogue={"fake__late": {"exists": True, "starting": False, "tool": "junk"}}
+    )
+
+    with pytest.raises(UnreadableAnswer):
+        await tool_lookup(hub, "fake__late")
+
+
+@pytest.mark.asyncio
+async def test_a_definition_for_another_tool_is_damage() -> None:
+    row = a_row()
+    row["tool"]["name"] = "fake__other"
+    hub = FakeHub(catalogue={"fake__late": row})
+
+    with pytest.raises(UnreadableAnswer):
+        await tool_lookup(hub, "fake__late")
+
+
+@pytest.mark.asyncio
+async def test_a_definition_whose_parameters_are_not_a_mapping_is_damage() -> None:
+    """`{}` means "nothing to declare"; a string is not that, and reading it as
+    one would let a call run unchecked."""
+    row = a_row()
+    row["tool"]["parameters"] = "junk"
+    hub = FakeHub(catalogue={"fake__late": row})
+
+    with pytest.raises(UnreadableAnswer):
+        await tool_lookup(hub, "fake__late")
+
+
+@pytest.mark.asyncio
+async def test_acquire_loads_and_returns_a_tool_when_the_arguments_fit() -> None:
+    hub = FakeHub(catalogue={"fake__late": a_row()})
+
+    tool = await acquire_tool(hub, "fake__late", {"text": "hi"})
+
+    assert tool is not None
+    assert tool.spec.name == "fake__late"
+    assert hub.loaded == ["fake__late"]
+    assert [name for name, _ in hub.calls] == [TOOL_EXISTS, TOOL_LOAD]
+    text, ok = await ToolRegistry([tool]).execute(
+        ToolCall(id="c1", name="fake__late", arguments={"text": "hi"})
+    )
+    assert (text, ok) == ("answered", True)
+
+
+@pytest.mark.asyncio
+async def test_acquire_does_not_load_a_call_that_does_not_fit() -> None:
+    hub = FakeHub(catalogue={"fake__late": a_row()})
+
+    tool = await acquire_tool(hub, "fake__late", {"text": 5})
+
+    assert tool is None
+    assert hub.loaded == []
+    assert [name for name, _ in hub.calls] == [TOOL_EXISTS]
+
+
+@pytest.mark.asyncio
+async def test_acquire_does_not_dispatch_when_the_hub_refuses_the_load() -> None:
+    hub = FakeHub(catalogue={"fake__late": a_row()}, refuse_load={"fake__late"})
+
+    tool = await acquire_tool(hub, "fake__late", {"text": "hi"})
+
+    assert tool is None
+    assert hub.loaded == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_schema_is_nothing_to_declare() -> None:
+    entry = UpstreamTool(
+        name="fake__late", server="fake", tool="late", description="", parameters={}
+    ).to_wire()
+    hub = FakeHub(
+        catalogue={"fake__late": {"exists": True, "starting": False, "tool": entry}}
+    )
+
+    tool = await acquire_tool(hub, "fake__late", {"anything": 1})
+
+    assert tool is not None
+    assert hub.loaded == ["fake__late"]
+
+
+def test_arguments_fit_refuses_what_the_schema_does_not_describe() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    }
+
+    assert arguments_fit("fake__late", schema, {"text": "hi"}) is True
+    assert arguments_fit("fake__late", schema, {}) is False
+    assert arguments_fit("fake__late", schema, {"text": "hi", "extra": 1}) is False
+    assert arguments_fit("fake__late", {}, {"anything": 1}) is True
+
+
+@pytest.mark.asyncio
+async def test_load_tool_reads_the_hub_s_verdict() -> None:
+    hub = FakeHub()
+
+    assert await load_tool(hub, "fake__late") is True
+    assert hub.calls == [(TOOL_LOAD, {"name": "fake__late"})]
