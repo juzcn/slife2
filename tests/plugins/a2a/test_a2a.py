@@ -1769,10 +1769,19 @@ async def test_a_refusing_window_is_a_failure_and_nothing_else_is_tried(
     because the window was not there — which is the one outcome a channel whose
     whole point is the terminal must not have.  What a caller gets now is a
     failure it cannot mistake for success, logged where the peer it belongs to is
-    named, because the peer is the only party who can send the task again.
+    named, and **settled as rejected**: the peer already has the `submitted`
+    acknowledgment, so its retry ladder has stopped and nothing but this terminal
+    would tell it the message never landed.
     """
     monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
     refusing = Window(refuse=True)
     async with Client(refusing.mcp) as window_client:
         refusing.client = window_client
@@ -1794,6 +1803,68 @@ async def test_a_refusing_window_is_a_failure_and_nothing_else_is_tried(
         and PEER in record.getMessage()
         for record in caplog.records
     )
+    assert settled and settled[0][:2] == (TASK, REJECTED)
+    assert "window" in settled[0][2]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_message_is_completed_only_when_the_window_takes_it(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**`completed` means the conversation has it**, not that the process did.
+
+    A bare message has no answer to wait for, so its round used to end at the
+    enqueue — before any window was asked.  It now ends where its delivery does,
+    and the writer is the one that says so.
+    """
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+    session = wired(window=window)
+    session.mesh.on_inbound_task(PEER, "hello", TASK, kind="message")
+    await drain_until_idle(session, window=window)
+
+    assert window.handed and window.handed[-1]["text"] == (
+        f"{marker(REMOTE, PEER, None, 'message')}hello"
+    )
+    assert settled == [(TASK, COMPLETED, "")]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_message_no_window_takes_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same ending a task gets, for the same reason: the peer is owed it."""
+    monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+    refusing = Window(refuse=True)
+    async with Client(refusing.mcp) as window_client:
+        refusing.client = window_client
+        session = wired(window=refusing)
+        session.mesh.on_inbound_task(PEER, "hello", TASK, kind="message")
+        await writer_until(
+            session,
+            lambda: any(
+                "a2a_delivery_unreachable" in record.getMessage()
+                for record in caplog.records
+            ),
+            window=refusing,
+        )
+
+    assert refusing.handed == []
+    assert settled and settled[0][:2] == (TASK, REJECTED)
+    assert "window" in settled[0][2]
 
 
 @pytest.mark.asyncio

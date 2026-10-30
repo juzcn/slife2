@@ -419,6 +419,28 @@ class Session:
             self.reasons[reason] = held - 1
         return not self.reasons
 
+    def settle(self, task_id: str, outcome: str, text: str = "") -> None:
+        """Settle the round a queued line belongs to, when it can.
+
+        **The writer's answer to "this never reached the conversation".**  The
+        responder is holding the peer's stream open on that round, and a
+        message that no window takes has nobody else to end it — the peer
+        already has the `submitted` acknowledgment, so its requester ladder
+        has stopped and it will not re-send.  Ending the round is what tells
+        it the truth.
+
+        A line with no round of its own (a note, a completion, a broadcast, a
+        group message) has no `task_id` and is left alone.  A round that is
+        already gone — the peer cancelled, or a test drove the callback
+        directly — answers with an error rather than raising: a bookkeeping
+        miss must not take the writer down.
+        """
+        if not task_id:
+            return
+        said = self.mesh.task_response(task_id, outcome, text)
+        if said != "ok":
+            logger.debug("a2a_round_gone task=%s: %s", task_id, said)
+
     def post(
         self,
         text: str,
@@ -427,16 +449,23 @@ class Session:
         *,
         note: bool = False,
         group: str = "",
+        task_id: str = "",
+        kind: str = "",
     ) -> None:
         """Queue one line for the writer — a message, or a note with `note`.
 
         Never blocks and never raises: this runs on the mesh's reader, and a
         delivery that has to wait is a delivery that stops the mesh reading.
-        Overflow drops the oldest waiting message rather than the newest.
+        Overflow drops the oldest waiting message rather than the newest, and
+        settles its round if it had one — a peer waiting on a line no writer
+        will read is the failure this queue exists to prevent, not a way to
+        make room.
 
         **Nothing is retried here.**  Everything on this queue has a peer behind
-        it, and a peer re-sends a task itself when it gets no answer; a second
-        copy of its message is worse than a late one.
+        it, and a second copy of its message is worse than a late one; what a
+        message that cannot be delivered gets instead is an ending
+        (`settle`), so the peer is told rather than left to re-send on the
+        assumption that it will.
 
         `note` says this line is the harness's rather than anybody's: the writer
         draws it in the window that is showing this agent and goes no further
@@ -448,13 +477,28 @@ class Session:
         It is part of the queue tuple beside `peer` because the two are what
         the channel is made from and nothing else in the pipeline can recover
         the group from the text (the marker is stripped for display).
+
+        `task_id` and `kind` are the round this line belongs to, when it is one
+        (an inbound task or message).  The writer needs them to settle a
+        delivery that failed: the responder is holding the peer's stream open
+        on that round, and nothing else can end it.  A note, a completion, a
+        broadcast and a group line have no round of their own and leave them
+        empty.
         """
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
-                self.queue.get_nowait()
+                _text, _peer, _what, _note, _group, dropped, _kind = (
+                    self.queue.get_nowait()
+                )
+                self.settle(
+                    dropped,
+                    mesh.REJECTED,
+                    "the agent's delivery queue overflowed, so this was not "
+                    "handed over; send it again",
+                )
             logger.warning("a2a_delivery_overflow dropped=1 peer=%s", peer)
         with contextlib.suppress(asyncio.QueueFull):
-            self.queue.put_nowait((text, peer, what, note, group))
+            self.queue.put_nowait((text, peer, what, note, group, task_id, kind))
 
 
 async def _hold_open(ctx: Context) -> None:
@@ -624,6 +668,8 @@ def _wire(session: Session) -> None:
             f"{content}",
             source,
             f"an inbound {marker_type} from {source}",
+            task_id=task_id,
+            kind=kind,
         )
 
     def on_task_completion(
@@ -912,10 +958,12 @@ async def _drain(
 
     **A delivery that fails is an error, and the message is not carried on
     anywhere.**  There is no second road for it (`slife2.libs.harness.handover`), so a peer's
-    message that reached no conversation has not been answered — and the one
-    party who can do something about that is the peer, which is why the line
-    says whose message it was.  Nothing is softened into a state here: this
-    plugin has no record of its own and no right to claim the work happened.
+    message that reached no conversation has not been answered.  **Its round is
+    settled rather than left open**: the peer already has the `submitted`
+    acknowledgment, which stopped its requester ladder, so a re-send is not
+    something this process may assume — the rejected status is what tells it.
+    Nothing is softened into a state here: this plugin has no record of its own
+    and no right to claim the work happened.
 
     **A member's turn is delivered to its conversation, and the harness does
     not speak for the member.**  The inbound message becomes a turn there
@@ -973,11 +1021,18 @@ async def _drain(
             with contextlib.suppress(Exception):
                 await close_server(client)
 
-    async def member_turn(text: str, peer: str, channel: str) -> None:
+    async def member_turn(
+        text: str, peer: str, channel: str, task_id: str, kind: str
+    ) -> None:
         """One member's turn, submitted without holding the writer."""
         try:
             try:
                 client = await ensure_member_client()
+                if kind == "message":
+                    # A bare message owes its sender no answer, so its round
+                    # ends where its delivery does — here, once the agent
+                    # server has taken the turn.
+                    session.settle(task_id, mesh.COMPLETED)
                 said = await run_turn(
                     config,
                     session.agent,
@@ -1000,6 +1055,8 @@ async def _drain(
                 # answer `peer` and they went nowhere.**  Its own key rather
                 # than the handler's below, which is about this plugin's own
                 # fault: this one is a conversation that could not be reached.
+                # The round is settled for the same reason: the peer already
+                # has the acknowledgment and has stopped re-sending.
                 logger.error(
                     "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
                     describe((session.agent, session.subagent)),
@@ -1007,18 +1064,25 @@ async def _drain(
                     len(text),
                     exc,
                 )
+                session.settle(task_id, mesh.REJECTED, exc.reason)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one bad turn must not end the writer
                 # **Not fatal, and the difference is this agent's whole mesh.**
-                # A turn that failed is one message dropped — a peer re-sends
-                # its own task — and the next one is read.  The connection is
-                # replaced too, because the failure may have been the
+                # A turn that failed is one message dropped, and the round is
+                # settled so the peer learns it — the acknowledgment stopped
+                # its ladder, so nothing else would tell it.  The connection
+                # is replaced too, because the failure may have been the
                 # connection's and the next turn is what finds out.
                 logger.exception(
                     "a2a_delivery_failed agent=%s peer=%s — that message dropped",
                     describe((session.agent, session.subagent)),
                     peer,
+                )
+                session.settle(
+                    task_id,
+                    mesh.REJECTED,
+                    "the agent's harness failed before the turn could run",
                 )
                 await drop_member_client()
         finally:
@@ -1026,7 +1090,7 @@ async def _drain(
 
     try:
         while True:
-            text, peer, what, note, group = await session.queue.get()
+            text, peer, what, note, group, task_id, kind = await session.queue.get()
             try:
                 if note:
                     if session.subagent:
@@ -1081,7 +1145,7 @@ async def _drain(
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                     task = asyncio.create_task(
-                        member_turn(text, peer, channel),
+                        member_turn(text, peer, channel, task_id, kind),
                         name=f"a2a-turn-{session.subagent}",
                     )
                     member_turns.add(task)
@@ -1099,7 +1163,9 @@ async def _drain(
                     # **An error, because the words are the only thing that
                     # could answer `peer` and they went nowhere.**  Its own key
                     # rather than the handler's below, which is about this
-                    # plugin's own fault.
+                    # plugin's own fault; and the round is settled, because the
+                    # peer already has the acknowledgment and its requester
+                    # ladder has stopped — nothing else would tell it.
                     logger.error(
                         "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
                         describe((session.agent, session.subagent)),
@@ -1107,6 +1173,14 @@ async def _drain(
                         len(text),
                         exc,
                     )
+                    session.settle(task_id, mesh.REJECTED, exc.reason)
+                else:
+                    if kind == "message":
+                        # A bare message owes its sender no answer, so its
+                        # round ends where its delivery does: the conversation
+                        # has taken it.  A task keeps its round open for the
+                        # model's own reply.
+                        session.settle(task_id, mesh.COMPLETED)
             except asyncio.CancelledError:
                 # `shutdown` cancels this writer; a cancellation is not a
                 # delivery failure and must reach the awaiting task as one.
@@ -1118,12 +1192,17 @@ async def _drain(
                 # result, broadcast and presence event would queue behind a
                 # writer that no longer exists, while the mesh still looked
                 # connected.  One message that cannot be rendered or handed over
-                # is dropped — a peer re-sends its own task — and the next one
-                # is read.
+                # is dropped — but its round is settled first, so the peer that
+                # was acknowledged learns it did not land.
                 logger.exception(
                     "a2a_delivery_failed agent=%s peer=%s — that message dropped",
                     describe((session.agent, session.subagent)),
                     peer,
+                )
+                session.settle(
+                    task_id,
+                    mesh.REJECTED,
+                    "the agent's harness could not hand it over",
                 )
     finally:
         # **Cancellation is what a session teardown looks like.**  The writer is

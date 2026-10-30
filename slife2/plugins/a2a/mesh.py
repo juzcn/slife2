@@ -469,10 +469,14 @@ class MeshResponder(Responder):
                 return RoundOutcome(COMPLETED, "")
             if message_type == "message":
                 # MESSAGE: a conversational message — not a task.  Enqueue it
-                # task-less and finish; the peer's real reply arrives as a NEW
-                # inbound message of its own.
-                self._mesh.on_inbound_task(peer, request.text, "", kind="message")
-                return RoundOutcome(COMPLETED, "")
+                # and finish once the agent's conversation has taken it: the
+                # writer settles this round from the delivery's own outcome
+                # (`Session.settle`), so a message no window took ends
+                # `rejected` rather than being acknowledged as delivered.  The
+                # peer's real reply arrives as a NEW inbound message of its
+                # own.
+                self._mesh.on_inbound_task(peer, request.text, task_id, kind="message")
+                return await waiter.wait()
             self._mesh.on_inbound_task(
                 peer,
                 request.text,

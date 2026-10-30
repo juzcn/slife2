@@ -955,8 +955,9 @@ payload protection, push notifications) are not implemented.
 A `task_request` returns an id immediately; the result arrives later with a
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker. The id
 and `status: "unverified"` describe acceptance, not delivery; a send nothing
-answers comes back as an unreachable notice when the retry ladder runs out. There
-is nothing to poll.
+answers comes back as an unreachable notice when the retry ladder runs out. A
+peer that accepted a task but could not hand it to its conversation answers
+`rejected` with the reason. There is nothing to poll.
 
 A peer may pause a task and ask for input; that line has type `task_input` and
 names the question. The task is still open: answer it with

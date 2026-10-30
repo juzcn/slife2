@@ -1633,6 +1633,12 @@ Rules specific to this system:
     transport ladder stops at the first correlated reply. `-32003`/`-32004`
     render as failures the model may re-send; `-32005` is not retryable; an
     unknown task is `-32001`. A peer's `failed` or `rejected` is terminal.
+21. **A message that reaches no conversation is rejected, not dropped.** The
+    requester stops its retry ladder at the first correlated reply — the
+    responder's `submitted` acknowledgment — so a message no window takes is
+    settled as `rejected` with the reason, and a bare `message` reports
+    `completed` only after the conversation has taken it. The peer reads the
+    ending and decides whether to send it again.
 
 **Why directed topics.** Group traffic uses
 `event/{org}/{unit}/member:<name>`, one topic per recipient, subscribed by that
@@ -2291,27 +2297,21 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **An inbound message that reaches no window.** A peer's message that cannot be
-   handed over is logged and dropped, on the assumption that the peer re-sends
-   it. The SDK acknowledges a request before the handler runs, so the peer's
-   retry ladder has already stopped. *Resolution would require:* an explicit
-   "could not deliver" the peer reads, or a delivery retried until a window
-   appears.
-2. **A scheduled run and the task that runs it.** A run is tied to its task by a
+1. **A scheduled run and the task that runs it.** A run is tied to its task by a
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-3. **Where a retry policy lives.** Two channels keep their own backoff and reset
+2. **Where a retry policy lives.** Two channels keep their own backoff and reset
    it on different events. *Resolution would require:* one policy in
    `helpers/timeouts.py` and one reason to reset.
-4. **A model call that ends the turn with an empty answer.** The wire is checked
+3. **A model call that ends the turn with an empty answer.** The wire is checked
    at the hop, but a provider that legitimately answers with nothing has the same
    shape. *Resolution would require:* deciding whether an empty answer is a
    verdict or a failure, and stating it once.
-5. **Dump search scope.** A dump is in the same corpus as the cabinet's other
+4. **Dump search scope.** A dump is in the same corpus as the cabinet's other
    kinds, but a search that names no kind excludes it. *Resolution would
    require:* a stated rule, not a query filter.
-6. **Correlation across processes.** A log line carries `agent/subagent`, and a
+5. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
 
