@@ -1,21 +1,12 @@
 # Using your tools
 
-The tool descriptions are the authority on each tool. This page is what no single description can say.
+The Tools catalogue is the authority on each tool. It holds all tools including built-in tools (bare names like `turn_read`), external MCP and REST tools (`{server}__{tool}`), jobs (`job__<name>`), harness tools (`_`-prefixed), skills (`skill:<name>`) and CLI entries (`cli:<name>`).
 
-- Tools catalogue: built-in tools (bare names like `turn_read`), external MCP and REST tools (`{server}__{tool}`), jobs (`job__<name>`), harness tools (`_`-prefixed), skills (`skill:<name>`) and CLI entries (`cli:<name>`).
 - Every function tool also takes `_timeout`, `_async` and `_approve`; the harness strips them before dispatch. With `_async` the result arrives later — never wait for it; end the turn. `_approve` asks only when someone can answer.
-- Prefer a dedicated tool over a shell command or ad-hoc code. Read a refusal and correct the call. 
-
-## Finding and loading
-
-- The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable. Search before concluding a capability is missing.
-- A tool can answer "not in the catalogue yet" while the catalogue is still starting. 
-- **A missing capability can be installed, not just reported.** If `tool_search` really holds nothing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set` (stdio or URL), `rest_api_set` (OpenAPI spec), `skill_set` (a playbook you write), `cli_set` (a command you installed first with the shell). `mcp_list_tools` / `rest_api_list_tools` (and `skill_list` / `cli_list`) show the new surface, and the next `tool_search` finds it.
-
-## The turn you are in
-
-- Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now` and `token-usage`.
-- A `[TURN:{…}]` footnote records when a past turn ran.
+- `tool_search` finds names, use `func_tool_load` to make it appear in the model's tool list if it is not already loaded.
+- If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set`, `rest_api_set`, `skill_set`, `cli_set`.
+- You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
+- Prefer a dedicated tool over a shell command or ad-hoc code. Read a refusal and correct the call.
 
 ## Built-in tools
 
@@ -70,16 +61,12 @@ The marker at the start of a message says where it came from.
 | Group message | `[PeerAgentGroup:{…}]` / `[SubagentGroup:{…}]` | `peer_agent_group_send_message` / `subagent_group_send_message` |
 | Agent task or background call | `[AgentTaskResult:{…}]` / `[AgentToolResult:{…}]` | already delivered |
 
+## The turn you are in
+
+- Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now` and `token-usage`.
+- A `[TURN:{…}]` footnote records when a past turn ran.
+
+## Last words
+
 - **Subagents** are yours, with their own conversation and memory; **peers** are other agents, with their own identity and memory. `subagent_*` does not reach a peer, and `peer_agent_*` does not reach your subagents.
-- **Agent tasks** run as you in the background, from this conversation's stored turns. Nobody can answer their questions, so `description` is their whole context.
-
-## Memory and the cabinet
-
-- Your conversation is stored automatically. A `[TURN:{…}]` footnote names a rebuilt turn's id and channel.
-- The cabinet is your durable, per-agent store; another agent cannot read it.
-- A shortened tool result is kept whole: read the rest with `dump_read`, by its `[DUMP:{…}]` marker. Do not re-run the tool.
-
-## Doing work
-
-- **Skills** are playbooks you follow; **jobs** are code that becomes a tool (`job__<name>`). Read `job-coding` before writing a job.
-- **A job can use everything you can.** Its code reaches the hub's catalogue, any plugin server, a full agent turn, and a raw model call — so a new tool that calls a model, or a workflow you keep repeating, can become a `job__<name>` you own. Save a recurring procedure as one of the two: a job when the steps are known, a skill when the judgement is the model's.
+- **Agent tasks** run as you in the background, from this conversation's stored turns. 
