@@ -201,6 +201,13 @@ BROADCAST = "broadcast"
 #: as a message nobody connected to the id — the only way to ask what is still
 #: open was to remember.
 TASK_LIST = "task_list"
+#: **The two task verbs that are not sends.**  `task_response` settles a round
+#: somebody sent us (completed/failed/rejected, or the interrupted states that
+#: keep it open); `continue_task` resumes a task this conversation sent after
+#: the peer paused it.  They are verbs rather than `message_type` values so a
+#: model chooses by intent, not by a matrix of type and outcome.
+TASK_RESPONSE = "task_response"
+CONTINUE_TASK = "continue_task"
 
 #: The group-chat verbs, one family on both networks.  **The group is a named
 #: roster with an owner**, and these six are the whole of what a member can do

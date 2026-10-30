@@ -83,6 +83,7 @@ from slife2.libs.host.config import (
     AGENT_SERVER_NAME,
     BROADCAST,
     CANCEL_TASK,
+    CONTINUE_TASK,
     GROUP_LEAVE,
     GROUP_LIST,
     GROUP_MEMBER_LIST,
@@ -95,6 +96,7 @@ from slife2.libs.host.config import (
     REMOTE,
     SEND_MESSAGE,
     TASK_LIST,
+    TASK_RESPONSE,
     A2ASettings,
     Config,
     Net,
@@ -138,12 +140,13 @@ CONFIG_KEY = REMOTE.plugin_key
 #: The remote network's tools, named.  **`PEER_*` and not `A2A_*`**, because
 #: what a model is handed is the semantic side of `Net`: this process speaks A2A,
 #: and the model is told it is talking to peer agents (`slife2.libs.host.config.REMOTE`
-#: is where that split is argued).  Two things that look like omissions are not: a
-#: `task_response` is not a tool, it is `peer_agent_send_message` with
-#: `message_type` said, because on the wire it *is* the same operation; and
-#: `PEER_TASK_LIST` is not a fifth *operation* either — it reads the two tables
-#: the others leave behind, and it is here because "what is still open" is the
-#: one question none of them can answer.
+#: is where that split is argued).  **Sending, settling and continuing are three
+#: verbs**, not one send with a `message_type` that also means "settle": the
+#: profile's continuation has its own shape (the same task, the same context,
+#: a fresh correlation) and the settlement has its own outcome axis.  A model
+#: choosing by intent is the point.  `PEER_TASK_LIST` is not a fourth *operation*
+#: — it reads the tables the others leave behind, and it is here because "what
+#: is still open" is the one question none of them can answer.
 #:
 #: **These are the remote network's**, and the local instance registers its own
 #: from the same verbs (`net.tool`), which is why every registration site composes
@@ -151,6 +154,8 @@ CONFIG_KEY = REMOTE.plugin_key
 #: reader arriving here want the remote network's names in one place.
 PEER_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
 PEER_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
+PEER_TASK_RESPONSE = REMOTE.tool(TASK_RESPONSE)
+PEER_CONTINUE_TASK = REMOTE.tool(CONTINUE_TASK)
 PEER_LIST = REMOTE.tool(LIST)
 PEER_BROADCAST = REMOTE.tool(BROADCAST)
 PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
@@ -262,11 +267,11 @@ def marker(
     that is the fact the receiving model needs.  ``[PeerAgent:{"from": …,
     "type": …}] ``, ``[Agent:{…}] `` or ``[Subagent:{…}] ``; ``from`` names the
     *sending* peer (never the receiver).  ``type`` tells what it is:
-    ``task_request`` (an inbound task to answer, via
-    ``peer_agent_send_message(message_type="task_response", task_id=…)`` — it may take
-    many turns), ``task_response`` (an auto-delivered task result),
-    ``cancel_task`` (the peer withdrew that task — its completion bridge died
-    with it, so a ``task_response`` for it is refused: answer with a plain
+    ``task_request`` (an inbound task to answer with the task-response tool —
+    it may take many turns), ``task_input`` (the peer continued an interrupted
+    task; answer the same task id again), ``task_response`` (an auto-delivered
+    task result), ``cancel_task`` (the peer withdrew that task — its completion
+    bridge died with it, so a response for it is refused: answer with a plain
     message or stay silent), ``message`` (a bare conversation), ``broadcast`` (a
     fire-and-forget event, informational).  ``task_id`` rides for tasks, results
     and withdrawals.
@@ -608,8 +613,12 @@ def _wire(session: Session) -> None:
         # to refuse, and every callback here has to pass its peer through it or
         # the one that does not is the hole.
         source = safe_name(source)
-        marker_id = (task_id or None) if kind == "task" else None
-        marker_type = "message" if kind != "task" else "task_request"
+        marker_id = (task_id or None) if kind in ("task", "task_input") else None
+        marker_type = {
+            "task": "task_request",
+            "task_input": "task_input",
+            "message": "message",
+        }.get(kind, "task_request")
         session.post(
             f"{marker(sender_net(session, source), source, marker_id, type=marker_type)}"
             f"{content}",
@@ -626,11 +635,13 @@ def _wire(session: Session) -> None:
     ) -> None:
         """Say what became of a send, in the send's own words.
 
-        `outcome` is one value — `mesh.COMPLETED`, `CANCELLED`, `FAILED` or
-        `UNREACHABLE` — so a renderer switches on the answer itself rather than
-        on flags that can disagree.  A peer that *answered* with a failure must
-        not render as "completed": that is the confident negative SDD Appendix C
-        forbids.
+        `outcome` is one value and the renderer switches on it: `completed`,
+        `cancelled`, `failed` and `rejected` are verdicts the peer had;
+        `input_required`/`auth_required` mean the task is paused and still open,
+        so the line names the question and the tool that continues it;
+        `unreachable` is the requester's own failure — nobody answered.  A peer
+        that *answered* with a failure must not render as "completed": that is
+        the confident negative SDD Appendix C forbids.
         """
         # Nothing to say about an empty *success*.  A withdrawal, a failure and
         # an unreachable peer are worth a line even with no words in them: the
@@ -664,16 +675,43 @@ def _wire(session: Session) -> None:
                 )
         elif kind == "message":
             # A MESSAGE conversation was answered: a bare message reply, no
-            # task involved.
+            # task involved.  A failure/rejection is still a verdict, not a
+            # reply: the line must not say the peer answered.
+            if outcome in (mesh.FAILED, mesh.REJECTED):
+                text = (
+                    f"{marker(words, peer, type='message')}"
+                    f"{peer_phrase(session.net, peer)} could not answer your "
+                    f"message ({outcome}):\n\n{result}"
+                )
+            else:
+                text = (
+                    f"{marker(words, peer, type='message')}"
+                    f"{peer_phrase(session.net, peer)} replied to your message:"
+                    f"\n\n{result}"
+                )
+        elif outcome in (mesh.INPUT_REQUIRED, mesh.AUTH_REQUIRED):
+            # **The task is paused, not ended.**  The line names the question
+            # and the two verbs that can settle it; the task id is repeated
+            # because the continue call needs it and the marker is the only
+            # place the model can read it back.
+            need = (
+                "wants more input"
+                if outcome == mesh.INPUT_REQUIRED
+                else "requires authentication"
+            )
             text = (
-                f"{marker(words, peer, type='message')}"
-                f"{peer_phrase(session.net, peer)} replied to your message:"
-                f"\n\n{result}"
+                f"{marker(words, peer, corr_id or None, type='task_input')}"
+                f"{peer_phrase(session.net, peer)} paused async task "
+                f"(ID: `{corr_id}`) and {need}:\n\n{result}\n\n"
+                f"Continue it with `{session.net.tool(CONTINUE_TASK)}` "
+                f"(task_id, message), or withdraw it with "
+                f"`{session.net.tool(CANCEL_TASK)}`."
             )
         else:
             # The peer answered, and this is what it said: `completed`,
-            # `cancelled` or `failed`, in the peer's own word.  All three are a
-            # verdict it had, which is what separates them from `UNREACHABLE`.
+            # `cancelled`, `failed` or `rejected`, in the peer's own word.  Each
+            # is a verdict it had, which is what separates them from
+            # `UNREACHABLE`.
             text = (
                 f"{marker(words, peer, corr_id or None, type='task_response')}"
                 f"{peer_phrase(session.net, peer)} {outcome} async task "
@@ -1615,14 +1653,14 @@ def build_server(
                         )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # The mesh tools (the four standard A2A operations)
+    # The mesh tools (the standard A2A operations and the profile's task verbs)
     # ═══════════════════════════════════════════════════════════════════════
     #
     # The standard A2A-over-MQTT profile is async-native: a message/send is typed
     # — 'task_request' returns a task id immediately and the result delivers to
     # the conversation later (a [PeerAgent:…] marker of type 'task_response');
-    # 'task_response' completes an inbound task; 'message' is a bare
-    # conversation.  No waiting, no timeout parameter.
+    # 'message' is a bare conversation.  Settling and continuing are their own
+    # tools (`task_response`, `continue_task`); no waiting, no timeout parameter.
 
     @mcp.tool(name=FORGET)
     async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
@@ -1672,26 +1710,23 @@ def build_server(
         ctx: Context,
         agent: str,
         message: str,
-        message_type: Literal[
-            "message", "task_request", "task_response"
-        ] = "task_request",
-        task_id: str = "",
+        message_type: Literal["message", "task_request"] = "task_request",
     ) -> dict[str, Any]:
         """Send a message to another agent on the A2A mesh.
 
         `message_type` decides what it is. 'task_request' (the default) asks for
         work and returns an id straight away — the peer answers later, and its
-        answer arrives on its own as a `[PeerAgent:…]` of type 'task_response'. Never
-        wait for it and never poll: there is nothing to poll. 'task_response'
-        completes a task somebody sent you, and needs the `task_id` from that
-        task's `[PeerAgent:…]` marker. 'message' is a plain conversation — no task, no
-        completion, and the reply arrives as a message.
+        answer arrives on its own as a `[PeerAgent:…]` of type 'task_response'.
+        Never wait for it and never poll: there is nothing to poll. 'message' is
+        a plain conversation — no task, no completion, and the reply arrives as
+        a message.
 
-        **A 'task_response' is the settlement, not a message about one.**  The
-        bridge is resolved here — `complete_task` before this call returns — so
-        the peer's terminal reply leaves in the same call and nothing
-        downstream has to settle the task again.  The harness only ever
-        delivered the inbound message; it takes no part in answering one.
+        **Settling and continuing are their own tools.**  A task somebody sent
+        you is settled with the response tool (completed, failed, rejected, or
+        the interrupted states that keep it open); a task you sent that the peer
+        paused is resumed with the continuation tool.  Neither is a message
+        type here: the task id and the outcome are the arguments that matter,
+        and a model choosing by intent beats a matrix of type and outcome.
 
         `agent` is a peer's name, which `peer_agent_list` gives you. A peer may
         be another agent on this machine or one somewhere else; the mesh does not
@@ -1723,47 +1758,26 @@ def build_server(
         Args:
             agent: The peer to send to, by name from `peer_agent_list`.
             message: What to say, or the task to do.
-            message_type: `task_request` asks for work, `task_response`
-                completes a task somebody sent you, and `message` is a plain
+            message_type: `task_request` asks for work, `message` is a plain
                 conversation.
-            task_id: The task being completed; required for `task_response`
-                and ignored otherwise.
         """
-        if message_type not in ("message", "task_request", "task_response"):
+        if message_type not in ("message", "task_request"):
             raise ToolError(
-                f"message_type must be 'message', 'task_request' or "
-                f"'task_response', got {message_type!r}."
+                f"message_type must be 'message' or 'task_request', got "
+                f"{message_type!r}. To settle or continue a task use the "
+                f"task-response or continue tool."
             )
         sender, mine = speaker(ctx)
-        # What the arguments say is settled before the mesh is dialled: a call
-        # that cannot work must not be the reason a broker is contacted, and the
-        # refusal reads better than a connect failure about a typo.
-        if message_type == "task_response" and not task_id:
-            raise ToolError(
-                "task_id is required for message_type='task_response' — it "
-                "is the [PeerAgent:…] marker's task_id."
-            )
         # **The subagent network's roster is complete, so an unknown name is a
         # refusal rather than a send that will time out.**  The peer network has
         # no authoritative roster (a peer may not have published its card yet),
         # so its sends stay asynchronous and say so in `status`.  A machine with
         # no section is left to `connected` for the refusal that names its own
         # switch; there is no roster to read on a network that is off.
-        if (
-            net is LOCAL
-            and message_type != "task_response"
-            and mesh_settings().configured
-        ):
+        if net is LOCAL and mesh_settings().configured:
             refuse_unknown_member(sender, agent)
         session = await connected(sender, USED, mine)
-        if message_type == "task_response":
-            answer = session.mesh.complete_task(task_id, message, False)
-            if answer != "ok":
-                raise ToolError(answer.removeprefix("Error: "))
-            return {"peer": agent, "task_id": task_id, "completed": True}
         # Before the publish, and only for a message somebody has to receive in.
-        # A `task_response` above needs nothing placed: what it completes is a
-        # bridge on *this* responder, which is already up.
         await place_for(sender, agent)
         sent = await session.mesh.send_message(
             agent, message, message_type=message_type
@@ -1795,6 +1809,127 @@ def build_server(
         }
 
     @mcp.tool(
+        name=net.tool(TASK_RESPONSE),
+        description=describe_tool(net, TASK_RESPONSE),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_task_response(
+        ctx: Context,
+        agent: str,
+        task_id: str = "",
+        outcome: Literal[
+            "completed", "failed", "rejected", "input_required", "auth_required"
+        ] = "completed",
+        message: str = "",
+    ) -> dict[str, Any]:
+        """Settle the round of a task somebody sent you.
+
+        `outcome` is what became of it. 'completed' means the work is done and
+        `message` is the result; 'failed' means an error; 'rejected' means this
+        agent declined the task. Those three end it. 'input_required' and
+        'auth_required' pause it instead: `message` is what you need from the
+        peer, the round ends without a terminal, and the peer can continue the
+        same task later.
+
+        **The task id is the marker's id.** A `[PeerAgent:…]` of type
+        'task_request' (a first round) or 'task_input' (a continuation) carries
+        it. One round settles exactly once; a second call for the same round is
+        refused, and an interrupted task cannot be settled again until the peer
+        continues it.
+
+        Args:
+            agent: The peer from the marker — it is the return value's `peer`.
+            task_id: The task's id, from the marker.
+            outcome: completed, failed, rejected, input_required, auth_required.
+            message: The result, the failure's reason, or the question.
+        """
+        if outcome not in (
+            "completed",
+            "failed",
+            "rejected",
+            "input_required",
+            "auth_required",
+        ):
+            raise ToolError(
+                f"outcome must be completed, failed, rejected, input_required "
+                f"or auth_required, got {outcome!r}."
+            )
+        if outcome in ("input_required", "auth_required") and not message:
+            raise ToolError(
+                f"message is required for outcome={outcome!r} — it is what the "
+                f"peer is asked for."
+            )
+        if not task_id:
+            raise ToolError(
+                "task_id is required — it is the [PeerAgent:…] marker's task_id."
+            )
+        sender, mine = speaker(ctx)
+        session = await connected(sender, USED, mine)
+        answer = session.mesh.task_response(task_id, outcome, message)
+        if answer != "ok":
+            raise ToolError(answer.removeprefix("Error: "))
+        return {
+            "peer": agent,
+            "task_id": task_id,
+            "outcome": outcome,
+            "state": (
+                "open" if outcome in ("input_required", "auth_required") else "closed"
+            ),
+        }
+
+    @mcp.tool(
+        name=net.tool(CONTINUE_TASK),
+        description=describe_tool(net, CONTINUE_TASK),
+        meta=FOR_THE_MODEL,
+    )
+    async def peer_agent_continue_task(
+        ctx: Context,
+        agent: str,
+        task_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Continue a task you sent that the peer paused for input.
+
+        The peer's line names the task id and the question. `message` is the
+        input it asked for; the task keeps its identity and its conversation,
+        and the peer resumes it. Do not send a new task instead: a new task
+        would be a second job, while this is the same one finishing.
+
+        Only an interrupted task can be continued. The call is refused for a
+        task that is still running, has already ended, or is not in this
+        process's bookkeeping. The result arrives later as a task response,
+        exactly as a first-round result does.
+
+        Args:
+            agent: The peer that paused the task, by name from the roster.
+            task_id: The paused task's id, from the line that named it.
+            message: The input the peer asked for.
+        """
+        if not task_id:
+            raise ToolError(
+                "task_id is required — it is the id named by the interrupted "
+                "task's line."
+            )
+        if not message:
+            raise ToolError("message is required — it is the input the peer asked for.")
+        sender, mine = speaker(ctx)
+        if net is LOCAL and mesh_settings().configured:
+            refuse_unknown_member(sender, agent)
+        session = await connected(sender, USED, mine)
+        await place_for(sender, agent)
+        answer = await session.mesh.continue_task(agent, task_id, message)
+        if answer != "ok":
+            raise ToolError(answer.removeprefix("Error: "))
+        return {
+            "peer": agent,
+            "task_id": task_id,
+            "status": "unverified",
+            "note": "Accepted for delivery, not delivered — the peer resumes "
+            "the task and its result arrives in this conversation; a notice "
+            "arrives here if it is never reached.",
+        }
+
+    @mcp.tool(
         name=net.tool(CANCEL_TASK),
         description=describe_tool(net, CANCEL_TASK),
         meta=FOR_THE_MODEL,
@@ -1805,9 +1940,10 @@ def build_server(
         """Withdraw a task you sent to another agent.
 
         `status` is the answer: 'cancelled' when the withdrawal went out,
-        'completed'/'failed'/'cancelled' when the task had already ended (a
-        finished result is never lost by asking), or 'not_found' for an id this
-        process never sent.
+        'completed'/'failed'/'cancelled'/'rejected' when the task had already
+        ended (a finished result is never lost by asking), or 'not_found' for an
+        id this process never sent. An interrupted task is not ended, so it can
+        be withdrawn too.
 
         Args:
             agent: The peer the task is with, by name.
@@ -1954,7 +2090,9 @@ def build_server(
         costs no model call and dials nothing (`A2AMesh.open_tasks`): `_sends`
         is what has not terminaled, and the in-flight table is what is owed.
         Both are this process's; a restart starts with none, and a peer that is
-        still waiting is the one that re-sends.
+        still waiting is the one that re-sends. A row whose status is
+        `interrupted` carries the peer's `question`; `continue_task` is the
+        call for it.
 
         `member` rather than `peer`, because one word is true of both directions
         and this network's members are not the remote network's peers.
@@ -2440,23 +2578,54 @@ _TOOL_TEXTS: dict[str, str] = {
         "`message_type` decides what it is. 'task_request' (the default) asks for\n"
         "work and returns an id straight away — the answer arrives later, on its\n"
         "own, as a {marker} of type 'task_response'. Never wait for it and\n"
-        "never poll: there is nothing to poll. 'task_response' completes a task\n"
-        "somebody sent you, and needs the `task_id` from that task's {marker}\n"
-        "marker. 'message' is a plain conversation — no task, no completion, and\n"
-        "the reply arrives as a message.\n"
+        "never poll: there is nothing to poll. 'message' is a plain conversation —\n"
+        "no task, no completion, and the reply arrives as a message.\n"
+        "\n"
+        "**A task that ends waiting for you is answered with `{task_response}`;\n"
+        "a task you sent that the peer paused is resumed with `{continue_tool}`.**\n"
+        "Neither is a message type here.\n"
         "\n"
         "The id and `status` are about *acceptance*, not delivery: it has\n"
         "been handed to the network when this returns, so `status` is\n"
         "'unverified' until a reply arrives, and a notice arrives here if the\n"
         "message is never acknowledged. {addressing}"
     ),
+    TASK_RESPONSE: (
+        "Settle the round of a task somebody sent you.\n"
+        "\n"
+        "`outcome` is what became of it. 'completed' means the work is done and\n"
+        "`message` is the result; 'failed' is an error; 'rejected' means you\n"
+        "declined it. Those three end the task. 'input_required' (or\n"
+        "'auth_required') pauses it instead: `message` is what you need from the\n"
+        "peer, the task stays open, and the peer continues it later.\n"
+        "\n"
+        "`task_id` is the {marker} marker's id — a type 'task_request' first\n"
+        "round or a type 'task_input' continuation. One round settles once; an\n"
+        "interrupted task cannot be settled again until the peer continues it.\n"
+        "\n"
+        "`agent` is the peer the marker names. The answer says whether the task\n"
+        "is now 'closed' or still 'open'."
+    ),
+    CONTINUE_TASK: (
+        "Continue a task you sent to {them} that the peer paused for input.\n"
+        "\n"
+        "`task_id` is the id on the line that said the task was paused;\n"
+        "`message` is the input it asked for. The task keeps its identity and\n"
+        "its context; the peer resumes the same task. Do not send a new task\n"
+        "instead — that would be a second job.\n"
+        "\n"
+        "Only an interrupted task can be continued: a running, ended or unknown\n"
+        "task is refused. The result arrives later as a {marker} of type\n"
+        "'task_response', and a notice arrives here if the peer is never reached."
+    ),
     CANCEL_TASK: (
         "Withdraw a task you sent to {them}.\n"
         "\n"
         "`status` is the answer: 'cancelled' when the withdrawal went out,\n"
-        "'completed'/'failed'/'cancelled' when the task had already ended (a\n"
-        "finished result is never lost by asking), or 'not_found' for an id you\n"
-        "never sent."
+        "'completed'/'failed'/'cancelled'/'rejected' when the task had already\n"
+        "ended (a finished result is never lost by asking), or 'not_found' for\n"
+        "an id you never sent. An interrupted task is not ended, so it can be\n"
+        "withdrawn too."
     ),
     LIST: (
         "List {roster}.\n"
@@ -2482,11 +2651,14 @@ _TOOL_TEXTS: dict[str, str] = {
         "A task is open while it is waiting for an answer ('sent') or while an\n"
         'answer is owed (\'received\'). Every row is `{{"task_id": …, "member": …,\n'
         '"direction": "sent"|"received", "status": …, "since": …}}`, and `member`\n'
-        "is the name the task is with — what `{send}` and `{cancel}` address.\n"
+        "is the name the task is with — what `{send}`, `{continue_tool}` and\n"
+        "`{cancel}` address.\n"
         "\n"
-        "`status` is 'pending' for a task still running, or 'unreachable' for one\n"
-        "you sent that was never acknowledged — a late answer can still arrive, so\n"
-        "check before sending it again.\n"
+        "`status` is 'pending' for a task still running, 'interrupted' for one\n"
+        "paused for input (the row's `question` says what it wants; continue it\n"
+        "with `{continue_tool}`), or 'unreachable' for a task you sent that was never\n"
+        "acknowledged — a late answer can still arrive, so check before sending\n"
+        "it again.\n"
         "\n"
         "An answer that already arrived is not listed; it is in this conversation."
     ),
@@ -2670,6 +2842,8 @@ def describe_tool(net: Net, verb: str) -> str:
     return _TOOL_TEXTS[verb].format(
         send=net.tool(SEND_MESSAGE),
         cancel=net.tool(CANCEL_TASK),
+        task_response=net.tool(TASK_RESPONSE),
+        continue_tool=net.tool(CONTINUE_TASK),
         group_leave=net.tool(GROUP_LEAVE),
         group_list=net.tool(GROUP_LIST),
         group_member_list=net.tool(GROUP_MEMBER_LIST),

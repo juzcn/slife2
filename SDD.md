@@ -93,7 +93,7 @@ providers, and the WeChat bridge.
 |---|---|
 | [README.md](README.md) | User manual and normative description of user-facing behavior. |
 | Model Context Protocol specification | Wire protocol implemented by every server. |
-| A2A-over-MQTT published profile | Wire protocol used by the peer and subagent networks. |
+| A2A-over-MQTT profile 0.1 (`emqx/mqtt-for-ai`, `specification/0.1/basic/mqtt_transport.md`, over A2A v1.0.0) | Wire protocol used by the peer and subagent networks; §9.2 states the Core conformance claim. |
 | OpenAI Chat Completions API | Model wire protocol. |
 | OpenAI Responses API | Model wire protocol. |
 | Anthropic Messages API | Model wire protocol. |
@@ -1516,15 +1516,20 @@ a reply.
 ### 9.2 Peer agents (A2A over MQTT)
 
 `plugins/a2a/` carries agent-to-agent traffic over MQTT, using the published
-A2A-over-MQTT profile. Its remote instance is the peer network of agents; a
-subagent is not a member of it and exists only on the local instance, under its
-maker.
+A2A-over-MQTT profile 0.1 (over A2A v1.0.0). Its remote instance is the peer
+network of agents; a subagent is not a member of it and exists only on the
+local instance, under its maker.
 
-The wire is the `a2a-over-mqtt` SDK's: the topic tree, the retained agent card
-and presence, the JSON-RPC envelopes and their MQTT properties, the task
-lifecycle and per-task deduplication, and the requester's retry ladder. What
-this package writes is the glue around that SDK; interoperability follows from
-the wire being somebody else's.
+The wire vocabularies are the `a2a-over-mqtt` SDK's: the topic tree, the
+retained agent card and presence, the JSON-RPC envelopes and their MQTT
+properties, and the protocol's classification helpers. The responder lifecycle
+is a local derivation in `plugins/a2a/responder.py`, because the profile's
+interrupted-task continuation is not in SDK 0.1.0 (upstream `main` is
+identical): a round may end `input-required`/`auth-required` without a
+terminal, a new `SendMessage` with the same `Task.id` and `context_id` resumes
+it, a terminal task refuses a new message, and `GetTask` reports the current
+task. The requester ladder and the two stores are this package's. The
+conformance claim at the end of this section names what is covered.
 
 **One identity per agent.** The agent name is the MQTT client id and the last
 segment of the request topic. Two processes answering to one name trade the
@@ -1537,15 +1542,20 @@ Rules specific to this system:
 1. **Presence follows a window.** A `join` call held open puts an agent on the
    mesh. Online and offline are notes, not messages; no turn runs and the model
    is not told. The roster is `peer_agent_list`.
-2. **A task is completed by the model's own call.** A `task_response` sent with
-   `peer_agent_send_message` settles the inbound bridge before the call returns;
-   a turn that ends in prose sends nothing.
-3. **A restart drops in-flight inbound tasks.** The bridge and the reply topic
-   are process-local. The requester's `peer_agent_task_list` names a task it never
-   heard back about, and a re-send is a fresh request.
-4. **Outcome is one word, and it is the peer's own.** Completed, cancelled, and
-   failed come from the reply. The one outcome no reply can produce — the retry
-   ladder running out — is `UNREACHABLE`, the requester's own failure.
+2. **A round is settled by the model's own call.** `peer_agent_task_response`
+   settles it with `completed`, `failed` or `rejected`; `input_required` and
+   `auth_required` pause it instead, and `peer_agent_continue_task` resumes a
+   paused task this conversation sent. A turn that ends in prose sends nothing.
+3. **A restart drops working rounds; task state is process-local.** The bridge
+   and the reply topic are process-local, and an interrupted task's question
+   and context live only here, so a restart loses the ability to continue it.
+   The peer's own `task_list` names what it is waiting on, and it can cancel or
+   re-send.
+4. **Outcome is one word, and it is the peer's own.** `completed`, `cancelled`,
+   `failed` and `rejected` come from the reply; `input_required` and
+   `auth_required` mean the task is paused and open. The one outcome no reply
+   can produce — the retry ladder running out — is `UNREACHABLE`, the
+   requester's own failure.
 5. **A withdrawal outranks a late answer.** Cancelling publishes the withdrawal
    first and records it only after the publish lands; a failed publish leaves the
    row pending. A later result or failure cannot rewrite an ending the caller was
@@ -1595,6 +1605,17 @@ Rules specific to this system:
     before it is published. The peer network has no authoritative roster, so its
     sends return `status: "unverified"`: the id means acceptance and publication,
     not receipt. A send that is never answered ends as an `UNREACHABLE` notice.
+19. **A paused task is continued, not re-sent.** A continuation is a
+    `SendMessage` with the same `Task.id` and `context_id` and a fresh
+    correlation; the responder couples it to the next round. The retry ladder
+    and the routing table are generation-scoped, so a late terminal from the
+    paused round cannot settle the continuation. A terminal task accepts no new
+    message, and a continuation that never lands restores the paused state with
+    its question.
+20. **A failed reply is a verdict with guidance, not an automatic retry.** The
+    transport ladder stops at the first correlated reply. `-32003`/`-32004`
+    render as failures the model may re-send; `-32005` is not retryable; an
+    unknown task is `-32001`. A peer's `failed` or `rejected` is terminal.
 
 **Why directed topics.** Group traffic uses
 `event/{org}/{unit}/member:<name>`, one topic per recipient, subscribed by that
@@ -1605,22 +1626,41 @@ give every group message a task lifecycle and a reply ladder it has no use for.
 The directed topic needs no subscription state beyond the fixed
 `member:<own name>`.
 
-The model-facing tools are `peer_agent_send_message`, `peer_agent_cancel_task`,
+The model-facing tools are `peer_agent_send_message`,
+`peer_agent_task_response`, `peer_agent_continue_task`, `peer_agent_cancel_task`,
 `peer_agent_list`, `peer_agent_task_list`, `peer_agent_broadcast`, and the six
 group tools `peer_agent_group_set`, `peer_agent_group_list`,
 `peer_agent_group_member_list`, `peer_agent_group_remove`,
 `peer_agent_group_leave`, `peer_agent_group_send_message`.
-`peer_agent_task_list` reports `pending` (still running) and `unreachable` (the
-requester's retry ladder ran out); an unknown id is reported as withdrawn or
-never seen.
+`peer_agent_task_list` reports `pending` (still running), `interrupted` (paused;
+its `question` says what it wants) and `unreachable` (the requester's retry
+ladder ran out); an unknown id is reported as withdrawn or never seen.
 
-A task id is a `uuid4` hex string. The in-memory task store is shared by every
-mesh in the process, a record carries the agent it belongs to, and the store is
-pruned with a soft cap.
+A task id is a canonical `uuid4` string, generated by the requester as the
+profile requires; a continuation reuses it and the original `context_id`, while
+a new task gets fresh ids. The in-memory task store is shared by every mesh in
+the process, a record carries the agent it belongs to, and the store is pruned
+with a soft cap.
 
 **The requester half is also a command.** `slife2 probe` sends one
 `task_request` and prints the terminal artifact; it is a peer, not a channel, and
 it reads no turn store. §10.5 has the one-shot argument.
+
+**Profile conformance.** The implementation targets A2A-over-MQTT profile 0.1
+(`emqx/mqtt-for-ai`, `specification/0.1/basic/mqtt_transport.md`) over A2A
+v1.0.0 and is **Core Conformant**: retained discovery and presence, the
+request/reply topic model and correlation, QoS 1, requester-generated `Task.id`
+with retry dedup, multi-turn continuation, the mandatory error mapping, and
+`a2a-status`/LWT. It also implements the profile's observable SHOULDs:
+`GetTask` after a stalled stream, a 30 s `stream_idle`, and the optional
+`a2a-context-id` property. Out of scope and not claimed: the Extended profiles
+(pool/shared-subscription dispatch, JKU trust, broker-managed status,
+observability, native binary artifacts, `ubsp-v1`, push notifications), durable
+task state across a restart, non-text parts, and a synchronous standalone-Message
+reply path. Two implementation notes: the auxiliary requester connection uses
+`{org}/{unit}/{agent}-out` (the identity connection is exact; the suffix names
+the requester role), and the private `message` type is a harness chat shape, not
+a profile message.
 
 ### 9.3 Agent tasks
 
@@ -2234,32 +2274,27 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **An interrupted peer task.** The SDK's `TERMINAL_KINDS` is wider than its
-   name: `input_required` ends the requester's retry ladder. This system has no
-   way to continue an interrupted task, so such a reply is recorded and read as
-   `failed`. *Resolution would require:* a continuation path, or a fourth outcome
-   that both the task store and the display carry.
-2. **An inbound message that reaches no window.** A peer's message that cannot be
+1. **An inbound message that reaches no window.** A peer's message that cannot be
    handed over is logged and dropped, on the assumption that the peer re-sends
    it. The SDK acknowledges a request before the handler runs, so the peer's
    retry ladder has already stopped. *Resolution would require:* an explicit
    "could not deliver" the peer reads, or a delivery retried until a window
    appears.
-3. **A scheduled run and the task that runs it.** A run is tied to its task by a
+2. **A scheduled run and the task that runs it.** A run is tied to its task by a
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-4. **Where a retry policy lives.** Two channels keep their own backoff and reset
+3. **Where a retry policy lives.** Two channels keep their own backoff and reset
    it on different events. *Resolution would require:* one policy in
    `helpers/timeouts.py` and one reason to reset.
-5. **A model call that ends the turn with an empty answer.** The wire is checked
+4. **A model call that ends the turn with an empty answer.** The wire is checked
    at the hop, but a provider that legitimately answers with nothing has the same
    shape. *Resolution would require:* deciding whether an empty answer is a
    verdict or a failure, and stating it once.
-6. **Dump search scope.** A dump is in the same corpus as the cabinet's other
+5. **Dump search scope.** A dump is in the same corpus as the cabinet's other
    kinds, but a search that names no kind excludes it. *Resolution would
    require:* a stated rule, not a query filter.
-7. **Correlation across processes.** A log line carries `agent/subagent`, and a
+6. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
 
@@ -2269,6 +2304,7 @@ The following are not implemented in this version:
 
 | Capability | Why deferred | Current behavior |
 |---|---|---|
+| Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Executing `cli:` entries | The entry is already a catalogue row; execution is an argv, not a shell. | Entries are catalogued and discoverable; no tool runs them. |
 | Executing playbook scripts | Same shape as the `cli:` entry, plus `skills:` environment injection. | `skill_use` returns the playbook text; the model runs commands itself. |
 | Fetching a URL in `file_save` | Not designed yet. | `file_save` copies local files only. |
@@ -2405,6 +2441,7 @@ The four shapes an undeclared fallback takes:
 | The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
+| A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |
 
 Everything not in this register is a defect. A path that substitutes a weaker
 behaviour and is not here is an undeclared fallback. A fallback that stops being

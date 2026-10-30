@@ -43,6 +43,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     BROADCAST,
     CANCEL_TASK,
+    CONTINUE_TASK,
     GROUP_LEAVE,
     GROUP_LIST,
     GROUP_MEMBER_LIST,
@@ -55,6 +56,7 @@ from slife2.libs.host.config import (
     REMOTE,
     SEND_MESSAGE,
     TASK_LIST,
+    TASK_RESPONSE,
     A2ASettings,
     Net,
     default_config,
@@ -74,8 +76,13 @@ from slife2.plugins.a2a.mesh import (
     _MAX_ATTEMPTS,
     _MAX_CORR_ENTRIES,
     _MAX_TRACKED_SENDS,
+    AUTH_REQUIRED,
+    CANCELLED,
     COMPLETED,
     FAILED,
+    INPUT_REQUIRED,
+    REJECTED,
+    UNREACHABLE,
     A2AMesh,
     AgentCard,
     AgentName,
@@ -96,6 +103,7 @@ from slife2.plugins.a2a.server import (
     MAX_QUEUED,
     PEER_BROADCAST,
     PEER_CANCEL_TASK,
+    PEER_CONTINUE_TASK,
     PEER_GROUP_LEAVE,
     PEER_GROUP_LIST,
     PEER_GROUP_MEMBER_LIST,
@@ -105,6 +113,7 @@ from slife2.plugins.a2a.server import (
     PEER_LIST,
     PEER_SEND_MESSAGE,
     PEER_TASK_LIST,
+    PEER_TASK_RESPONSE,
     USED,
     WINDOW,
     Session,
@@ -136,6 +145,7 @@ def settings(**overrides: Any) -> A2ASettings:
 #: the list and the reader.
 A2A_TYPES = (
     "task_request",
+    "task_input",
     "task_response",
     "cancel_task",
     "message",
@@ -349,17 +359,21 @@ def test_the_instance_id_is_read_out_of_the_nested_card() -> None:
     assert _card_instance({"capabilities": {"extensions": ["nonsense"]}}) == ""
 
 
-def test_a_terminal_reply_says_which_of_the_three_endings_it_was() -> None:
+def test_a_reply_says_which_ending_it_was() -> None:
     def wire(state: str) -> dict:
         return {"result": {"statusUpdate": {"status": {"state": state}}}}
 
-    assert _reply_state(wire("TASK_STATE_COMPLETED")) == "completed"
-    assert _reply_state(wire("TASK_STATE_CANCELED")) == "cancelled"
-    assert _reply_state(wire("TASK_STATE_FAILED")) == "failed"
-    assert _reply_state({}) == "failed"
+    assert _reply_state(wire("TASK_STATE_COMPLETED")) == COMPLETED
+    assert _reply_state(wire("TASK_STATE_CANCELED")) == CANCELLED
+    assert _reply_state(wire("TASK_STATE_FAILED")) == FAILED
+    assert _reply_state(wire("TASK_STATE_REJECTED")) == REJECTED
+    assert _reply_state(wire("TASK_STATE_INPUT_REQUIRED")) == INPUT_REQUIRED
+    assert _reply_state(wire("TASK_STATE_AUTH_REQUIRED")) == AUTH_REQUIRED
+    assert _reply_state({}) == FAILED
 
 
-def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
+@pytest.mark.asyncio
+async def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     """**The store evicts; the peer answers anyway.**
 
     The task store is process-local and drops the oldest *pending* record once
@@ -371,8 +385,9 @@ def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> None:
     """
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     corr = "corr-pruned"
-    mesh._corr_to_task[corr] = TASK
-    mesh._sends[TASK] = _OutboundSend(TASK, PEER, "session", "{}")
+    send = _OutboundSend(TASK, PEER, "session", "{}")
+    mesh._corr_to_task[corr] = (TASK, send.round)
+    mesh._sends[TASK] = send
     assert get_store().get(TASK) is None, "the state this test is about"
 
     done: list[tuple[Any, ...]] = []
@@ -1345,7 +1360,7 @@ async def test_a_cancelled_first_publish_keeps_the_route_for_a_late_reply(
 
     ((task_id, send),) = list(mesh._sends.items())
     assert get_store().get(task_id).status == "pending"
-    assert mesh._corr_to_task.get(task_id) == task_id
+    assert (task_id, send.round) in mesh._corr_to_task.values()
     await until(lambda: not send.loops, "the ladder was left waiting")
     await mesh.disconnect()
 
@@ -1462,58 +1477,33 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_publish_that_never_left_is_not_a_rung_of_the_ladder(
+async def test_a_publish_that_never_left_still_spends_an_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The ladder counts what a peer could have seen.**
+    """**The profile counts what the broker did not accept.**
 
-    `_deliver` incremented `send.attempts` before `_publish_attempt` and left
-    the count standing when that raised — which is exactly what a mesh does
-    while its outbound client is mid-reconnect (`_publish_props` answers
-    `A2A mesh is not connected.`).  The first two backoffs are ~1 s and ~2 s, so
-    a broker or outbound outage of three or four seconds spent the whole budget
-    without a single publish leaving: the send was abandoned, the conversation
-    was pushed "it was sent 3 times over the requester retry ladder and never
-    acknowledged" — a count of things no peer could have received — and nothing
-    retried it when the link came back, so the task row `pending` that
-    `peer_agent_send_message` promised a result for stayed `pending` for ever.
-
-    The link is down for four publishes and then up, and both halves of that
-    are asserted: the send is still there when the link returns, and the rungs
-    it then spends are its own.
+    `_publish_props` answers ``A2A mesh is not connected.`` while the outbound
+    client is mid-reconnect, and the retry profile's retry-eligible conditions
+    include "publish not accepted by the client/broker path" until
+    ``max_attempts``.  The budget therefore moves, and the ladder's last word
+    reaches the conversation instead of retrying a dead link for ever.
     """
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     send = _OutboundSend("task-the-link-was-down-for", PEER, "session", "{}")
-    published: list[str] = []
-    down = 4
-
-    async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
-        published.append(topic)
-
-    real = mesh._publish_attempt
 
     async def a_link_that_drops(send_: _OutboundSend, corr: str) -> None:
-        nonlocal down
-        if down:
-            down -= 1
-            raise RuntimeError("A2A mesh is not connected.")
-        await real(send_, corr)
+        raise RuntimeError("A2A mesh is not connected.")
 
-    monkeypatch.setattr(mesh, "_publish_props", lands)
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
     monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_drops)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
     monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
 
     await mesh._deliver(send)
 
-    # `send.attempts` starts at one: the send's own publish, which `send_message`
-    # makes before `_deliver` is started.  The two retries the profile allows are
-    # the two that follow, and both of them have to reach the wire.
-    assert len(published) == _MAX_ATTEMPTS - 1, (
-        f"the ladder was spent on publishes that never left: "
-        f"{len(published)} of {_MAX_ATTEMPTS - 1} rungs reached the broker"
-    )
-    assert send.attempts == _MAX_ATTEMPTS, "the rungs that landed are not counted"
+    assert send.attempts == _MAX_ATTEMPTS, "the failed publishes were not counted"
+    assert done and done[0][2] == UNREACHABLE, "and the ladder ended in words"
 
 
 @pytest.mark.asyncio
@@ -1544,40 +1534,20 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     monkeypatch.setattr(mesh, "_probe_own_name", the_name_is_taken)
     send = _OutboundSend("task-in-flight-over-a-reconnect", PEER, "session", "{}")
+    # A working frame arrived; the terminal is still owed, so this is a send
+    # a reconnect must not forget.
+    send.delivered = True
     mesh._sends[send.task_id] = send
-
-    published: list[str] = []
-    down = True
-
-    async def lands(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
-        published.append(topic)
-
-    real_attempt = mesh._publish_attempt
-
-    async def a_link_that_is_down(send_: _OutboundSend, corr: str) -> None:
-        if down:
-            raise RuntimeError("A2A mesh is not connected.")
-        await real_attempt(send_, corr)
-
-    monkeypatch.setattr(mesh, "_publish_props", lands)
-    monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_is_down)
-    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
-
-    loop = asyncio.create_task(mesh._deliver(send))
-    send.loops.add(loop)
-    await asyncio.sleep(0.05)  # it is on the ladder, and its rung cannot land
+    mesh._corr_to_task["corr-over-reconnect"] = (send.task_id, send.round)
 
     with pytest.raises(RuntimeError, match="holds the name"):
         await mesh.connect()
 
-    assert not loop.done(), "the connect attempt destroyed a send that was in flight"
-    assert loop in send.loops and send.task_id in mesh._sends
-
-    # The link comes back, and the rung the send was owed reaches the broker.
-    down = False
-    await asyncio.wait_for(loop, timeout=5.0)
-    assert published, "the send was never published once the mesh was back"
+    assert send.task_id in mesh._sends, "the reviving teardown dropped the send"
+    assert mesh._corr_to_task.get("corr-over-reconnect") == (
+        send.task_id,
+        send.round,
+    ), "and its reply can no longer route"
 
 
 @pytest.mark.asyncio
@@ -1937,7 +1907,7 @@ def build(**overrides: Any) -> FastMCP:
 
 @pytest.mark.asyncio
 async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
-    """The eleven model-facing tools: five on the mesh, six for groups.
+    """The thirteen model-facing tools: seven on the mesh, six for groups.
 
     There is no `system_health` tool: `peer_agent_list` reports the mesh's
     state.
@@ -1952,6 +1922,7 @@ async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
     model_names = [
         PEER_BROADCAST,
         PEER_CANCEL_TASK,
+        PEER_CONTINUE_TASK,
         PEER_GROUP_LEAVE,
         PEER_GROUP_LIST,
         PEER_GROUP_MEMBER_LIST,
@@ -1961,6 +1932,7 @@ async def test_the_mesh_tools_are_the_models_and_nothing_else_is() -> None:
         PEER_LIST,
         PEER_SEND_MESSAGE,
         PEER_TASK_LIST,
+        PEER_TASK_RESPONSE,
     ]
     assert sorted(by_name) == sorted([FORGET, JOIN, *model_names])
 
@@ -2011,9 +1983,11 @@ async def test_the_local_instance_serves_the_local_network() -> None:
         for verb in (
             SEND_MESSAGE,
             CANCEL_TASK,
+            CONTINUE_TASK,
             LIST,
             BROADCAST,
             TASK_LIST,
+            TASK_RESPONSE,
             GROUP_SET,
             GROUP_LIST,
             GROUP_MEMBER_LIST,
@@ -2112,8 +2086,8 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
     async with Client(build(on_the_mesh=True)) as client:
         with pytest.raises(ToolError, match="task_id is required"):
             await client.call_tool(
-                PEER_SEND_MESSAGE,
-                {"agent": PEER, "message": "done", "message_type": "task_response"},
+                PEER_TASK_RESPONSE,
+                {"agent": PEER, "outcome": "completed", "message": "done"},
                 meta=client_meta(AGENT),
             )
 
@@ -2122,44 +2096,64 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
 async def test_a_task_response_settles_the_task_in_the_same_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**The send call is the settlement, and there is no second step.**
+    """**The response call is the settlement, and there is no second step.**
 
     A model that decides to answer a task it was given calls
-    `message_type='task_response'`; the tool resolves that task's bridge
-    (`A2AMesh.complete_task`) before it returns, so the terminal reply leaves
-    in the same call.  The harness only ever delivered the inbound message —
-    it has no part in settling a task (`_drain` no longer speaks for a turn).
+    `peer_agent_task_response`; the tool resolves that round's bridge
+    (`A2AMesh.task_response`) before it returns, so the peer's status leaves in
+    the same call.  The harness only ever delivered the inbound message — it
+    has no part in settling a task (`_drain` no longer speaks for a turn).
     """
-    completed: list[tuple[str, str, bool]] = []
+    settled: list[tuple[str, str, str]] = []
 
     async def connect(self: Any) -> None:
         self._connected = True
 
-    def complete_task(
-        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
-    ) -> str:
-        completed.append((task_id, result, cancelled))
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
         return "ok"
 
     monkeypatch.setattr(A2AMesh, "connect", connect)
-    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
 
     async with Client(build(on_the_mesh=True)) as client:
         answer = await client.call_tool(
-            PEER_SEND_MESSAGE,
+            PEER_TASK_RESPONSE,
             {
                 "agent": PEER,
-                "message": "the answer",
-                "message_type": "task_response",
                 "task_id": TASK,
+                "outcome": "completed",
+                "message": "the answer",
             },
             meta=client_meta(AGENT),
         )
 
-    assert completed == [(TASK, "the answer", False)], (
+    assert settled == [(TASK, "completed", "the answer")], (
         "the tool did not settle the task it answered"
     )
-    assert answer.data == {"peer": PEER, "task_id": TASK, "completed": True}
+    assert answer.data == {
+        "peer": PEER,
+        "task_id": TASK,
+        "outcome": "completed",
+        "state": "closed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_response_needs_a_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    async with Client(build(on_the_mesh=True)) as client:
+        with pytest.raises(ToolError, match="message is required"):
+            await client.call_tool(
+                PEER_TASK_RESPONSE,
+                {"agent": PEER, "task_id": TASK, "outcome": "input_required"},
+                meta=client_meta(AGENT),
+            )
 
 
 @pytest.mark.asyncio

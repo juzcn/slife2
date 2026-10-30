@@ -811,13 +811,20 @@ agent-task:
 
 ### Peer agent
 
-agent 的 peer 是其他 agent，通过发布的 A2A-over-MQTT profile 通信。人在
-`slife2.yaml` 里写 `peer_agent:`；模型看到 `peer_agent_*` 工具，协议名不出现在它读到
-的任何内容里。
+agent 的 peer 是其他 agent，通过发布的 A2A-over-MQTT profile（0.1，基于 A2A
+v1.0.0）通信。人在 `slife2.yaml` 里写 `peer_agent:`；模型看到 `peer_agent_*` 工具，
+协议名不出现在它读到的任何内容里。
+
+peer 网络和 subagent 网络对该 profile **符合 Core**。wire 原语来自
+`a2a-over-mqtt` SDK；补上 profile 的「中断任务续传、终态任务拒收新消息、`GetTask`」
+的 responder 生命周期是本项目的。可选的 Extended profile（共享订阅分发、信任元数据、
+broker 管理状态、原生二进制 artifact、端到端载荷保护、推送通知）未实现。
 
 | 工具 | 用途 |
 |---|---|
-| `peer_agent_send_message` | 发送任务、完成收到的任务，或发送消息。`message_type` 选择操作。 |
+| `peer_agent_send_message` | 发送任务（`task_request`）或普通消息；结果稍后到达。 |
+| `peer_agent_task_response` | 结算 peer 发来的任务：completed、failed、rejected，或保持打开的中断状态。 |
+| `peer_agent_continue_task` | 继续一个你发出、被 peer 暂停等待输入的任务。 |
 | `peer_agent_cancel_task` | 撤回本 agent 发出的任务。 |
 | `peer_agent_list` | 先列本 agent，再按名字列每个 peer。 |
 | `peer_agent_task_list` | 列出未结束的任务：等待回答的，以及仍欠回答的。 |
@@ -832,14 +839,20 @@ agent 的 peer 是其他 agent，通过发布的 A2A-over-MQTT profile 通信。
 `task_request` 立即返回 id；结果稍后带
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker 到达。id 和
 `status: "unverified"` 描述的是接受与否，不是送达；无人回答的发送会在重试阶梯耗尽时
-以 unreachable 通知回来。没有可轮询的东西。`task_response` 用 marker 里的 `task_id`
-完成本 agent 收到的任务；方向由 `from` 携带。
+以 unreachable 通知回来。没有可轮询的东西。
+
+peer 可能暂停任务并索取输入；那一行类型是 `task_input`，并写明问题。任务仍然打开：
+用 `peer_agent_continue_task`（同一个任务、同一个对话）回答，或用
+`peer_agent_cancel_task` 撤回。不要另发一个新任务——那是第二件事。peer 发来的任务用
+`peer_agent_task_response` 结算；`completed`、`failed`、`rejected` 结束它，
+`input_required`/`auth_required` 则暂停它，等 peer 续传。
 
 每个 agent 一个 mesh：同一名字的第二个活实例在加入前被拒绝。subagent 不在这个网络上。
 
 在线状态画成 harness 行（`[⚡ jill online]`），不是轮次。名册是 `peer_agent_list`。
 窗口持有 `join` 调用期间 agent 在线；`--headless` 在没有窗口的情况下持有同一个调用。
-进行中的任务保存在内存中，因此重启从零开始。
+任务状态保存在内存中，因此重启从零开始；被暂停任务的问题和 context 也是进程本地的，
+仍在等待的 peer 会在自己的 `peer_agent_task_list` 里看到该任务。
 
 群组是有 owner 的具名名册；没有邀请或接受流程。群消息是向其他每个成员的即发即忘事件
 ——绝不回到发送者——带 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker
@@ -864,8 +877,8 @@ peer_agent:
 ```
 
 省略 `broker:` 时，peer 网络使用 subagent 网络的 broker 地址。省略 `peer_agent:` 则
-机器完全不在该网络上。重启会丢弃所有进行中的任务；仍在等待的 peer 会在自己的
-`peer_agent_task_list` 里看到该任务并重发，重发作为新请求到达。
+机器完全不在该网络上。重启会丢弃进行中的轮次和被暂停的任务；仍在等待的 peer 会在
+自己的 `peer_agent_task_list` 里看到该任务，可以取消或重发，重发作为新请求到达。
 
 ### Subagent
 
@@ -876,8 +889,8 @@ prompt 和自己的对话，但没有进程、没有窗口、不占用 agent 名
 
 subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
 与 peer agent 相同的操作、以 `subagent_*` 名字寻址：`subagent_send_message`、
-`subagent_cancel_task`、`subagent_list`、`subagent_task_list`、
-`subagent_broadcast`，以及六个群组工具。成员身份就是目录集合，点名的名字不是成员时，
+`subagent_task_response`、`subagent_continue_task`、`subagent_cancel_task`、
+`subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。成员身份就是目录集合，点名的名字不是成员时，
 发送在发布前被拒绝。这个网络上的群消息带 `[SubagentGroup:…]` 和
 `subagent_group:<group>:<sender>` channel，无论发送者是创建者还是兄弟，每个成员
 维护自己的 `groups.yaml`。

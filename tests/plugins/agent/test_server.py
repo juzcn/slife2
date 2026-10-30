@@ -3030,8 +3030,8 @@ async def test_a_headless_prompt_names_its_reply_tools_not_their_schema(
     **A headless window has nobody to read prose** (`slife2 --headless`,
     SDD §10.5): what reaches it came from a peer, a channel or a schedule, so
     the answer has to leave the way the sender can receive it.  The prompt names
-    the tools; the arguments — `task_response`, `message_type` — stay in the
-    tool descriptions, exactly as they do for a subagent
+    the tools; the arguments — `outcome`, `message_type` — stay in the tool
+    descriptions, exactly as they do for a subagent
     (`test_a_subagents_prompt_names_its_reply_tools_not_their_schema`).
     """
     from slife2.libs.host.runtime import AgentClaim, clear_claim, write_claim
@@ -3048,11 +3048,12 @@ async def test_a_headless_prompt_names_its_reply_tools_not_their_schema(
     finally:
         clear_claim(DEFAULT_AGENT)
 
+    assert "peer_agent_task_response" in prompt
     assert "peer_agent_send_message" in prompt
+    assert "peer_agent_continue_task" in prompt
     assert "peer_agent_broadcast" in prompt
     assert "peer_agent_group_send_message" in prompt
     assert "channel's own send tool" in prompt
-    assert "task_response" not in prompt
     assert "message_type" not in prompt
 
 
@@ -3817,13 +3818,13 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
 ) -> None:
     """The prompt names the reply tools; their schema stays on the tools.
 
-    A subagent's answer has to leave by `subagent_send_message`,
-    `subagent_broadcast` or `subagent_group_send_message`, and naming them here
-    is what points a fresh conversation at the right ones.  *How* to answer —
-    `task_response` and `message_type` — and the group's casual-silence rule
-    belong to the tool descriptions, where the model already reads the
-    arguments; repeating them here would be a second schema kept in step by
-    hand.
+    A subagent's answer has to leave by `subagent_task_response`,
+    `subagent_send_message`, `subagent_continue_task`, `subagent_broadcast` or
+    `subagent_group_send_message`, and naming them here is what points a fresh
+    conversation at the right ones.  *How* to answer — `outcome` and
+    `message_type` — and the group's casual-silence rule belong to the tool
+    descriptions, where the model already reads the arguments; repeating them
+    here would be a second schema kept in step by hand.
     """
     backend = FakeBackend(text_turn("hello"))
     server = build_server(
@@ -3833,10 +3834,11 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
     await send(server, "one", subagent="researcher")
 
     prompt = backend.calls[0][0][0].content
+    assert "subagent_task_response" in prompt
     assert "subagent_send_message" in prompt
+    assert "subagent_continue_task" in prompt
     assert "subagent_broadcast" in prompt
     assert "subagent_group_send_message" in prompt
-    assert "task_response" not in prompt
     assert "message_type" not in prompt
 
 

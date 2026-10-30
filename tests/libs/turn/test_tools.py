@@ -274,7 +274,9 @@ async def test_unreadable_arguments_on_a_catalogued_name_keep_the_load_hint() ->
 
     found = ToolRegistry([], exists=present)
     text, ok = await found.execute(
-        ToolCall(id="c1", name="peer_agent_send_message", error="its arguments are not JSON")
+        ToolCall(
+            id="c1", name="peer_agent_send_message", error="its arguments are not JSON"
+        )
     )
 
     assert ok is False

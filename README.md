@@ -922,12 +922,22 @@ current clock, which does not follow a daylight-saving change.
 ### Peer agents
 
 An agent's peers are other agents, reached over the published A2A-over-MQTT
-profile. A person writes `peer_agent:` in `slife2.yaml`; the model sees
-`peer_agent_*` tools, and the protocol name appears in nothing it reads.
+profile (0.1, over A2A v1.0.0). A person writes `peer_agent:` in
+`slife2.yaml`; the model sees `peer_agent_*` tools, and the protocol name
+appears in nothing it reads.
+
+The peer and subagent networks are **Core Conformant** to the profile. The wire
+primitives are the `a2a-over-mqtt` SDK's; the responder lifecycle that adds the
+profile's interrupted-task continuation, terminal-task rejection and `GetTask`
+is this project's. The optional Extended profiles (shared-subscription dispatch,
+trust metadata, broker-managed status, native binary artifacts, end-to-end
+payload protection, push notifications) are not implemented.
 
 | Tool | Purpose |
 |---|---|
-| `peer_agent_send_message` | Send a task, complete a received task, or send a message. `message_type` selects the operation. |
+| `peer_agent_send_message` | Send a task (`task_request`) or a plain message; the result arrives later. |
+| `peer_agent_task_response` | Settle a task a peer sent you: completed, failed, rejected, or the interrupted states that keep it open. |
+| `peer_agent_continue_task` | Resume a task you sent that the peer paused for input. |
 | `peer_agent_cancel_task` | Withdraw a task this agent sent. |
 | `peer_agent_list` | List this agent first, then every peer by name. |
 | `peer_agent_task_list` | List open tasks: those waiting for an answer and those still owed one. |
@@ -943,16 +953,25 @@ A `task_request` returns an id immediately; the result arrives later with a
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker. The id
 and `status: "unverified"` describe acceptance, not delivery; a send nothing
 answers comes back as an unreachable notice when the retry ladder runs out. There
-is nothing to poll. `task_response` completes a task this agent was sent, using
-the `task_id` from the marker; the direction is carried by `from`.
+is nothing to poll.
+
+A peer may pause a task and ask for input; that line has type `task_input` and
+names the question. The task is still open: answer it with
+`peer_agent_continue_task` (the same task and conversation) or withdraw it with
+`peer_agent_cancel_task`. Do not send a new task — that would be a second job.
+A task a peer sends you is settled with `peer_agent_task_response`; `completed`,
+`failed` and `rejected` end it, while `input_required`/`auth_required` pause it
+for the peer to continue.
 
 There is one mesh per agent: a second live instance under one name is refused
 before it joins. A subagent is not on this network.
 
 Presence is drawn as a harness line (`[⚡ jill online]`), not a turn. The roster is
 `peer_agent_list`. An agent is on the mesh while a window holds its `join` call;
-`--headless` holds the same call without a window. In-flight tasks are held in
-memory, so a restart starts with none.
+`--headless` holds the same call without a window. Task state is held in memory,
+so a restart starts with none; a paused task's question and context are
+process-local too, and the peer's own `peer_agent_task_list` names what it is
+waiting on.
 
 A group is a named roster with an owner; no invitation or acceptance is involved.
 Group messages are fire-and-forget events to every other member — never back to
@@ -983,8 +1002,9 @@ peer_agent:
 
 If `broker:` is omitted, the peer network uses the subagent network's broker
 address. Omitting `peer_agent:` keeps the machine off the network entirely. A
-restart drops every in-flight task; a peer still waiting sees the task in its own
-`peer_agent_task_list` and re-sends it, which arrives as a new request.
+restart drops working rounds and paused tasks alike; a peer still waiting sees
+the task in its own `peer_agent_task_list` and can cancel or re-send it, and a
+re-send arrives as a new request.
 
 ### Subagents
 

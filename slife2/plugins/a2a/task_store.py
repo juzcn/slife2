@@ -1,21 +1,41 @@
 """Task store — shared A2A task-lifecycle tracking.
 
-Every A2A operation (send, result, cancel) records metadata here so the mesh can
-attribute results to their send and answer cancel/status lookups.  Internal
-bookkeeping only — the wire is the official ``a2a-over-mqtt`` SDK.
+Every A2A operation (send, result, cancel, continuation) records metadata here
+so the mesh can attribute results to their send and answer cancel/status
+lookups.  Internal bookkeeping only — the wire is the official
+``a2a-over-mqtt`` SDK.
+
+**A terminal status never flips.**  The four terminal words are the profile's
+``completed``/``failed``/``cancelled``/``rejected``; once one is written, a
+late result, error, rejection or withdrawal leaves it alone.  `interrupted`
+is the one non-terminal word beyond `pending`: the peer paused the task and a
+continuation can resume it.
 
 The same in-memory store serves every agent's mesh in this process.  That is
-right for a reason rather than by inheritance: a task id is a `uuid4().hex`, so
-two agents cannot collide in the table, and the agent a record names is written
-into the record and read from it rather than taken from whichever mesh is
-asking.  What the sharing costs is one prune cap instead of one per agent, which
-is a bound on memory and not a fact about any task.
+right for a reason rather than by inheritance: a task id is a `uuid4` hex
+string, so two agents cannot collide in the table, and the agent a record
+names is written into the record and read from it rather than taken from
+whichever mesh is asking.  What the sharing costs is one prune cap instead of
+one per agent, which is a bound on memory and not a fact about any task.
 """
 
 from __future__ import annotations
 
 import time as _time
 from dataclasses import dataclass, field
+
+# ── Status vocabulary ───────────────────────────────────────────────────
+
+PENDING = "pending"
+INTERRUPTED = "interrupted"
+COMPLETED = "completed"
+FAILED = "failed"
+CANCELLED = "cancelled"
+REJECTED = "rejected"
+
+#: A task cannot leave these.  One tuple so a guard, the prune order and the
+#: display cannot drift from one another.
+TERMINAL_STATUSES = (COMPLETED, FAILED, CANCELLED, REJECTED)
 
 # ── Task record ─────────────────────────────────────────────────────────
 
@@ -37,7 +57,7 @@ class TaskRecord:
     """Target agent this task was sent to."""
 
     status: str
-    """One of ``"pending"``, ``"completed"``, ``"failed"``, ``"cancelled"``."""
+    """One of ``PENDING``, ``INTERRUPTED``, or `TERMINAL_STATUSES`."""
 
     created_at: float = field(default_factory=_time.monotonic)
 
@@ -48,7 +68,7 @@ class TaskRecord:
 class TaskStore:
     """Task-lifecycle store shared by every mesh in this process."""
 
-    MAX_RECORDS = 500  # soft cap — oldest completed entries pruned first
+    MAX_RECORDS = 500  # soft cap — oldest terminal entries pruned first
 
     def __init__(self) -> None:
         self._records: dict[str, TaskRecord] = {}
@@ -60,53 +80,73 @@ class TaskStore:
         rec = TaskRecord(
             task_id=task_id,
             agent_name=agent_name,
-            status="pending",
+            status=PENDING,
         )
         self._records[task_id] = rec
         self._maybe_prune()
         return rec
 
+    def record_resume(self, task_id: str) -> TaskRecord | None:
+        """A continuation went out: the task is running again, not waiting."""
+        rec = self._records.get(task_id)
+        if rec is None:
+            return None
+        if rec.status == INTERRUPTED:
+            rec.status = PENDING
+        return rec
+
+    def record_interrupt(self, task_id: str) -> TaskRecord | None:
+        """The peer paused the task; it is not terminal and can be continued."""
+        rec = self._records.get(task_id)
+        if rec is None:
+            return None
+        if rec.status not in TERMINAL_STATUSES:
+            rec.status = INTERRUPTED
+        return rec
+
     def record_result(self, task_id: str) -> TaskRecord | None:
         """Mark a task as completed.
 
-        A task that is already in a terminal state (cancelled or failed) stays
-        there — a result arriving from a peer after the caller was told about a
-        cancel must not flip the record back to completed and contradict what
-        the caller saw.  A ``pending`` record flips to completed here and the
-        late result still delivers.
+        A task that is already terminal stays there — a result arriving from a
+        peer after the caller was told about a cancel/rejection must not flip
+        the record back to completed and contradict what the caller saw.
         """
         rec = self._records.get(task_id)
         if rec is None:
             return None
-        if rec.status in ("cancelled", "failed"):
+        if rec.status in TERMINAL_STATUSES:
             return rec
-        rec.status = "completed"
+        rec.status = COMPLETED
         return rec
 
     def record_error(self, task_id: str) -> TaskRecord | None:
-        """Mark a task as failed.
-
-        **A withdrawal outranks a failure, for `record_result`'s reason.**  A
-        caller who was told `cancelled` has already acted on it, and a peer that
-        answers the cancel with `failed` — the SDK publishes exactly that when
-        its handler raises on a cancelled task — must not rewrite the ending the
-        caller saw.  The two recorders are one rule with one exception, and it
-        was only in the other one.
-        """
+        """Mark a task as failed.  A terminal status is never rewritten."""
         rec = self._records.get(task_id)
         if rec is None:
             return None
-        if rec.status == "cancelled":
+        if rec.status in TERMINAL_STATUSES:
             return rec
-        rec.status = "failed"
+        rec.status = FAILED
+        return rec
+
+    def record_reject(self, task_id: str) -> TaskRecord | None:
+        """The peer declined the task.  It is terminal, and not a failure."""
+        rec = self._records.get(task_id)
+        if rec is None:
+            return None
+        if rec.status in TERMINAL_STATUSES:
+            return rec
+        rec.status = REJECTED
         return rec
 
     def record_cancel(self, task_id: str) -> TaskRecord | None:
-        """Mark a task as cancelled."""
+        """Mark a task as cancelled.  A terminal status is never rewritten."""
         rec = self._records.get(task_id)
         if rec is None:
             return None
-        rec.status = "cancelled"
+        if rec.status in TERMINAL_STATUSES:
+            return rec
+        rec.status = CANCELLED
         return rec
 
     # ── Read ──────────────────────────────────────────────────────────
@@ -119,7 +159,7 @@ class TaskStore:
 
     def _maybe_prune(self) -> None:
         """Drop oldest entries when over max — terminal status first, then the
-        oldest pending so a burst of async sends to slow/hung peers can't grow
+        oldest pending, so a burst of async sends to slow/hung peers can't grow
         the in-memory store past the cap."""
         if len(self._records) <= self.MAX_RECORDS:
             return
@@ -128,7 +168,7 @@ class TaskStore:
         ordered = sorted(
             self._records.values(),
             key=lambda r: (
-                r.status not in ("completed", "cancelled", "failed"),
+                r.status not in TERMINAL_STATUSES,
                 r.created_at,
             ),
         )

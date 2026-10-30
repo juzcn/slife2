@@ -228,10 +228,11 @@ class Deliver:
     name_probe: float = 1.0
     reply_first: float = 15.0
     keepalive: float = 25.0
-    #: The gap allowed between two frames of one task reply.  The responder's
-    #: keepalive is `keepalive`, so this has to outlast it or a long task looks
-    #: dead between two pings.
-    stream_idle: float = 60.0
+    #: The gap allowed between two frames of one task reply.  The profile's
+    #: default is 30 s; the responder's keepalive is 25 s, so a live task still
+    #: answers inside this window.  Past it the requester asks ``GetTask``
+    #: rather than re-publishing the request.
+    stream_idle: float = 30.0
     #: One probe's whole task budget: a headless window may run the task for as
     #: long as its turns take, and the probe waits for its `task_response`.
     probe: float = 3600.0
@@ -287,6 +288,12 @@ class Pacing:
     #: poll.
     broker_poll: float = 0.1
     mesh_retry_delay: float = 1.0
+    #: How long a terminal inbound task is kept for retry dedup, and how long
+    #: an interrupted one is kept waiting for a continuation.  The profile's
+    #: SDK uses 300 s for completed dedup; an interrupted task can wait on a
+    #: model or a person, so the one window covers both and the store's cap is
+    #: the real memory bound.
+    a2a_task_ttl: float = 1800.0
     #: The terminal's pause before offering to attach again.
     reconnect: float = 2.0
     #: Between two attempts at a local lock.
