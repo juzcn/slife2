@@ -15,6 +15,10 @@ one transaction against a local file, it is already the shortest path through a
 sequence of awaited steps, and wrapping it would be a thread hop per write for a
 wait nobody is making.
 
+**A write is `{kind}_save`, whatever the kind does with it.**  A note's save
+replaces, a diary's and a report's append, a file's copies bytes in — the
+difference is the tool's docstring, not three verbs in three names.
+
 **Six kinds, one corpus.**  A note, a day, a saved file, a report, a dump and
 an image are rows of one table with a `kind` column, so a search ranks them
 against each other rather than against their own kind — a rank only means
@@ -388,11 +392,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     # ── Notes ────────────────────────────────────────────────────────────
 
-    @mcp.tool(name="note_edit", meta=FOR_THE_MODEL)
-    async def note_edit(
+    @mcp.tool(name="note_save", meta=FOR_THE_MODEL)
+    async def note_save(
         ctx: Context, subject: str, content: str, tags: str = ""
     ) -> dict[str, Any]:
-        """Write a private note about a subject, replacing what it held.
+        """Save a private note about a subject, replacing what it held.
 
         A note is a document: this is the whole of what the cabinet keeps under
         that subject, and an older body goes.
@@ -415,7 +419,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
-        logger.info("note_edit subject=%s", subject)
+        logger.info("note_save subject=%s", subject)
         return facts(row)
 
     @mcp.tool(name="note_remove", meta=FOR_THE_MODEL)
@@ -477,11 +481,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
     # ── The diary ────────────────────────────────────────────────────────
 
-    @mcp.tool(name="diary_write", meta=FOR_THE_MODEL)
-    async def diary_write(
+    @mcp.tool(name="diary_save", meta=FOR_THE_MODEL)
+    async def diary_save(
         ctx: Context, content: str, date: str = "", tags: str = ""
     ) -> dict[str, Any]:
-        """Write today's diary entry, or add to the entry for a given day.
+        """Save today's diary entry, or add to the entry for a given day.
 
         A later write of the same day appends, so this is safe to call again:
         two entries under one date are two facts about that day.
@@ -510,7 +514,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
-        logger.info("diary_write date=%s", day)
+        logger.info("diary_save date=%s", day)
         return facts(row)
 
     @mcp.tool(name="diary_read", meta=FOR_THE_MODEL)

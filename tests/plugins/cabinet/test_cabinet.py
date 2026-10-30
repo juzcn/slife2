@@ -132,7 +132,7 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
         record.write_text("fork: false\n", encoding="utf-8")
         await payload(
             client,
-            "note_edit",
+            "note_save",
             subagent="researcher",
             subject="own",
             content="the subagent's note",
@@ -144,7 +144,7 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
         record.write_text("fork: true\n", encoding="utf-8")
         await payload(
             client,
-            "note_edit",
+            "note_save",
             subagent="researcher",
             subject="shared",
             content="the maker's note",
@@ -176,11 +176,11 @@ async def test_the_tools_are_the_models_except_the_ones_the_harness_calls() -> N
 
     harness = {"dump_save", "image_save", "image_source"}
     assert set(listed) == {
-        "note_edit",
+        "note_save",
         "note_remove",
         "note_read",
         "note_list",
-        "diary_write",
+        "diary_save",
         "diary_read",
         "diary_list",
         "file_save",
@@ -227,9 +227,9 @@ async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
     """A note is a document: the second write *is* the note, and the file too."""
     async with Client(cabinet()) as client:
         wrote = await payload(
-            client, "note_edit", subject="Python", content="first", tags="py"
+            client, "note_save", subject="Python", content="first", tags="py"
         )
-        await ask(client, "note_edit", subject="Python", content="second")
+        await ask(client, "note_save", subject="Python", content="second")
         read = await payload(client, "note_read", subject="Python")
 
     assert [wrote[key] for key in ("kind", "key", "title", "tags", "summary")] == [
@@ -388,8 +388,8 @@ async def test_a_days_diary_accumulates_because_two_entries_are_two_facts() -> N
     distinction between a document and a log, kept whole.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "diary_write", content="morning", date="2026-10-11")
-        await ask(client, "diary_write", content="evening", date="2026-10-11")
+        await ask(client, "diary_save", content="morning", date="2026-10-11")
+        await ask(client, "diary_save", content="evening", date="2026-10-11")
         read = await payload(client, "diary_read", date="2026-10-11")
         with pytest.raises(ToolError, match="no note about"):
             await ask(client, "note_remove", subject="2026-10-11")
@@ -431,7 +431,7 @@ async def test_a_bad_date_is_refused_rather_than_stored() -> None:
     """`2026-13-45` is a typo, and a diary keyed by it is a day that cannot sort."""
     async with Client(cabinet()) as client:
         with pytest.raises(ToolError, match="is not a date"):
-            await ask(client, "diary_write", content="x", date="2026-13-45")
+            await ask(client, "diary_save", content="x", date="2026-13-45")
 
     assert store().get(DIARY, "2026-13-45") is None
 
@@ -440,7 +440,7 @@ async def test_a_bad_date_is_refused_rather_than_stored() -> None:
 async def test_removing_a_note_takes_its_file_row_and_vectors() -> None:
     """A remove is one operation over three stores, or it is a leak."""
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="gone", content=f"{WORD} here")
+        await ask(client, "note_save", subject="gone", content=f"{WORD} here")
         assert (bag() / "notes" / "gone.md").exists()
         answer = await payload(client, "note_remove", subject="gone")
         with pytest.raises(ToolError, match="no note about"):
@@ -468,7 +468,7 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
     """
     async with Client(cabinet()) as client:
         for index in range(3):
-            await ask(client, "note_edit", subject=f"n{index}", content=f"body {index}")
+            await ask(client, "note_save", subject=f"n{index}", content=f"body {index}")
         first = await payload(client, "note_list", limit=2)
         second = await payload(client, "note_list", limit=2, offset=2)
 
@@ -704,7 +704,7 @@ async def test_a_short_embedding_answer_is_refused_at_the_write_path() -> None:
 
     async with Client(server) as client:
         with pytest.raises(Exception, match="searchable only by keyword"):
-            await ask(client, "note_edit", subject="partial", content=TWO_CHUNKS)
+            await ask(client, "note_save", subject="partial", content=TWO_CHUNKS)
 
     assert store().get(NOTE, "partial") is None, "a write that raised stored nothing"
     assert not list((bag() / "notes").glob("partial*")), "and wrote no mirror"
@@ -721,7 +721,7 @@ async def test_a_short_embedding_answer_is_refused_at_the_search_path() -> None:
     the sentence is this corpus's.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="alpha", content=f"a note about {WORD}")
+        await ask(client, "note_save", subject="alpha", content=f"a note about {WORD}")
 
     server = build_server(load(), embedder=ShortEmbedder())
     async with Client(server) as client:
@@ -743,8 +743,8 @@ async def test_the_two_legs_answer_different_questions() -> None:
     ordered it.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="alpha", content=f"{WORD} in the body")
-        await ask(client, "note_edit", subject="beta", content="nothing to match")
+        await ask(client, "note_save", subject="alpha", content=f"{WORD} in the body")
+        await ask(client, "note_save", subject="beta", content="nothing to match")
         # One row, because the worded row is first and the routed meaning leg
         # also returns the unrelated note behind it at similarity 0.
         by_words = await payload(client, "cabinet_search", keywords=[WORD], limit=1)
@@ -773,7 +773,7 @@ async def test_words_alone_reach_the_meaning_leg() -> None:
     """
     async with Client(cabinet()) as client:
         await ask(
-            client, "note_edit", subject="partial", content=f"a note about {WORD}"
+            client, "note_save", subject="partial", content=f"a note about {WORD}"
         )
         answer = await payload(client, "cabinet_search", keywords=[WORD, OTHER])
 
@@ -808,7 +808,7 @@ async def test_a_mark_is_about_what_the_row_shows() -> None:
     # The word at 300, so the printed excerpt (the first 120) cannot show it.
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(source)], title="quarterly figures")
-        await ask(client, "note_edit", subject="deep", content=f"{'x' * 300} {WORD}")
+        await ask(client, "note_save", subject="deep", content=f"{'x' * 300} {WORD}")
         by_title = await payload(client, "cabinet_search", keywords=["quarterly"])
         by_tail = await payload(client, "cabinet_search", keywords=[WORD])
 
@@ -832,7 +832,7 @@ async def test_a_mark_is_decided_by_the_index_s_own_tokenizer() -> None:
     which is the only way the two can be the same rule.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="spelling", content="A Café on the wall")
+        await ask(client, "note_save", subject="spelling", content="A Café on the wall")
         answer = await payload(client, "cabinet_search", keywords=["cafe"])
 
     assert answer["results"][0]["matched_in"] == "line", (
@@ -878,8 +878,8 @@ async def test_the_open_pass_runs_on_another_thread() -> None:
 async def test_a_window_narrows_without_deciding() -> None:
     """A range removes rows from the page; it does not re-rank what is left."""
     async with Client(cabinet()) as client:
-        await ask(client, "diary_write", content="old", date="2020-01-01")
-        await ask(client, "diary_write", content="new", date="2030-01-01")
+        await ask(client, "diary_save", content="old", date="2020-01-01")
+        await ask(client, "diary_save", content="new", date="2030-01-01")
         windowed = await payload(
             client, "cabinet_search", kind=DIARY, since="2025-01-01"
         )
@@ -902,7 +902,7 @@ async def test_a_day_axis_reads_a_datetime_bound_as_the_day_it_names() -> None:
     """
     async with Client(cabinet()) as client:
         for day in ("2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"):
-            await ask(client, "diary_write", content=f"on {day}", date=day)
+            await ask(client, "diary_save", content=f"on {day}", date=day)
         by_day = await payload(client, "diary_list", until="2026-10-07")
         by_moment = await payload(client, "diary_list", until="2026-10-07T12:00:00")
         equal = await payload(
@@ -927,7 +927,7 @@ async def test_a_search_with_neither_input_browses() -> None:
     the browse a caller did not ask for.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="one", content="x")
+        await ask(client, "note_save", subject="one", content="x")
         browsed = await payload(client, "cabinet_search")
         with pytest.raises(ToolError, match="no search term"):
             await ask(client, "cabinet_search", keywords=["  "])
@@ -940,8 +940,8 @@ async def test_a_search_with_neither_input_browses() -> None:
 async def test_a_search_can_name_one_kind() -> None:
     """A filter narrows what is shown and never what is ranked."""
     async with Client(cabinet()) as client:
-        await ask(client, "note_edit", subject="same-word", content=WORD)
-        await ask(client, "diary_write", content=WORD, date="2026-10-11")
+        await ask(client, "note_save", subject="same-word", content=WORD)
+        await ask(client, "diary_save", content=WORD, date="2026-10-11")
         only_files = await payload(client, "cabinet_search", keywords=[WORD], kind=FILE)
         only_notes = await payload(client, "cabinet_search", keywords=[WORD], kind=NOTE)
 

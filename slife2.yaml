@@ -176,7 +176,7 @@ tool_load:
     - cabinet_search
     - file_read
     - note_read
-    - note_edit
+    - note_save
     - report_save
     # A tool output the harness shortened.
     - dump_read

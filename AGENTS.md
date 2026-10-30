@@ -15,7 +15,7 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 |---|---|
 | Tools | `tool_search`, `tool_list`, `func_tool_load` |
 | Memory | `turn_list`, `turn_read`, `turn_search`, `turn_summarize` |
-| Cabinet | `note_edit`, `note_remove`, `note_read`, `note_list`, `diary_write`, `diary_read`, `diary_list`, `file_save`, `file_remove`, `file_read`, `file_list`, `report_save`, `report_read`, `report_list`, `cabinet_search`, `cabinet_summarize`, `dump_read` |
+| Cabinet | `note_save`, `note_remove`, `note_read`, `note_list`, `diary_save`, `diary_read`, `diary_list`, `file_save`, `file_remove`, `file_read`, `file_list`, `report_save`, `report_read`, `report_list`, `cabinet_search`, `cabinet_summarize`, `dump_read` |
 | Subagents | `subagent_set`, `subagent_remove`, `subagent_list`, `subagent_send_message`, `subagent_task_response`, `subagent_continue_task`, `subagent_broadcast`, `subagent_task_list`, `subagent_cancel_task`, `subagent_group_set`, `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`, `subagent_group_leave`, `subagent_group_send_message` |
 | Peers | `peer_agent_send_message`, `peer_agent_task_response`, `peer_agent_continue_task`, `peer_agent_cancel_task`, `peer_agent_list`, `peer_agent_task_list`, `peer_agent_broadcast`, `peer_agent_group_set`, `peer_agent_group_list`, `peer_agent_group_member_list`, `peer_agent_group_remove`, `peer_agent_group_leave`, `peer_agent_group_send_message` |
 | Agent tasks | `agent_task_start`, `agent_task_status`, `agent_task_list`, `agent_task_cancel` |

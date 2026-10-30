@@ -415,7 +415,7 @@ servers:
 tool_result:
   tokens: {WINDOW}
 
-# `note_edit` is the tool the turn test asks the model for, so it is in the
+# `note_save` is the tool the turn test asks the model for, so it is in the
 # list the model is offered.  Every other cabinet tool is on demand, which is
 # what a plugin's tools are now; the first eight are what the system works by.
 tool_load:
@@ -428,7 +428,7 @@ tool_load:
     - skill_use
     - check_async
     - cancel_async
-    - note_edit
+    - note_save
 
 providers:
   stub:
@@ -653,7 +653,7 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
         ChatAnswer(
             tool=ToolAsk(
                 id="call_e2e_note",
-                name="note_edit",
+                name="note_save",
                 arguments=json.dumps(
                     {"subject": "e2e verification", "content": NOTE_BODY}
                 ),
@@ -678,7 +678,7 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     # plugins use — so the catalogue reached the model and the name the model
     # wrote is the name the hub routes by.  Read from the turn's own call and
     # not the discriminator's, which is a completion and carries no tools.
-    assert "note_edit" in provider.tool_names[1], provider.tool_names[1]
+    assert "note_save" in provider.tool_names[1], provider.tool_names[1]
 
     # And the tool's answer came back into the conversation: the third request
     # carries a `tool` message the loop built out of what the cabinet process
