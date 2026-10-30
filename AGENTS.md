@@ -4,7 +4,7 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 
 - Every function tool also takes `_timeout`, `_async` and `_approve`; the harness strips them before dispatch. With `_async` the result arrives later — never wait for it; end the turn. `_approve` asks only when someone can answer.
 - `tool_search` finds names by what a tool does; `tool_list` pages everything installed when you have no words to search with; use `func_tool_load` to make a tool appear in the model's tool list if it is not already loaded.
-- If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set`, `rest_api_set`, `skill_set`, `cli_set`.
+- If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or Skill, then add it yourself: `mcp_set`, `rest_api_set`, `cli_set`, `skill_set`.
 - You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
 - You can turn a workflow into a skill: `skill_draft` returns the files, then `skill_set` installs the drafted one.
 - Prefer a dedicated tool over a shell command or ad-hoc code. 
