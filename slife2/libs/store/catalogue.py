@@ -176,7 +176,6 @@ _TOOL_COLUMNS = frozenset(
         "source_id",
         "remote_name",
         "schema",
-        "returns",
         "status",
         "load_status",
         "last_loaded",
@@ -227,14 +226,11 @@ def _check_values(ddl: str, column: str) -> set[str] | None:
 #: The `bm25` column weights, in `tool_fts`'s column order.  A tool is found by
 #: its name far more often than by anything else about it — "the calculator" and
 #: `calc` have to meet — so the name dominates and the schema, which is
-#: long and full of punctuation, counts for least.  The weights put `returns`
-#: at the description's second tier: it is prose about the answer,
-#: and a model may look for a tool by what it hands back ("returns an image
-#: URL") as well as by what it does.
-BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5, 1.0)
+#: long and full of punctuation, counts for least.
+BM25_WEIGHTS = (5.0, 2.0, 1.0, 1.0, 0.5)
 
 #: The columns the keyword index holds, in `BM25_WEIGHTS`'s order.
-_FTS_FIELDS = ("name", "description", "category", "source_id", "schema", "returns")
+_FTS_FIELDS = ("name", "description", "category", "source_id", "schema")
 
 #: The version of the keyword index's own **field list and weights**, beside the
 #: shared text rules in `slife2.libs.store.textindex.RULES_VERSION`.  A change
@@ -242,7 +238,7 @@ _FTS_FIELDS = ("name", "description", "category", "source_id", "schema", "return
 #: index for its rows, and `_sync_text_index` rebuilds it when the stamp differs.
 #: Separate from `RULES_VERSION` because the turn and cabinet indexes share that
 #: one, and a catalogue column is not a reason to rebuild either of them.
-TOOL_FTS_VERSION = "2"
+TOOL_FTS_VERSION = "3"
 
 #: The keyword table's DDL, in one place because two writers use it: the schema
 #: at open, and `_sync_text_index` when the field list has moved.  A version
@@ -286,7 +282,6 @@ CREATE TABLE IF NOT EXISTS tool (
     source_id   TEXT NOT NULL DEFAULT '',
     remote_name TEXT NOT NULL DEFAULT '',
     schema      TEXT NOT NULL DEFAULT '',
-    returns     TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'enabled'
                 CHECK (status IN ('enabled','disabled','error')),
     load_status TEXT NOT NULL DEFAULT 'unloaded'
@@ -361,11 +356,11 @@ def _in_list(values: Any) -> str:
 #: uses it; this covers *which columns* `tool_document` reads, which is a fact
 #: about this catalogue and about nothing else.  It is folded into the vector
 #: identity where the index is built, because a stored vector is a function of
-#: the text it was made from: adding `returns` makes every existing vector the
+#: the text it was made from: adding a column makes every existing vector the
 #: wrong vector for its row, exactly as changing the model does, and the rebuild
 #: is the same one.  **Bump it with any change to `tool_document`** — including
 #: the order of what it joins, because the text is what the vector is of.
-TOOL_DOCUMENT_VERSION = "2"
+TOOL_DOCUMENT_VERSION = "3"
 
 
 def _vector_identity(embedder: Embedder) -> str:
@@ -383,18 +378,14 @@ def _vector_identity(embedder: Embedder) -> str:
 def tool_document(row: Mapping[str, Any]) -> str:
     """The text a tool is *about*, which is what its vector is a vector of.
 
-    Name, description, the answer's `Returns:` prose and the parameter schema,
-    and nothing else: those are the four things a model chooses a tool by, and
-    the rest of the row is bookkeeping (`source_id`, `status`) that describes the
-    record rather than the tool.  Through `storable` for the reason the turn's
-    text is: this string goes out as JSON on its way to an embedding model, and a
-    lone surrogate cannot be encoded.
+    Name, description and the parameter schema, and nothing else: those are the
+    three things a model chooses a tool by, and the rest of the row is
+    bookkeeping (`source_id`, `status`) that describes the record rather than the
+    tool.  Through `storable` for the reason the turn's text is: this string goes
+    out as JSON on its way to an embedding model, and a lone surrogate cannot be
+    encoded.
 
-    **`returns` is in both legs.**  It is prose about what an answer holds, so
-    the semantic leg reads it as meaning; the keyword leg holds it too, because
-    "which tool returns the phase of the moon" is a question a model may write
-    in words, and the two legs should agree about what a row is about.  A change
-    to this function is a change to the vector identity
+    A change to this function is a change to the vector identity
     (`TOOL_DOCUMENT_VERSION`).
 
     **Every row has one, so every row has a vector.**  The *schema* is worth
@@ -404,9 +395,6 @@ def tool_document(row: Mapping[str, Any]) -> str:
     argument list.  A name is never empty, so the document never is either.
     """
     parts = [str(row.get("name") or ""), str(row.get("description") or "").strip()]
-    returned = str(row.get("returns") or "")
-    if returned.strip():
-        parts.append(returned)
     schema = str(row.get("schema") or "")
     if schema.strip():
         parts.append(schema)
@@ -422,7 +410,6 @@ def _tool_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source_id": str(row["source_id"]),
         "remote_name": str(row["remote_name"]),
         "schema": str(row["schema"]),
-        "returns": str(row["returns"]),
         "status": str(row["status"]),
         "load_status": str(row["load_status"]),
     }
@@ -462,12 +449,11 @@ def _search_dict(
     `matched_in` is the other half and is not a score: the row's own text holds
     every word the caller gave, which is certain where a similarity is graded —
     and is the one piece of evidence a cutoff cannot express, since a row can be
-    named exactly whatever it scores (`pandoc`, at 0.514).  **`"line"`,
-    `"returns"` or `"rest"` says where those words are**: the line the answer
-    prints, the tool's `Returns:` prose, or the rest of what it is indexed by
-    (its parameters, or a skill's whole playbook).  That is not a detail: a mark
-    whose evidence is not on the page is a mark the reader cannot check, and the
-    two hidden columns are different things to go and read.
+    named exactly whatever it scores (`pandoc`, at 0.514).  **`"line"` or
+    `"rest"` says where those words are**: the line the answer prints, or the
+    rest of what it is indexed by (its parameters, or a skill's whole playbook).
+    That is not a detail: a mark whose evidence is not on the page is a mark the
+    reader cannot check.
     """
     found: dict[str, Any] = {column: str(row[column]) for column in _SEARCH_COLUMNS}
     schema = str(row["schema"] or "")
@@ -885,7 +871,6 @@ class ToolStore:
                     "source_id": source,
                     "remote_name": str(row.get("remote_name") or name),
                     "schema": str(row.get("schema") or ""),
-                    "returns": str(row.get("returns") or ""),
                 }
                 # **A row may carry its own verdict.**  Every other row's status
                 # is the *runtime's* — `source_state` is the only writer, because
@@ -923,12 +908,12 @@ class ToolStore:
                 }
                 if moved:
                     updates.append({**previous, **fields, "moved": sorted(moved)})
-                    # A moved description, schema or returns text is a moved
-                    # document: those three are all `tool_document` reads, so the
-                    # vector must be remade.  Anything else (a `remote_name`, a
-                    # status) leaves the document identical, and re-embedding it
-                    # would buy the same text at the price of a call.
-                    if moved.keys() & {"description", "schema", "returns"}:
+                    # A moved description or schema is a moved document: those
+                    # are both `tool_document` reads, so the vector must be
+                    # remade.  Anything else (a `remote_name`, a status) leaves
+                    # the document identical, and re-embedding it would buy the
+                    # same text at the price of a call.
+                    if moved.keys() & {"description", "schema"}:
                         documents.append((name, tool_document(fields)))
                 # Except a row that stated its own: a merge re-enables what an
                 # older *config* switched off, and for a family with no
@@ -967,9 +952,9 @@ class ToolStore:
                 try:
                     cursor = connection.execute(
                         "INSERT INTO tool(name, description, category, source_id,"
-                        " remote_name, schema, returns, status, load_status,"
+                        " remote_name, schema, status, load_status,"
                         " last_loaded, last_used)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             entry["name"],
                             entry["description"],
@@ -977,7 +962,6 @@ class ToolStore:
                             entry["source_id"],
                             entry["remote_name"],
                             entry["schema"],
-                            entry["returns"],
                             entry["status"],
                             entry["load_status"],
                             entry["last_loaded"],
@@ -1794,23 +1778,15 @@ class ToolStore:
             self._rows_in_order, ordered, clauses, values, limit
         )
 
-        # **Where the words are, for the rows they matched** — `schema` and
-        # `returns` are the two columns of the six a row is indexed by that the
-        # line does not print, so a row can be marked `matched your words` with
-        # nothing on the line to check it against: a skill's whole playbook rides
-        # in `schema`, and a tool's `Returns:` prose is behind the line too.  A
-        # mark whose evidence cannot be seen is a mark that cannot be checked,
-        # so the answer says which side it is on — and which hidden column,
-        # because "the parameters" is the wrong place to look for a word that is
-        # in the answer's description.
+        # **Where the words are, for the rows they matched** — `schema` is the
+        # one column of the five a row is indexed by that the line does not
+        # print, so a row can be marked `matched your words` with nothing on the
+        # line to check it against: a skill's whole playbook rides in `schema`,
+        # and so do a tool's parameters.  A mark whose evidence cannot be seen is
+        # a mark that cannot be checked, so the answer says which side it is on.
         page = [int(row["rowid"]) for row in rows]
         inline = (
             await asyncio.to_thread(self._matched_in_line, expression, page)
-            if worded
-            else set()
-        )
-        by_returns = (
-            await asyncio.to_thread(self._matched_in_returns, expression, page)
             if worded
             else set()
         )
@@ -1824,8 +1800,6 @@ class ToolStore:
                         if int(row["rowid"]) not in worded
                         else "line"
                         if int(row["rowid"]) in inline
-                        else "returns"
-                        if int(row["rowid"]) in by_returns
                         else "rest"
                     ),
                 )
@@ -1837,20 +1811,17 @@ class ToolStore:
     def _matched_in_line(self, expression: str, rowids: Sequence[int]) -> set[int]:
         """Which of those rows hold the words in the columns the line prints.
 
-        **The line prints four of the six columns a row is indexed by** — name,
-        description, category and source_id — so `schema` and `returns` are
-        unshown, and `{name description category source_id}` is the scope whose
-        miss means "the words are behind the line".  `_matched_in_returns`
-        splits that miss into the two columns, because a reader sent to the
-        parameters for a word that is in the answer's description is looking in
-        the wrong place.  It used to be `{name description}`, and that was wrong
-        about the renderer: a row whose words are in its category or its
-        source_id was reported `rest`, and a reader told the evidence is behind
-        the line looks for it in the parameters — the same uncheckable mark this
-        function exists to prevent, one step along.  `schema` carries something
-        substantial — a tool's parameters, or for a skill the whole playbook
-        (`tool_document` argues the column, and this is not the place it is what
-        it says).
+        **The line prints four of the five columns a row is indexed by** — name,
+        description, category and source_id — so `schema` is unshown, and
+        `{name description category source_id}` is the scope whose miss means
+        "the words are behind the line".  It used to be `{name description}`,
+        and that was wrong about the renderer: a row whose words are in its
+        category or its source_id was reported `rest`, and a reader told the
+        evidence is behind the line looks for it in the parameters — the same
+        uncheckable mark this function exists to prevent, one step along.
+        `schema` carries something substantial — a tool's parameters, or for a
+        skill the whole playbook (`tool_document` argues the column, and this is
+        not the place it is what it says).
 
         The filter is a column-scoped `MATCH` rather than a token comparison in
         Python: what counts as a word here is `unicode61`'s answer, and a second
@@ -1869,31 +1840,6 @@ class ToolStore:
                         f"{{name description category source_id}} : ({expression})",
                         *rowids,
                     ),
-                )
-            }
-
-    def _matched_in_returns(self, expression: str, rowids: Sequence[int]) -> set[int]:
-        """Which of those rows hold the words in their `Returns:` prose.
-
-        **The other hidden column, and the one a word about an answer turns up
-        in.**  A row the line does not show and the schema does not hold is
-        reported `returns`, not `rest`: the two are different places to go and
-        read, and the model-facing label is the pointer.
-
-        A row that matches in both `schema` and `returns` is reported here — the
-        words are in the answer's description, so that is a true pointer, and a
-        single word cannot say both.  `rest` is left for the parameters, where
-        no `Returns:` text is involved.
-        """
-        if not rowids:
-            return set()
-        with self._connect() as connection:
-            return {
-                int(row["rowid"])
-                for row in connection.execute(
-                    "SELECT f.rowid AS rowid FROM tool_fts f"
-                    f" WHERE tool_fts MATCH ? AND f.rowid IN ({_marks(rowids)})",
-                    (f"{{returns}} : ({expression})", *rowids),
                 )
             }
 
@@ -2189,7 +2135,6 @@ class ToolStore:
                         "category": str(row["category"]),
                         "source_id": str(row["source_id"]),
                         "schema": str(row["schema"]),
-                        "returns": str(row["returns"]),
                     },
                 )
             set_index_meta(connection, "meta", text_version=stamp)
@@ -2212,7 +2157,7 @@ class ToolStore:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, t.name AS name, t.description AS description,"
-                " t.schema AS schema, t.returns AS returns FROM tool t"
+                " t.schema AS schema FROM tool t"
                 " LEFT JOIN tool_chunk c ON c.name = t.name"
                 " WHERE c.id IS NULL"
                 " ORDER BY t.rowid"

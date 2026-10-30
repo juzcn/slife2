@@ -32,7 +32,6 @@ from slife2.libs.store.catalogue import (
     STATUS_ERROR,
     UNLOADED,
     ToolStore,
-    tool_document,
 )
 from slife2.libs.store.index import fuse_ranked
 from tests.fakes import StubEmbedder
@@ -987,42 +986,6 @@ def test_a_reconnect_never_touches_what_the_model_decided(tmp_path) -> None:
     assert rows_in(store)[0][2] == LOADED
 
 
-def test_a_tools_returns_text_is_a_row_and_absence_is_the_empty_string(
-    tmp_path,
-) -> None:
-    """The `Returns:` prose a tool declared, stored beside its input schema.
-
-    **It is not in the description**, because FastMCP drops the section when it
-    has parameters to parse; the plugin reads it from the docstring and puts it
-    on `_meta`, and this is where the hub keeps it.  A tool that says nothing
-    gets the empty string, which is the column's own default and the spelling
-    every reader already treats as "nothing here".
-    """
-    store = store_at(tmp_path)
-    merge(
-        store,
-        "context",
-        "plugin",
-        [tool("turn_list", returns="`entries` — one per turn.\n`total` — how many.")],
-    )
-    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
-
-    with sqlite3.connect(store.path) as connection:
-        stored = dict(connection.execute("SELECT name, returns FROM tool"))
-    assert stored == {
-        "arxiv__search": "",
-        "turn_list": "`entries` — one per turn.\n`total` — how many.",
-    }
-    assert store.route("turn_list")["returns"].startswith("`entries`")
-    # And it is part of what the row's *vector* is made of, which is the half a
-    # semantic search reads.  The keyword index is deliberately not given it.
-    document = tool_document(store.route("turn_list"))
-    assert "`entries` — one per turn." in document
-    absent = tool_document(store.route("arxiv__search"))
-    assert absent == "arxiv__search\n\nDoes a thing.", "absence adds no text"
-    assert "n/a" not in absent
-
-
 # --- loading and the budget ---------------------------------------------------
 
 
@@ -1247,32 +1210,6 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
-def test_a_tool_is_found_by_a_word_only_its_returns_text_carries(tmp_path) -> None:
-    """**`returns` is in the keyword leg too**, which is the one place the two
-    legs' contracts differ.
-
-    The semantic document and the keyword index both hold the `Returns:` prose,
-    because a model may look for a tool by what it hands back — "which tool
-    returns the phase of the moon" — as well as by what it does.  A keyword
-    match is the precision half: the word is present in this row's text and
-    nowhere else's.
-    """
-    store = store_at(tmp_path)
-    merge(
-        store,
-        "cabinet",
-        "plugin",
-        [tool("moon_phase", "Report something.", returns="`phase` — the silver orb.")],
-    )
-    merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
-
-    keyword = asyncio.run(store.search(keywords=["silver"], embedder=EMBEDDER))
-    assert keyword["results"][0]["name"] == "moon_phase"
-    assert keyword["results"][0]["matched_in"] == "returns", (
-        "the word is in the Returns prose, which no line prints"
-    )
-
-
 def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
     tmp_path,
 ) -> None:
@@ -1312,30 +1249,29 @@ def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
 def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
     """**A column added to the index is a shape change, not a rules change.**
 
-    The live FTS5 table from the build before `returns` has five columns, and an
-    insert built from the current six fails on it — so `_sync_text_index` drops
-    and recreates the table when its stamp moves, rather than `DELETE`ing rows
-    and putting them back into a table that cannot hold them.  The stamp here is
-    the one the previous build wrote.
+    The live FTS5 table from an older build has fewer columns, and an insert
+    built from the current list fails on it — so `_sync_text_index` drops and
+    recreates the table when its stamp moves, rather than `DELETE`ing rows and
+    putting them back into a table that cannot hold them.  The stamp here is the
+    one the previous build wrote.
     """
     store = store_at(tmp_path)
     merge(
         store,
         "cabinet",
         "plugin",
-        [tool("moon_phase", "Report something.", returns="`phase` — of the moon.")],
+        [tool("moon_phase", "Report something.")],
     )
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP TABLE tool_fts")
         connection.execute(
             "CREATE VIRTUAL TABLE tool_fts USING fts5("
-            "name, description, category, source_id, schema, "
+            "name, description, category, source_id, "
             f"{textindex.FTS_TOKENIZE})"
         )
         connection.execute(
-            "INSERT INTO tool_fts(rowid, name, description, category, source_id,"
-            " schema) SELECT rowid, name, description, category, source_id, schema"
-            " FROM tool"
+            "INSERT INTO tool_fts(rowid, name, description, category, source_id)"
+            " SELECT rowid, name, description, category, source_id FROM tool"
         )
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'text_version'",
@@ -1351,13 +1287,12 @@ def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> Non
 def test_a_word_match_the_line_does_not_show_says_which_side_it_is_on(tmp_path) -> None:
     """`matched_in` names the column, and a hidden one is the case that needs it.
 
-    The values are `line`, `returns` and `rest`: the text the line prints, the
-    tool's `Returns:` prose, and everything else behind the line (a skill's
-    playbook, a tool's parameters).  `rest` is the one that used to swallow both
-    hidden columns, and a reader sent to the parameters for a word that is in
-    the answer's description looks in the wrong place.
+    The values are `line` and `rest`: the text the line prints, and everything
+    else behind the line (a skill's playbook, a tool's parameters).  `rest` is
+    the one that used to swallow the hidden column, and a reader sent to the
+    parameters for a word that is in a skill's playbook looks in the wrong place.
 
-    A row is indexed by six columns and a result line prints two of them, so a
+    A row is indexed by five columns and a result line prints four of them, so a
     row can carry `matched your words` with nothing in the printed text to check
     it against — measured on the report's own call, `skill:browser-harness`
     matched `read`/`file` through the playbook that rides in its `schema` column

@@ -220,7 +220,6 @@ class Registry:
                     "remote_name": job.name,
                     "schema": job.schema if job.ok else "",
                     "status": "error" if job.error else "enabled",
-                    "returns": "",
                 }
             )
         return rows

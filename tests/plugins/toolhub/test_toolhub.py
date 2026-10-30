@@ -521,29 +521,6 @@ async def test_a_plugins_tools_arrive_through_a_connection_like_anything_else() 
     assert row["loaded"] == 4, "a plugin's tools are in the model's list"
 
 
-@pytest.mark.asyncio
-async def test_a_plugins_returns_section_reaches_the_catalogue() -> None:
-    """**The `Returns:` prose is a fact the hub keeps, and `tools/list` has it.**
-
-    FastMCP drops the section from the description when it parses arguments, so
-    before this the catalogue had nothing saying what a tool's answer holds.  The
-    plugin's `DeclareReturns` middleware puts it on `_meta`; the hub reads the
-    same key and stores it, which is what makes it available without the hub
-    knowing anything about a plugin's source.
-    """
-    async with Client(hub_for()) as hub:
-        await hub.call_tool("list_tools", {})
-
-    with sqlite3.connect(catalogue_db()) as connection:
-        returns = connection.execute(
-            "SELECT returns FROM tool WHERE name = ?", ("turn_list",)
-        ).fetchone()
-
-    assert returns is not None, "the context plugin listed turn_list"
-    assert returns[0].startswith("`entries`"), returns[0]
-    assert "token_count" in returns[0]
-
-
 def write_skill(
     data_dir: Path,
     name: str = "one",
@@ -1610,26 +1587,6 @@ async def test_the_rows_the_words_matched_are_listed_first() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_match_in_a_tools_returns_text_says_returns_not_parameters() -> None:
-    """**The hidden column the words are in is named.**
-
-    `token_count` is in `turn_list`'s `Returns:` prose and in neither its
-    description nor its parameters; before `returns` was indexed this query
-    could not have matched the row at all, and once it was, the answer still
-    pointed at the parameters.  The label is the pointer a reader follows to
-    check the mark, so it has to name the column the words are in.
-    """
-    async with Client(hub_for()) as hub:
-        answer = await call(
-            hub, "tool_search", {"keywords": ["token_count"], "sentences": []}
-        )
-
-    rows = json.loads(answer["text"])["results"]
-    row = next(one for one in rows if one["name"] == "turn_list")
-    assert row["matched"] == "returns", row
-
-
-@pytest.mark.asyncio
 async def test_tool_search_unloaded_only_hides_what_the_list_already_holds() -> None:
     """**The default is unchanged; the flag is the discovery view.**
 
@@ -2044,7 +2001,7 @@ def test_an_entrys_rows_carry_no_verdict_of_their_own() -> None:
     )
 
     assert "status" not in row
-    assert set(row) == {"name", "description", "remote_name", "schema", "returns"}
+    assert set(row) == {"name", "description", "remote_name", "schema"}
 
 
 @pytest.mark.asyncio
@@ -2897,7 +2854,6 @@ async def test_a_damaged_schema_fails_the_list_rather_than_reading_as_no_argumen
         "source_id": "arxiv",
         "remote_name": "search",
         "schema": '{"type": "object"',
-        "returns": "",
         "status": "enabled",
         "load_status": "loaded",
     }

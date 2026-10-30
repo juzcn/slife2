@@ -1155,13 +1155,10 @@ whole list is what makes a deleted entry stop being a hit; refreshing is what
 makes dropping a directory into `skills/` or editing the configuration take
 effect at the next search. The hub's own tools are rows too.
 
-A plugin's own tools also state what their answer holds: the `Returns:` section
-of the docstring travels in `_meta` under `slife2/returns`, because FastMCP
-drops that section from the description. The hub stores it in the catalogue's
-`returns` column beside the input schema; an external server may state the same
-key. The `schema` and `returns` columns spell absence as the empty string, and a
-value that will not parse is damage: the hub refuses the list rather than
-serving the tool with no arguments.
+A plugin's own tools state the arguments they take; the hub stores the input
+schema in the catalogue's `schema` column, which spells absence as the empty
+string. A value that will not parse is damage: the hub refuses the list rather
+than serving the tool with no arguments.
 
 ### 7.3 Naming
 
@@ -1303,13 +1300,6 @@ schema.
 A field may contain a sentence, because a person reads some answers too. The
 rule is that the envelope is one shape, so a reader that knows one tool knows
 them all.
-
-**The return contract is catalogued, not advertised.** A tool's `Returns:`
-section is not part of the description the model carries: the description goes
-out with every request, and repeating the shape of every held tool's answer
-would spend that budget on a fact a model needs once. The section travels on
-`_meta` and the keyword leg reads it, so a question phrased in the answer's own
-words finds the tool.
 
 ### 7.7 Meta-parameters
 

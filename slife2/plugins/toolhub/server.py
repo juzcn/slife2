@@ -212,7 +212,6 @@ from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     LIST_SOURCES,
-    RETURNS,
     close_names,
     house_server,
     serve_plugin,
@@ -2169,11 +2168,9 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
 
     `matched` is which leg found it, and it is the half of the answer that is
     certain rather than graded: `words` is the caller's own words **in this
-    row's text**, `returns` is the same evidence in the tool's `Returns:`
-    prose, and `body`/`parameters` is the rest behind the line — a playbook's
-    whole text, or the parameters of a tool.  Naming which is what makes the
-    mark checkable instead of mysterious: a reader sent to the parameters for a
-    word that is in the answer's description looks in the wrong place.
+    row's text**, and `body`/`parameters` is the rest behind the line — a
+    playbook's whole text, or the parameters of a tool.  Naming which is what
+    makes the mark checkable instead of mysterious.
 
     `status` is left as the catalogue's own word rather than filtered to unusable
     rows: `enabled` is an answer, and "its server is switched off" is exactly what
@@ -2188,8 +2185,6 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
     matched = row.get("matched_in")
     if matched == "line":
         found_by = "words"
-    elif matched == "returns":
-        found_by = "returns"
     elif matched == "rest":
         found_by = "body" if str(row.get("category")) == SKILL else "parameters"
     else:
@@ -2370,7 +2365,6 @@ def _advertise(settings: ToolServerSettings, tool: Any) -> UpstreamTool:
         tool=tool.name,
         description=(tool.description or "").strip(),
         parameters=dict(tool.input_schema or {}),
-        returns=str((getattr(tool, "meta", None) or {}).get(RETURNS) or ""),
     )
 
 
@@ -2384,18 +2378,12 @@ def _row_of(tool: UpstreamTool) -> dict[str, Any]:
 
     An empty `schema` means "nothing to declare", and the catalogue keeps it
     empty: absence is the empty string there, and only a real schema is text.
-
-    **`returns` is the tool's `Returns:` prose**, which the plugin put on
-    `_meta` (`slife2.libs.plugin.protocol.DeclareReturns`).  Empty is the same
-    absence as an empty schema: most external servers say nothing, and that is a
-    fact about them rather than a reason not to store what the ones that do say.
     """
     return {
         "name": tool.name,
         "description": tool.description,
         "remote_name": tool.tool,
         "schema": json.dumps(tool.parameters) if tool.parameters else "",
-        "returns": tool.returns,
     }
 
 
@@ -2431,7 +2419,6 @@ def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
         tool=str(row.get("remote_name") or name),
         description=f"[{server}] {description}".strip() if server else description,
         parameters=parameters,
-        returns=str(row.get("returns") or ""),
     )
 
 

@@ -63,7 +63,6 @@ from slife2.libs.plugin.protocol import (
     CLI_SOURCE,
     JOB_SOURCE,
     LIST_SOURCES,
-    RETURNS,
     SKILLS_SOURCE,
     house_server,
 )
@@ -292,10 +291,6 @@ class Link:
             # the advertised name is sanitised and carries the server in front.
             "remote_name": str(getattr(tool, "name", "")),
             "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
-            # Somebody else's server may say what its answer holds, in the same
-            # `_meta` key ours does.  It is kept when it is there and is empty
-            # when it is not — absence is the empty string in the catalogue.
-            "returns": str((getattr(tool, "meta", None) or {}).get(RETURNS) or ""),
         }
 
 
