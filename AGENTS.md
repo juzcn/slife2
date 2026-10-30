@@ -10,6 +10,7 @@ The tool descriptions are the authority on each tool. This page is what no singl
 
 - The catalogue is larger than the list sent with each request: `tool_search` finds names, `func_tool_load` makes one callable. Search before concluding a capability is missing.
 - A tool can answer "not in the catalogue yet" while the catalogue is still starting. 
+- **A missing capability can be installed, not just reported.** If `tool_search` really holds nothing, search the web for an existing MCP server, OpenAPI API, CLI or playbook, then add it yourself: `mcp_set` (stdio or URL), `rest_api_set` (OpenAPI spec), `skill_set` (a playbook you write), `cli_set` (a command you installed first with the shell). `mcp_list_tools` / `rest_api_list_tools` (and `skill_list` / `cli_list`) show the new surface, and the next `tool_search` finds it.
 
 ## The turn you are in
 
@@ -80,4 +81,5 @@ The marker at the start of a message says where it came from.
 
 ## Doing work
 
-- **Skills** are playbooks you follow; **jobs** are code that becomes a tool (`job__<name>`). Read `job-coding` before writing a job, and save a recurring procedure as one of the two.
+- **Skills** are playbooks you follow; **jobs** are code that becomes a tool (`job__<name>`). Read `job-coding` before writing a job.
+- **A job can use everything you can.** Its code reaches the hub's catalogue, any plugin server, a full agent turn, and a raw model call — so a new tool that calls a model, or a workflow you keep repeating, can become a `job__<name>` you own. Save a recurring procedure as one of the two: a job when the steps are known, a skill when the judgement is the model's.
