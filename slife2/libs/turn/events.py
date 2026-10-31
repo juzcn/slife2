@@ -28,10 +28,13 @@ from typing import Any, Protocol, assert_never
 from slife2.libs.turn.messages import Usage
 
 #: How much of a tool result travels in a progress notification.  The model
-#: still receives the full result — this caps only what is *displayed*, because
-#: a tool returning 100 KB would otherwise be duplicated into the notification
-#: stream and into every log line that touches it.
-PREVIEW_CHARS = 200
+#: still receives the full result — this caps only what is *displayed*, and the
+#: expanded tool panel scrolls what it is given.  Thirty-two thousand characters
+#: is a few hundred terminal lines: enough to read a tool's answer through,
+#: while a tool returning 100 KB is not duplicated into the notification stream
+#: and held by every panel.  What does not fit is named by the count beside the
+#: result (`tui/widgets.py`), so a cut is never mistaken for the whole.
+PREVIEW_CHARS = 32000
 
 
 def preview(text: str, limit: int = PREVIEW_CHARS) -> str:

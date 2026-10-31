@@ -25,6 +25,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
 from slife2.libs.turn.events import (
+    PREVIEW_CHARS,
     ContextChosen,
     MessageCutIn,
     TextDelta,
@@ -598,6 +599,42 @@ async def test_a_tool_panel_says_which_step_of_the_turn_it_is() -> None:
     assert "(2/30)" in rows[0]
     assert "(3)" in rows[1]
     assert "(" not in rows[2], "nobody said is not `(0)`"
+
+
+async def test_an_expanded_panel_scrolls_its_result() -> None:
+    """A long result is read by scrolling the panel, not by pushing the
+    transcript off the screen.
+
+    The panel is a scroll region of its own, and the wire carries enough of the
+    result (`events.PREVIEW_CHARS`) for that region to be worth scrolling: the
+    paging keys belong to the focused panel, and the transcript underneath does
+    not move.
+    """
+    lines = "\n".join(f"line {number}" for number in range(200))
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted("c1", "read_file", {"path": "big.txt"}))
+        on_event(ToolCallFinished("c1", "read_file", True, lines, len(lines), 4))
+        return ""
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "read it")
+        panel = app.query_one(ToolCallWidget)
+        panel.action_toggle_detail()
+        await pilot.pause()
+
+        assert "line 199" in panel.plain_text(), "the whole result, not a teaser"
+        assert panel.max_scroll_y > 0, "the panel holds more than it shows"
+        assert panel.scroll_y == 0
+
+        panel.focus()
+        await pilot.pause()
+        await pilot.press("pagedown")
+        await pilot.pause()
+
+        assert panel.scroll_y > 0, "PageDown pages the panel"
+        assert app.query_one(ChatView).scroll_y == 0, "the transcript stayed put"
 
 
 async def test_a_tool_panel_starts_collapsed() -> None:
@@ -1474,7 +1511,7 @@ async def test_a_restored_result_reads_like_a_live_one() -> None:
     entire output is rendered — and the one place a call looks different from
     the same call seen live.
     """
-    long = "x" * 5000
+    long = "x" * (PREVIEW_CHARS + 100)
     client = answering_with(
         stored(
             Message(role="user", content="read it"),

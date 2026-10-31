@@ -26,6 +26,7 @@ import slife2.libs.harness.async_tasks as async_tasks
 from slife2.libs.harness.async_tasks import cancel_async
 from slife2.libs.model.base import Chunk, ToolCallDelta
 from slife2.libs.turn.events import (
+    PREVIEW_CHARS,
     MessageCutIn,
     TextDelta,
     ToolCallFinished,
@@ -432,7 +433,7 @@ async def test_a_refused_acquire_leaves_the_call_to_the_unknown_path() -> None:
 
 async def test_tool_result_preview_is_truncated_but_the_model_gets_it_all() -> None:
     """The model sees the whole result; the progress stream sees a preview."""
-    long_value = "x" * 5000
+    long_value = "x" * (PREVIEW_CHARS + 5000)
     backend = FakeBackend(
         tool_turn(ToolCall(id="c1", name="calc", arguments={"e": long_value})),
         text_turn("done"),
@@ -443,7 +444,7 @@ async def test_tool_result_preview_is_truncated_but_the_model_gets_it_all() -> N
     await AgentLoop(backend, registry()).run_turn(messages, "go", observer)
 
     finished = next(e for e in observer.events if isinstance(e, ToolCallFinished))
-    assert len(finished.result_preview) < 300
+    assert len(finished.result_preview) == PREVIEW_CHARS + 3
     # The tool message is the error text for an invalid expression, but the
     # point stands: it is not truncated anywhere in the conversation.
     assert finished.result_chars == len(messages[2].content or "")

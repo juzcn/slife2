@@ -1186,9 +1186,8 @@ class ToolCallWidget(VerticalScroll):
                 line.append("\n" + self._result, PALETTE["text-secondary"])
                 # What the tool actually returned, when that is more than the
                 # preview shows.  The result on the wire is capped at
-                # `events.PREVIEW_CHARS` (two hundred), so a line count says
-                # nothing; the size is the number carried beside the preview for
-                # exactly this.
+                # `events.PREVIEW_CHARS`, so a line count says nothing; the size
+                # is the number carried beside the preview for exactly this.
                 if self._result_chars > len(self._result):
                     line.append(
                         f"\n{GLYPHS['ellipsis']} "
