@@ -66,7 +66,7 @@ The marker at the start of a message says where it came from.
 
 - Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now` and `token-usage`.
 - A `[TURN:{…}]` footnote records when a past turn ran.
-- A turn that could not go on ends with an assistant message `[TURN-FAILED:{"by":"harness","error":…}]`: the harness stopped it, not you — a tool's own failure is its result and the turn carries on. The message before it is left unanswered; the error says why.
+- A turn that could not go on ends with an assistant message `[TURN-FAILED:{"by":"harness","error":…}]`: the harness stopped it, not you. A tool's own failure is its result, and the turn carries on.
 
 ## Last words
 
