@@ -685,6 +685,18 @@ class Outcome:
     folded: list[Pending] = field(default_factory=list)
 
 
+def failure_text(failure: BaseException) -> str:
+    """One failure, in the words the log line and the next turn's marker share.
+
+    **Two readers of one fact.**  The operator's `turn_done` line says what a
+    turn died of, and the next turn's `[TURN-PROMPT:{…}]` tells the model the
+    same thing — so a second spelling would let the log and the conversation
+    describe one failure two ways, and neither reader could tell which is the
+    account.
+    """
+    return f"{type(failure).__name__}: {failure}"
+
+
 def log_turn(
     loop: Loop,
     outcome: Outcome,
@@ -710,9 +722,10 @@ def log_turn(
     material — the same rule `slife2.helpers.logcontext` applies to the prefix.
     """
     if not outcome.started_at:
-        # A message folded into a running turn, or a turn that failed before it
-        # began (a restore, a rebuild): no turn here, and a line saying one ran
-        # would be the log's version of a false positive.
+        # A message folded into a running turn: it ran no turn of its own, and a
+        # line saying one ran would be the log's version of a false positive.
+        # Every other ending has a turn — including one that died before the
+        # loop could open, whose clock `keep_opening` takes.
         return
     result = outcome.result
     if result is not None:
@@ -742,7 +755,7 @@ def log_turn(
         usage.cache_creation,
         len(outcome.messages),
         outcome.elapsed,
-        f" error={type(failure).__name__}: {failure}" if failure is not None else "",
+        f" error={failure_text(failure)}" if failure is not None else "",
     )
 
 
@@ -875,6 +888,16 @@ class Loop:
     #: provider's count, and an estimate of the same list would be a second
     #: figure that disagrees with it.
     context_tokens: int = 0
+    #: The previous turn's failure, in its own words, for the next turn's
+    #: `[TURN-PROMPT:{…}]` marker.  **A turn the model never saw is a fact the
+    #: next turn has to carry**: the message is in the conversation and the
+    #: record (`remember_turn`), but a provider that refused, a tool list that
+    #: never arrived, or a conversation that could not be put back is *why* the
+    #: model's previous message has no answer — and a model shown an unanswered
+    #: message is being asked to guess the reason.  Read once and cleared by
+    #: the turn that reports it, which is the marker's own rule for a per-turn
+    #: fact: what a turn needed and no later turn should remember.
+    last_failure: str = ""
     #: The `_approve` calls this conversation is holding for an answer, by call
     #: id.  On the loop because a turn is what fills and empties it, and the
     #: answer arrives on a *different* call (`answer_approval`) that must not
@@ -2671,6 +2694,14 @@ def build_server(
         usage, _used = context_usage(loop.context_tokens, loop.context_window)
         if usage:
             facts["token-usage"] = usage
+        # **What the last turn died of, read once.**  The marker is the model's
+        # one channel for a fact about the turn it is about to run, and the
+        # failure of the turn before it is exactly that: it says why a message
+        # in the list above has no answer.  Taken here so the turn that reports
+        # it is also the turn that forgets it.
+        if loop.last_failure:
+            facts["failed"] = loop.last_failure
+            loop.last_failure = ""
         lead = turn_prompt_note(facts)
         user = with_lead(user, lead)
         for refusal in refusals:
@@ -2766,24 +2797,35 @@ def build_server(
                 return False
             return True
 
-        agent_loop = await loop_for(
-            loop,
-            (loop.agent, loop.subagent),
-            # Only a caller that said it can be asked is asked (see
-            # `Pending.watched`).  With None the loop grants the request and the
-            # call runs, which is the rule for a turn with nobody behind it.
-            ask if item.watched else None,
-            deliver,
-            # Every turn's results are fitted, not only the ones a window has
-            # anything to say about: the callback's first act is to measure, and
-            # a result that fits costs a comparison rather than a call.
-            compress_for,
-            # So the tool list's size reaches the display on this turn's own
-            # stream, each time the list is re-read before a model call.
-            observer,
-        )
+        # None until the loop is opened, which is the one failure below that has
+        # no loop to read a bill from and no loop to trim for.
+        agent_loop: AgentLoop | None = None
         cancelled = False
         try:
+            # **The loop is opened inside the turn's own `try`.**  It is the
+            # turn's first step and it asks the hub for the tool list
+            # (`loop_for` → `registry` → `turn_tools`), so a plugin that is not
+            # answering fails *here* — before `run_turn` has appended the
+            # caller's message.  Inside, the `finally` below keeps that message:
+            # see it.
+            agent_loop = await loop_for(
+                loop,
+                (loop.agent, loop.subagent),
+                # Only a caller that said it can be asked is asked (see
+                # `Pending.watched`).  With None the loop grants the request and
+                # the call runs, which is the rule for a turn with nobody behind
+                # it.
+                ask if item.watched else None,
+                deliver,
+                # Every turn's results are fitted, not only the ones a window
+                # has anything to say about: the callback's first act is to
+                # measure, and a result that fits costs a comparison rather than
+                # a call.
+                compress_for,
+                # So the tool list's size reaches the display on this turn's own
+                # stream, each time the list is re-read before a model call.
+                observer,
+            )
             # The parts, built above and after the rebuild — the rebuild
             # replaces the list wholesale, so a message appended before it would
             # be destroyed, which is why `run_turn` appends this one itself.
@@ -2811,19 +2853,32 @@ def build_server(
             cancelled = True
             raise
         finally:
+            # **The caller's message is this turn, and it stays in the list.**
+            # `run_turn` appends it as its first act, so an unchanged list means
+            # the turn died before the loop could open — a hub whose tool list
+            # cannot be read is the failure this was written for, and it is the
+            # one failure that used to leave nothing to record at all.  A message
+            # handed to a conversation is kept however its turn ended
+            # (`remember_turn`), and a fork's is kept the same way even though
+            # nothing is written for it: the store is what a fork does not have,
+            # not the conversation.  Put in before the snapshot below, so the
+            # record, the `[TURN:]` footnote and `roll_back` all see it as the
+            # turn's own opening message.
+            if len(loop.messages) == snapshot:
+                loop.messages.append(Message(role="user", content=user))
             # **The trim is wrapped.**  It is a *post-turn* step, so it only runs
             # when the turn answered — but it suspends on a real call to the hub
             # (`unload_tools`), and a cancellation that lands in that suspension
             # is a cancellation of something the caller is no longer waiting for;
             # the turn is already done.  Left to unwind freely it would skip the
-            # commit below, and `send_message`'s handler would then find an empty
-            # `outcome.messages`, record nothing and re-raise — a completed turn
-            # with no row, which is the "conversation the database has never
-            # heard of" SDD §5.6's rule exists to prevent.  So the commit is put in a
-            # `finally` of its own: it holds no `await`, so it completes even as a
-            # cancellation unwinds past it (the property
-            # `slife2.plugins.agent_task.server`'s cancelled path names), and the turn is
-            # settled however the trim ended.
+            # commit below, and `send_message` would then record the caller's
+            # opening message and none of the work the turn did — a completed
+            # turn whose answer has no row, which is the "conversation the
+            # database has never heard of" SDD §5.6's rule exists to prevent.  So
+            # the commit is put in a `finally` of its own: it holds no `await`,
+            # so it completes even as a cancellation unwinds past it (the
+            # property `slife2.plugins.agent_task.server`'s cancelled path
+            # names), and the turn is settled however the trim ended.
             #
             # Skipped entirely on the cancelled path above, and not merely to
             # save a call: that `finally` is running *during* a cancellation,
@@ -2831,9 +2886,11 @@ def build_server(
             # pair could be started and never finished, which is the one history
             # state that is a 400 from every provider.  `auto_invoke` refuses to
             # start for the same reason.  The turn is over; the budget
-            # can wait a turn.
+            # can wait a turn.  A loop that never opened is skipped for a
+            # different reason: this turn loaded nothing, and the hub that could
+            # not answer above is the one the trim would ask.
             try:
-                if not cancelled:
+                if not cancelled and agent_loop is not None:
                     await trim_tools(loop)
             finally:
                 # **What a folded message is owed, settled where the turn
@@ -2879,8 +2936,13 @@ def build_server(
                 # model call and resets them when a turn begins
                 # (`AgentLoop.usage`), so this reads *this* turn even on the
                 # path where no result exists.
-                outcome.usage = agent_loop.usage
-                outcome.last_usage = agent_loop.last_usage
+                # A loop that never opened spent nothing: the `Outcome` already
+                # holds the zero bill, and the conversation's context figure is
+                # the last call the conversation *did* make — resetting it to
+                # zero would make a failed turn look like an empty one.
+                if agent_loop is not None:
+                    outcome.usage = agent_loop.usage
+                    outcome.last_usage = agent_loop.last_usage
                 # **The marker leaves as the turn ends**, before the record and
                 # the footnote: it was prompt text for this turn only, and the
                 # message it rode is the one `annotate_turn` appends `[TURN:]`
@@ -2893,8 +2955,63 @@ def build_server(
                     )
                 # The number the status bar will show, and the one the next
                 # turn's marker reports — the last call this turn made, not a
-                # sum over the turn (`TurnRecord.context_tokens`).
-                loop.context_tokens = outcome.last_usage.total_tokens
+                # sum over the turn (`TurnRecord.context_tokens`).  Only a loop
+                # that opened made one; a failed pre-turn leaves the last known
+                # figure standing.
+                if agent_loop is not None:
+                    loop.context_tokens = outcome.last_usage.total_tokens
+
+    def keep_opening(
+        loop: Loop, item: Pending, outcome: Outcome, elapsed: float
+    ) -> None:
+        """The message that opened a turn stays in the conversation however it ended.
+
+        **`run_turn` appends it, so an empty tail means the turn died before the
+        loop could be opened** — a restore or a rebuild that could not be made,
+        or the hub's tool list failing to arrive (`loop_for`), which is the case
+        this was written for.  The failure still belongs to the caller:
+        `repaired_error` says what it cost and the re-raise hands it back.  What
+        this refuses is the second loss — the message was accepted into this
+        conversation and then left no trace anywhere at all (SDD §5.6,
+        Appendix A rule 10).
+
+        **Put where `run_turn` would have put it**: the end of the live list, so
+        the record writes it as the turn's own opening message, and a fork —
+        which writes no record — holds it in memory all the same.  The store is
+        what a fork does not have, not the conversation; a failed turn is
+        handled identically on both sides of that line.
+
+        **The pictures are named, not read.**  A turn that dies here never
+        resolved its sources, and an image part whose URL is a path is one a
+        provider cannot fetch — so each source becomes the same `image_note` a
+        failed turn's attachment leaves, and nothing touches a disk on the way
+        out of a failure.  (`run_turn_into`'s own failure path is the other
+        case: there the parts are resolved bytes, and `repaired_error` drops
+        them.)
+
+        The clock and the model are taken here for a turn that began before
+        `run_turn_into` could take them; the row and the `[TURN:]` footnote are
+        both derived from them, so the live and rebuilt spellings agree — the
+        rule `annotate_turn` states for the ordinary path.
+        """
+        if outcome.messages:
+            return
+        opening = Message(
+            role="user",
+            content=(
+                attachments.parts(item.prompt, list(item.images))
+                if item.images
+                else item.prompt
+            ),
+        )
+        if item.images:
+            attachments.drop([opening])
+        loop.messages.append(opening)
+        outcome.messages = [opening]
+        outcome.started_at = outcome.started_at or now()
+        outcome.completed_at = outcome.completed_at or now()
+        outcome.elapsed = elapsed
+        outcome.model = outcome.model or loop.model
 
     def repaired_error(loop: Loop, exc: BaseException) -> BaseException:
         """What a turn that died at the provider leaves behind, and what it says.
@@ -3810,41 +3927,52 @@ def build_server(
                 # seen by the running turn as steering nobody asked for.
                 with contextlib.suppress(ValueError):
                     loop.inbox.remove(item)
-                # **Inside the lock, and here rather than when the loop is
-                # built.**  A restore replaces the message list wholesale, so it
-                # has to happen before the turn that runs on it — and it has to
-                # happen under the lock, because two callers can arrive on one
-                # brand-new key at once: one creates the loop and the other does
-                # not, and a restore awaited outside the lock lands *underneath*
-                # whichever of them got in first, reassigning the list a running
-                # turn is reading.  The claim is on the loop, for the reason
-                # `Loop.restored` gives.
-                if not loop.restored:
-                    # **A fork is put back on its maker's conversation, not on a
-                    # stored one.**  It has no store — nothing about it is
-                    # written down — so this is its own step, and it is taken
-                    # here for the reason the restore is: this is where a
-                    # conversation begins.  Which includes beginning again: a
-                    # fork the idle sweep let go starts afresh from its maker as
-                    # it stands then, and that is the same rule and not a
-                    # fallback — a conversation nobody wrote down is a
-                    # conversation whose next start is a new copy.
-                    if loop.fork:
-                        await adopt_maker(loop)
-                    else:
-                        await restore_into(loop)
-                    loop.restored = True
+                # **The turn's clock, for the one ending that never reaches
+                # `run_turn_into`'s own** — a failure before the loop is built,
+                # where `keep_opening` still has to give the row a duration.
+                turn_began = time.monotonic()
                 # **The turn is opened for watchers here**, before its first
                 # observable step: `rebuild_into` can emit `ContextChosen`, and
                 # a watcher that joined while it ran must find that event in the
                 # tap rather than before a turn it belongs to.  The message is
                 # the one frame a watcher never sent and so cannot otherwise
-                # see.  Outside the `try` as well, so a failure below is a
-                # failure of a turn that was announced rather than an unbound
-                # name in the handler.
-                tap = start_tap(key, TurnStarted(item.prompt, item.channel))
-                observer = ProgressObserver(ctx, publish=partial(publish, key))
+                # see.
+                #
+                # **Inside the `try`, because the restore is inside it too.**
+                # From the moment this message left the inbox its turn is one to
+                # keep, and a conversation that cannot be put back is the first
+                # way that turn can fail (`keep_opening` in the handler says
+                # why the message survives that).  `tap` is None until the
+                # announcement, so the handler can tell a turn announced from one
+                # that died before it could be.
+                tap: Tap | None = None
                 try:
+                    # **Inside the lock, and here rather than when the loop is
+                    # built.**  A restore replaces the message list wholesale, so
+                    # it has to happen before the turn that runs on it — and it
+                    # has to happen under the lock, because two callers can
+                    # arrive on one brand-new key at once: one creates the loop
+                    # and the other does not, and a restore awaited outside the
+                    # lock lands *underneath* whichever of them got in first,
+                    # reassigning the list a running turn is reading.  The claim
+                    # is on the loop, for the reason `Loop.restored` gives.
+                    if not loop.restored:
+                        # **A fork is put back on its maker's conversation, not
+                        # on a stored one.**  It has no store — nothing about it
+                        # is written down — so this is its own step, and it is
+                        # taken here for the reason the restore is: this is where
+                        # a conversation begins.  Which includes beginning again:
+                        # a fork the idle sweep let go starts afresh from its
+                        # maker as it stands then, and that is the same rule and
+                        # not a fallback — a conversation nobody wrote down is a
+                        # conversation whose next start is a new copy.
+                        if loop.fork:
+                            await adopt_maker(loop)
+                        else:
+                            await restore_into(loop)
+                        loop.restored = True
+                    tap = start_tap(key, TurnStarted(item.prompt, item.channel))
+                    observer = ProgressObserver(ctx, publish=partial(publish, key))
                     # **The rebuild is inside this `try` too**, and not for
                     # tidiness: when the discriminator is asked a question it
                     # makes a model call carrying these same messages
@@ -3892,6 +4020,14 @@ def build_server(
                     await run_turn_into(loop, item, observer, outcome)
                 except BaseException as exc:
                     failure = exc
+                    # **The next turn is told what this one died of.**  A kept
+                    # turn keeps the message, but an unanswered message alone
+                    # makes the model guess the reason; the marker carries the
+                    # error's own words once (`Loop.last_failure`).  A
+                    # cancellation is not a failure — the caller stopped the
+                    # turn — and there is nothing to report.
+                    if isinstance(exc, Exception):
+                        loop.last_failure = failure_text(exc)
                     # A turn that happened is recorded however it ended, and this
                     # is deliberately one clause rather than a handler per ending
                     # — see `remember_turn` for why the rule is written that way.
@@ -3909,6 +4045,18 @@ def build_server(
                     # turn takes the id up (`settle_record`).  `detach` is what
                     # makes either task outlive this scope.
                     #
+                    # **The turn's opening message is in the conversation before
+                    # it is repaired or recorded.**  A turn can die before
+                    # `run_turn` has appended it — the restore, the rebuild and
+                    # the loop's opening are all steps that fail ahead of it —
+                    # and `keep_opening` is what makes those failures a turn with
+                    # a record (and, for a fork, a conversation that still holds
+                    # the message) instead of a message nobody kept.
+                    #
+                    # **Before `repaired_error` as well**, so a picture the
+                    # caller sent is dropped into its note by the same repair
+                    # every other failed turn's attachment goes through.
+                    keep_opening(loop, item, outcome, time.monotonic() - turn_began)
                     # **Repaired before it is recorded**, so the row and the live
                     # conversation are one list and not two: the record writes
                     # `outcome.messages`, which holds this same list's own
@@ -3916,66 +4064,58 @@ def build_server(
                     # while the live list had already let them go is the
                     # disagreement `repaired_error` exists to prevent.
                     repaired = repaired_error(loop, exc)
-                    if outcome.messages:
-                        written = detach(record(loop, item, outcome))
-                        # **The id reaches the tap when the write does**, and
-                        # that is what lets a watcher tell whether the snapshot
-                        # it has just read already contains this turn: the same
-                        # turn can be in the store and in the tap, and drawing
-                        # both is the duplicate this field exists to prevent.
+                    written = detach(record(loop, item, outcome))
+                    # **The id reaches the tap when the write does**, and
+                    # that is what lets a watcher tell whether the snapshot
+                    # it has just read already contains this turn: the same
+                    # turn can be in the store and in the tap, and drawing
+                    # both is the duplicate this field exists to prevent.
+                    # A turn that died before its announcement has no tap to
+                    # tell.
+                    if tap is not None:
                         written.add_done_callback(partial(_recorded_into, tap))
-                        # An id backs a *prefix*, so it can only be claimed when
-                        # this turn began on a wholly backed list — where it
-                        # began being `began`, re-derived rather than read
-                        # because a failure inside the rebuild reaches this
-                        # handler with the name unbound (and with no messages of
-                        # its own, which is what the `if` above says).
-                        began = len(loop.messages) - len(outcome.messages)
-                        if isinstance(exc, Exception):
-                            # **A failure waits for its own row.**  A store or
-                            # cabinet refusal is a hard failure: the turn is
-                            # unrecorded, so its messages and the answers it gave
-                            # folded callers are taken back, and the original
-                            # failure is what the caller sees.  A cancellation
-                            # during this await keeps the task for the next turn,
-                            # which applies the same rule.
-                            try:
-                                turn_id = await asyncio.shield(written)
-                            except asyncio.CancelledError:
-                                if loop.covered == began:
-                                    loop.record_pending = PendingRecord(
-                                        written, outcome, item
-                                    )
-                                raise
-                            except Exception as refusal:  # noqa: BLE001 - a refused write is a hard failure
-                                logger.warning(
-                                    "the failed turn of %s was not recorded "
-                                    "(%s); rolling it back",
-                                    describe((loop.agent, loop.subagent)),
-                                    refusal,
-                                    exc_info=refusal,
+                    # An id backs a *prefix*, so it can only be claimed when
+                    # this turn began on a wholly backed list — where it began
+                    # being `began`, derived rather than kept because
+                    # `keep_opening` may have put the opening message in here.
+                    began = len(loop.messages) - len(outcome.messages)
+                    if isinstance(exc, Exception):
+                        # **A failure waits for its own row.**  A store or
+                        # cabinet refusal is a hard failure: the turn is
+                        # unrecorded, so its messages and the answers it gave
+                        # folded callers are taken back, and the original
+                        # failure is what the caller sees.  A cancellation
+                        # during this await keeps the task for the next turn,
+                        # which applies the same rule.
+                        try:
+                            turn_id = await asyncio.shield(written)
+                        except asyncio.CancelledError:
+                            if loop.covered == began:
+                                loop.record_pending = PendingRecord(
+                                    written, outcome, item
                                 )
-                                roll_back(loop, outcome)
-                                if taps.get(key) is tap:
-                                    taps.pop(key, None)
-                            else:
-                                if turn_id is not None and loop.covered == began:
-                                    loop.covered += len(loop.messages) - began
-                                    address_turn(loop, outcome, item, turn_id)
-                        elif loop.covered == began:
-                            # **An interruption is claimed once its row lands.**
-                            # The picture is in the cabinet, so an id no longer
-                            # risks the retry image; a refused write is a hard
-                            # failure and `settle_record` rolls the tail back.
-                            loop.record_pending = PendingRecord(written, outcome, item)
-                    else:
-                        # **A turn that never started is not a turn to watch.**
-                        # It has no messages and no events, so a tap left here
-                        # would replay a question with no answer after it.  The
-                        # watchers are not closed: the conversation is still
-                        # watchable, and the next turn replaces the tap anyway.
-                        if taps.get(key) is tap:
-                            taps.pop(key, None)
+                            raise
+                        except Exception as refusal:  # noqa: BLE001 - a refused write is a hard failure
+                            logger.warning(
+                                "the failed turn of %s was not recorded "
+                                "(%s); rolling it back",
+                                describe((loop.agent, loop.subagent)),
+                                refusal,
+                                exc_info=refusal,
+                            )
+                            roll_back(loop, outcome)
+                            if tap is not None and taps.get(key) is tap:
+                                taps.pop(key, None)
+                        else:
+                            if turn_id is not None and loop.covered == began:
+                                loop.covered += len(loop.messages) - began
+                                address_turn(loop, outcome, item, turn_id)
+                    elif loop.covered == began:
+                        # **An interruption is claimed once its row lands.**
+                        # The picture is in the cabinet, so an id no longer
+                        # risks the retry image; a refused write is a hard
+                        # failure and `settle_record` rolls the tail back.
+                        loop.record_pending = PendingRecord(written, outcome, item)
                     if repaired is exc:
                         raise
                     raise repaired from exc

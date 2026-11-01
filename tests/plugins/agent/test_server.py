@@ -1624,6 +1624,233 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     assert stored[0]["content"] == "one"
 
 
+DEAD_PLUGIN = "a plugin is not answering — peer-agent: MCPError: Connection closed"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_turn_that_died_before_the_loop_names_the_picture_it_never_attached(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """A source the turn never resolved is named, not handed on as a URL.
+
+    The turn died before `attachments.resolve` read anything, so an image part
+    would carry the caller's source as its `url` — one no provider can fetch,
+    and the next turn would send it and fail.  The note is the one a failed
+    turn's attachment leaves; the bytes were never this process's to keep.
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(),
+            context_client=context_client,
+            hub_client=FlakyHub(hub, DEAD_PLUGIN),
+            backend=FakeBackend(),
+        )
+        with pytest.raises(Exception, match="not answering"):
+            await send(server, "look", images=["https://example.test/a.png"])
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.dumps(json.loads(rows[0][0]))
+    assert "https://example.test/a.png" in stored
+    assert "image_url" not in stored, "a source no provider can fetch was kept"
+
+
+class FlakyHub:
+    """A hub whose tool-list ask fails, the way a dead plugin makes it fail.
+
+    `turn_tools` asks the hub for the whole catalogue before the model's first
+    call, and the hub fails that ask for the whole list when one plugin behind
+    it does not answer — the list is one list, and half of it is not a shorter
+    one.  So this is the failure that arrives *before* `run_turn` has appended
+    the caller's message, which is the case these tests are about.
+
+    `times` is how many asks fail: `None` never answers again, and a number is a
+    hub that comes back — the shape a test needs when it asks what the *next*
+    turn saw.
+    """
+
+    def __init__(self, hub: Client, reason: str, times: int | None = None) -> None:
+        self.hub = hub
+        self.reason = reason
+        self.times = times
+
+    async def call_tool(self, name: str, arguments: Any = None, **kwargs: Any) -> Any:
+        if name == "list_tools" and (self.times is None or self.times > 0):
+            if self.times is not None:
+                self.times -= 1
+            raise RuntimeError(self.reason)
+        return await self.hub.call_tool(name, arguments, **kwargs)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_turn_the_hub_could_not_open_is_still_recorded(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """**A message accepted into a conversation is kept even when no turn can run.**
+
+    The tool list is asked for before the model's first call, and a plugin that
+    has stopped answering fails that ask.  `run_turn` is what appends the user's
+    message, so this failure used to land with nothing to record at all: the
+    caller's words were in neither the conversation nor the log, and a restart
+    found them gone — the one ending that made "a turn that happened is
+    recorded" (SDD §5.6) a rule with a hole in it.  A message that arrived is a
+    turn however it ended (Appendix A rule 10).
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(),
+            context_client=context_client,
+            hub_client=FlakyHub(hub, DEAD_PLUGIN),
+            backend=FakeBackend(),
+        )
+        with pytest.raises(Exception, match="not answering"):
+            await send(server, "one")
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user"]
+    assert stored[0]["content"] == "one"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_the_next_turn_is_told_what_the_last_one_died_of(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """**An unanswered message alone makes the model guess the reason.**
+
+    The kept turn is the store's half.  The other half is the next turn's
+    `[TURN-PROMPT:{…}]` marker, which carries the failure once: it is the one
+    channel the model has for a fact about the turn it is about to run, and
+    "why does the message above have no answer" is exactly that fact.  A later
+    turn must not see it again — the marker's own rule for a per-turn fact.
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    backend = answering("second answer")
+    # **Copied at call time**, because the marker is removed from the live
+    # message before the turn is saved: a later read of `backend.calls` sees
+    # the cleaned message, which is the row's shape and not what the model read.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append([str(m.content) for m in messages if m.role == "user"])
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(),
+            context_client=context_client,
+            hub_client=FlakyHub(hub, DEAD_PLUGIN, times=1),
+            backend=backend,
+        )
+        with pytest.raises(Exception, match="not answering"):
+            await send(server, "one")
+        assert (await send(server, "two")).data["text"] == "second answer"
+
+    # The failed turn's message is in the conversation the next turn ran on.
+    assert prompts_seen(backend, 0) == ["user:one", "user:two"]
+    # ...and the marker says what happened to it.
+    current = as_sent[0][-1]
+    assert current.startswith(TURN_PROMPT_PREFIX)
+    facts = json.loads(current[len(TURN_PROMPT_PREFIX) : current.index("] ")])
+    assert facts["failed"] == f"RuntimeError: {DEAD_PLUGIN}"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """A subagent is a conversation, and the rule travels with its key.
+
+    The same dead hub that fails the agent's own turn fails this one's, and what
+    is kept is kept where the subagent's turns live: its own store, under its
+    own directory — the one `subagent_remove` deletes.
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(),
+            context_client=context_client,
+            hub_client=FlakyHub(hub, DEAD_PLUGIN),
+            backend=FakeBackend(),
+        )
+        with pytest.raises(Exception, match="not answering"):
+            await send(server, "one", subagent="worker")
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT, "worker") / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user"]
+    assert stored[0]["content"] == "one"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_forks_failed_turn_is_kept_and_written_nowhere(context, hub) -> None:
+    """**A fork has no store, and that is not the same as having no conversation.**
+
+    Its turns are not recorded — a fork writes nothing down — but the message it
+    was given stays in the list its next turn runs on, and the failure reaches
+    the caller exactly as it does for a conversation with a log.  The store is
+    what a fork does not have, not the conversation; the error path is the same
+    on both sides of that line.
+    """
+    backend = FakeBackend(text_turn("the fork's"))
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=FlakyHub(hub, DEAD_PLUGIN, times=1),
+        backend=backend,
+    )
+
+    await set_subagent(server, "researcher", fork=True)
+    with pytest.raises(Exception, match="not answering"):
+        await send(server, "one", subagent="researcher")
+    await send(server, "two", subagent="researcher")
+
+    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
+    assert prompts_seen(backend, 0) == ["user:one", "user:two"]
+
+
 @pytest.mark.asyncio
 async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
     hub,

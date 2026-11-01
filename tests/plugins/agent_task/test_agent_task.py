@@ -1056,6 +1056,36 @@ async def test_a_refusing_window_is_the_end_of_that_answer(
     assert "was not delivered" in caplog.text
 
 
+async def test_a_hand_over_that_crashed_is_said_not_left_on_the_coroutine(
+    hub: Client,
+    store: Store,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A task has nobody behind it to raise to.**
+
+    `run` is a detached coroutine: an exception that leaves it is stored on a
+    task nothing reads, and the answer beside it is cleared by the `finally`
+    that unwinds — a trace nobody saw where the design owes the agent a
+    message.  Any failure of the hand-over is a failure to deliver, however it
+    arrived, and it is said at `error` with the trace.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    async def crashed(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the hand-over itself came apart")
+
+    monkeypatch.setattr(module, "hand_over", crashed)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
+    built = build(text_turn("three tries"), hub=hub, context=store)
+    await start(built)
+    answer = await settle(built)
+    await wait_for_log(caplog, "nothing else would report it")
+
+    assert answer["status"] == "finished"
+    assert "nothing else would report it" in caplog.text
+
+
 # ── what the registry remembers ──────────────────────────────────────────────
 
 

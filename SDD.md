@@ -930,9 +930,10 @@ Rules:
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added after the recall and removed before the turn is
   saved (`without_lead`), so it never reaches the row, the index or a rebuild. Its
-  payload is a mapping — today `now` and `token-usage` — because a per-turn fact
-  can grow. The agent, its subagents and an agent task all carry it; a fork's
-  turns are never recorded, so its marker lives only in memory.
+  payload is a mapping — `now`, `token-usage`, and `failed` when the turn before
+  it died — because a per-turn fact can grow. The agent, its subagents and an
+  agent task all carry it; a fork's turns are never recorded, so its marker lives
+  only in memory.
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
 
@@ -985,6 +986,20 @@ An interrupted turn's write is detached, and the next turn takes its id up
 (`settle_record`). A write the store or cabinet refuses is a hard failure: the
 turn is unrecorded, so its messages are rolled back to the last backed prefix and
 the caller sees the refusal.
+
+**A message that left the inbox is a turn, even when no loop opened for it.** A
+hub whose tool list is not answering, a store that will not restore, a rebuild
+that fails: the message is put at the end of the live conversation as the turn's
+opening message and recorded, so the failure ends with a row rather than with the
+caller's words gone from both places. A picture the turn died before resolving is
+named in an `image_note`, never kept as a part a provider cannot fetch. A fork
+records nothing but keeps the message the same way — the store is what a fork
+does not have, not the conversation. An agent task records nothing at all and
+answers with its failure instead; its answer is a message like any other, and
+this rule is what keeps that message when the turn it arrives on fails too.
+
+The failure is carried into the next turn's `[TURN-PROMPT:{…}]` as `failed`,
+once: the record says the message has no answer, and the marker says why.
 
 The model's tool result is authoritative. Display chunks are not: progress
 notifications may be dropped, delayed, or coalesced without affecting the

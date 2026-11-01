@@ -942,6 +942,23 @@ def build_server(
                 "agent task %s for %s was not delivered: %s", task.name, task.agent, exc
             )
             return
+        except Exception as exc:  # noqa: BLE001 — a task has nobody behind it to raise to
+            # **A crash here is the one silence this task cannot afford.**  `run`
+            # is a detached coroutine: an exception that leaves it is stored on a
+            # task nothing reads, and the answer beside it is cleared by the
+            # `finally` that unwinds — so the *work* would end in a trace nobody
+            # saw instead of the message the agent is owed.  A failure to deliver
+            # is a failure to deliver, however it arrived; it is said at `error`
+            # with the trace, and the status it produces already reads `failed`
+            # or `finished` with `delivered` false.
+            logger.exception(
+                "agent task %s for %s was not delivered (%s); "
+                "nothing else would report it",
+                task.name,
+                task.agent,
+                exc,
+            )
+            return
         task.delivered = True
 
     # ── whose task ───────────────────────────────────────────────────────
