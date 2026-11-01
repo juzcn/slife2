@@ -138,6 +138,12 @@ TURN_PREFIX = "[TURN:"
 #: turn is saved.  It is therefore never stored, never rebuilt, and never seen
 #: by a screen; its only reader is the model that is answering.
 TURN_PROMPT_PREFIX = "[TURN-PROMPT:"
+#: The harness's record of a turn that died, as a message of its own.  **The
+#: one capitals marker that is a message rather than a footnote**: the failure
+#: belongs to the turn, but a footnote is derived from the row and a failure is
+#: not a column — so it follows the turn as an assistant message the harness
+#: wrote, which is stored, rebuilt, and still there after a restart.
+TURN_FAILED_PREFIX = "[TURN-FAILED:"
 TURN_SUFFIX = "]"
 
 
@@ -596,6 +602,49 @@ def turn_note(
         f"{turn_footnote(turn_id, created_at, completed_at, channel)}"
         f"{TURN_SUFFIX}"
     )
+
+
+def turn_failed_note(error: str) -> str:
+    """The message a turn ends with when it could not go on, and why.
+
+    **An assistant message the harness wrote, and the marker is what says so.**
+    Capitals are the harness's (`[TURN:…]`, `[DUMP:…]`), so a model reading its
+    own history does not take this for something it said; `by` names the side
+    that failed, because a tool's failure is never this — it is text in the
+    result the model was given, and the turn carries on.  What reaches here is
+    the turn itself stopping, which is the harness's to report.
+
+    **A message rather than a footnote**, and the difference is a design one:
+    the turn's own `[TURN:…]` footnote is derived from its row, and a failure is
+    not a column — so it rides its own message, which is stored, rebuilt, and
+    still there after a restart.  `turn_failed_error` is the screen's reader.
+    """
+    return (
+        f"{TURN_FAILED_PREFIX}"
+        f"{json.dumps({'by': 'harness', 'error': error}, ensure_ascii=False)}"
+        f"{TURN_SUFFIX}"
+    )
+
+
+def turn_failed_error(content: Any) -> str | None:
+    """The error a `[TURN-FAILED:…]` message carries, or `None`.
+
+    The reader a screen uses to draw the failure as the harness's line rather
+    than as an answer — the same payload, one spelling.  A content that is not
+    a string, or a string that is not that marker, is `None`: a message of any
+    other shape is somebody else's.
+    """
+    if not isinstance(content, str) or not content.startswith(TURN_FAILED_PREFIX):
+        return None
+    payload = content[len(TURN_FAILED_PREFIX) :]
+    if not payload.endswith(TURN_SUFFIX):
+        return None
+    try:
+        found = json.loads(payload[: -len(TURN_SUFFIX)])
+    except json.JSONDecodeError:
+        return None
+    error = found.get("error") if isinstance(found, dict) else None
+    return error if isinstance(error, str) else None
 
 
 def with_note(content: Any, note: str) -> Any:

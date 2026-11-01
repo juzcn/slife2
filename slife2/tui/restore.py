@@ -36,7 +36,7 @@ import logging
 from typing import Any
 
 from slife2.libs.turn.attachments import IMAGE_PREFIX
-from slife2.libs.turn.context import turn_footnote
+from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
 from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness
@@ -167,6 +167,15 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
                 channel=str(turn.get("channel") or ""),
             )
         elif role == "assistant":
+            # **The harness's record of a turn that died is a line, not an
+            # answer.**  It is an assistant message because that is where the
+            # record puts it — the turn has no row column to carry a failure —
+            # and drawing it as a block would show the model saying something
+            # it never said.
+            failed = turn_failed_error(message.get("content"))
+            if failed is not None:
+                chat.add_note(notes.turn_failed(failed), ends_turn=True)
+                continue
             _draw_answer(chat, message, results)
 
 

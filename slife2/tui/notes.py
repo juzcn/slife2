@@ -70,6 +70,16 @@ def interrupted() -> str:
     return t("interrupted")
 
 
+def turn_failed(error: str) -> str:
+    """A turn that could not go on, and what stopped it.
+
+    The restored transcript's half of the harness's `[TURN-FAILED:…]` message:
+    the record stores the marker, and a screen shows the sentence inside it —
+    the reason is the harness's own and is quoted rather than restated.
+    """
+    return t("turn_failed", error=error)
+
+
 def not_on_the_mesh(reason: str) -> str:
     """The window could not put its agent on the A2A mesh, and why.
 

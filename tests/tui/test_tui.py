@@ -24,6 +24,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
+from slife2.libs.turn.context import turn_failed_note
 from slife2.libs.turn.events import (
     PREVIEW_CHARS,
     ContextChosen,
@@ -1120,6 +1121,34 @@ async def test_a_restarted_window_shows_the_conversation_it_left() -> None:
     # only replayed the text would leave out.
     assert len(panels) == 1
     assert "Calc" in panels[0].plain_text()
+
+
+async def test_a_restored_failed_turn_reads_as_the_harness_line_not_an_answer() -> None:
+    """The ending the harness wrote is the harness's, and the screen says so.
+
+    The record carries a turn's failure as an assistant message, because that is
+    where a turn's ending lives and there is no column for it; drawing that as
+    an answer would show the model saying something it never said.  What the
+    person sees is the same kind of line as `[interrupted]`, with the reason
+    quoted.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="one"),
+            Message(
+                role="assistant",
+                content=turn_failed_note("RuntimeError: the provider answered 500"),
+            ),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert "You> one" in text
+    assert "turn failed: RuntimeError: the provider answered 500" in text
+    assert "jack> [TURN-FAILED" not in text, "the harness's line is not the model's"
 
 
 async def test_a_name_that_has_never_run_shows_nothing() -> None:

@@ -930,10 +930,9 @@ Rules:
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added after the recall and removed before the turn is
   saved (`without_lead`), so it never reaches the row, the index or a rebuild. Its
-  payload is a mapping — `now`, `token-usage`, and `failed` when the turn before
-  it died — because a per-turn fact can grow. The agent, its subagents and an
-  agent task all carry it; a fork's turns are never recorded, so its marker lives
-  only in memory.
+  payload is a mapping — today `now` and `token-usage` — because a per-turn fact
+  can grow. The agent, its subagents and an agent task all carry it; a fork's
+  turns are never recorded, so its marker lives only in memory.
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
 
@@ -998,8 +997,16 @@ does not have, not the conversation. An agent task records nothing at all and
 answers with its failure instead; its answer is a message like any other, and
 this rule is what keeps that message when the turn it arrives on fails too.
 
-The failure is carried into the next turn's `[TURN-PROMPT:{…}]` as `failed`,
-once: the record says the message has no answer, and the marker says why.
+**A turn that cannot go on ends with the harness saying so.** A tool's failure
+is text in the result the model reads and the turn carries on; an exception is
+the turn itself stopping, so the turn ends with an assistant message carrying
+`[TURN-FAILED:{"by": "harness", "error": …}]`. It is a message rather than a
+footnote because a footnote is derived from the row and a failure is not a
+column; and it is a capitalised marker rather than prose because the harness is
+what failed, and a model reading its own history must not take the words for its
+own. The message is recorded with the turn, so the reason survives a restart; a
+cancellation ends nothing this way — the caller stopped the turn, and there is
+nothing to report.
 
 The model's tool result is authoritative. Display chunks are not: progress
 notifications may be dropped, delayed, or coalesced without affecting the

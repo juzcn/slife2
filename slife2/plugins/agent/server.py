@@ -164,6 +164,7 @@ from slife2.libs.plugin.protocol import (
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import (
     context_usage,
+    turn_failed_note,
     turn_note,
     turn_prompt_note,
     with_lead,
@@ -686,13 +687,13 @@ class Outcome:
 
 
 def failure_text(failure: BaseException) -> str:
-    """One failure, in the words the log line and the next turn's marker share.
+    """One failure, in the words the log line and the turn's last message share.
 
     **Two readers of one fact.**  The operator's `turn_done` line says what a
-    turn died of, and the next turn's `[TURN-PROMPT:{…}]` tells the model the
-    same thing — so a second spelling would let the log and the conversation
-    describe one failure two ways, and neither reader could tell which is the
-    account.
+    turn died of, and the `[TURN-FAILED:…]` message the turn ends with tells the
+    model the same thing — so a second spelling would let the log and the
+    conversation describe one failure two ways, and neither reader could tell
+    which is the account.
     """
     return f"{type(failure).__name__}: {failure}"
 
@@ -888,16 +889,6 @@ class Loop:
     #: provider's count, and an estimate of the same list would be a second
     #: figure that disagrees with it.
     context_tokens: int = 0
-    #: The previous turn's failure, in its own words, for the next turn's
-    #: `[TURN-PROMPT:{…}]` marker.  **A turn the model never saw is a fact the
-    #: next turn has to carry**: the message is in the conversation and the
-    #: record (`remember_turn`), but a provider that refused, a tool list that
-    #: never arrived, or a conversation that could not be put back is *why* the
-    #: model's previous message has no answer — and a model shown an unanswered
-    #: message is being asked to guess the reason.  Read once and cleared by
-    #: the turn that reports it, which is the marker's own rule for a per-turn
-    #: fact: what a turn needed and no later turn should remember.
-    last_failure: str = ""
     #: The `_approve` calls this conversation is holding for an answer, by call
     #: id.  On the loop because a turn is what fills and empties it, and the
     #: answer arrives on a *different* call (`answer_approval`) that must not
@@ -2694,14 +2685,6 @@ def build_server(
         usage, _used = context_usage(loop.context_tokens, loop.context_window)
         if usage:
             facts["token-usage"] = usage
-        # **What the last turn died of, read once.**  The marker is the model's
-        # one channel for a fact about the turn it is about to run, and the
-        # failure of the turn before it is exactly that: it says why a message
-        # in the list above has no answer.  Taken here so the turn that reports
-        # it is also the turn that forgets it.
-        if loop.last_failure:
-            facts["failed"] = loop.last_failure
-            loop.last_failure = ""
         lead = turn_prompt_note(facts)
         user = with_lead(user, lead)
         for refusal in refusals:
@@ -4020,14 +4003,6 @@ def build_server(
                     await run_turn_into(loop, item, observer, outcome)
                 except BaseException as exc:
                     failure = exc
-                    # **The next turn is told what this one died of.**  A kept
-                    # turn keeps the message, but an unanswered message alone
-                    # makes the model guess the reason; the marker carries the
-                    # error's own words once (`Loop.last_failure`).  A
-                    # cancellation is not a failure — the caller stopped the
-                    # turn — and there is nothing to report.
-                    if isinstance(exc, Exception):
-                        loop.last_failure = failure_text(exc)
                     # A turn that happened is recorded however it ended, and this
                     # is deliberately one clause rather than a handler per ending
                     # — see `remember_turn` for why the rule is written that way.
@@ -4057,6 +4032,25 @@ def build_server(
                     # caller sent is dropped into its note by the same repair
                     # every other failed turn's attachment goes through.
                     keep_opening(loop, item, outcome, time.monotonic() - turn_began)
+                    # **A turn that cannot go on ends with the harness saying
+                    # so.**  A tool's failure is text in the result the model
+                    # reads and the turn carries on; an exception is the turn
+                    # itself stopping, and a conversation that ended on an
+                    # unanswered question with no account of why is one the
+                    # model can only guess about — including after a restart,
+                    # which is why this is a message and not a one-shot note.
+                    # The marker keeps it in the harness's voice: capitals are
+                    # the harness's (`turn_failed_note`), so the model does not
+                    # read it as prose it wrote.  A cancellation is not an error
+                    # — the caller stopped the turn — and there is nothing to
+                    # report.
+                    if isinstance(exc, Exception):
+                        ended = Message(
+                            role="assistant",
+                            content=turn_failed_note(failure_text(exc)),
+                        )
+                        loop.messages.append(ended)
+                        outcome.messages.append(ended)
                     # **Repaired before it is recorded**, so the row and the live
                     # conversation are one list and not two: the record writes
                     # `outcome.messages`, which holds this same list's own

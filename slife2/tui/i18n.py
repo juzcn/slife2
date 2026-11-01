@@ -150,6 +150,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "interrupted",
         "zh": "已中断",
     },
+    # A turn that stopped itself — the harness's record, with its own reason
+    # quoted rather than restated.
+    "turn_failed": {
+        "en": "turn failed: {error}",
+        "zh": "轮次失败：{error}",
+    },
     # The window could not put its agent on the mesh, and why.  `reason` is the
     # transport's own sentence, quoted rather than restated.
     "not_on_the_mesh": {

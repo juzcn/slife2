@@ -63,6 +63,8 @@ from slife2.libs.turn.context import (
     TURN_PREFIX,
     TURN_PROMPT_PREFIX,
     TURN_SUFFIX,
+    turn_failed_error,
+    turn_failed_note,
     turn_footnote,
 )
 from slife2.libs.turn.events import (
@@ -1588,6 +1590,10 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     shows it — which makes a missing row the same "conversation the database
     has never heard of" the rule exists to prevent.  Recording is therefore
     keyed on the turn having happened, not on how it ended.
+
+    And the row ends the way the conversation does: with the harness's
+    `[TURN-FAILED:…]` message, because a turn that cannot go on says so rather
+    than leaving an unanswered question behind.
     """
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
@@ -1620,8 +1626,11 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     )
     assert len(rows) == 1, "the failed turn was not recorded"
     stored = json.loads(rows[0][0])
-    assert [m["role"] for m in stored] == ["user"]
+    assert [m["role"] for m in stored] == ["user", "assistant"]
     assert stored[0]["content"] == "one"
+    assert turn_failed_error(stored[1]["content"]) == (
+        "RuntimeError: the provider answered 500"
+    )
 
 
 DEAD_PLUGIN = "a plugin is not answering — peer-agent: MCPError: Connection closed"
@@ -1731,38 +1740,28 @@ async def test_a_turn_the_hub_could_not_open_is_still_recorded(
     )
     assert len(rows) == 1, "the failed turn was not recorded"
     stored = json.loads(rows[0][0])
-    assert [m["role"] for m in stored] == ["user"]
+    assert [m["role"] for m in stored] == ["user", "assistant"]
     assert stored[0]["content"] == "one"
+    assert turn_failed_error(stored[1]["content"]) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_the_next_turn_is_told_what_the_last_one_died_of(
+async def test_a_turn_that_could_not_go_on_ends_with_the_harness_saying_so(
     hub, tmp_path, monkeypatch
 ) -> None:
-    """**An unanswered message alone makes the model guess the reason.**
+    """**An unanswered question alone makes the model guess the reason.**
 
-    The kept turn is the store's half.  The other half is the next turn's
-    `[TURN-PROMPT:{…}]` marker, which carries the failure once: it is the one
-    channel the model has for a fact about the turn it is about to run, and
-    "why does the message above have no answer" is exactly that fact.  A later
-    turn must not see it again — the marker's own rule for a per-turn fact.
+    A tool's failure is text in the result the model reads and the turn carries
+    on; an exception stops the turn.  The turn then *ends* with an assistant
+    message carrying the reason — a harness marker, because the harness is what
+    failed, and not prose in the model's voice.  It is recorded with the turn,
+    so a restart still has it and the next request replays it in place.
     """
-    from slife2.libs.host.paths import DATA_ENV_VAR
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
     from slife2.plugins.context.server import build_server as build_context
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     backend = answering("second answer")
-    # **Copied at call time**, because the marker is removed from the live
-    # message before the turn is saved: a later read of `backend.calls` sees
-    # the cleaned message, which is the row's shape and not what the model read.
-    as_sent: list[list[str]] = []
-    inner = backend.stream
-
-    def stream(messages, tools):
-        as_sent.append([str(m.content) for m in messages if m.role == "user"])
-        return inner(messages, tools)
-
-    backend.stream = stream  # type: ignore[method-assign]
 
     async with Client(
         build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
@@ -1777,13 +1776,20 @@ async def test_the_next_turn_is_told_what_the_last_one_died_of(
             await send(server, "one")
         assert (await send(server, "two")).data["text"] == "second answer"
 
-    # The failed turn's message is in the conversation the next turn ran on.
-    assert prompts_seen(backend, 0) == ["user:one", "user:two"]
-    # ...and the marker says what happened to it.
-    current = as_sent[0][-1]
-    assert current.startswith(TURN_PROMPT_PREFIX)
-    facts = json.loads(current[len(TURN_PROMPT_PREFIX) : current.index("] ")])
-    assert facts["failed"] == f"RuntimeError: {DEAD_PLUGIN}"
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user", "assistant"]
+    assert turn_failed_error(stored[1]["content"]) == f"RuntimeError: {DEAD_PLUGIN}"
+
+    # ...and the next request replays it after the message it belongs to.
+    seen = [m for m in backend.calls[0][0] if m.role != "system"]
+    assert [m.role for m in seen] == ["user", "assistant", "user"]
+    assert without_footnote(seen[0].content) == "one"
+    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -1820,8 +1826,9 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
     )
     assert len(rows) == 1, "the failed turn was not recorded"
     stored = json.loads(rows[0][0])
-    assert [m["role"] for m in stored] == ["user"]
+    assert [m["role"] for m in stored] == ["user", "assistant"]
     assert stored[0]["content"] == "one"
+    assert turn_failed_error(stored[1]["content"]) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -1848,7 +1855,10 @@ async def test_a_forks_failed_turn_is_kept_and_written_nowhere(context, hub) -> 
     await send(server, "two", subagent="researcher")
 
     assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
-    assert prompts_seen(backend, 0) == ["user:one", "user:two"]
+    seen = [m for m in backend.calls[0][0] if m.role != "system"]
+    assert [m.role for m in seen] == ["user", "assistant", "user"]
+    assert without_footnote(seen[0].content) == "one"
+    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio
@@ -1910,10 +1920,11 @@ async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
 
     assert prompts_seen(backend, 2) == [
         "user:one",
+        f"assistant:{turn_failed_note('RuntimeError: the provider answered 500')}",
         "user:two",
         "assistant:second answer",
         "user:three",
-    ], "the unanswered message is still in the conversation, and nothing is twice"
+    ], "the failed turn is still in the conversation, and nothing is twice"
 
 
 @pytest.mark.asyncio
@@ -1969,10 +1980,13 @@ async def test_a_failed_turn_is_annotated_when_the_next_turn_settles_its_id(
     await send(server, "two", channel="tui")
 
     # The failed turn's own call had no id to carry; the next turn's call is
-    # the first one after the write has been waited for.
+    # the first one after the write has been waited for.  The ending the
+    # harness wrote rides in between — the turn's own last message.
+    ended = f"assistant:{turn_failed_note('RuntimeError: the provider answered 500')}"
     assert as_sent[0] == ["user:one"]
     assert as_sent[1][0].startswith("user:one [TURN:")
-    assert as_sent[1][1] == "user:two", "and the newest turn has none yet"
+    assert as_sent[1][1] == ended
+    assert as_sent[1][2] == "user:two", "and the newest turn has none yet"
 
     async with Client(server) as client:
         answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
