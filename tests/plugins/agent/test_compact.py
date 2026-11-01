@@ -43,6 +43,7 @@ from tests.fakes import (
     keep_the_context,
     plugin_transports,
     upstream_server,
+    wait_until_settled,
 )
 
 pytestmark = pytest.mark.unit
@@ -196,6 +197,12 @@ async def turn(
         ) as context_client,
         Client(cabinet_stub(kept, page=page, mimes=mimes)) as cabinet_client,
     ):
+        # **The hub's own start-up is waited for, because its bounds are not
+        # promises.**  A source still connecting while the catalogue is being
+        # written is the "not in the catalogue yet" answer, and a loaded runner
+        # can exceed the wait an ask gives it — so the turn below waits for the
+        # whole catalogue rather than for a fast machine.
+        await wait_until_settled(hub_client)
         server = build_server(
             cfg,
             backend=backend,

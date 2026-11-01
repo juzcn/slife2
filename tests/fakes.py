@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import operator
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -713,6 +714,30 @@ def answering(server: Any) -> Any:
         return Client(server)
 
     return factory
+
+
+async def wait_until_settled(hub: Any, *, timeout: float = 60.0) -> None:
+    """Wait until every source the hub asks has finished connecting.
+
+    **Both of the hub's answers bound their wait** (`ready.list_settle`), so a
+    runner slow enough to exceed that bound leaves a source `connecting` while
+    the hub is already answering — and a test that reads the catalogue there
+    sees a half-written one: a tool "not in the catalogue yet", or a list that
+    omits a source the machine has.  The bound is the design (a turn must not
+    wait for an `npx`), so a test that needs the whole catalogue waits for it
+    explicitly rather than assuming the machine was fast.
+
+    `servers` is the question, and asking it is also what keeps the wait honest:
+    it starts the attempts that are not running and settles the ones that are.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        answer = await hub.call_tool("servers", {})
+        rows = answer.data["servers"]
+        if not any(row.get("state") == "connecting" for row in rows):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"a source was still connecting after {timeout}s")
 
 
 def blank_plugin() -> Any:

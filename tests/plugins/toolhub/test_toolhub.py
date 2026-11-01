@@ -63,7 +63,13 @@ from slife2.plugins.toolhub.server import (
 from slife2.plugins.toolhub.server import (
     build_server as build_hub,
 )
-from tests.fakes import StubEmbedder, config_file, plugin_transports, upstream_server
+from tests.fakes import (
+    StubEmbedder,
+    config_file,
+    plugin_transports,
+    upstream_server,
+    wait_until_settled,
+)
 
 #: The sections every file must have (SDD §4.1).  These homes are read through
 #: `load_cached`, so each is a file the loader has to accept.
@@ -1064,29 +1070,42 @@ async def test_only_one_of_ours_may_declare() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else() -> None:
+async def test_a_plugin_that_is_down_costs_freshness_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The refresh runs on the search path, so it may not wait for anybody.
 
     `begin_connecting` starts an attempt rather than awaiting one, and a source
     that is not up is skipped: the rows it declared last time are still in the
     catalogue, and the next search asks again.  A `settle` here — five seconds,
     for a plugin that may never answer — would put a start-up inside the one
-    call a model makes while it is stuck, so the clock is the assertion: the
-    answer has to come back well inside that window.
+    call a model makes while it is stuck.
+
+    **The wait is counted, not timed.**  A loaded runner can spend longer than
+    the budget on a search that waited for nobody — measured at 9.5 s against
+    the 5 s bound on a Windows CI run — so the clock cannot tell the two apart.
+    What the search must not do is settle at all.
     """
+    import slife2.plugins.toolhub.server as hub_server
 
     def refuses_to_start(settings: ToolServerSettings) -> Any:
         raise FileNotFoundError("no such program: slife2-skills")
 
-    started = time.monotonic()
+    waited: list[Any] = []
+    settle = hub_server.settle_attempts
+
+    async def counted(attempts: Any) -> None:
+        waited.append(attempts)
+        await settle(attempts)
+
+    monkeypatch.setattr(hub_server, "settle_attempts", counted)
+
     async with Client(hub_for(connected={"skills-server": refuses_to_start})) as hub:
+        before = len(waited)
         found = await call(hub, "tool_search", {"keywords": ["turn"], "sentences": []})
-    elapsed = time.monotonic() - started
 
     assert found["ok"] is True
-    assert elapsed < _T.timeouts.ready.list_settle, (
-        "the search waited for a plugin that is not coming up"
-    )
+    assert len(waited) == before, "the search waited for a plugin that is not coming up"
 
 
 def plugin_with_two_kinds_of_tool() -> FastMCP:
@@ -2948,6 +2967,12 @@ async def test_a_catalogue_answer_without_tools_fails_the_list(
     monkeypatch.setattr(ToolStore, "injectable", lambda self, sources: {"rows": []})
 
     async with Client(hub_for()) as hub:
+        # **The plugins are waited for, because this test is about the
+        # catalogue.**  An ask bounds its wait for sources that are still
+        # connecting, and on a loaded runner that bound can expire — the list
+        # then fails with "a plugin is not answering" before it ever reaches the
+        # shape this test damages.
+        await wait_until_settled(hub)
         with pytest.raises(ToolError, match="without a tool list"):
             await hub.call_tool("list_tools", {})
 
@@ -3336,6 +3361,14 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
     Read out of the first home's file rather than asked of the hub again: asking
     would re-list the plugin and merge the tool in on its own, which is the one
     thing this test must not do.
+
+    **Two waits, because neither of the hub's promises is unbounded.**  An ask
+    starts a re-list and waits `ready.list_settle` for it; on a runner slow
+    enough to expire that bound, a second ask would join the *first* attempt —
+    a listing taken before the plugin grew — instead of starting its own, so the
+    links are waited for between the two phases.  And the merge that the second
+    ask starts can land after its answer, so the file is polled rather than read
+    once.
     """
     mine, theirs = tmp_path / "mine", tmp_path / "theirs"
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
@@ -3361,8 +3394,31 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
         with in_home(home):
             await hub_client.call_tool("list_tools", {}, meta=client_meta("jack"))
 
+    def routed(path: Path) -> bool:
+        """Whether the file holds the grown tool, read without opening a store."""
+        if not path.exists():
+            return False
+        try:
+            connection = sqlite3.connect(path)
+        except sqlite3.Error:
+            return False
+        try:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM tool WHERE name = 'second'"
+                ).fetchone()
+                is not None
+            )
+        except sqlite3.Error:
+            return False
+        finally:
+            connection.close()
+
     async with Client(hub) as client:
         await listed(client, mine)
+        # The first ask's re-list is finished before the plugin grows: a second
+        # ask then starts a re-read of its own rather than joining that one.
+        await wait_until_settled(client)
 
         # The plugin grows a tool, and nothing asks in `mine` again.
         @grown.tool(meta=FOR_THE_MODEL)
@@ -3371,6 +3427,13 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
             return ""
 
         await listed(client, theirs)
+
+        # The write is waited for, because the ask it started outlives it on a
+        # slow machine.  What this test is about is where the rows land.
+        path = mine / "agents" / "tools.db"
+        deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+        while time.monotonic() < deadline and not routed(path):
+            await asyncio.sleep(0.05)
 
     held = ToolStore(mine / "agents" / "tools.db", threshold=100)
     assert held.route("second") is not None, "the re-read stopped at the asking home"
