@@ -18,8 +18,9 @@ conversation it produced is still there for the next turn.
 
 **It is the slow lane.**  Eighteen daemons come up and go down, so it is marked
 `e2e` and kept out of the default run (`-m e2e` is how it is asked for); see
-README's Tests section.  Nothing here is timing-sensitive beyond the launcher's
-own readiness probe, which is what a real start waits on too.
+README's Tests section.  A test starts from the stack the fixture hands it —
+every process serving, and the hub linked to every plugin it requires — rather
+than from whichever parts happened to be up.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import DUMP, index_path, store_of
 from slife2.tui.client import MCPAgentClient
-from tests.fakes import StubEmbedder, a_home
+from tests.fakes import StubEmbedder, a_home, wait_until_settled
 
 pytestmark = pytest.mark.e2e
 
@@ -497,6 +498,17 @@ async def stack(
         assert not failed, [
             (one.spec.name, one.status.value, one.detail) for one in failed
         ]
+        # **The launcher's readiness is per process; the hub's links are the
+        # hub's own.**  `agent-task`, `schedule`, `peer-agent` and `subagent`
+        # start *after* the hub — they reach it, so it cannot wait for them — so
+        # its first attempts fail while they come up.  A turn's `list_tools`
+        # bounds its wait at `ready.list_settle` and is entitled to refuse with
+        # "a plugin is not answering"; on a loaded runner that is what the
+        # first turn after `ensure_all` gets.  The stack handed to a test is
+        # therefore one the hub has linked to, not merely one whose processes
+        # are serving.
+        async with Client(config.server("toolhub").url) as hub:
+            await wait_until_settled(hub)
         yield {"config": config, "provider": provider, "data": tmp_path}
     finally:
         provider.stop()

@@ -717,27 +717,39 @@ def answering(server: Any) -> Any:
 
 
 async def wait_until_settled(hub: Any, *, timeout: float = 60.0) -> None:
-    """Wait until every source the hub asks has finished connecting.
+    """Wait until every source the hub *requires* is ready.
 
     **Both of the hub's answers bound their wait** (`ready.list_settle`), so a
-    runner slow enough to exceed that bound leaves a source `connecting` while
-    the hub is already answering — and a test that reads the catalogue there
-    sees a half-written one: a tool "not in the catalogue yet", or a list that
-    omits a source the machine has.  The bound is the design (a turn must not
-    wait for an `npx`), so a test that needs the whole catalogue waits for it
-    explicitly rather than assuming the machine was fast.
+    runner slow enough to exceed that bound answers with a source that is still
+    connecting or has just failed an attempt — and a test that reads the
+    catalogue there sees a half-written one, or is refused outright.  The bound
+    is the design (a turn must not wait for an `npx`), so a test that needs the
+    whole catalogue waits for it explicitly rather than assuming the machine was
+    fast.
+
+    **`ready` and not "not connecting".**  A source whose attempt failed a
+    moment ago is settled but not up, and the refusal `list_tools` makes is
+    exactly about those sources.  A failed one is retried by the next ask
+    below, which is how the wait ends rather than how it gives up.
 
     `servers` is the question, and asking it is also what keeps the wait honest:
     it starts the attempts that are not running and settles the ones that are.
     """
     deadline = time.monotonic() + timeout
+    waiting: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         answer = await hub.call_tool("servers", {})
         rows = answer.data["servers"]
-        if not any(row.get("state") == "connecting" for row in rows):
+        waiting = [
+            row for row in rows if row.get("required") and row.get("state") != "ready"
+        ]
+        if not waiting:
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"a source was still connecting after {timeout}s")
+    raise AssertionError(
+        f"a required source was not ready after {timeout}s — "
+        + "; ".join(f"{row['name']}: {row['state']}" for row in waiting)
+    )
 
 
 def blank_plugin() -> Any:
