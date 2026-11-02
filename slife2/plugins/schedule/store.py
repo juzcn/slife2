@@ -23,8 +23,8 @@ file rather than by a `WHERE` clause, and this is a store with one writer, so
 name: `safe_agent_name` keeps two names apart but is not the identity (`a/b`
 becomes `a_b-<digest>`), and the poll loop, which is shared, has nothing but
 the directory to go on.
-Firing a task by a name that has been sanitised would hand the trigger to a
-conversation that is not the one that asked for it — the failure is silent, so it
+Firing a task by a name that has been sanitised would start the work for an
+agent that is not the one the ledger belongs to — the failure is silent, so it
 is worth the one row.
 
 A **row is never deleted**, except with its task.  What a scheduled task did last
@@ -47,10 +47,15 @@ from slife2.libs.store.index import connect_to
 
 #: Every state a run can be in, in the order they can be reached.
 #:
-#: `pending` is written **before** the hand-over rather than after it, which is
-#: what makes an interrupted fire visible instead of invisible: a run whose
-#: trigger was never answered is a `pending` row the next start sweeps up, where
-#: a row written after the hand-over would simply never have existed.
+#: `pending` is written **before** the window is asked rather than after it,
+#: which is what makes an interrupted fire visible instead of invisible: a run
+#: whose window was never asked is a `pending` row the next start sweeps up,
+#: where a row written after the start would simply never have existed.
+#:
+#: `failed` is the run that did not happen: the work failed or was cancelled,
+#: the run could not be started or followed, or a process stopped before its
+#: ending was seen.  `missed` is the absence: the fire came due while no
+#: instance was running, so nothing was started at all.
 PENDING = "pending"
 RAN = "ran"
 FAILED = "failed"
@@ -97,9 +102,9 @@ CREATE TABLE IF NOT EXISTS scheduled_runs (
     error         TEXT NOT NULL DEFAULT '',
     -- The background task this run's work is being done by, once it has been
     -- started.  Empty until then, and empty forever for a run that never got
-    -- that far — which is the difference between "in flight" and "nobody acted
-    -- on the trigger", and the reason this is a column rather than a guess made
-    -- from the task's name.
+    -- that far — which is the difference between "in flight" and "never
+    -- started", and the reason this is a column rather than a guess made from
+    -- the task's name.
     agent_task_id TEXT NOT NULL DEFAULT '',
     UNIQUE(task_id, due_at)
 );
@@ -206,9 +211,9 @@ class ScheduleStore:
         #: **The home this ledger lives in**, kept because a shared process
         #: serves every home and a ledger is not enough to say which one: the
         #: file name is `schedule.db` in all of them.  Everything the poll does
-        #: with a ledger — dispatching its run, handing its trigger to a window,
-        #: asking the task server what became of the work — has to be done in
-        #: this home, or the work lands in the daemon's own (`paths.in_home`).
+        #: with a ledger — asking a window whether it is there, dispatching its
+        #: run, asking the task server what became of the work — has to be done
+        #: in this home, or the work lands in the daemon's own (`paths.in_home`).
         self.home = home
         self._ensure_schema()
 
@@ -573,9 +578,10 @@ class ScheduleStore:
         answer that is still delivered.  Nothing could put it back either:
         `reconcile` closes `pending` rows and only those, so it would never look
         at the row again, and `reopen` refuses one that has ended.  The other
-        endings are not this: `ran` and `failed` come from what the task did, and
-        `missed` — like a skip of a `pending` run with *no* task on it — is a
-        trigger nobody answered, which is exactly a run that did not happen.
+        endings are not this: `ran` and `failed` come from what the run and its
+        task did, and `missed` — like a skip of a `pending` run with *no* task on
+        it — is a fire nobody answered, which is exactly a run that did not
+        happen.
         """
         if status not in STATUSES:
             raise ValueError(f"{status!r} is not a run state")
@@ -628,10 +634,10 @@ class ScheduleStore:
         nothing happened by getting the row back unchanged.
 
         **The task id goes with the ending, and only with the ending.**  A run
-        that *failed* after its background task started still carries that task's
-        id, and reopening only the status would leave a `pending` row that still
-        names a task — `schedule_run_now`'s in-flight guard reads exactly that
-        pair, so the backfill would answer without dispatching anything, do
+        that *failed* after its background task started still carries that
+        task's id, and reopening only the status would leave a `pending` row that
+        still names a task — `schedule_run_now`'s in-flight guard reads exactly
+        that pair, so the backfill would answer without dispatching anything, do
         nothing, and be settled `failed` again by the next reconcile.  Clearing
         the column is what makes that reopened run a run nobody is doing yet.
 
@@ -639,7 +645,7 @@ class ScheduleStore:
         and its id is how the guard knows: clearing it there would make a second
         `schedule_run_now` for the same due time dispatch a second task, which is
         the repeat the guard exists to prevent.  So the id is kept for `pending`
-        and dropped for the two states that are genuinely over.
+        and dropped for the states that are genuinely over.
         """
         found = self.run(name, due_at)
         if found is None or found.status not in UNSETTLED:
@@ -663,8 +669,8 @@ class ScheduleStore:
 
         Written the moment the task has started, so that a process which stops
         afterwards leaves a row that says what it was waiting on.  A run whose
-        work never got started keeps an empty column, which is how the poll tells
-        "in flight" from "nobody acted on the trigger".
+        work never got started keeps an empty column, which is how the sweep
+        tells "in flight when the process stopped" from "never started".
         """
         task = self.task(name)
         if task is None:
@@ -688,8 +694,8 @@ class ScheduleStore:
         """Runs whose work is being done right now: `pending`, with a task.
 
         What the poll asks the agent-task plugin about.  A `pending` run with no
-        task is *not* here — it is a trigger nobody acted on, which is a different
-        thing and one this plugin deliberately does not chase (SDD §14.2).
+        task is *not* here — it never started, and the next start's sweep closes
+        it `missed`.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -702,25 +708,40 @@ class ScheduleStore:
         return [_run(row, row["task_name"]) for row in rows]
 
     def sweep(self) -> int:
-        """Fail every `pending` run a stopped process left behind.
+        """Close every `pending` run a stopped process left behind.
 
-        **The one thing a crash can leave that nothing else can resolve.**  A
-        `pending` row means the trigger was written and the process died before
-        anything closed it, so the answer is not "unknown" — it is that this
-        never finished, and saying so is what lets the agent decide whether to
-        backfill it.  Returns how many it moved, so the caller can say.
+        **Two endings, and the column the scheduler already wrote decides
+        which.**  A run with no `agent_task_id` never got as far as starting the
+        work — the process stopped between the record and the dispatch — so it
+        is `missed`: the fire came due and nothing ran.  A run that names a task
+        did start, and its ending was never observed, so it is `failed`: the work
+        may have happened and the ledger cannot say.  Both are re-openable
+        (`schedule_run_now` with the due time), which is how an instance that
+        comes up decides whether to run it again.
+
+        Returns how many it moved, so the caller can say.
         """
         moment = now()
         with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE scheduled_runs SET status = ?, error = ? WHERE status = ?",
+            missed = connection.execute(
+                "UPDATE scheduled_runs SET status = ?, error = ? "
+                "WHERE status = ? AND agent_task_id = ''",
                 (
-                    FAILED,
-                    f"slife2 stopped before this run was settled ({moment})",
+                    MISSED,
+                    f"the instance stopped before this run started ({moment})",
                     PENDING,
                 ),
-            )
-        return cursor.rowcount
+            ).rowcount
+            failed = connection.execute(
+                "UPDATE scheduled_runs SET status = ?, error = ? "
+                "WHERE status = ? AND agent_task_id <> ''",
+                (
+                    FAILED,
+                    f"the process stopped before this run was settled ({moment})",
+                    PENDING,
+                ),
+            ).rowcount
+        return missed + failed
 
 
 def _task(row: sqlite3.Row) -> Task:

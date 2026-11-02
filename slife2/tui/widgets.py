@@ -206,13 +206,10 @@ def channel_prefix(channel: str) -> str:
         # (`slife2.libs.harness.async_tasks.channel_for`).
         return f"AsyncTool({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{SCHEDULE_CHANNEL}:"):
-        # The clock, and which task came due.  **There is no marker to take off
-        # here** — unlike an agent task's answer, a trigger wears none, because
-        # the marker vocabulary is for matching a result to what produced it and
-        # a trigger is not a result (SDD §9.4).  So what the channel
-        # carries is the *whole* of what the window can say about where this came
-        # from, which is why every message this plugin hands over names a task —
-        # including the reconciliation, which is sent per task for this reason.
+        # A turn written by an older build, when a fire was handed over as a
+        # message.  A fire is no longer a turn, but a stored conversation can
+        # still hold one, and the channel is the whole of what says which task
+        # spoke.
         return f"Scheduled({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{REMOTE.group_channel}:"):
         # A group on the peer network.  The bubble names the sender *and* the

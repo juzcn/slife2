@@ -244,7 +244,7 @@ async def test_a_window_that_goes_away_answers_every_caller_still_waiting() -> N
 
 
 async def test_nothing_here_is_offered_to_the_model() -> None:
-    """Three tools, and the hub must leave all of them out of the tool set.
+    """Four tools, and the hub must leave all of them out of the tool set.
 
     None carries the audience mark, and the plugin declares no sources — so it
     contributes no catalogue rows either, which is what makes it one of the
@@ -257,10 +257,32 @@ async def test_nothing_here_is_offered_to_the_model() -> None:
 
     assert {tool.name for tool in tools} == {
         control.ATTACH,
+        control.ATTACHED,
         control.SUBMIT,
         control.NOTE,
     }
     assert not any(for_the_model(tool.meta) for tool in tools)
+
+
+async def test_attached_answers_whether_a_window_is_showing() -> None:
+    """The one read-only question here, and the one a scheduler asks before it
+    starts work whose answer would have nowhere to go."""
+    server = control.build_server()
+
+    async with Client(server) as channel:
+        before = await channel.call_tool(control.ATTACHED, {"agent": "jack"})
+    assert before.data == {"attached": False}
+
+    async with attached(server, "jack"):
+        async with Client(server) as channel:
+            # The same probe every caller uses to know the session is held:
+            # a `submit` that stops being refused.
+            await submitted(channel, "jack", text="probe", channel="wechat")
+            here = await channel.call_tool(control.ATTACHED, {"agent": "jack"})
+            elsewhere = await channel.call_tool(control.ATTACHED, {"agent": "jill"})
+
+    assert here.data == {"attached": True}
+    assert elsewhere.data == {"attached": False}
 
 
 async def test_the_surface_answers_to_the_name_it_advertises() -> None:

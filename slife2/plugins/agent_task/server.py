@@ -912,13 +912,11 @@ def build_server(
     async def deliver(task: AgentTask) -> None:
         """Hand a finished task's answer to the conversation that asked for it.
 
-        **The hand-over itself is `slife2.libs.harness.handover`, and it is shared with
-        `slife2-schedule`** — one road, the window, and one failure when it
-        cannot be made.  Two plugins that both put a message into a conversation
-        nobody asked them about is one more copy than this project keeps of
-        anything, so what is left here is only the part that *is* an agent
-        task's: what an answer wears, and what "delivered" means when it does not
-        arrive.
+        **The hand-over itself is `slife2.libs.harness.handover`** — one road,
+        the window, and one failure when it cannot be made.  Every channel that
+        puts a message into a conversation it does not own takes it, so what is
+        left here is only the part that *is* an agent task's: what an answer
+        wears, and what "delivered" means when it does not arrive.
 
         **An undelivered answer is a failure rather than a stage.**  A task that
         finished with nobody watching is the case a background task exists for —

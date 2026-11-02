@@ -104,9 +104,9 @@ def _renderer(directory: Path) -> Environment:
 def render_instruction(template: str | Path, **context: object) -> str:
     """Render an instruction template: one turn's text, from the package.
 
-    The callers are the recall instruction (`slife2.libs.turn.context`), the
-    compact instruction (`slife2.libs.harness.dumps`) and a scheduled run's
-    trigger.  A bare name is looked up among the shipped templates; a path is
+    The callers are the recall instruction (`slife2.libs.turn.context`) and the
+    compact instruction (`slife2.libs.harness.dumps`).  A bare name is looked up
+    among the shipped templates; a path is
     looked up beside itself.
 
     **Nothing from the home is in its context**, and `agents_md` is a value

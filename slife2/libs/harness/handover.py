@@ -37,6 +37,12 @@ may already be down the stream.  That distinction decides *what a retry is worth
 repeating it is how one message becomes two turns — and it is spent here rather
 than passed on: what the callers get is one failure, whose reason is in it.
 
+**One question here is not a hand-over at all.**  `window_attached` asks whether
+a window is showing a conversation, for a caller that must decide *before*
+starting work — a scheduled run whose answer would have nowhere to go.  It takes
+the same road and the same patience for a starting window; what it does not take
+is a message, because a question about a socket should not cost a turn.
+
 **And one thing this module hands over is not a message at all.**  A *note*
 (`note_to_window`) is a line the harness has to say and nobody has to answer, so
 it goes to the window and stops there: a line no window took is a line nobody
@@ -55,7 +61,7 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.libs.plugin.protocol import close_server, open_server
+from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.plugins.tui import server as control
 from slife2.plugins.tui.server import NOTE
 
@@ -199,6 +205,64 @@ async def note_to_window(
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.debug("no window for %s could be reached: %s", agent, exc)
         return False
+
+
+async def window_attached(
+    config: Config, agent: str, *, client: Client | None = None
+) -> bool | None:
+    """Whether a window is showing *agent*'s conversation.
+
+    **True, False, or "the terminal could not be asked".**  The third answer is
+    not a `False`: a call that did not come back says nothing either way, and a
+    caller that read it as "no window" would record a missed run that may have
+    had somewhere to go.  The distinction is the one `submit_to` makes, for the
+    same reason — an exception's type cannot tell a refusal from a dropped
+    stream.
+
+    **A `False` is retried at the window's own pace**, because an agent's window
+    attaches a moment after its stack comes up and a caller may ask in that gap.
+    That is `hand_over`'s patience, spent here rather than at the call site: it
+    is a fact about the window rather than about the work.
+
+    The question is `slife2.plugins.tui.server`'s `attached`, and it carries the
+    ambient home like every call to one of our servers (`Peer`), so a ledger in
+    another home is asked about that home's window.
+    """
+    try:
+        async with _peer(
+            config.server("tui").url,
+            name=TUI_SERVER_NAME,
+            fallback_tool=control.ATTACHED,
+            timeout=_T.timeouts.transport.window,
+            client=client,
+        ) as window:
+            for attempt in range(1, _T.timeouts.stream.handover + 1):
+                try:
+                    answer = await window.call_tool(
+                        control.ATTACHED,
+                        {"agent": agent},
+                        timeout=_T.timeouts.transport.window,
+                    )
+                except Exception as exc:  # noqa: BLE001 - the third answer
+                    logger.debug("the window for %s could not be asked: %s", agent, exc)
+                    return None
+                value = tool_payload(answer).get("attached")
+                if value is True:
+                    return True
+                if value is not False:
+                    # A shape this build cannot read is not an answer; saying
+                    # "no window" would turn a broken peer into a missed run.
+                    logger.warning(
+                        "the window for %s answered an unreadable shape", agent
+                    )
+                    return None
+                if attempt < _T.timeouts.stream.handover:
+                    await asyncio.sleep(_T.timeouts.pacing.reconnect)
+            logger.debug("no window is showing %s", agent)
+            return False
+    except Exception as exc:  # noqa: BLE001 - nothing reached, nothing asked
+        logger.debug("no window for %s could be reached: %s", agent, exc)
+        return None
 
 
 class DeliveryFailed(RuntimeError):

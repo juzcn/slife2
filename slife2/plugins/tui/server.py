@@ -38,11 +38,12 @@ one that becomes a row somewhere else.  Holding the call open is also what
 makes a session self-cleaning — a window that dies takes its stream with it,
 which cancels the handler behind it, which is the detach.
 
-**Three tools, and none of them is the model's.**  `submit` is a channel's,
-`note` is the harness's, `attach` is a window's; all three are addressed by an
-agent name.  Nothing here carries `slife2.libs.plugin.audience.FOR_THE_MODEL`, so the hub
-leaves all of it out of the tool set, and the plugin serves no `list_sources` —
-it declares no rows, and is therefore asked for none (`slife2.libs.plugin.protocol`).
+**Four tools, and none of them is the model's.**  `submit` is a channel's,
+`note` is the harness's, `attach` is a window's, and `attached` answers whether
+one is there; all four are addressed by an agent name.  Nothing here carries
+`slife2.libs.plugin.audience.FOR_THE_MODEL`, so the hub leaves all of it out of
+the tool set, and the plugin serves no `list_sources` — it declares no rows, and
+is therefore asked for none (`slife2.libs.plugin.protocol`).
 
 **Returning is the acknowledgement, and it is the write.**  A caller whose
 `submit` came back knows the words are on their way down a stream a window is
@@ -64,6 +65,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -87,6 +89,9 @@ CONFIG_KEY = "tui"
 ATTACH = "attach"
 SUBMIT = "submit"
 NOTE = "note"
+#: The one read-only question here: whether a window is showing an agent.  A
+#: scheduler asks it before starting work whose answer would have nowhere to go.
+ATTACHED = "attached"
 
 #: What a hand-over asks the window to do with the words, and the one branch
 #: between them: `TURN` is run as a turn of the conversation, `NOTE` is drawn as
@@ -123,7 +128,8 @@ def refused(error: Exception) -> bool:
 INSTRUCTIONS = (
     "The terminal showing an agent's conversation. `attach` is how a window "
     "announces itself and is handed messages; `submit` hands it one, from a "
-    "channel that is not the person at that terminal."
+    "channel that is not the person at that terminal; `attached` answers "
+    "whether a window is showing it."
 )
 
 
@@ -471,6 +477,22 @@ def build_server(_config: Config | None = None) -> FastMCP:
             await _push(ctx, session)
         finally:
             windows.detach(agent, session)
+
+    @mcp.tool(name=ATTACHED)
+    async def attached(agent: str) -> dict[str, Any]:
+        """Whether a window is showing this agent's conversation.
+
+        **A read, and the only question here that changes nothing.**  A
+        scheduled run asks it before starting work, because an answer no window
+        could receive is work nobody gets: `false` makes the run `missed`
+        rather than started.  It is a tool rather than something a caller infers
+        from `submit` because asking by handing over a message would run a turn
+        — a model call to answer a question about a socket.
+
+        Args:
+            agent: Whose conversation to ask about.
+        """
+        return {"attached": windows.showing(agent.strip()) is not None}
 
     @mcp.tool(name=SUBMIT)
     async def submit(agent: str, text: str, channel: str) -> None:

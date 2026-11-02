@@ -150,17 +150,13 @@ def test_the_agent_speaking_in_a_subagents_conversation_is_drawn_as_an_agent() -
     assert LOCAL_AGENT.marker in MARKERS
 
 
-def test_a_scheduled_trigger_says_which_task_came_due() -> None:
-    """The clock's messages wear **no marker** — there is nothing to match a
-    result to, because a trigger is not a result (SDD §9.4) — so the
-    channel carries the whole of what the window can say about where it came
-    from, and every message this plugin hands over names a task."""
+def test_a_stored_scheduled_turn_says_which_task_came_due() -> None:
+    """A fire is no longer a turn, but a conversation written by an older build
+    can still hold one, and its channel is the whole of what says where it came
+    from (SDD §9.4)."""
     from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
 
     assert channel_prefix(f"{SCHEDULE_CHANNEL}:daily") == "Scheduled(daily)> "
-    # A schedule message with no task in it cannot happen: a fire is the only
-    # thing this plugin hands over, and a trigger always names the task it is
-    # about (`slife2.plugins.schedule.server`), which is what keeps this branch total.
     assert channel_prefix(SCHEDULE_CHANNEL) == f"{SCHEDULE_CHANNEL}> "
 
 

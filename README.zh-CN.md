@@ -788,9 +788,9 @@ agent-task:
 ### 定时任务
 
 定时任务是模型写下的名字、描述和 cron 表达式。`slife2-schedule` 在 slife2 运行期间
-触发它。任务到期时，agent 在显示该对话的窗口里收到一轮；这一轮调用
-`schedule_run_now` 并带上它携带的到期时间。没有到达任何窗口的触发以 `failed` 结束
-该次运行并记录原因。
+触发它。任务到期时，调度器先问是否有窗口正在显示该 agent：没有窗口就把这次运行记为
+`missed`——结果将无处送达——有窗口则直接以 agent task 启动工作。不会打开一轮对话，
+也不消耗模型调用。终端无法询问或派发失败时，运行记为 `failed` 并记录原因。
 
 | 工具 | 用途 |
 |---|---|
@@ -798,15 +798,16 @@ agent-task:
 | `schedule_remove` | 删除任务及其全部运行记录。 |
 | `schedule_list` | 列出任务及下次到期时间。 |
 | `schedule_runs` | 列出账本：每次触发一行。 |
-| `schedule_run_now` | 立刻执行本次运行；带 `due_at` 则补跑。 |
+| `schedule_run_now` | 立刻执行本次运行；带 `due_at` 则补跑 missed 或 failed 的运行。 |
 | `schedule_run_skip` | 带原因关闭一次不会发生的运行。 |
 
 一次运行就是一次触发，以它到期的那一刻命名。状态从 `pending` 变为 `ran`、`failed`、
-`missed` 或 `skipped`。行在移交工作之前写入，因此同一次触发不会在下一轮询重复。
+`missed` 或 `skipped`。行在询问窗口之前写入，因此同一次触发不会在下一轮询重复。
 
-任务只在 slife2 运行时触发。启动时，扫描会关闭被停止的进程遗留的运行，轮询为每个任务
-记录最新的错过触发。`schedule_runs(status="missed")` 列出它们；错过的运行可以用
-`schedule_run_now(name, due_at)` 补跑，或用 `schedule_run_skip` 关闭。
+任务只在 slife2 运行时触发。启动时，扫描会关闭被停止的进程遗留的运行——从未启动的
+记为 `missed`，已经命名了 task 的记为 `failed`——轮询为每个任务记录最新的错过触发。
+`schedule_runs(status="missed")` 和 `status="failed"` 列出它们；两者都可以用
+`schedule_run_now(name, due_at)` 重跑，或用 `schedule_run_skip` 关闭。
 
 账本是 `<data>/agents/<agent>/schedule.db`。没有配置节。任务的 `timezone` 是 IANA
 名字；省略时使用机器当前时钟，不跟随夏令时变化。

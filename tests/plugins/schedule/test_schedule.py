@@ -14,9 +14,10 @@ under test are exactly those: a fire cannot repeat, a settled run cannot be
 reopened, and a run whose fate is unknown is not reported as either outcome. A
 fake store would test the fake.
 
-The window and the agent server are recorders rather than the real plugins —
-what is under test is *what this plugin hands over*: the channel, the rendered
-template, and which of the two paths it took.
+The window and the agent-task peer are recorders rather than the real plugins —
+what is under test is the decision a fire makes: whether the window is asked,
+which agent and home the work is started for, and what the ledger records when
+the answer would have nowhere to go.
 """
 
 from __future__ import annotations
@@ -56,7 +57,6 @@ from slife2.plugins.agent_task.server import (
 )
 from slife2.plugins.schedule.expressions import latest_fire
 from slife2.plugins.schedule.server import (
-    CHANNEL,
     SCHEDULE_LIST,
     SCHEDULE_REMOVE,
     SCHEDULE_RUN_NOW,
@@ -102,40 +102,29 @@ FINISHED_AT = "2026-10-12T22:31:07+08:00"
 
 @dataclass
 class Window:
-    """A recorder standing in for `slife2-tui`, and what it was handed."""
+    """A recorder standing in for `slife2-tui`, and the questions it was asked."""
 
     client: Client | None = None
-    #: Refuse, the way a terminal that is not showing that conversation does —
-    #: which is the one failure that *proves* nothing was written, and so the
-    #: one the fallback is allowed to act on.
-    refuse: bool = False
-    #: Raise something that is not a refusal: the words may or may not have
-    #: landed, which is the whole of what makes this different from `refuse`.
+    #: Whether a window is showing the conversation — the one fact a fire asks.
+    showing: bool = True
+    #: Raise something that is not an answer: the terminal is gone, which is not
+    #: the same as a window that is not showing the agent.
     broken: bool = False
-    handed: list[dict[str, Any]] = field(default_factory=list)
+    asked: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.mcp: FastMCP = FastMCP("window")
 
         @self.mcp.tool
-        async def submit(agent: str, text: str, channel: str) -> None:
-            if self.broken:
-                raise ConnectionError("the stream dropped mid-call")
-            if self.refuse:
-                raise ToolError(f"no window is showing {agent}'s conversation")
+        async def attached(agent: str) -> dict[str, Any]:
             # **The home the call arrived in**, read on this side of the hop: it
             # is the caller's (`client_meta`'s `data_dir`), applied by the
-            # protocol's own middleware, so a trigger offered to the wrong home
-            # is visible here rather than only in the conversation it never
-            # reached.
-            self.handed.append(
-                {
-                    "agent": agent,
-                    "text": text,
-                    "channel": channel,
-                    "home": str(paths.home()),
-                }
-            )
+            # protocol's own middleware, so a fire asking in the wrong home is
+            # visible here rather than only in the ledger it went on to close.
+            self.asked.append({"agent": agent, "home": str(paths.home())})
+            if self.broken:
+                raise ConnectionError("the terminal is gone")
+            return {"attached": self.showing}
 
 
 @dataclass
@@ -167,12 +156,12 @@ class Tasks:
     #: Park an in-flight start here, and say when one has arrived.  The race
     #: these exist for is between the first start and its `attach`: without the
     #: gate every call finishes before the second one reads, and the test would
-    #: pass whichever code ran.  `starting` is what a second start sees while
-    #: the first is parked, which is what the real agent-task plugin's
-    #: "already running" refusal reads.
+    #: pass whichever code ran.  `running` is what a second start of the same
+    #: name sees while the first is parked, which is what the real agent-task
+    #: plugin's "already running" refusal reads.
     park: asyncio.Event | None = None
     entered: asyncio.Event | None = None
-    starting: bool = False
+    running: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.mcp: FastMCP = FastMCP("tasks")
@@ -187,9 +176,9 @@ class Tasks:
         ) -> dict[str, Any]:
             if self.refuse:
                 raise ToolError(f"an agent task named {name!r} is already running")
-            if self.starting or self.started:
+            if name in self.running:
                 raise ToolError(f"an agent task named {name!r} is already running")
-            self.starting = True
+            self.running.add(name)
             if self.entered is not None:
                 self.entered.set()
             if self.park is not None:
@@ -205,7 +194,7 @@ class Tasks:
                     "home": str(paths.home()),
                 }
             )
-            self.starting = False
+            self.running.discard(name)
             answer = {
                 "name": name,
                 "status": TASK_RUNNING,
@@ -258,7 +247,7 @@ async def window() -> AsyncIterator[Window]:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def dead_window() -> AsyncIterator[Window]:
-    node = Window(refuse=True)
+    node = Window(showing=False)
     async with Client(node.mcp) as client:
         node.client = client
         yield node
@@ -266,15 +255,15 @@ async def dead_window() -> AsyncIterator[Window]:
 
 @pytest.fixture
 def a_quick_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Walk `hand_over`'s refusal ladder without waiting out its real pace.
+    """Walk `window_attached`'s retry ladder without waiting out its real pace.
 
-    A refused hand-over is tried three times, `pacing.reconnect` apart — two
-    seconds by design, because the window it is aimed at may be restarting — so
-    a test that *ends* in a refusal spends four seconds on a fact it is not
-    asserting.  What it asserts is the ledger: the run is `failed` and the reason
-    travels with it.  The pace is a registry value and patching one is what
-    `slife2.helpers.timeouts` exists for; the ladder's *length* is the design and
-    is left alone.
+    A `false` is tried three times, `pacing.reconnect` apart — two seconds by
+    design, because the window it is aimed at may be starting — so a test that
+    *ends* in a refusal spends four seconds on a fact it is not asserting.  What
+    it asserts is the ledger: the run is `missed` and the reason travels with
+    it.  The pace is a registry value and patching one is what
+    `slife2.helpers.timeouts` exists for; the ladder's *length* is the design
+    and is left alone.
     """
     monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
 
@@ -566,73 +555,56 @@ async def test_a_task_needs_a_description_that_stands_alone() -> None:
 # ── the clock ────────────────────────────────────────────────────────────────
 
 
-async def test_a_task_that_has_come_due_is_handed_to_the_conversation(
-    window: Window,
+async def test_a_task_that_has_come_due_starts_the_work_as_an_agent_task(
+    window: Window, tasks: Tasks
 ) -> None:
-    """A fire is a turn of the agent's own, on the task's own channel, wearing
-    the rendered template — and the run it opens is `pending` with no task behind
-    it yet, because *starting the work* is what the turn is for."""
-    async with Client(build(window)) as client:
+    """A fire asks whether a window is showing the agent, then starts the work
+    itself — no turn, no model, and the run names the task doing it."""
+    async with Client(build(window, tasks)) as client:
         await write(client, cron=EVERY_MINUTE)
 
     did = await poll_once(
-        default_config(), window_client=window.client, reference=later(90)
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
     )
 
-    assert len(window.handed) == 1
-    handed = window.handed[0]
-    assert handed["agent"] == AGENT
-    # The name is in the channel because a hand-over carries the channel and the
-    # words and nothing else, and the window draws the bubble from the channel.
-    assert handed["channel"] == f"{CHANNEL}:daily"
-    assert "▸ Scheduled task: daily" in handed["text"]
-    assert DESCRIPTION in handed["text"]
-    # **Whose task it is, in the words** — the only place it can be, since the
-    # `agent` above is an address and a model never sees one.  Without it a
-    # trigger is unanswerable for a conversation that holds no such task: the
-    # reader can say "not mine" and nothing more.
-    assert f"{AGENT}'s task" in handed["text"]
+    assert [one["agent"] for one in window.asked] == [AGENT]
+    assert [
+        (one["agent"], one["name"], one["description"]) for one in tasks.started
+    ] == [(AGENT, "daily", DESCRIPTION)]
+    assert [Path(one["home"]).resolve() for one in tasks.started] == [
+        paths.home().resolve()
+    ]
 
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING
-    # **Open, with nothing doing it yet**: the turn has not been answered, so
-    # `schedule_run_now` has not been called.
-    assert run.agent_task_id == ""
-    # The trigger's one instruction is that call, carrying the due time that names
-    # the run — and it says the run closes itself, so there is nothing to
-    # remember in a later turn.
-    assert run.due_at in handed["text"]
-    assert SCHEDULE_RUN_NOW in handed["text"]
+    assert run.agent_task_id == "agent-task:daily"
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
 
 
-async def test_a_trigger_names_the_agent_whose_ledger_holds_the_run(
-    window: Window,
+async def test_the_window_and_the_task_are_addressed_to_the_ledgers_own_agent(
+    window: Window, tasks: Tasks
 ) -> None:
-    """**The one thing that tells a mis-delivery from a reader's own ledger.**
+    """**The ledger's agent, not the machine's default.**
 
-    A trigger that arrives where no such task is written down leaves the reader
-    with a dead end: `schedule_run_now` refuses, `schedule_run_skip` refuses, the
-    ledger is empty — and every one of those is *correct*, because a run is
-    written into the ledger of the agent whose task it is and there is nothing
-    here to start or settle.  What was missing was not a path but a fact: whose
-    run the trigger was talking about, which the words have to carry because a
-    hand-over's address never reaches the model.
-
-    `OTHER`'s ledger rather than this agent's, which is the case that tells the
-    two apart — the name written into the words is the ledger's own agent, not
-    the machine's default and not something read off the task's name.
+    A fire is a fact about one agent's ledger; the window it asks and the task
+    it starts have to be that agent's, whether the ledger is the process's own
+    or another home's.
     """
-    async with Client(build(window)) as client:
+    async with Client(build(window, tasks)) as client:
         await write(client, agent=OTHER, cron=EVERY_MINUTE)
 
-    await poll_once(default_config(), window_client=window.client, reference=later(90))
+    await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
 
-    assert len(window.handed) == 1
-    handed = window.handed[0]
-    assert handed["agent"] == OTHER
-    assert f"{OTHER}'s task" in handed["text"]
-    assert f"{AGENT}'s task" not in handed["text"]
+    assert [one["agent"] for one in window.asked] == [OTHER]
+    assert [one["agent"] for one in tasks.started] == [OTHER]
 
 
 async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
@@ -647,7 +619,9 @@ async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
         default_config(), window_client=window.client, reference=later(days=400)
     )
 
-    assert window.handed == []
+    # A stale fire is decided before the window is asked: nothing can make it
+    # run now, so there is no question to put to the terminal.
+    assert window.asked == []
     run = ledger().newest("daily")
     assert run is not None and run.status == MISSED
     assert "not running" in run.error
@@ -685,26 +659,33 @@ async def test_the_poll_settles_finished_runs_before_it_fires_again(
 
 
 async def test_a_task_that_is_not_due_yet_does_nothing_twice(
-    window: Window,
+    window: Window, tasks: Tasks
 ) -> None:
     """`None` is the answer on almost every poll, and the anchor is what keeps it
     that way: the same moment asked about again finds nothing, because the fire
     it found is already on record."""
-    async with Client(build(window)) as client:
+    async with Client(build(window, tasks)) as client:
         await write(client, cron=EVERY_MINUTE)
         reference = later(90)
 
         first = await poll_once(
-            default_config(), window_client=window.client, reference=reference
+            default_config(),
+            window_client=window.client,
+            tasks_client=tasks.client,
+            reference=reference,
         )
         second = await poll_once(
-            default_config(), window_client=window.client, reference=reference
+            default_config(),
+            window_client=window.client,
+            tasks_client=tasks.client,
+            reference=reference,
         )
 
     assert len(first) == 1
     # Nothing new to do: the anchor moved, so the same fire is behind it.
     assert second == []
-    assert len(window.handed) == 1
+    assert len(window.asked) == 1
+    assert len(tasks.started) == 1
 
 
 async def test_a_disabled_task_is_never_fired(window: Window) -> None:
@@ -716,20 +697,19 @@ async def test_a_disabled_task_is_never_fired(window: Window) -> None:
     )
 
     assert did == []
-    assert window.handed == []
+    assert window.asked == []
     assert ledger().newest("daily") is None
 
 
-async def test_a_run_no_window_could_be_reached_for_is_failed(
+async def test_a_fire_with_no_window_is_missed(
     dead_window: Window,
     a_quick_ladder: None,
 ) -> None:
-    """A window that is not showing that agent is a failure, not a detour.
+    """The instance is not running, so the answer would have nowhere to go.
 
-    The fallback used to run the turn in the agent server — a turn nobody was
-    watching, for a task whose whole point is that somebody is told the clock
-    came due.  So the run is finished `failed` and the reason goes with it: the
-    ledger is where "did it run?" is answered, and this one did not.
+    `missed`, and not `failed`: nothing was tried and nothing broke.  The
+    instance that comes up later decides whether to backfill the run or close
+    it.
     """
     async with Client(build(dead_window)) as client:
         await write(client)
@@ -740,21 +720,19 @@ async def test_a_run_no_window_could_be_reached_for_is_failed(
         reference=later(90),
     )
 
-    assert dead_window.handed == []
+    assert dead_window.asked, "the window was asked"
     run = ledger().newest("daily")
-    assert run is not None and run.status == FAILED
-    assert run.error, "and the reason travels with the run"
+    assert run is not None and run.status == MISSED
+    assert "instance was not running" in run.error
 
 
-async def test_a_hand_over_that_does_not_come_back_fails_the_run_too(
+async def test_a_terminal_that_cannot_be_asked_is_failed(
     broken_window: Window,
 ) -> None:
-    """The third answer, and it is not a state to wait in either.
+    """A call that did not come back is not "no window": it proves nothing.
 
-    A call that did not come back is not repeated — its words may already be in
-    the conversation, and one message arriving twice is worse than one arriving
-    late — but the run's trigger reached no conversation that could be confirmed,
-    so the run did not happen either.  `failed`, with the reason recorded.
+    The window may have been there, so recording `missed` would claim an
+    absence nobody saw.  The run is `failed`, with the reason on it.
     """
     async with Client(build(broken_window)) as client:
         await write(client)
@@ -767,24 +745,28 @@ async def test_a_hand_over_that_does_not_come_back_fails_the_run_too(
 
     run = ledger().newest("daily")
     assert run is not None and run.status == FAILED
-    assert "was not repeated" in run.error
+    assert "could not be asked" in run.error
 
 
 async def test_the_clock_is_one_loop_that_sees_every_agents_ledger(
-    window: Window,
+    window: Window, tasks: Tasks
 ) -> None:
     """One process serves every agent, so the poll walks the ledgers — and whose
     each one is comes from the row inside it rather than from the directory
     name, which is the sanitised one."""
-    async with Client(build(window)) as client:
+    async with Client(build(window, tasks)) as client:
         await write(client, name="mine", agent=AGENT)
         await write(client, name="theirs", agent=OTHER)
 
     did = await poll_once(
-        default_config(), window_client=window.client, reference=later(90)
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
     )
 
-    assert sorted(entry["agent"] for entry in window.handed) == [AGENT, OTHER]
+    assert sorted(entry["agent"] for entry in window.asked) == [AGENT, OTHER]
+    assert sorted(entry["agent"] for entry in tasks.started) == [AGENT, OTHER]
     assert {line.split(":")[0] for line in did} == {AGENT, OTHER}
     assert ledger(OTHER).newest("theirs") is not None
 
@@ -804,12 +786,12 @@ async def test_a_ledger_that_does_not_say_whose_it_is_is_skipped(
         )
 
     assert did == []
-    assert window.handed == []
+    assert window.asked == []
     assert "does not say whose ledger" in caplog.text
 
 
 async def test_a_ledger_that_cannot_be_opened_is_an_error_not_a_quiet_skip(
-    window: Window, caplog: pytest.LogCaptureFixture
+    window: Window, tasks: Tasks, caplog: pytest.LogCaptureFixture
 ) -> None:
     """**The clock serving the other agents is what used to hide this one.**
 
@@ -819,7 +801,7 @@ async def test_a_ledger_that_cannot_be_opened_is_an_error_not_a_quiet_skip(
     the whole point of one pass over every agent — and it moves to an error
     naming the file, which is the only place it can be seen.
     """
-    async with Client(build(window)) as client:
+    async with Client(build(window, tasks)) as client:
         await write(client, name="mine", agent=AGENT)
 
     dead = paths.schedule_db(OTHER)
@@ -828,7 +810,10 @@ async def test_a_ledger_that_cannot_be_opened_is_an_error_not_a_quiet_skip(
 
     with caplog.at_level(logging.ERROR, logger="slife2.plugins.schedule.server"):
         did = await poll_once(
-            default_config(), window_client=window.client, reference=later(90)
+            default_config(),
+            window_client=window.client,
+            tasks_client=tasks.client,
+            reference=later(90),
         )
 
     assert [line.split(":")[0] for line in did] == [AGENT], (
@@ -845,9 +830,9 @@ async def test_a_ledger_that_cannot_be_opened_is_an_error_not_a_quiet_skip(
 async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
     tasks: Tasks,
 ) -> None:
-    """**The whole of what a trigger asks for.** The plugin makes the call, so it
-    is handed the id — and that is why a run can close itself later instead of a
-    model having to remember anything (SDD §9.4)."""
+    """**The manual path, and the one a backfill takes.** The plugin makes the
+    call, so it is handed the id — and that is why a run can close itself later
+    instead of a model having to remember anything (SDD §9.4)."""
     async with Client(build(tasks=tasks)) as client:
         await write(client)
         run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
@@ -945,7 +930,7 @@ async def test_a_start_whose_id_cannot_be_read_closes_the_run(tasks: Tasks) -> N
 
     The call succeeded, so the work may still run; what cannot happen is a
     `pending` row with an empty `agent_task_id` — `in_flight` skips it and the
-    poll has nothing to ask about.  It takes the failed dispatch's ending: the
+    poll has nothing to ask about.  It takes the errored dispatch's ending: the
     run is closed with the reason, and the caller is told.
     """
     tasks.no_id = True
@@ -1250,13 +1235,11 @@ async def test_removing_a_task_takes_its_runs_with_it(tasks: Tasks) -> None:
 # ── coming up again ──────────────────────────────────────────────────────────
 
 
-async def test_the_sweep_fails_what_a_stopped_process_left_pending(
-    window: Window,
-) -> None:
-    """A `pending` row is a trigger that was written and a process that died
-    before anything closed it — so the answer is not "unknown", it is that this
-    never finished."""
-    async with Client(build(window)) as client:
+async def test_the_sweep_calls_a_run_that_never_started_missed() -> None:
+    """A `pending` row with no task is a fire that was written and a process
+    that died before anything started it — `missed`, which the instance that
+    comes up can backfill."""
+    async with Client(build()) as client:
         await write(client)
     # What the process left behind: a run written, and nothing after it.
     store = ledger()
@@ -1267,21 +1250,41 @@ async def test_the_sweep_fails_what_a_stopped_process_left_pending(
     did = await sweep_once()
 
     run = ledger().run("daily", "2026-10-12T09:00:00+08:00")
-    assert run is not None and run.status == FAILED
+    assert run is not None and run.status == MISSED
     assert "stopped before" in run.error
     assert any("never settled" in line for line in did)
 
 
-async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
-    window: Window,
-) -> None:
-    """**A fire is the only thing this plugin says to a conversation.** Printing
-    unsettled runs into every turn's prompt would be one plugin reaching into a
-    prompt another plugin owns, and a note handed over on the trigger's channel
-    is deferred rather than half-built (SDD §14.2). What the agent gets instead
-    is a ledger it can read — which is what makes "did it run?" a question with
-    an answer rather than a message nobody asked for."""
-    async with Client(build(window)) as client:
+async def test_the_sweep_calls_a_run_that_had_started_failed() -> None:
+    """A `pending` row naming a task started, and its ending was lost with the
+    process — `failed`, because the work may have happened and the ledger cannot
+    say."""
+    async with Client(build()) as client:
+        await write(client)
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    stamp = "2026-10-12T09:00:00+08:00"
+    store.record(task, stamp)
+    store.attach("daily", stamp, "agent-task:daily")
+
+    did = await sweep_once()
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == FAILED
+    assert "process stopped" in run.error
+    assert any("never settled" in line for line in did)
+
+
+async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look() -> (
+    None
+):
+    """Printing unsettled runs into every turn's prompt would be one plugin
+    reaching into a prompt another plugin owns, and a note to the window is
+    deferred rather than half-built (SDD §14.2). What the agent gets instead is
+    a ledger it can read — which is what makes "did it run?" a question with an
+    answer rather than a message nobody asked for."""
+    async with Client(build()) as client:
         await write(client)
     store = ledger()
     task = store.task("daily")
@@ -1290,21 +1293,19 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
 
     await sweep_once()
 
-    assert window.handed == []
     # …and the run is findable, which is the whole of the answer it needs.
     async with Client(build()) as client:
-        runs = await ask(client, SCHEDULE_RUNS, {"name": "daily", "status": FAILED})
+        runs = await ask(client, SCHEDULE_RUNS, {"name": "daily", "status": MISSED})
     assert [row["due_at"] for row in runs["runs"]] == ["2026-10-12T09:00:00+08:00"]
 
 
-async def test_a_sweep_with_nothing_to_do_is_quiet(window: Window) -> None:
-    async with Client(build(window)) as client:
+async def test_a_sweep_with_nothing_to_do_is_quiet() -> None:
+    async with Client(build()) as client:
         await write(client)
 
     did = await sweep_once()
 
     assert did == []
-    assert window.handed == []
 
 
 # ── the decision, on its own ─────────────────────────────────────────────────
@@ -1362,12 +1363,12 @@ async def test_the_clock_survives_a_pass_that_raises(
 
 
 async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
-    window: Window,
+    window: Window, tasks: Tasks
 ) -> None:
     """A row with a hand-edited, non-ISO anchor makes `due` raise out of
     `moment_of`, and one ledger's damage must not take the whole pass with it —
     or every *other* agent's tasks would quietly stop firing."""
-    async with Client(build(window)) as client:
+    async with Client(build(window, tasks)) as client:
         await write(client, name="theirs", agent=OTHER, cron=EVERY_MINUTE)
         await write(client, name="mine", agent=AGENT, cron=EVERY_MINUTE)
 
@@ -1378,11 +1379,14 @@ async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
     connection.close()
 
     did = await poll_once(
-        default_config(), window_client=window.client, reference=later(90)
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
     )
 
     # The good ledger fired; the bad one was skipped rather than aborting the pass.
-    assert [entry["agent"] for entry in window.handed] == [OTHER]
+    assert [entry["agent"] for entry in window.asked] == [OTHER]
     assert any(OTHER in line for line in did)
 
 
@@ -1392,16 +1396,15 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
     """**A second home's schedule runs in the second home.**
 
     One shared clock serves every home on the machine — `schedule_dbs` walks them
-    all, and that is what it is for: a schedule fires while nobody is watching,
-    which is exactly a home with no window in it.  But a home is a property of
-    the *request* a shared process is serving, not of the process, so a ledger
-    found in another home has to be fired with that home in force.  Everything a
-    fire reaches for is otherwise the daemon's own: the address `client_meta`
-    stamps on the dispatch, the agent-task peer that starts the work, and the
-    window the trigger is offered to.  Fired in the wrong home, the trigger is
-    handed to a conversation that is not the one the ledger belongs to — the real
-    window refuses it, "no window is showing it" — and the run is settled
-    `failed`, once per due task, for ever.
+    all, and that is what it is for: a schedule belongs to a home, not to the
+    process that happens to be running.  But a home is a property of the
+    *request* a shared process is serving, not of the process, so a ledger found
+    in another home has to be fired with that home in force.  Everything a fire
+    reaches for is otherwise the daemon's own: the address `client_meta` stamps
+    on the dispatch, the agent-task peer that starts the work, and the window the
+    fire asks.  Fired in the wrong home, the fire asks a conversation that is not
+    the ledger's — the real window answers "no window is showing it" — and the
+    run is settled `missed`, once per due task, for ever.
 
     The recorders read the home on the *server* side of each call, which is where
     the difference is observable: it is the caller's, applied from the meta by
@@ -1445,9 +1448,13 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
     )
 
     assert any(AGENT in line for line in did), did
-    assert [one["agent"] for one in window.handed] == [AGENT]
-    assert Path(window.handed[0]["home"]).resolve() == other.resolve(), (
-        "the trigger was offered to the ledger's own home"
+    assert [one["agent"] for one in window.asked] == [AGENT]
+    assert Path(window.asked[0]["home"]).resolve() == other.resolve(), (
+        "the window was asked in the ledger's own home"
+    )
+    assert [one["agent"] for one in tasks.started] == [AGENT]
+    assert Path(tasks.started[0]["home"]).resolve() == other.resolve(), (
+        "the work was started in the ledger's own home"
     )
     # And the ask that closes a run went to the same place: addressed at the
     # daemon's own home, the task server answers about *its* registry, and a
@@ -1835,11 +1842,11 @@ async def test_a_fall_back_repeat_fires_once_and_not_twice() -> None:
 async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> None:
     """The same rule at the clock, which is where the second run was written.
 
-    A second fire is not only a second trigger: `due` finds a fire fresh enough to
-    run, `fire` writes a run for it — the two spellings of 01:00 are two keys, so
-    `UNIQUE(task_id, due_at)` does not dedupe them — and a dispatch refused as a
-    duplicate leaves a spuriously `failed` run behind, or, if the first has
-    finished by then, does the work twice.
+    A second fire is not only a second window ask: `due` finds a fire fresh
+    enough to run, `fire` writes a run for it — the two spellings of 01:00 are
+    two keys, so `UNIQUE(task_id, due_at)` does not dedupe them — and a dispatch
+    refused as a duplicate leaves a spuriously `failed` run behind, or, if the
+    first has finished by then, does the work twice.
 
     The anchor is what the first fire left, and the poll is half a minute past the
     moment the clock went back — the two lines that make the second fire appear.
@@ -1859,5 +1866,5 @@ async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> 
     )
 
     assert did == []
-    assert window.handed == []
+    assert window.asked == []
     assert store.newest("daily") is None, "no second run was written"

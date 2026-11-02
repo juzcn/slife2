@@ -495,11 +495,11 @@ def test_every_peer_each_server_reaches_starts_before_it() -> None:
     # A task reaches four: the hub its loop runs with, the two ways into a
     # conversation, and the store the task's own conversation is restored from.
     assert set(launcher.NEEDS["agent-task"]) == {"toolhub", "tui", "agent", "context"}
-    # The clock reaches three peers, and asks the hub for nothing: it makes no
-    # model call (SDD §9.4), so the terminal and the agent server behind it
-    # are where a trigger goes, and `agent-task` is where a run's work is started
-    # and asked after — the third edge is the one that lets a run close itself.
-    assert set(launcher.NEEDS["schedule"]) == {"tui", "agent", "agent-task"}
+    # The clock reaches two peers, and asks the hub for nothing: it makes no
+    # model call (SDD §9.4), so the terminal is where it learns whether a window
+    # is showing the agent, and `agent-task` is where a run's work is started and
+    # asked after — the second edge is the one that lets a run close itself.
+    assert set(launcher.NEEDS["schedule"]) == {"tui", "agent-task"}
     # The mesh reaches two, and it is the same pair for the same reason
     # (SDD §9.2): what arrives from a peer is a message handed to a
     # conversation, wherever the conversation can be reached.

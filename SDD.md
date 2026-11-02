@@ -1764,16 +1764,18 @@ The data model is three SQL tables — `meta`, `scheduled_tasks`, and
 
 | State | Meaning |
 |---|---|
-| `pending` | The trigger was handed over but the outcome is not known. |
+| `pending` | The run was written; the outcome is not known yet. |
 | `ran` | The work finished; the task's `finished_at` is the run's time. |
-| `failed` | The work failed, was cancelled, or could not be started. |
-| `missed` | The fire occurred while no process was running. |
+| `failed` | The work failed or was cancelled, the run could not be started or followed, or a stopped process left it in flight. |
+| `missed` | The fire occurred while no instance was running — no process, or no window showing the agent — so nothing started. |
 | `skipped` | An operator or the model closed a run that will not happen. |
 
 A run is named by the moment it was due, not by when it ran. The row is written
-before the work is handed over, so a fire cannot repeat on the next poll. A
-hand-over that is refused marks the run `failed`; a run whose outcome does not
-come back remains `pending`. A fire follows the wall clock of its task's
+before the window is asked, so a fire cannot repeat on the next poll. A window
+that is not showing the agent marks the run `missed`; a terminal that cannot be
+asked, or a dispatch that fails, marks it `failed`; a run whose outcome does not
+come back remains `pending`, and the next start's sweep closes it — `missed` if
+it never started, `failed` if it had. A fire follows the wall clock of its task's
 timezone; a repeated local hour is the same fire only if its wall-clock reading
 equals the anchor's, because comparing instants alone would fire twice in a
 fall-back hour.
@@ -1782,23 +1784,24 @@ The ledger is one file per agent. The shared process finds agents by walking
 `agents/*/schedule.db` across every known home; a ledger carries the home it came
 from, because the home is a property of the request, never of the process.
 
-A fire is handed over, not executed. The trigger is delivered to the window
-showing the agent as a turn whose only instruction is to call `schedule_run_now`
-with the due time; `schedule_run_now` dispatches the work to the agent-task
-plugin, which runs the loop. The schedule plugin is the caller of
-`agent_task_start`, so it receives the task id and its poll can close the run
-when the task ends. An agent-task plugin that cannot come up is a scheduler that
-cannot run, and the launch order reflects that dependency.
+A fire is gated, then dispatched. The poll asks the terminal whether a window is
+showing the agent: one that is not is `missed`, because the answer would have
+nowhere to go, and the instance that comes up later decides whether to backfill
+the run with `schedule_run_now(name, due_at)` or close it with
+`schedule_run_skip`. One that is there is started directly as an ordinary agent
+task (`agent_task_start`); the schedule plugin is the caller, so it receives the
+task id and its poll can close the run when the task ends. No turn is opened and
+no model call is spent — a trigger turn would ask a model to press a button the
+plugin can press itself, and a model that did not press it would leave the run
+`pending`. An agent-task plugin that cannot come up is a scheduler that cannot
+run, and the launch order reflects that dependency.
 
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
-open by a stopped process, and the poll records the newest missed fire for each
-task. A missed run can be backfilled with `schedule_run_now(name, due_at)` or
-closed with `schedule_run_skip`. Nothing announces a missed run; the ledger
-holds the answer.
-
-A trigger is the only thing the clock ever says to a conversation. It carries no
-marker, because the marker vocabulary matches a result to what produced it, and a
-trigger is not a result.
+open by a stopped process — a run with no task was never started and is
+`missed`; one that names a task is `failed` — and the poll records the newest
+missed fire for each task. A missed or failed run can be re-run with
+`schedule_run_now(name, due_at)` or closed with `schedule_run_skip`. Nothing
+announces it; the ledger holds the answer.
 
 A task's `timezone` is an IANA name. Leaving it out uses the machine's clock as
 it is now, which does not follow a daylight-saving change.
@@ -1886,7 +1889,7 @@ so it follows the OS locale rather than `--lang`; a machine whose OS language an
 
 An agent is on the peer network while a window holds its `join` call. Everything
 else already works without a terminal: a channel's hand-over goes to the window,
-a scheduled trigger goes to the window, and a task's answer goes to the window.
+a scheduled fire asks the window, and a task's answer goes to the window.
 An agent nobody holds is offline, and that is the one thing a terminal was
 required for.
 
@@ -2357,7 +2360,6 @@ The following are not implemented in this version:
 | A word to the model about the loaded set | The tool descriptions explain themselves. | A model may not use loading unless it reads them. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
-| A trigger nobody acted on | The closing rule needs a measured timeout. | One turn's inattention leaves a run `pending`. |
 | Background work inside an agent task | A task runs one turn and has no second turn for a result. | `_async` is refused with an explanation. |
 | A client id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn client id is stored. |
 | The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |

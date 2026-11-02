@@ -896,9 +896,11 @@ not total work over time.
 
 A scheduled task is a name, a description, and a cron expression written by the
 model. `slife2-schedule` fires it while slife2 is running. When a task comes due,
-the agent receives a turn in the window showing that conversation; that turn
-calls `schedule_run_now` with the due time it carries. A fire that reaches no
-window ends the run as `failed` with the reason recorded.
+the scheduler asks whether a window is showing that agent: a window that is not
+there ends the run as `missed` — the answer would have nowhere to go — and a
+window that is there starts the work directly as an agent task. No turn is
+opened and no model call is spent. A terminal that cannot be asked, or a dispatch
+that fails, ends the run as `failed` with the reason recorded.
 
 | Tool | Purpose |
 |---|---|
@@ -906,17 +908,18 @@ window ends the run as `failed` with the reason recorded.
 | `schedule_remove` | Remove a task and all of its runs. |
 | `schedule_list` | List tasks and their next due times. |
 | `schedule_runs` | List the ledger: one row per fire. |
-| `schedule_run_now` | Start this run's work now; with `due_at`, backfill a run. |
+| `schedule_run_now` | Start this run's work now; with `due_at`, backfill a missed or failed run. |
 | `schedule_run_skip` | Close a run that will not happen, with a reason. |
 
 A run is one fire, named by the moment it was due. Its state moves from
-`pending` to `ran`, `failed`, `missed`, or `skipped`. The row is written before
-the work is handed over, so a fire cannot repeat on the next poll.
+`pending` to `ran`, `failed`, `missed`, or `skipped`. The row is written
+before the window is asked, so a fire cannot repeat on the next poll.
 
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
-open by a stopped process, and the poll records the newest missed fire for each
-task. `schedule_runs(status="missed")` lists them; a missed run can be backfilled
-with `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
+open by a stopped process — a run that never started is `missed`, one that names
+a task is `failed` — and the poll records the newest missed fire for each task.
+`schedule_runs(status="missed")` and `status="failed"` list them; either can be
+re-run with `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
 
 The ledger is `<data>/agents/<agent>/schedule.db`. There is no configuration
 section. A task's `timezone` is an IANA name; leaving it out uses the machine's

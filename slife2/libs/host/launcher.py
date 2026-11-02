@@ -683,16 +683,15 @@ NEEDS: dict[str, tuple[str, ...]] = {
     # looks like the feature not working rather than like a daemon that was still
     # starting.
     "agent-task": ("toolhub", "tui", "agent", "context"),
-    # The clock reaches three peers, and needs neither the hub nor a model.  A
-    # fire puts a due task in front of the agent through the terminal, or through
-    # the agent server when no window is showing that conversation; the turn it
-    # opens then calls back into *this* plugin, which hands the work to
-    # `agent-task` as a task of the agent's own and asks that peer what became of
-    # it.  So the third edge is where the run can actually be closed.  Ordering
-    # rather than correctness, like every edge here — a fire that cannot be handed
-    # over is a run marked failed, which looks like the feature not working rather
-    # than like a daemon that was still starting.
-    "schedule": ("tui", "agent", "agent-task"),
+    # The clock reaches two peers, and needs neither the hub nor a model.  A
+    # fire asks the terminal whether a window is showing the agent — no window
+    # is a missed run, because the answer would have nowhere to go — and hands
+    # the work to `agent-task` as a task of the agent's own; its poll asks that
+    # peer what became of it.  So the second edge is where the run can actually
+    # be closed.  Ordering rather than correctness, like every edge here — a
+    # window that cannot be asked is a run marked failed, which looks like the
+    # feature not working rather than like a daemon that was still starting.
+    "schedule": ("tui", "agent-task"),
     # The mesh reaches two peers and needs neither the hub nor a model: what
     # arrives from a peer is handed to the conversation — the terminal showing
     # it, or the agent server when no window is — through the same `hand_over`
