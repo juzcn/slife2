@@ -1747,7 +1747,17 @@ The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. **A task is `finished` only when its answer
 reached a window**: if no window is showing the conversation, it ends `failed`
 and the log records why — the answer is the product, and an answer nobody
-received is not a finished task. **A probe may start one too.** `slife2 probe
+received is not a finished task.
+
+**The acknowledgement is the write, not the record.**  `finished` means the
+window took the answer: `hand_over` returns when the words are on their way down
+the window's stream, and the window submits them into the conversation, which
+the agent server records as a turn when that turn ends.  A window that dies
+between the two leaves a `finished` task whose answer is in no store.  Closing
+that gap needs a second acknowledgement after the record, which the hand-over
+design refuses: it is how one message becomes two turns.
+
+**A probe may start one too.** `slife2 probe
 --channel tui` starts a task as the target agent, waits for its state, and reads
 the delivered message; `agent_task_status` reports state and never the result.
 
@@ -1769,7 +1779,7 @@ The data model is three SQL tables — `meta`, `scheduled_tasks`, and
 | State | Meaning |
 |---|---|
 | `pending` | The run was written; the outcome is not known yet. |
-| `ran` | The work finished and its answer reached the conversation; the task's `finished_at` is the run's time. |
+| `ran` | The work finished and its answer reached the conversation (the window's write, §9.3); the task's `finished_at` is the run's time. |
 | `failed` | The work failed or was cancelled, the answer could not be delivered, the run could not be started or followed, or a stopped process left it in flight. |
 | `missed` | The fire occurred while no instance was running — no process, or no window showing the agent — so nothing started. |
 | `skipped` | An operator or the model closed a run that will not happen. |
