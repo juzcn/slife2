@@ -2533,7 +2533,7 @@ def asking(call_id: str = "call-1", name: str = "sensitive"):
 
     The request arrives as a progress event and the answer cannot travel back on
     it, so the window draws a row and answers it on its own call.  What is under
-    test here is the row, not the handshake — `tests/test_approval.py` holds that
+    test here is the row, not the handshake — `tests/tui/test_approval.py` holds that
     half.
     """
 
@@ -3220,8 +3220,8 @@ async def test_the_window_attaches_to_its_inbox_and_a_push_reaches_the_queue() -
     A window no longer *serves* anything — it attaches to `slife2-tui` on mount
     and keeps that call open for its life, which is what makes a message able to
     find one window out of several.  The plugin is faked here because the real
-    one is a socket and a second process; `tests/test_tui_control.py` runs that
-    end to end over a port.
+    one is a socket and a second process; `tests/plugins/tui/test_tui_control.py`
+    runs that end to end over a port.
 
     The assertion is the same one as above, deliberately: what arrives on the
     push is the *person's own typing* by the time it is done, or the seam is in

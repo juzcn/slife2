@@ -299,8 +299,8 @@ FUNC_TOOL_LOAD = "func_tool_load"
 #: The tool that reads a playbook, which **`slife2-skills` serves and this
 #: process does not**.  Spelled here rather than imported from `slife2.plugins.skills.playbooks`,
 #: because a name crossing a process boundary is spelled on both sides and the
-#: hub has no other business with the module — `tests/test_config.py` holds the
-#: two spellings together.  What the hub uses it for is the one thing that is
+#: hub has no other business with the module — `tests/libs/host/test_config.py`
+#: holds the two spellings together.  What the hub uses it for is the one thing that is
 #: still the hub's: not letting the model throw it away (see `ALWAYS_LOADED`).
 SKILL_USE = "skill_use"
 

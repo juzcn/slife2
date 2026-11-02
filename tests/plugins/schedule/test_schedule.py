@@ -431,8 +431,9 @@ async def test_a_task_is_written_read_back_and_listed() -> None:
     hands to a person: local time with an explicit offset.  So the offset here is
     *this machine's*, and asserting `+08:00` was asserting the runner's clock —
     it passed on a machine set to it and failed on the other three, which is the
-    failure `tests/test_timeutil.py` writes down for the same reason.  What every
-    timezone shares is the fire itself, which is also the half worth holding:
+    failure `tests/helpers/test_timeutil.py` writes down for the same reason.
+    What every timezone shares is the fire itself, which is also the half worth
+    holding:
     `timezone: Asia/Shanghai` is the claim that `0 9 * * *` fires at nine in the
     morning *there*, and that is what this asserts — without naming an offset the
     machine is not obliged to have.

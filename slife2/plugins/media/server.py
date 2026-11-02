@@ -180,7 +180,7 @@ def build_server(
     four tools drives a fake adapter, so what is under test is the *tool* half
     (which provider, which model, which parameters, which folder) with no HTTP
     anywhere.  The adapters' own shapes are tested against a fake transport in
-    `tests/test_media.py`, which is the other half.
+    `tests/plugins/media/test_media.py`, which is the other half.
     """
     media = Media(config, adapters=adapters)
 

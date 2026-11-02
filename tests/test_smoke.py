@@ -653,9 +653,10 @@ def test_the_take_down_is_what_stops_the_broker(
     is tied to the stack's instead, and it is the same place for both ways a
     stack goes away: `slife2 down`, and the last client exiting.
 
-    The broker's own half is stubbed (`tests/test_a2a.py` has it: the record, and
-    the refusal to signal anything the record does not prove is ours).  What is
-    asserted here is that the take-down *asks*, and repeats the answer.
+    The broker's own half is stubbed (`tests/plugins/a2a/test_a2a.py` has it:
+    the record, and the refusal to signal anything the record does not prove is
+    ours).  What is asserted here is that the take-down *asks*, and repeats the
+    answer.
     """
     import slife2.plugins.a2a.broker as broker
     from slife2.libs.host import launcher
@@ -774,7 +775,8 @@ def test_headless_reaches_the_driver_and_the_claim(
     somebody's terminal — the ordinary case while this feature is being used —
     holds that mutex, and a test that claimed the default name would fail as
     `agent 'slife2' is already running` for a reason that has nothing to do with
-    what it asserts.  `tests/test_launcher.py` names its claims `alpha`, `beta`
+    what it asserts.  `tests/libs/host/test_launcher.py` names its claims `alpha`,
+    `beta`
     and so on for exactly this.
     """
     from uuid import uuid4

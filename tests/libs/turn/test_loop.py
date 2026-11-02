@@ -127,8 +127,8 @@ async def test_reasoning_lands_on_the_message_the_way_text_does() -> None:
     channels is allowed to drop fragments.  Scripted contradictorily on purpose:
     the chunks spell one thing and the result another, so a loop that
     reassembled the reasoning from what it forwarded would be caught here.  That
-    the provider is never sent it back is `to_wire`'s, and `tests/test_wire.py`
-    states it.
+    the provider is never sent it back is `to_wire`'s, and
+    `tests/libs/model/test_wire.py` states it.
     """
     turn = ScriptedTurn(
         result=StreamChatResult(text="42", thinking="six sevens are forty-two"),

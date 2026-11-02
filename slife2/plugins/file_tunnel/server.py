@@ -374,7 +374,8 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     two tools drives a fake tunnel, so what is under test is the *tool* half
     (which file, which token, what the far end is told) with no tunnel, no
     credential and no network anywhere.  The providers' own shapes are tested
-    against fake subprocesses in `tests/test_file_tunnel_providers.py`.
+    against fake subprocesses in
+    `tests/plugins/file_tunnel/test_file_tunnel_providers.py`.
 
     **The port comes from the config, not from a bound socket.**
     `serve_plugin` already knows the address, and the tunnel is pointed at the

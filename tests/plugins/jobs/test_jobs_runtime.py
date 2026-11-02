@@ -162,7 +162,6 @@ def context(**overrides: Any) -> job.RunContext:
         "config": default_config(),
         "agent": "jack",
         "subagent": "",
-        "run_id": "run1",
     }
     values.update(overrides)
     return job.RunContext(**values)

@@ -35,6 +35,7 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
 from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.store import index as store_index
 from slife2.libs.store.index import connect_to, table_exists
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet import server as cabinet_server
@@ -532,7 +533,9 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
     """
     async with Client(cabinet()) as client:
         for index in range(3):
-            await ask(client, "note_write", subject=f"n{index}", content=f"body {index}")
+            await ask(
+                client, "note_write", subject=f"n{index}", content=f"body {index}"
+            )
         first = await payload(client, "note_list", limit=2)
         second = await payload(client, "note_list", limit=2, offset=2)
 
@@ -1032,7 +1035,9 @@ async def test_a_mark_is_decided_by_the_index_s_own_tokenizer() -> None:
     which is the only way the two can be the same rule.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_write", subject="spelling", content="A Café on the wall")
+        await ask(
+            client, "note_write", subject="spelling", content="A Café on the wall"
+        )
         answer = await payload(client, "cabinet_search", keywords=["cafe"])
 
     assert answer["results"][0]["matched_in"] == "line", (
@@ -1683,7 +1688,7 @@ async def test_a_search_caps_the_shortlist_it_hands_to_sql(
     visible on a corpus of five: what the search hands on is the top of the
     union rather than all of it, and the page is what the caller asked for.
     """
-    monkeypatch.setattr(cabinet_store, "MAX_SQL_VARS", 2)
+    monkeypatch.setattr(store_index, "MAX_SQL_VARS", 2)
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)

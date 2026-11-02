@@ -252,7 +252,7 @@ def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
     has one.  So the resolver is pinned to "no vocabulary", which makes every
     test that sizes a turn use the script fallback — a branch that has to work
     anyway, since a machine with no network is supported rather than broken.
-    `tests/test_tokens.py` puts the real one back by asking for the
+    `tests/libs/turn/test_tokens.py` puts the real one back by asking for the
     `real_tokenizer` fixture, and skips where there is genuinely none.
     """
     monkeypatch.setattr(tokens, "_openai_encoding", lambda: None)
@@ -285,7 +285,8 @@ def tokenizer_resolver():
     """The real vocabulary resolver, for a test that wants to drive the load itself.
 
     Handed out rather than patched back in place, because what such a test wants
-    is usually to decide *how* the load goes — `test_tokens.py` makes it raise,
+    is usually to decide *how* the load goes — `tests/libs/turn/test_tokens.py`
+    makes it raise,
     to check that a failure is paid for once rather than once per message.
     """
     return _REAL_RESOLVER

@@ -2253,8 +2253,9 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
 async def served(mcp: FastMCP) -> AsyncIterator[str]:
     """Serve a built server on a real port, and yield its URL.
 
-    `tests/test_tui_control.py` has its own, and this is deliberately a second
-    copy rather than a shared one: what each needs it *for* is different — that
+    `tests/plugins/tui/test_tui_control.py` has its own, and this is
+    deliberately a second copy rather than a shared one: what each needs it
+    *for* is different — that
     file proves a hand-over reaches a stream, this one proves a stream that ends
     takes the mesh with it — and a helper shared between two modules for two
     reasons is the shape that grows a parameter per caller.
@@ -2441,7 +2442,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     This is a property of the *wire* and cannot be shown in process — the end of
     the call the window was holding is what ends the membership, and there is no
     `leave` for it to send — so it is served on a real port, like
-    `tests/test_tui_control.py`'s proof for the window's own inbox.
+    `tests/plugins/tui/test_tui_control.py`'s proof for the window's own inbox.
 
     **And it is driven through the real client** (`MCPMeshClient`, the three
     lines `SlifeApp._hold_mesh` runs), because that is the half that has to be

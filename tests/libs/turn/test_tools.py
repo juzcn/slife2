@@ -9,7 +9,7 @@ thread.  A *harness* failure is the exception: `UnreadableAnswer` is re-raised
 so the turn fails rather than the model being told a foreign hub "said no".
 
 The tools themselves live with the server that serves them, so the tests for
-what they *do* are next to it.  See `tests/test_skills_server.py`.
+what they *do* are next to it.  See `tests/plugins/skills/test_skills_server.py`.
 """
 
 from __future__ import annotations

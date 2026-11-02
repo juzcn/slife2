@@ -46,7 +46,6 @@ from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
     MAX_SQL_VARS,
-    NO_SIMILARITY,
     SYNC_BATCH,
     Embedder,
     _marks,
@@ -60,7 +59,7 @@ from slife2.libs.store.index import (
     connect_to,
     embed_rows,
     filter_clause,
-    fuse_ranked,
+    fuse_shortlist,
     index_meta,
     meanings_by_cosine,
     page_limit,
@@ -1742,62 +1741,11 @@ class ToolStore:
                 self._keyword_hits, expression, over, clauses, values
             )
 
-        # **The shortlist, one list per question.**  `keywords` is what the caller
-        # has in mind, so where there is a sentence it is that sentence's other
-        # leg and is fused into that question — a row both legs found is evidence
-        # *about that question* — and `fuse_ranked` is what orders that list.  The
-        # questions are then unioned and the whole shortlist is ordered once,
-        # below, by a rule the caller can read off the page.
-        phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
-        meaning: dict[int, float] = {}
-        shortlist: list[int] = []
-        seen: set[int] = set()
+        # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
+        # so the cabinet puts its page together by the same rule this one does.
         queries, lists = await self._semantic_lists(sentences, embedder, over)
-        for (index, _), hits in zip(phrases, lists, strict=True):
-            legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
-            if keyword_hits is not None:
-                legs["keyword"] = keyword_hits
-            for rowid, _ in fuse_ranked(legs):
-                if rowid not in seen:
-                    seen.add(rowid)
-                    shortlist.append(rowid)
-            # A row several sentences found takes the *nearest* of them, so the
-            # number is how close the row came to the nearest thing the caller
-            # asked for — not whichever sentence happened to be looked at first.
-            for rowid, measured in hits:
-                meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-        # **The union is capped, and each question may bring `over` ids of its
-        # own.**  Nothing a caller passes bounds this list: every sentence
-        # contributes its meaning leg's ids plus the keyword leg's, and the query
-        # binds one value per id.  What is dropped is the tail of the union —
-        # the weakest evidence — because a page is at most `limit` rows and every
-        # question's own list is already ranked.
-        shortlist = shortlist[:MAX_SQL_VARS]
-
-        # **Every row of the shortlist gets its number**, not only the rows the
-        # meaning leg returned: the word-matched rows are about to be shown
-        # first, and without a number the strongest evidence on the page would
-        # read as the weakest.
-        for rowid, value in self._meaning_of(
-            [rowid for rowid in shortlist if rowid not in meaning], queries
-        ).items():
-            meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), value)
-
-        # **The page is ordered by two things the caller can see.**  The words
-        # first, because a row whose own text contains them is certain where a
-        # cosine is graded, and cosines cannot separate a near-duplicate cluster
-        # (`set_table_column_width` and `..._widths` measure 0.63 and 0.62).
-        # Then by meaning, descending.
-        #
-        # Ordered here rather than by the fusion's ranks: ranking across
-        # questions gave each an alternating half of the page, so a second
-        # question the caller appended cost the first one five of its ten rows.
-        # The sort is stable and carries no id in its key, so equal meaning keeps
-        # the fusion's order and a tie falls back to the evidence.
-        worded = set(keyword_hits or ())
-        ordered = sorted(
-            shortlist,
-            key=lambda rowid: (rowid not in worded, -meaning.get(rowid, NO_SIMILARITY)),
+        ordered, meaning, worded = fuse_shortlist(
+            lists, keyword_hits, queries, self._meaning_of
         )
         rows = await asyncio.to_thread(
             self._rows_in_order, ordered, clauses, values, limit

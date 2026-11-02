@@ -1,15 +1,17 @@
 """The tool catalogue, on its own.
 
-`tests/test_toolhub.py` reaches it through a hub and two MCP hops, so what it
-can assert is what survives the trip.  These are about the store itself: what a
+`tests/plugins/toolhub/test_toolhub.py` reaches it through a hub and two MCP
+hops, so what it can assert is what survives the trip.  These are about the
+store itself: what a
 merge does to the rows, what the gate answers, who the budget may take out, and
 what the two search legs find.  The store is where the four things the whole
 design rests on are decided — a name is a row's identity, off is not down, the
 load state is the model's with the operator's `autoload` list as its one
 baseline, and a name beginning with `_` is the harness's.
 
-The embedder is the deterministic stub, for the reason `tests/test_db.py` gives:
-these are about what the store does with a vector, not about the model that
+The embedder is the deterministic stub, for the reason
+`tests/libs/store/test_db.py` gives: these are about what the store does with a
+vector, not about the model that
 produced it.
 """
 
@@ -1374,7 +1376,7 @@ def test_a_row_the_meaning_leg_never_saw_still_carries_its_number(tmp_path) -> N
     index holds.
 
     Nine rows hold the stub's `工具` and the tenth holds `计算`, so with `limit=2`
-    the meaning leg's page is four rows wide (`_TOOL_OVERFETCH`) and the row the
+    the meaning leg's page is four rows wide (`_OVERFETCH`) and the row the
     *words* matched is outside it — which is the only way to build the case at
     all, since the words and the sentence have to point at different rows.
     """

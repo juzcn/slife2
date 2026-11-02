@@ -1391,7 +1391,7 @@ async def test_loading_says_why_it_cannot() -> None:
     """A name that resolves to nothing is answered with the way to find one.
 
     The refusals that depend on a row's own state are the store's to make and
-    are tested there (`tests/test_toolsdb.py`); what this checks is the hop —
+    are tested there (`tests/libs/store/test_toolsdb.py`); what this checks is the hop —
     that the model reads which name did not land and why.
     """
     async with Client(hub_for()) as hub:
@@ -2185,8 +2185,8 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
     the model's list for that second reason, the one `_`-prefixed name that is,
     and the four tools the system works by are refused rather than obeyed.
 
-    The budget itself is the store's (`tests/test_toolsdb.py` has the counting);
-    what this checks is the hop and the two ways to call it.
+    The budget itself is the store's (`tests/libs/store/test_toolsdb.py` has the
+    counting); what this checks is the hop and the two ways to call it.
     """
     config = replace(
         default_config(),

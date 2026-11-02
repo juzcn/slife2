@@ -11,8 +11,9 @@ the agent server's seams because a task is the same turn.
 **The window is a recorder rather than the terminal's own plugin**, and that is
 a deliberate split: what is under test here is *what this plugin sends* — the
 channel, the marker, the words — while "the terminal accepts a `submit` at all"
-is `tests/test_tui_control.py`'s subject.  The two places the real one is used
-are the fallback, whose whole trigger is that plugin's own refusal, and nothing
+is `tests/plugins/tui/test_tui_control.py`'s subject.  The two places the real
+one is used are the fallback, whose whole trigger is that plugin's own refusal,
+and nothing
 else.
 
 The properties under test throughout: a task is the agent's own work — its
@@ -279,8 +280,9 @@ async def wait_for_handover(node: Window, count: int = 1) -> None:
     """Wait for a hand-over to land.
 
     **Generous, and asserted rather than bounded-and-ignored** — the rule
-    `tests/test_server.py` states for its own wait.  A delivery happens *after*
-    the loop returns, and the task's status is not final until it lands (a
+    `tests/plugins/agent/test_server.py` states for its own wait.  A delivery
+    happens *after* the loop returns, and the task's status is not final until
+    it lands (a
     successful loop that cannot deliver ends `failed`), so a test that read the
     status and asserted at once would be racing the very thing it is testing.
     """

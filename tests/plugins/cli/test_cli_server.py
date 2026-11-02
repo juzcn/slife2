@@ -143,7 +143,7 @@ async def test_the_model_gets_the_tools_that_edit_the_section(
 
     This is the server's own tool list, which is not the model's — the mark is
     what decides *that* list, and the hub's is tested in
-    `tests/test_mcp_tools.py`.
+    `tests/plugins/mcp_tools/test_mcp_tools.py`.
     """
     async with Client(build_server(config_for(isolated_runtime))) as client:
         listed = {tool.name for tool in await client.list_tools()}

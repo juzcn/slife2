@@ -120,7 +120,8 @@ def refused(error: Exception) -> bool:
     it posts anything**: nothing was written, so trying somewhere else cannot
     duplicate anything.  The module that writes the message is the one that
     answers what it looks like — the same arrangement `MARKER_PREFIX` makes for a
-    marker, and `tests/test_agent_task.py` holds the pair together.
+    marker, and `tests/plugins/agent_task/test_agent_task.py` holds the pair
+    together.
     """
     return isinstance(error, ToolError) and NO_WINDOW in str(error)
 

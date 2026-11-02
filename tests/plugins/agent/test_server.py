@@ -191,8 +191,9 @@ async def hub():
     a missing hub is a broken system rather than a conversation with no tools.
 
     No upstreams: these tests are about the agent, and the tool servers behind a
-    hub are `tests/test_toolhub.py`'s subject.  What it does prove here is that
-    the registry the loop runs with is the one the hub advertised.
+    hub are `tests/plugins/toolhub/test_toolhub.py`'s subject.  What it does
+    prove here is that the registry the loop runs with is the one the hub
+    advertised.
 
     The real server rather than a stub, so the tool names and schemas these
     tests see crossed a real MCP hop.

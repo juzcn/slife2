@@ -1988,8 +1988,8 @@ class FileTunnelSettings:
     #: same rule `AGENT_SERVER_NAME` states above: reading it means importing
     #: it, and this module is imported by the TUI and the agent loop, neither
     #: of which should pull in a tunnel's SDK or `subprocess`.  `DEFAULT_PROVIDER`
-    #: is the other end of this fact and `tests/test_config.py` pins the two
-    #: together.
+    #: is the other end of this fact and `tests/libs/host/test_config.py` pins
+    #: the two together.
     active: str = "ngrok"
     #: provider name -> its own options, kept as written; `options_for`
     #: resolves the ``${VAR}`` references when a tunnel is about to start.

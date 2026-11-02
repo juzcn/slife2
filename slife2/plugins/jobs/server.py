@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -261,7 +260,6 @@ class Registry:
             config=self.config,
             agent=agent,
             subagent=subagent,
-            run_id=uuid.uuid4().hex,
         )
         with runtime.running(context):
             try:

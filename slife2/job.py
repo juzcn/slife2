@@ -109,9 +109,7 @@ class CapabilityResult:
 class RunContext:
     """One job run: the config its handles resolve through, and its identity.
 
-    The plugin builds this and binds it for the length of the call.  `run_id` is
-    unique per run; it is available to the job's code only through the plugin's
-    logs, so a job that wants a conversation of its own names one.  The
+    The plugin builds this and binds it for the length of the call.  The
     important part is `agent`/`subagent`: every call the handles make carries
     that identity, so tools that read a conversation read the right one.
     """
@@ -119,7 +117,6 @@ class RunContext:
     config: Config
     agent: str
     subagent: str
-    run_id: str
 
 
 _current: ContextVar[RunContext | None] = ContextVar("slife2_job_run", default=None)

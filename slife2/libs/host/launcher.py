@@ -109,7 +109,6 @@ class AgentInUse(Exception):
             where += f", since {holder.started_at})" if holder.started_at else ")"
         super().__init__(f"agent {name!r} is already running{where}")
         self.name = name
-        self.holder = holder
 
 
 class StartFailed(Exception):
@@ -657,7 +656,7 @@ _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
 #: plugin that is itself waiting on the hub.  Its peers are up by construction
 #: rather than by an edge, which is the weaker guarantee and the honest one.
 #:
-#: `tests/test_launcher.py` holds this table together: every name is one of ours,
+#: `tests/libs/host/test_launcher.py` holds this table together: every name is
 #: nothing here points at itself in a circle, and the hub waits for every plugin
 #: it can.
 NEEDS: dict[str, tuple[str, ...]] = {

@@ -311,8 +311,7 @@ def _checked_url(url: str) -> urllib.parse.SplitResult:
     host = parts.hostname.casefold().rstrip(".")
     if host == "localhost" or host.endswith(".localhost"):
         raise ToolError(
-            f"{url!r} names this machine — a fetched URL may only reach the "
-            f"internet."
+            f"{url!r} names this machine — a fetched URL may only reach the internet."
         )
     try:
         address = ipaddress.ip_address(host)
@@ -361,9 +360,7 @@ async def _fetch_url(
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location:
-                            raise ToolError(
-                                f"{current} redirected without a location."
-                            )
+                            raise ToolError(f"{current} redirected without a location.")
                         current = urllib.parse.urljoin(current, location)
                         continue
                     response.raise_for_status()

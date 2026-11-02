@@ -130,9 +130,8 @@ from slife2.helpers.timeutil import normalize_bound
 from slife2.libs.host.paths import work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
+    _OVERFETCH,
     MAX_PAGE,
-    MAX_SQL_VARS,
-    NO_SIMILARITY,
     SYNC_BATCH,
     Embedder,
     _marks,
@@ -143,7 +142,7 @@ from slife2.libs.store.index import (
     connect_to,
     embed_chunks,
     filter_clause,
-    fuse_ranked,
+    fuse_shortlist,
     index_meta,
     instant_bound,
     meanings_by_cosine,
@@ -238,9 +237,7 @@ class Spec:
 
 
 SPECS: dict[str, Spec] = {
-    NOTE: Spec(
-        time="updated_at", day=False, mirror="notes", searchable=True
-    ),
+    NOTE: Spec(time="updated_at", day=False, mirror="notes", searchable=True),
     # The diary's time axis **is** its key: a day keyed by `YYYY-MM-DD` sorts
     # chronologically as a string, so the column that addresses the row is the
     # column that orders it and there is no second one to keep in step.
@@ -330,11 +327,11 @@ def cabinet_dir(agent: str, subagent: str = "") -> Path:
 def index_path(agent: str, subagent: str = "") -> Path:
     """The cabinet's index file, beside the documents it indexes.
 
-    Inside the cabinet rather than in `slife2.libs.store.db/` with the other
-    stores, so the cabinet is **one directory** — copy it, back it up, or delete
-    it and the cabinet is gone with nothing left behind.  The cost is that the
-    store's path is not derivable from the data directory alone, which is what
-    these two functions are for.
+    Inside the cabinet rather than beside `turns.db` and `schedule.db` in the
+    agent's directory, so the cabinet is **one directory** — copy it, back it
+    up, or delete it and the cabinet is gone with nothing left behind.  The
+    cost is that the store's path is not derivable from the data directory
+    alone, which is what these two functions are for.
     """
     return cabinet_dir(agent, subagent) / INDEX_NAME
 
@@ -1556,63 +1553,17 @@ class CabinetStore:
         if keywords and not any(sentence.strip() for sentence in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
+        over = limit * _OVERFETCH
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits = (
-            self._keyword_hits(expression, limit * 4, clauses, values)
-            if keywords
-            else None
+            self._keyword_hits(expression, over, clauses, values) if keywords else None
         )
 
-        # **The shortlist, one list per question.**  `keywords` are what the
-        # caller has in mind, so where there is a sentence it is that sentence's
-        # other leg and is fused into that question — a row both legs found is
-        # evidence *about that question*.  The questions are then unioned and the
-        # page ordered once, by a rule the caller can read off it.
-        #
-        # **And the union is capped**, exactly as `ToolStore.search` caps its
-        # own: nothing the caller passes bounds it (each sentence brings up to
-        # `limit * 4` of its own ids, and the keyword leg as many again), while
-        # the query that reads the rows binds one value per id and SQLite
-        # refuses a statement with too many.  What is dropped is the tail of the
-        # union, and the page is `limit` rows.
-        phrases = [(index, s) for index, s in enumerate(sentences) if s.strip()]
-        queries, lists = await self._semantic_lists(sentences, embedder, limit * 4)
-        meaning: dict[int, float] = {}
-        shortlist: list[int] = []
-        seen: set[int] = set()
-        for (index, _), hits in zip(phrases, lists, strict=True):
-            legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
-            if keyword_hits is not None:
-                legs["keyword"] = keyword_hits
-            for rowid, _ in fuse_ranked(legs):
-                if rowid not in seen:
-                    seen.add(rowid)
-                    shortlist.append(rowid)
-            for rowid, measured in hits:
-                meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-        # Every keyword id is in `shortlist` already: a keywords-only call was
-        # routed into `sentences` above, so the words are some question's other
-        # leg and the fusion put them there.  The fallback that stood here was
-        # the one-leg path this routing removes.
-        shortlist = shortlist[:MAX_SQL_VARS]
-        for rowid, value in self._meaning_of(
-            [rowid for rowid in shortlist if rowid not in meaning], queries
-        ).items():
-            meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), value)
-
-        # Words first, then meaning — `ToolStore.search`'s rule, and the reason
-        # the column a reader sees is the column that ordered the page: a cosine
-        # cannot separate a cluster, and the word match knows which row was named.
-        # `NO_SIMILARITY` and not `0.0` for a row nothing measured, which is the
-        # same sentinel the catalogue uses: a cosine is a signed number, so a row
-        # measured at -0.4 would otherwise sort *above* one nobody looked at.
-        worded = set(keyword_hits or ())
-        ordered = sorted(
-            shortlist,
-            key=lambda rowid: (
-                rowid not in worded,
-                -meaning.get(rowid, NO_SIMILARITY),
-            ),
+        # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
+        # so this page is put together by the same rule the catalogue's is.
+        queries, lists = await self._semantic_lists(sentences, embedder, over)
+        ordered, meaning, worded = fuse_shortlist(
+            lists, keyword_hits, queries, self._meaning_of
         )
         with self._connect() as connection:
             rows = self._rows_in_order(connection, ordered, clauses, values, limit)

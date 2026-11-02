@@ -494,8 +494,8 @@ async def keep_the_context(
     `{}` and not a failure: "a decision that asks for exactly what is in hand
     rebuilds nothing at all" is the behaviour those tests are written against,
     and it is the same default `Replies` falls back to in
-    `tests/test_context_server.py`, which varies the *answer* rather than the
-    seam.
+    `tests/plugins/context/test_context_server.py`, which varies the *answer*
+    rather than the seam.
     """
     return "{}"
 

@@ -17,8 +17,8 @@ missing rowid is a fault rather than a zero, and the copy that read it as `0`
 was the one nobody had looked at. What is shared is the
 mechanism; what stays with each store is the corpus — the document a row is
 indexed by (`searchable_text`, `embed_text`, `tool_document`, `search_text`,
-`vector_text`), the shape an answer is dressed in, and the policy its search
-follows.
+`vector_text`), the shape an answer is dressed in, and the legs its search
+runs.
 
 ## Two rules the whole file is written around
 
@@ -58,7 +58,7 @@ import array
 import math
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -960,3 +960,56 @@ def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, f
         for rank, turn_id in enumerate(ranked, start=1):
             scores[turn_id] = scores.get(turn_id, 0.0) + 1.0 / (k + rank)
     return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
+
+
+def fuse_shortlist(
+    lists: Sequence[Sequence[tuple[int, float]]],
+    keyword_hits: Sequence[int] | None,
+    queries: list[list[float]],
+    meaning_of: Callable[[list[int], list[list[float]]], dict[int, float]],
+) -> tuple[list[int], dict[int, float], set[int]]:
+    """One search's page order, its meaning column, and the rows the words found.
+
+    **One list per question, then one union.**  The keyword hits are what the
+    caller had in mind, so they are each sentence's other leg and are fused into
+    that question (`fuse_ranked`): a row both legs found is evidence *about that
+    question*.  The questions are then unioned, and the page ordered by two
+    things the caller can read off it — the words first, because a row whose own
+    text contains them is certain where a cosine is graded, and then by meaning.
+
+    The union is capped at `MAX_SQL_VARS` because nothing the caller passes
+    bounds it: every sentence brings its own leg, and the final query binds one
+    value per id.  Every row gets its number, the word-matched ones included —
+    without one they would be the strongest evidence on the page reading as the
+    weakest.  A row several sentences found takes the **nearest** of them, and
+    `NO_SIMILARITY` rather than `0.0` keeps an unmeasured row below a measured
+    negative cosine.
+
+    `meaning_of` is the store's own measurement of the rows the meaning leg
+    never returned; the corpora read the stored vectors the same way, but that
+    fallback stays with the store that owns the table.
+    """
+    meaning: dict[int, float] = {}
+    shortlist: list[int] = []
+    seen: set[int] = set()
+    for index, hits in enumerate(lists):
+        legs = {f"sentence:{index}": [rowid for rowid, _ in hits]}
+        if keyword_hits is not None:
+            legs["keyword"] = list(keyword_hits)
+        for rowid, _ in fuse_ranked(legs):
+            if rowid not in seen:
+                seen.add(rowid)
+                shortlist.append(rowid)
+        for rowid, measured in hits:
+            meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
+    shortlist = shortlist[:MAX_SQL_VARS]
+    for rowid, value in meaning_of(
+        [rowid for rowid in shortlist if rowid not in meaning], queries
+    ).items():
+        meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), value)
+    worded = set(keyword_hits or ())
+    ordered = sorted(
+        shortlist,
+        key=lambda rowid: (rowid not in worded, -meaning.get(rowid, NO_SIMILARITY)),
+    )
+    return ordered, meaning, worded

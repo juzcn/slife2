@@ -70,7 +70,7 @@ def make_row(
 
 
 def make_app(respond) -> tuple[SlifeApp, FakeAgentClient]:
-    """A window with a scripted client, as `tests/test_tui.py` builds one."""
+    """A window with a scripted client, as `tests/tui/test_tui.py` builds one."""
     client = FakeAgentClient(respond)
     app = SlifeApp(
         "http://test/mcp",
@@ -92,7 +92,7 @@ def asking(call_id: str = "call-1", name: str = "sensitive"):
 
 
 async def submit(pilot, text: str) -> None:
-    """Type a prompt and run it, as `tests/test_tui.py` does."""
+    """Type a prompt and run it, as `tests/tui/test_tui.py` does."""
     pilot.app.query_one(HistoryInput).text = text
     await pilot.press("enter")
     await pilot.pause()

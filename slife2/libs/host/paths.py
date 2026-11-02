@@ -223,7 +223,7 @@ def data_dir() -> Path:
     **A checkout keeps everything at its root; an installation keeps it under
     the home directory.**  Working on slife2 means the config, the runtime state
     and the databases are the ones in front of you — the checked-in
-    `slife2.yaml` is read, `slife2.libs.store.db/` is a directory you can open, and deleting
+    `slife2.yaml` is read, `agents/` is a directory you can open, and deleting
     the checkout deletes the lot.  The root is the nearest ancestor whose
     `pyproject.toml` names this project, so a command run from a subdirectory
     still writes beside the checkout.  An installation has no such root, so it

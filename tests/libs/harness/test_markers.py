@@ -91,7 +91,7 @@ def test_a_marker_a_message_only_mentions_is_left_alone() -> None:
 def test_the_window_takes_off_exactly_what_the_plugins_write() -> None:
     """The pair held together across the seam: what a plugin writes is what the
     screen removes, character for character — the same property
-    `tests/test_wechat.py` asserts for its own marker."""
+    `tests/plugins/wechat/test_wechat.py` asserts for its own marker."""
     assert wechat.MARKER_PREFIX in MARKERS
     assert MARKER_PREFIX in MARKERS
 

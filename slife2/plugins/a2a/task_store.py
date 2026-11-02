@@ -95,59 +95,38 @@ class TaskStore:
             rec.status = PENDING
         return rec
 
-    def record_interrupt(self, task_id: str) -> TaskRecord | None:
-        """The peer paused the task; it is not terminal and can be continued."""
-        rec = self._records.get(task_id)
-        if rec is None:
-            return None
-        if rec.status not in TERMINAL_STATUSES:
-            rec.status = INTERRUPTED
-        return rec
+    def _transition(self, task_id: str, status: str) -> TaskRecord | None:
+        """Set one task's status unless it is already terminal.
 
-    def record_result(self, task_id: str) -> TaskRecord | None:
-        """Mark a task as completed.
-
-        A task that is already terminal stays there — a result arriving from a
-        peer after the caller was told about a cancel/rejection must not flip
-        the record back to completed and contradict what the caller saw.
+        **A terminal status is never rewritten.**  An answer that arrives after
+        the caller was told about a cancel, a rejection or a failure must not
+        flip the record and contradict what the caller saw.
         """
         rec = self._records.get(task_id)
-        if rec is None:
-            return None
-        if rec.status in TERMINAL_STATUSES:
+        if rec is None or rec.status in TERMINAL_STATUSES:
             return rec
-        rec.status = COMPLETED
+        rec.status = status
         return rec
+
+    def record_interrupt(self, task_id: str) -> TaskRecord | None:
+        """The peer paused the task; it is not terminal and can be continued."""
+        return self._transition(task_id, INTERRUPTED)
+
+    def record_result(self, task_id: str) -> TaskRecord | None:
+        """Mark a task as completed."""
+        return self._transition(task_id, COMPLETED)
 
     def record_error(self, task_id: str) -> TaskRecord | None:
         """Mark a task as failed.  A terminal status is never rewritten."""
-        rec = self._records.get(task_id)
-        if rec is None:
-            return None
-        if rec.status in TERMINAL_STATUSES:
-            return rec
-        rec.status = FAILED
-        return rec
+        return self._transition(task_id, FAILED)
 
     def record_reject(self, task_id: str) -> TaskRecord | None:
         """The peer declined the task.  It is terminal, and not a failure."""
-        rec = self._records.get(task_id)
-        if rec is None:
-            return None
-        if rec.status in TERMINAL_STATUSES:
-            return rec
-        rec.status = REJECTED
-        return rec
+        return self._transition(task_id, REJECTED)
 
     def record_cancel(self, task_id: str) -> TaskRecord | None:
         """Mark a task as cancelled.  A terminal status is never rewritten."""
-        rec = self._records.get(task_id)
-        if rec is None:
-            return None
-        if rec.status in TERMINAL_STATUSES:
-            return rec
-        rec.status = CANCELLED
-        return rec
+        return self._transition(task_id, CANCELLED)
 
     # ── Read ──────────────────────────────────────────────────────────
 

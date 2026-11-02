@@ -115,8 +115,8 @@ _FENCE = "---"
 #: The name lives here and the *tool* is served by `slife2.plugins.skills.server`, which
 #: takes its own name from this constant — and `slife2.plugins.toolhub.server` spells it too,
 #: because the hub will not let the model unload it.  A name that crosses a
-#: process boundary is spelled on both sides; `tests/test_config.py` holds the
-#: two spellings together.
+#: process boundary is spelled on both sides; `tests/libs/host/test_config.py`
+#: holds the two spellings together.
 USE_TOOL = "skill_use"
 
 

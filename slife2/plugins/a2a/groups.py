@@ -317,7 +317,7 @@ def apply_event(store: GroupStore, event: GroupEvent, me: str) -> EventResult:
         return _apply_set(store, existing, event, me)
     if event.kind == KIND_LEAVE:
         return _apply_leave(store, existing, event, me)
-    return _apply_disbanded(store, existing, event, me)
+    return _apply_disbanded(store, existing, event)
 
 
 def _apply_message(
@@ -455,7 +455,6 @@ def _apply_disbanded(
     store: GroupStore,
     existing: Group | None,
     event: GroupEvent,
-    me: str,
 ) -> EventResult:
     if existing is None or event.gid != existing.gid:
         return EventResult()

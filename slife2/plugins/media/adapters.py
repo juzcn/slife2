@@ -41,6 +41,7 @@ import httpx2
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import unresolved_reference
 from slife2.libs.host.paths import work_dir
+from slife2.libs.turn.attachments import MEDIA_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -395,16 +396,10 @@ AUDIO_MIME: dict[str, str] = {
 
 #: Image suffixes as media types, for the one place an image's bytes travel
 #: inline: a reference image that is a *local file*, which the far end has no way
-#: to fetch and so has to be handed.  Same list, and the same trade, as
-#: `slife2.libs.turn.attachments.MEDIA_TYPES` — the suffix decides, and a format not named
-#: here is refused rather than guessed at.
-IMAGE_MIME: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
+#: to fetch and so has to be handed.  **The table is the attachment encoder's**
+#: (`slife2.libs.turn.attachments.MEDIA_TYPES`), because two routes to a provider
+#: may not disagree about what a suffix means.
+IMAGE_MIME: dict[str, str] = MEDIA_TYPES
 
 #: How much of a provider's error text is passed on.  Long enough to carry the
 #: vendor's own words, short enough not to spend a context window doing it.

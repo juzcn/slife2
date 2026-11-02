@@ -219,7 +219,6 @@ class Responder(abc.ABC):
         self._topics = topics
         self._card = card
         self._inbound = inbound
-        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         #: One in-flight round per task.  An interrupted task has no entry:
         #: its state lives in the store, not in a coroutine.
