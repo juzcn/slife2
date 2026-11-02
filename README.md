@@ -916,7 +916,9 @@ A run is one fire, named by the moment it was due. Its state moves from
 `pending` to `ran`, `failed`, `missed`, or `skipped`. `ran` means the task
 finished and its answer reached the conversation; a task that could not deliver
 is `failed` and can be re-run. The row is written before the window is asked, so
-a fire cannot repeat on the next poll.
+a fire cannot repeat on the next poll. The clock is a poll: a fire can start up
+to 30 seconds after its due moment, and a finished run closes on the next pass;
+`ran_at` is the task's own finish time.
 
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run that never started is `missed`, one that names

@@ -1812,6 +1812,11 @@ plugin can press itself, and a model that did not press it would leave the run
 `pending`. An agent-task plugin that cannot come up is a scheduler that cannot
 run, and the launch order reflects that dependency.
 
+The clock is a poll, not a timer: a fire is noticed on the next pass — up to
+`pacing.schedule_poll` (30 s) after its due moment — and a finished run is closed
+on the next pass after its task ends.  `ran_at` is still the task's own
+`finished_at`, not the poll's.
+
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run with no task was never started and is
 `missed`; one that names a task is `failed` — and the poll records the newest

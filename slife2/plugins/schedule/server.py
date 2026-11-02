@@ -822,7 +822,7 @@ async def poll_forever(
         # The ordinary way this ends.  Re-raised because the sweep of a
         # cancelled task is what tells `asyncio` the cancellation was taken —
         # and there is nothing here to unwind: a fire is a record and a
-        # hand-over, both of which either happened or did not.
+        # dispatch, both of which either happened or did not.
         raise
     except Exception:  # noqa: BLE001 - one bad ledger must not stop the clock
         logger.exception("the startup sweep failed; the clock goes on")
@@ -956,9 +956,9 @@ def build_server(
     ) -> dict[str, Any]:
         """Write a scheduled task, or replace one that exists.
 
-        The clock runs it — not you, and not the person. When it comes due you
-        are handed the description as a turn, with the order to run it as a
-        background task of your own; say in `description` what to do and what
+        The clock runs it — not you, and not the person. When it comes due the
+        clock starts it as an agent task of your own, with this description as
+        the task; no turn is opened. Say in `description` what to do and what
         "done" looks like, because it is the whole of what that task is given and
         nobody can answer a question it raises.
 
@@ -1024,7 +1024,7 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         # Under the task's lock: a removal between a fire's record and its
-        # hand-over would leave a run whose task no longer exists, and a
+        # dispatch would leave a run whose task no longer exists, and a
         # removal between `run_now`'s lookup and its dispatch would do the same
         # while a background task started for it.
         async with RunLocks.held(locks, store, name.strip()):
@@ -1124,8 +1124,8 @@ def build_server(
         run's `due_at` to re-open the same run and start the work as a
         background task of yours. It returns at once; do not wait for it and do
         not follow it up — the answer arrives on its own, and **the run closes
-        itself** when that task ends, so nothing here has to be remembered
-        later.
+        itself on the next poll after that task ends**, so nothing here has to
+        be remembered later.
 
         `due_at` names the run — the moment it was due, as the ledger holds it.
         Any spelling of that moment will do; a value that is not a moment is
