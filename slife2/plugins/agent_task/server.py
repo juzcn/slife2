@@ -176,7 +176,9 @@ class AgentTask:
     The five fields `report` answers with are a task's *whole* description:
     there is no message list here, no transcript and no result beyond the one
     being delivered, because none of those outlive the coroutine that produced
-    them (SDD §9.3).
+    them (SDD §9.3).  `status` is the delivery-gated fact: `finished` means the
+    answer reached a window; a task whose answer could not be delivered is
+    `failed`, however much work it did.
     """
 
     agent: str
@@ -200,9 +202,10 @@ class AgentTask:
     #: conversation twice (SDD §9.3).
     text: str = ""
     #: Whether the answer reached the conversation.  Kept because "was it handed
-    #: over" is the one fact about a finished task that nothing else can
-    #: reconstruct — the delivery log is the process's, and the conversation
-    #: cannot be asked whether something arrived.
+    #: over" is the one fact about a task that nothing else can reconstruct — the
+    #: delivery log is the process's, and the conversation cannot be asked
+    #: whether something arrived.  `finished` implies `True`; a `failed` task may
+    #: have delivered its failure message or may have delivered nothing.
     delivered: bool = False
     #: The running coroutine, kept so it is not collected mid-flight and so that
     #: `agent_task_cancel` has something to cancel.
@@ -307,13 +310,21 @@ def channel_for(task: AgentTask) -> str:
     return f"{CHANNEL}:{task.name}"
 
 
-def marker(task: AgentTask) -> str:
+def marker(task: AgentTask, *, status: str = "") -> str:
     """What a task's answer wears, so the model knows which task it came from.
 
     The space between a marker and the words beside it is the joiner's to add,
     exactly as `slife2-wechat` adds its own (SDD §5.5).
+
+    `status` is what the answer *is*, which is not always the object's status at
+    the moment it is built: a successful loop is still `running` while its answer
+    is being handed over (a task is `finished` only when it lands), and the
+    marker has to say what the answer will be if it lands.
     """
-    return f"{MARKER_PREFIX}{json.dumps(task.report(), ensure_ascii=False)}]"
+    payload = task.report()
+    if status:
+        payload["status"] = status
+    return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}]"
 
 
 def build_server(
@@ -841,6 +852,13 @@ def build_server(
         arrive.  Cancellation is the one exception, and it is not one — a task
         that was called off has nothing to report, so it delivers nothing.
 
+        **A task is `finished` only when its answer reached a window.**  The
+        answer is the product and there is no result to keep (SDD §9.3), so a
+        delivery that cannot be made ends the task `failed`: the work may have
+        happened, but the task did not complete.  The loop's status stays
+        `running` while the hand-over runs, which is what keeps a reader from
+        seeing a completion that may still fail.
+
         **And the two things a task holds are dropped on every way out.**  The
         outer `try` is the whole life rather than the delivery alone, because a
         cancellation re-raises out of the `except` below and would otherwise take
@@ -850,12 +868,12 @@ def build_server(
         remembered it.  A task that has stopped holds nothing.
         """
         try:
+            outcome = FINISHED
             try:
                 result = await run_loop(task)
                 task.text = (
                     result.text.strip() or "(the task stopped without saying anything)"
                 )
-                task.status = FINISHED
                 task.finished_at = now()
             except asyncio.CancelledError:
                 # No await anywhere in this path: SDD §5.6 measured that a plain
@@ -869,17 +887,27 @@ def build_server(
                 task.text = f"The agent task {task.name!r} failed: {exc}"
                 task.status = FAILED
                 task.finished_at = now()
-            finally:
-                # **A task is over when it stops, not when its answer has been
-                # handed over.**  The hand-over waits on another process, and the
-                # cap counts what has stopped, so retiring here is what keeps
-                # "finished" and "still holding a slot" from being the same
-                # thing.
-                retire(task)
-            # The cancelled ending left through the branch above, so this is
-            # reached by the two that have an answer.
-            await deliver(task)
+                outcome = FAILED
+            # **The answer is the product, so a task is not `finished` until it
+            # has reached a window.**  The loop's status stays `running` while
+            # the hand-over runs, so a reader that asks in that moment is not
+            # told a completion that may still fail; the marker carries the
+            # outcome the answer will have if it lands.
+            try:
+                delivered = await deliver(task, status=outcome)
+            except asyncio.CancelledError:
+                task.status = CANCELLED
+                task.finished_at = now()
+                raise
+            if outcome == FINISHED:
+                task.status = FINISHED if delivered else FAILED
         finally:
+            # **A task is retired when its ending is final** — for a successful
+            # loop, after the answer has been handed over.  The cap counts
+            # `running`, so a task that is still delivering holds its slot: it is
+            # not finished yet, and this is the line that keeps the registry and
+            # the contract saying the same thing.
+            retire(task)
             task.handle = None
             # **The answer is let go of here, and this line is the design rather
             # than tidiness.**  A finished task's message list, its loop and its
@@ -897,9 +925,11 @@ def build_server(
     def retire(task: AgentTask) -> None:
         """Let go of an ended task, oldest first, past the cap.
 
-        A task stops being *running* when it stops, but it stays answerable until
-        it is forgotten — which is what makes asking about one that has finished
-        a question with an answer.  What is bounded is how long that lasts.
+        A task is over when its ending is final — for a successful loop, that is
+        after the answer has been handed over, because a task that cannot deliver
+        is `failed`.  It stays answerable until it is forgotten, which is what
+        makes asking about one that has finished a question with an answer.
+        What is bounded is how long that lasts.
         """
         retired.append(task)
         while len(retired) > RETIRED:
@@ -909,28 +939,31 @@ def build_server(
 
     # ── the way back ─────────────────────────────────────────────────────
 
-    async def deliver(task: AgentTask) -> None:
-        """Hand a finished task's answer to the conversation that asked for it.
+    async def deliver(task: AgentTask, *, status: str) -> bool:
+        """Hand a task's answer to the conversation that asked for it.
 
         **The hand-over itself is `slife2.libs.harness.handover`** — one road,
         the window, and one failure when it cannot be made.  Every channel that
         puts a message into a conversation it does not own takes it, so what is
         left here is only the part that *is* an agent task's: what an answer
-        wears, and what "delivered" means when it does not arrive.
+        wears, and what an undelivered answer *means*.
 
-        **An undelivered answer is a failure rather than a stage.**  A task that
-        finished with nobody watching is the case a background task exists for —
-        start it, close the window, walk away — and the honest report of that is
-        that the answer reached no conversation *and was not carried anywhere
-        else*: the work happened, the delivery did not, and the log says which.
-        The answer is not run into the conversation to make the mismatch go away,
-        because that is a turn nobody is watching.
+        **An undelivered answer is a failed task, not a stage.**  The answer is
+        the product and there is no second copy of it (SDD §9.3), so a task whose
+        answer reached no conversation did not finish, however much work it did.
+        `run` sets the final status from what this returns; the log says why the
+        answer went nowhere.  `status` is what the marker says the answer is —
+        `finished` for a loop that succeeded, `failed` for one that did not —
+        because the object is still `running` while a successful answer is being
+        handed over.
+
+        Returns whether the answer reached a window.
         """
         try:
             await hand_over(
                 config,
                 task.agent,
-                f"{marker(task)} {task.text}",
+                f"{marker(task, status=status)} {task.text}",
                 channel_for(task),
                 what=f"agent task {task.name}",
                 window_client=window_client,
@@ -939,7 +972,7 @@ def build_server(
             logger.error(
                 "agent task %s for %s was not delivered: %s", task.name, task.agent, exc
             )
-            return
+            return False
         except Exception as exc:  # noqa: BLE001 — a task has nobody behind it to raise to
             # **A crash here is the one silence this task cannot afford.**  `run`
             # is a detached coroutine: an exception that leaves it is stored on a
@@ -947,8 +980,7 @@ def build_server(
             # `finally` that unwinds — so the *work* would end in a trace nobody
             # saw instead of the message the agent is owed.  A failure to deliver
             # is a failure to deliver, however it arrived; it is said at `error`
-            # with the trace, and the status it produces already reads `failed`
-            # or `finished` with `delivered` false.
+            # with the trace, and `run` turns this `False` into a `failed` task.
             logger.exception(
                 "agent task %s for %s was not delivered (%s); "
                 "nothing else would report it",
@@ -956,8 +988,9 @@ def build_server(
                 task.agent,
                 exc,
             )
-            return
+            return False
         task.delivered = True
+        return True
 
     # ── whose task ───────────────────────────────────────────────────────
 
@@ -1032,7 +1065,9 @@ def build_server(
 
         For work that would hold you — long, or waiting on the home. The call
         returns at once and the answer reaches this conversation on its own: do
-        not wait for it, and do not poll.
+        not wait for it, and do not poll. **If no window is showing this
+        conversation when it stops, the task ends `failed`** — the answer is the
+        product and it is not kept, so there is nothing to fetch later.
 
         `description` is the task itself. It starts from this conversation's
         stored turns, so **the turn you are answering is not among them** — put
@@ -1108,8 +1143,10 @@ def build_server(
         """What one agent task is doing, by name.
 
         Its state — `running`, `finished`, `failed` or `cancelled` — and never
-        the result, which arrives by itself and cannot be fetched. Do not poll:
-        if it is `running`, end your turn. `unknown` is a name no task here has.
+        the result, which arrives by itself and cannot be fetched. `finished`
+        means the answer reached this conversation; a task whose answer could
+        not be delivered is `failed`. Do not poll: if it is `running`, end your
+        turn. `unknown` is a name no task here has.
 
         Args:
             name: The task's name, as `agent_task_start` was given it.
@@ -1126,7 +1163,7 @@ def build_server(
 
         Each row is a task's id, name, state and times with a glance at its
         description, so that a name chosen a while ago still means something. It
-        is bounded — the most recent finished tasks are kept and the tail is
+        is bounded — the most recently ended tasks are kept and the tail is
         forgotten — so a row can go `unknown` like any other.
         """
         agent = agent_of(ctx)

@@ -774,8 +774,8 @@ agent task 是同一个 agent 的另一条循环，用名字和描述启动，�
 
 任务以 agent 身份运行，使用相同的 system prompt、模型、工具和上下文决策。它没有启动
 它的那一轮，因此描述必须复述相关上下文。回答带 `[AgentTaskResult:{…}]` marker 从
-`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。没有窗口显示该对话时，
-回答被报告为 `undelivered`，日志记录这一点。
+`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。任务停止时没有窗口
+显示该对话，任务以 `failed` 结束——回答就是产物，不会被保留——日志记录原因。
 
 ```yaml
 agent-task:
@@ -802,7 +802,8 @@ agent-task:
 | `schedule_run_skip` | 带原因关闭一次不会发生的运行。 |
 
 一次运行就是一次触发，以它到期的那一刻命名。状态从 `pending` 变为 `ran`、`failed`、
-`missed` 或 `skipped`。行在询问窗口之前写入，因此同一次触发不会在下一轮询重复。
+`missed` 或 `skipped`。`ran` 表示任务完成且回答已到达对话；回答无法送达的任务是
+`failed`，可以重跑。行在询问窗口之前写入，因此同一次触发不会在下一轮询重复。
 
 任务只在 slife2 运行时触发。启动时，扫描会关闭被停止的进程遗留的运行——从未启动的
 记为 `missed`，已经命名了 task 的记为 `failed`——轮询为每个任务记录最新的错过触发。

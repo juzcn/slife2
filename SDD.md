@@ -1726,6 +1726,9 @@ Properties:
    deliver.
 4. **Background work inside a task is refused.** The task loop runs one turn and
    has no second turn for a background result to arrive in.
+5. **`finished` means delivered.** A task's answer is its product and no copy is
+   kept (§9.3), so a task whose answer reached no window is `failed`; the status
+   can be trusted to mean what it says.
 
 A task runs one turn, so it makes one rebuild; zero would make it the one turn in
 the system whose context nobody decided. It runs with the agent's system prompt,
@@ -1741,11 +1744,12 @@ filters it. `agent-task.max_running` bounds concurrency, not total work over
 time.
 
 The answer is delivered as a message on the `agent-task:<name>` channel, with an
-`[AgentTaskResult:{…}]` marker. If no window is showing the conversation, the
-result is `undelivered` and the log records that. **A probe may start one too.**
-`slife2 probe --channel tui` starts a task as the target agent, waits for its
-state, and reads the delivered message; `agent_task_status` reports state and
-never the result.
+`[AgentTaskResult:{…}]` marker. **A task is `finished` only when its answer
+reached a window**: if no window is showing the conversation, it ends `failed`
+and the log records why — the answer is the product, and an answer nobody
+received is not a finished task. **A probe may start one too.** `slife2 probe
+--channel tui` starts a task as the target agent, waits for its state, and reads
+the delivered message; `agent_task_status` reports state and never the result.
 
 ### 9.4 Scheduled tasks
 
@@ -1765,17 +1769,19 @@ The data model is three SQL tables — `meta`, `scheduled_tasks`, and
 | State | Meaning |
 |---|---|
 | `pending` | The run was written; the outcome is not known yet. |
-| `ran` | The work finished; the task's `finished_at` is the run's time. |
-| `failed` | The work failed or was cancelled, the run could not be started or followed, or a stopped process left it in flight. |
+| `ran` | The work finished and its answer reached the conversation; the task's `finished_at` is the run's time. |
+| `failed` | The work failed or was cancelled, the answer could not be delivered, the run could not be started or followed, or a stopped process left it in flight. |
 | `missed` | The fire occurred while no instance was running — no process, or no window showing the agent — so nothing started. |
 | `skipped` | An operator or the model closed a run that will not happen. |
 
 A run is named by the moment it was due, not by when it ran. The row is written
 before the window is asked, so a fire cannot repeat on the next poll. A window
 that is not showing the agent marks the run `missed`; a terminal that cannot be
-asked, or a dispatch that fails, marks it `failed`; a run whose outcome does not
-come back remains `pending`, and the next start's sweep closes it — `missed` if
-it never started, `failed` if it had. A fire follows the wall clock of its task's
+asked, or a dispatch that fails, marks it `failed`; a task that finishes but
+cannot deliver its answer is `failed` too, because an agent task is `finished`
+only when the answer reached the conversation; a run whose outcome does not come
+back remains `pending`, and the next start's sweep closes it — `missed` if it
+never started, `failed` if it had. A fire follows the wall clock of its task's
 timezone; a repeated local hour is the same fire only if its wall-clock reading
 equals the anchor's, because comparing instants alone would fire twice in a
 fall-back hour.

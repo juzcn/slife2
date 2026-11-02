@@ -53,9 +53,10 @@ from slife2.libs.store.index import connect_to
 #: where a row written after the start would simply never have existed.
 #:
 #: `failed` is the run that did not happen: the work failed or was cancelled,
-#: the run could not be started or followed, or a process stopped before its
-#: ending was seen.  `missed` is the absence: the fire came due while no
-#: instance was running, so nothing was started at all.
+#: the answer could not be delivered, the run could not be started or followed,
+#: or a process stopped before its ending was seen.  `missed` is the absence:
+#: the fire came due while no instance was running, so nothing was started at
+#: all.
 PENDING = "pending"
 RAN = "ran"
 FAILED = "failed"

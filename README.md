@@ -880,8 +880,9 @@ A task runs as the agent, with the same system prompt, model, tools, and context
 decision. It does not have the turn that started it, so the description must
 restate the relevant context. Its answer arrives with an
 `[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
-`AsyncTask(<name>)>`. If no window is showing the conversation, the answer is
-reported as `undelivered` and the log says so.
+`AsyncTask(<name>)>`. If no window is showing the conversation when it stops, the
+task ends `failed` — the answer is the product and is not kept — and the log
+says why.
 
 ```yaml
 agent-task:
@@ -912,8 +913,10 @@ that fails, ends the run as `failed` with the reason recorded.
 | `schedule_run_skip` | Close a run that will not happen, with a reason. |
 
 A run is one fire, named by the moment it was due. Its state moves from
-`pending` to `ran`, `failed`, `missed`, or `skipped`. The row is written
-before the window is asked, so a fire cannot repeat on the next poll.
+`pending` to `ran`, `failed`, `missed`, or `skipped`. `ran` means the task
+finished and its answer reached the conversation; a task that could not deliver
+is `failed` and can be re-run. The row is written before the window is asked, so
+a fire cannot repeat on the next poll.
 
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run that never started is `missed`, one that names

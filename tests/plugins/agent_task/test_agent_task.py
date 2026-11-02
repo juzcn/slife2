@@ -185,9 +185,9 @@ def a_quick_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
     A refused hand-over is tried three times, `pacing.reconnect` apart — two
     seconds by design, because the window it is aimed at may be restarting — so
     a test that *ends* in a refusal spends four seconds on a fact it is not
-    asserting: the run is over, or the answer was not delivered.  The pace is a
-    registry value and patching one is what `slife2.helpers.timeouts` exists for;
-    the ladder's length is the design and is left alone.
+    asserting: the task is `failed`, not `finished`.  The pace is a registry
+    value and patching one is what `slife2.helpers.timeouts` exists for; the
+    ladder's length is the design and is left alone.
     """
     monkeypatch.setattr(_T.timeouts.pacing, "reconnect", 0.01)
 
@@ -280,11 +280,9 @@ async def wait_for_handover(node: Window, count: int = 1) -> None:
 
     **Generous, and asserted rather than bounded-and-ignored** — the rule
     `tests/test_server.py` states for its own wait.  A delivery happens *after*
-    the task stops, because it is a message and a message is not part of the
-    loop, so a test that read the status and asserted at once would be racing the
-    very thing it is testing.  That race is not theoretical: it appeared the
-    moment `retire` moved ahead of the hand-over, and it showed up as a test
-    failing for a reason that had nothing to do with what it asserts.
+    the loop returns, and the task's status is not final until it lands (a
+    successful loop that cannot deliver ends `failed`), so a test that read the
+    status and asserted at once would be racing the very thing it is testing.
     """
     deadline = time.monotonic() + 30.0  # timeouts: a test's patience
     while time.monotonic() < deadline:
@@ -370,7 +368,7 @@ async def test_a_task_needs_a_description_that_stands_alone(
 
 
 async def test_the_task_runs_as_the_agent_on_the_rendered_template(
-    hub: Client, store: Store
+    hub: Client, store: Store, window: Window
 ) -> None:
     """The agent's prompt, the hub's tools, the template as the user message.
 
@@ -379,7 +377,7 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     description verbatim, which is what tells the loop that nobody is listening
     and that what it sends when it stops is the whole of what comes back.
     """
-    built = build(text_turn("three tries"), hub=hub, context=store)
+    built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
     await settle(built)
 
@@ -410,11 +408,13 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     }
 
 
-async def test_the_context_is_rebuilt_exactly_once(hub: Client, store: Store) -> None:
+async def test_the_context_is_rebuilt_exactly_once(
+    hub: Client, store: Store, window: Window
+) -> None:
     """One turn, so one rebuild — and *not* zero, which is the thing that would
     be wrong: a context that was never chosen is the one turn in this system
     whose context nobody decided (SDD §5.5)."""
-    built = build(text_turn("done"), hub=hub, context=store)
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
     await start(built)
     await settle(built)
 
@@ -425,7 +425,7 @@ async def test_the_context_is_rebuilt_exactly_once(hub: Client, store: Store) ->
 
 
 async def test_the_context_it_runs_on_is_the_agents_own(
-    hub: Client, store: Store
+    hub: Client, store: Store, window: Window
 ) -> None:
     """**The key is the agent's**, so a task starts from what this conversation
     has been about rather than from nothing.
@@ -455,7 +455,7 @@ async def test_the_context_it_runs_on_is_the_agents_own(
             meta=client_meta(AGENT),
         )
 
-    built = build(text_turn("done"), hub=hub, context=store)
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
     await start(built)
     await settle(built)
 
@@ -968,21 +968,20 @@ async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) ->
 # ── the way back ─────────────────────────────────────────────────────────────
 
 
-async def test_an_answer_with_no_window_is_undelivered_and_said(
+async def test_a_task_whose_answer_reached_no_window_is_failed(
     hub: Client,
     store: Store,
     caplog: pytest.LogCaptureFixture,
     a_quick_ladder: None,
 ) -> None:
-    """The case a background task exists for: start it, close the window, walk
-    away — and the answer reaches nobody.
+    """The answer is the product, so a task that could not deliver it is not
+    `finished` — however much work it did.
 
     Built against **the real `slife2-tui`** with nothing attached, because what
     makes this fire is that plugin's own refusal rather than a stub's: no
     terminal is showing this agent, and there is no second road for the answer
-    (`slife2.libs.harness.handover`).  The work happened; the delivery did not; the log says
-    so, and nothing runs a turn in a conversation nobody is watching to make the
-    two agree.
+    (`slife2.libs.harness.handover`).  The work happened; the answer reached
+    nobody; the status says `failed` and the log says why.
     """
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     # Nothing has attached, so `submit` refuses with the terminal's own error
@@ -996,9 +995,10 @@ async def test_an_answer_with_no_window_is_undelivered_and_said(
             real_window=nobody,
         )
         await start(built)
-        await settle(built)
+        answer = await settle(built)
         await wait_for_log(caplog, "was not delivered")
 
+    assert answer["status"] == "failed"
     assert "was not delivered" in caplog.text
 
 
@@ -1012,7 +1012,7 @@ async def test_a_hand_over_that_did_not_come_back_is_not_repeated(
     says nothing about whether it wrote: the words may be down the window's
     stream already, and sending them again is how one answer arrives *twice* —
     which the agent then acts on twice.  So the unknown case is logged and not
-    repeated, and the task's answer is undelivered rather than doubled.
+    repeated, and the task is `failed` rather than a doubled `finished` one.
     """
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(
@@ -1022,9 +1022,10 @@ async def test_a_hand_over_that_did_not_come_back_is_not_repeated(
         window=broken_window,
     )
     await start(built)
-    await settle(built)
+    answer = await settle(built)
     await wait_for_log(caplog, "was not repeated")
 
+    assert answer["status"] == "failed"
     assert "was not repeated" in caplog.text
 
 
@@ -1040,7 +1041,7 @@ async def test_a_refusing_window_is_the_end_of_that_answer(
 
     There is no such road now — a fallback that runs the work where the window is
     not is exactly "carry on without the window" — so a refusal is a failed
-    delivery like any other, and the task is over.
+    delivery like any other, and the task ends `failed`.
     """
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(
@@ -1050,9 +1051,10 @@ async def test_a_refusing_window_is_the_end_of_that_answer(
         window=dead_window,
     )
     await start(built)
-    await settle(built)
+    answer = await settle(built)
     await wait_for_log(caplog, "was not delivered")
 
+    assert answer["status"] == "failed"
     assert "was not delivered" in caplog.text
 
 
@@ -1082,7 +1084,7 @@ async def test_a_hand_over_that_crashed_is_said_not_left_on_the_coroutine(
     answer = await settle(built)
     await wait_for_log(caplog, "nothing else would report it")
 
-    assert answer["status"] == "finished"
+    assert answer["status"] == "failed"
     assert "nothing else would report it" in caplog.text
 
 
@@ -1090,7 +1092,7 @@ async def test_a_hand_over_that_crashed_is_said_not_left_on_the_coroutine(
 
 
 async def test_the_registry_forgets_from_the_tail(
-    hub: Client, store: Store, monkeypatch: pytest.MonkeyPatch
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Bounded, because a model can start tasks for as long as somebody keeps
     asking it to — and forgetting is why `unknown` is an honest answer rather
@@ -1099,7 +1101,12 @@ async def test_the_registry_forgets_from_the_tail(
 
     monkeypatch.setattr(module, "RETIRED", 2)
     built = build(
-        text_turn("a"), text_turn("b"), text_turn("c"), hub=hub, context=store
+        text_turn("a"),
+        text_turn("b"),
+        text_turn("c"),
+        hub=hub,
+        context=store,
+        window=window,
     )
     for name in ("one", "two", "three"):
         await start(built, name)
@@ -1113,7 +1120,7 @@ async def test_the_registry_forgets_from_the_tail(
 
 
 async def test_a_name_that_has_been_started_again_is_a_different_task(
-    hub: Client, store: Store, monkeypatch: pytest.MonkeyPatch
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The registry is keyed by `(agent, name)` and the *retired* list holds
     objects rather than keys, because a name that has been started again is a
@@ -1122,7 +1129,9 @@ async def test_a_name_that_has_been_started_again_is_a_different_task(
     import slife2.plugins.agent_task.server as module
 
     monkeypatch.setattr(module, "RETIRED", 1)
-    built = build(text_turn("first"), text_turn("second"), hub=hub, context=store)
+    built = build(
+        text_turn("first"), text_turn("second"), hub=hub, context=store, window=window
+    )
     await start(built, "research")
     await settle(built, "research")
     await start(built, "research")
@@ -1138,7 +1147,11 @@ async def test_a_name_that_has_been_started_again_is_a_different_task(
 
 
 async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
-    hub: Client, store: Store, caplog: pytest.LogCaptureFixture, monkeypatch
+    hub: Client,
+    store: Store,
+    window: Window,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch,
 ) -> None:
     """The trim is not optional (SDD §9.3), and a task has no next turn for a dead
     hub to surface on.
@@ -1158,7 +1171,7 @@ async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
 
     monkeypatch.setattr(module, "unload_tools", no_hub)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
-    built = build(text_turn("three tries"), hub=hub, context=store)
+    built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
     await settle(built)
 
@@ -1166,7 +1179,11 @@ async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
 
 
 async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none(
-    hub: Client, store: Store, caplog: pytest.LogCaptureFixture, monkeypatch
+    hub: Client,
+    store: Store,
+    window: Window,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch,
 ) -> None:
     """An answer missing `unloaded` read as "nothing was unloaded".
 
@@ -1188,7 +1205,7 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
 
     monkeypatch.setattr(module, "unload_tools", no_names)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
-    built = build(text_turn("three tries"), hub=hub, context=store)
+    built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
     answer = await settle(built)
 

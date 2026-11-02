@@ -40,9 +40,9 @@ own and knows nothing about schedules (SDD §8.3), so storing a report is not
 the same write as closing a run.  The work is an agent task whose answer is
 delivered back to the conversation by *that* plugin — so this ledger records
 that a run happened, not what it produced.  What came of it is read where it was
-said, and its delivery is the agent-task plugin's fact rather than this
-ledger's: a task that finishes closes the run `ran` whether or not a window was
-still there to take the answer.
+said, and delivery is the agent-task plugin's fact rather than this ledger's: a
+task is `finished` only when its answer reached the conversation, so a run whose
+task could not deliver is closed `failed` and can be run again.
 
 **The ledger is the feature.**  `pending → ran | failed | missed | skipped`.  A
 run is written **before** the window is asked, so the anchor advances and a fire
@@ -556,10 +556,13 @@ async def reconcile(config: Config, *, tasks_client: Client | None = None) -> li
     it, and this asks the peer what became of each one.  `finished` is `ran`, and
     **the moment comes off the task's own `finished_at`** rather than off the
     clock — the work ended when it ended, not when this poll happened to look.
+    A task is `finished` only when its answer reached the conversation, so an
+    undelivered answer arrives here as `failed`.
 
-    `failed` and `cancelled` are both `failed`, because the ledger's question is
-    whether the work happened and neither of those is it; the account of *why* is
-    in the conversation, where the task's answer was delivered.
+    `failed` and `cancelled` are both `failed` — and so is a delivery failure,
+    because `finished` means the answer reached the conversation.  The ledger's
+    question is whether the run's product arrived; the account of *why* is in the
+    conversation when it was delivered, and in the log when it was not.
 
     **A task the peer no longer holds is `failed` too**, with the reason saying
     nothing was seen of its ending.  That is the honest answer rather than a
@@ -1135,7 +1138,8 @@ def build_server(
 
         The answer is the run's row, with the background task's id on it. A
         `pending` row means the work is in flight; `failed` means it could not
-        be started or followed, and the error says why.
+        be started or followed, or its answer could not be delivered, and the
+        error says why.
 
         Args:
             name: The scheduled task, by name.
