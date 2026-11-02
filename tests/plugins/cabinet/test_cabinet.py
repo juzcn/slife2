@@ -1,10 +1,12 @@
-"""`slife2-cabinet`: six kinds of document, one corpus, and the files beside it.
+"""`slife2-cabinet`: six kinds of row, a corpus of four, and the files beside it.
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
 it answers, and the four rules the cabinet keeps — a day accumulates while a
 note is replaced, a file's bytes are never indexed, a path from a model cannot
-leave the cabinet, and a save that cannot embed stores nothing.
+leave the cabinet, and a save that cannot embed stores nothing.  A dump and an
+image are stored here and addressed by the turn's markers; they are not in the
+corpus, and the tests that used to search them now assert that they cannot.
 
 **Every tool here answers JSON**, which is what a model reads: a `payload` is one
 call's parsed answer, an `ask` is the same call's raw text — the two the budget
@@ -17,9 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
-import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -550,17 +550,18 @@ async def test_an_image_is_stored_once_and_read_back_as_a_data_url() -> None:
         first = await payload(client, "image_save", url="data:image/png;base64,AAAA")
         again = await payload(client, "image_save", url="data:image/png;base64,AAAA")
         read = await payload(client, "image_source", key=first["key"])
+        with pytest.raises(ToolError, match="kind must be one of"):
+            await ask(client, "cabinet_search", kind=IMAGE)
+        browsed = await payload(client, "cabinet_search")
 
     assert first["key"] == again["key"], "content-addressed, so one file and row"
     assert first["key"].startswith("pictures/")
     assert first["mime"] == "image/png"
     assert first["size"] == 3
     assert read["url"].startswith("data:image/png;base64,")
-
-    async with Client(cabinet()) as client:
-        found = await payload(client, "cabinet_search", kind=IMAGE, limit=5)
-
-    assert [hit["key"] for hit in found["results"]].count(first["key"]) == 1
+    assert first["key"] not in keys(browsed["results"]), (
+        "an image is addressed by its turn, not ranked"
+    )
 
 
 @pytest.mark.asyncio
@@ -1025,13 +1026,13 @@ async def test_a_path_from_a_model_cannot_leave_the_cabinet() -> None:
 # --- the store, on its own ----------------------------------------------------
 
 
-def test_one_corpus_is_one_table(tmp_path: Path) -> None:
-    """Six kinds are six values of a column, so the two legs fuse on a rowid.
+def test_one_table_holds_six_kinds_and_one_corpus(tmp_path: Path) -> None:
+    """Six kinds are six values of a column; the four corpus kinds share a rowid.
 
     One table also means no view to union and no synthesised global id out of a
-    per-kind offset for the fusion to rank: the rowid *is* the corpus id — and
-    the FTS table is written in the same transaction as the row, which is why
-    there is no trigger anywhere.
+    per-kind offset for the fusion to rank: a corpus row's rowid *is* its corpus
+    id — and the FTS table is written in the same transaction as the row, which
+    is why there is no trigger anywhere.
     """
     store = store_of(tmp_path / ".index.db")
     with store._connect() as connection:
@@ -1643,78 +1644,69 @@ async def test_a_line_too_large_for_the_window_names_the_file_instead() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_search_that_names_no_kind_does_not_reach_the_dumps() -> None:
+async def test_a_dump_is_addressed_by_its_marker_and_never_searched() -> None:
     """A dump is reached by the marker that names it, not by a search.
 
     It is the one kind nobody wrote, and a body full of a tool's output matches
-    on every word it happens to contain — so a search that named no kind would
-    rank machine output against a person's own notes, which is the dilution the
-    one-corpus rule warns about.  Naming the kind still reaches it, and that is
-    how it is browsed and listed.
+    on every word it happens to contain — so ranking it against a person's own
+    notes is the dilution the one-corpus rule warns about.  It is not in the
+    corpus at all: a search that names no kind cannot see it, and naming its
+    kind is refused rather than answered with an empty page.  The marker's call
+    id is the address, and `dump_read` is the reader.
     """
     await save_dump("call_word", f"{WORD} is in this output\nand a second line")
 
     async with Client(cabinet()) as client:
         anywhere = await payload(client, "cabinet_search", keywords=[WORD])
-        named = await payload(client, "cabinet_search", keywords=[WORD], kind=DUMP)
+        with pytest.raises(ToolError, match="kind must be one of"):
+            await ask(client, "cabinet_search", keywords=[WORD], kind=DUMP)
+        read = await payload(client, "dump_read", call="call_word")
 
     assert "call_word" not in keys(anywhere["results"])
-    assert "call_word" in keys(named["results"])
-
-
-def test_an_index_created_before_a_kind_is_rebuilt_with_its_rows(caplog) -> None:
-    """**The bill for adding a kind, paid once.**
-
-    `kind` carries a `CHECK` listing the kinds and `CREATE TABLE IF NOT EXISTS`
-    leaves an existing table exactly as it was — so an index written before a
-    kind refuses it, deep inside a transaction, in SQLite's own words about a
-    constraint.  Opening it rebuilds the table: the rows are the truth, the
-    columns have not changed, and the ids come with them because the keyword
-    index and the vectors are keyed by id.
-    """
-    path = index_path("jack")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # The schema as it was before **the last two kinds** existed: the `CHECK` is
-    # the only part of it that changed, which is the whole reason a rebuild is
-    # needed.
-    old = cabinet_store._SCHEMA.replace(",'dump','image'", "")
-    with sqlite3.connect(path) as connection:
-        connection.executescript(old)
-        connection.execute(
-            "INSERT INTO cabinet_doc (kind, key, body, created_at, updated_at) "
-            "VALUES ('note', 'kept', 'a note that predates both kinds', "
-            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
-        )
-        assert connection.execute("SELECT COUNT(*) FROM cabinet_doc").fetchone()[0] == 1
-
-    caplog.set_level(logging.WARNING)
-    opened = store_of(path)
-
-    with opened._connect() as connection:
-        rows = connection.execute("SELECT id, kind, key FROM cabinet_doc").fetchall()
-        ddl = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'cabinet_doc'"
-        ).fetchone()[0]
-    assert [tuple(row) for row in rows] == [(1, "note", "kept")], "its id came too"
-    assert "'dump'" in ddl and "'image'" in ddl, "and the table can hold both now"
-    assert "rebuilt to hold it" in caplog.text
+    assert "is in this output" in read["text"], "the marker is the address"
 
 
 @pytest.mark.asyncio
-async def test_an_image_can_be_written_after_that_rebuild() -> None:
-    """The rebuild is not just a table: the kind it was rebuilt for has to work."""
-    path = index_path("jack")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A schema from before the image kind but after the dump one.
-    old = cabinet_store._SCHEMA.replace(",'image'", "")
-    with sqlite3.connect(path) as connection:
-        connection.executescript(old)
+async def test_an_attachment_is_stored_but_not_indexed() -> None:
+    """The store holds six kinds and indexes four.
 
-    await save_dump("call_after", "one line\nand another")
+    A dump and an image share the directory, the table and the write path with
+    the documents — that is what makes a turn's text and bytes one cabinet —
+    but their address is the marker in the turn, so neither the keyword index
+    nor the vector index is written for them.  `sync`'s count is the corpus's,
+    because that is the set the vector pass is supposed to cover.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    await store.write(DUMP, "call", body=f"{WORD} in a tool output", embedder=embedder)
+    await store.write(
+        IMAGE,
+        "pictures/x.png",
+        file_path="pictures/x.png",
+        mime="image/png",
+        embedder=embedder,
+    )
+    await store.write(NOTE, "readable", body=f"a note about {WORD}", embedder=embedder)
 
-    async with Client(cabinet()) as client:
-        saved = await payload(client, "image_save", url="data:image/png;base64,AAAA")
-        answer = await ask(client, "dump_read", call="call_after")
+    attachments = "SELECT id FROM cabinet_doc WHERE kind IN (?, ?)"
+    kinds = (DUMP, IMAGE)
+    with store._connect() as connection:
+        indexed = connection.execute(
+            f"SELECT COUNT(*) AS n FROM cabinet_fts WHERE rowid IN ({attachments})",
+            kinds,
+        ).fetchone()["n"]
+        chunks = connection.execute(
+            f"SELECT COUNT(*) AS n FROM cabinet_chunk WHERE doc_id IN ({attachments})",
+            kinds,
+        ).fetchone()["n"]
+        embedded = connection.execute(
+            f"SELECT COUNT(*) AS n FROM cabinet_embedded WHERE doc_id IN ({attachments})",
+            kinds,
+        ).fetchone()["n"]
 
-    assert "one line" in answer
-    assert saved["key"].startswith("pictures/")
+    status = await store.sync(embedder)
+
+    assert int(indexed) == int(chunks) == int(embedded) == 0
+    assert status["ready"] is True, status["problems"]
+    assert status["documents"] == 1, "the corpus, not the rows in the directory"

@@ -700,7 +700,9 @@ unexpose_local_image(token)   -> 该 URL 失效
 
 ### 文件柜
 
-文件柜是每个 agent 的存储：笔记、日记、保存的文件、报告、dump 和图片。
+文件柜是每个 agent 的存储：笔记、日记、保存的文件、报告、dump 和图片。前四种是它的
+corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件，由 turn 里的 marker
+寻址。
 
 | 种类 | key | 第二次写入 |
 |---|---|---|
@@ -711,27 +713,28 @@ unexpose_local_image(token)   -> 该 URL 失效
 | `dump` | 产生输出的工具调用 | 由 harness 写入。 |
 | `image` | 内容摘要 | 由 harness 写入；字节在 `pictures/`。 |
 
-笔记、文件和图片是文档：第二次写入就是它们的内容，所以只有笔记和文件有删除工具。
-日记和报告是日志：同一日期或标题下的两条是两件事实。
+笔记、文件和图片第二次写入即替换，所以只有笔记和文件有删除工具。日记和报告是日志：
+同一日期或标题下的两条是两件事实。
 
 dump 是对对话而言过大的工具输出。输出完整存储，以工具调用 id 为键，对话携带的是在
 `tool_result.tokens` 内从输出自己的行中选出的片段；不做任何改写。模型用 `dump_read`
 读回任意部分：`pattern` 按字面匹配行，`context` 带上邻近行，`offset` 从某行读起
-（负数从末尾数），`limit` 少读几行。除非 `kind` 是 `dump`，搜索看不到 dump。
+（负数从末尾数），`limit` 少读几行。dump 不参与搜索：对话里的 `[DUMP:…]` marker 给出
+call id，`dump_read` 是读者。
 
 图片完整存放在 `pictures/`，以内容摘要为键，轮次行携带 `[Image:…]` 引用而不是像素。
 `image_source` 解析引用，`attach_image` 是模型再次看到图片的方式；`http(s)` 图片由
-provider 抓取，不在这里。不指定 kind 的搜索能看到图片。
+provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 key 就是它的地址。
 
-每个文本文档——笔记、日记、报告或 dump——写两份：文件柜索引中的一行，以及
+每个文本 kind——笔记、日记、报告或 dump——写两份：文件柜索引中的一行，以及
 `agents/<agent>/cabinet/` 下的 Markdown 文件（`notes/`、`diary/`、`reports/`、
 `dumps/`），可以脱离 slife2 打开、编辑或删除。保存文件的字节在文件柜下，不被索引，
-也没有 Markdown 镜像。`file_read` 返回文件文本，遇到 PDF、图片或压缩包时说明它是什么
-并拒绝。
+也没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。`file_read` 返回文件
+文本，遇到 PDF、图片或压缩包时说明它是什么并拒绝。
 
 `cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
-`cabinet_summarize` 为文档写描述；为文件或图片写描述会重新嵌入它。`file_save` 只复制
-机器上已有的文件，不抓取 URL。
+`cabinet_summarize` 为文档写描述；为文件写描述会重新嵌入它，而 dump 和图片不写描述，
+因为它们不参与搜索。`file_save` 只复制机器上已有的文件，不抓取 URL。
 
 ### 微信
 

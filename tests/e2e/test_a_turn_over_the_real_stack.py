@@ -744,7 +744,7 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
 
     A turn in real use seldom returns an output past the window, so nothing here
     waits for one to happen: the dump is put where the harness will put it, and
-    everything after that is real. A second process owns the corpus, the call
+    everything after that is real. A second process owns the cabinet, the call
     crosses a socket, and the window is the number in the config file every
     child read.
 

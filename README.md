@@ -333,7 +333,7 @@ one server.
 | `slife2-jobs` | Code-defined tools (`job__<name>`) | 24042 |
 | `slife2-mcp-tools` | The `mcp:` section | 24033 |
 | `slife2-restapi-tools` | The `rest-api:` section | 24034 |
-| `slife2-cabinet` | Notes, diary, files, reports, dumps | 24035 |
+| `slife2-cabinet` | Notes, diary, files, reports; a turn's dumps and images | 24035 |
 | `slife2-media` | Image, video, speech, transcription | 24036 |
 | `slife2-agent-task` | Background agent tasks | 24037 |
 | `slife2-file-tunnel` | Public HTTPS URL for a local file | 24038 |
@@ -790,7 +790,8 @@ is not exposed to the model.
 ### Cabinet
 
 The cabinet is a per-agent store of notes, diary entries, saved files, reports,
-dumps, and images.
+dumps, and images. The first four are its corpus — what `cabinet_search` ranks;
+dumps and images are a turn's attachments, addressed by the markers in the turn.
 
 | Kind | Key | A second write |
 |---|---|---|
@@ -801,34 +802,37 @@ dumps, and images.
 | `dump` | The tool call that produced the output | Written by the harness. |
 | `image` | Its content digest | Written by the harness; bytes in `pictures/`. |
 
-Notes, files and images are documents: the second write is their content, which
-is why only notes and files have remove tools. A diary and a report are logs: two
-entries under one date or title are two facts.
+Notes, files and images are replaced by a second write, which is why only notes
+and files have remove tools. A diary and a report are logs: two entries under
+one date or title are two facts.
 
 A dump is a tool output too large for the conversation. The output is stored
 whole, keyed by the tool call id, and the conversation carries a selection of the
 output's own lines within `tool_result.tokens`; nothing is paraphrased. The model
 reads any part back with `dump_read`: `pattern` finds lines literally, `context`
 adds their neighbours, `offset` reads from a line (negative from the end), and
-`limit` reads fewer lines. A search does not see dumps unless `kind` is `dump`.
+`limit` reads fewer lines. A dump is not searched: the `[DUMP:…]` marker names
+the call id, and `dump_read` is the reader.
 
 An image is stored whole under `pictures/`, keyed by its content digest, and the
 turn row carries an `[Image:…]` reference instead of the pixels. `image_source`
 resolves the reference and `attach_image` is how the model sees the picture
-again; an `http(s)` image is fetched by the provider, not here. A no-kind search
-sees images.
+again; an `http(s)` image is fetched by the provider, not here. An image is not
+searched either: the `[Image:…]` key is its address.
 
-Every text document — a note, diary entry, report, or dump — is written twice: a
-row in the cabinet index and a Markdown file under `agents/<agent>/cabinet/`
+Every text row — a note, diary entry, report, or dump — is written twice: a row
+in the cabinet index and a Markdown file under `agents/<agent>/cabinet/`
 (`notes/`, `diary/`, `reports/`, `dumps/`), which can be opened, edited, or
 deleted without slife2. A saved file's bytes live under the cabinet and are not
-indexed, and it has no Markdown mirror. `file_read` returns a file's text and
-refuses a PDF, image, or archive by saying what it is.
+indexed, and it has no Markdown mirror; an image is the same shape under
+`pictures/`. `file_read` returns a file's text and refuses a PDF, image, or
+archive by saying what it is.
 
 `cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
 `cabinet_summarize` writes a description for a document; writing one for a file
-or an image re-embeds it. `file_save` copies files already on the machine and
-does not fetch URLs.
+re-embeds it, while a dump or an image is not described because it is not
+searched. `file_save` copies files already on the machine and does not fetch
+URLs.
 
 ### WeChat
 

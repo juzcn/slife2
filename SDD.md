@@ -1440,7 +1440,7 @@ is what the record keeps.
 
 ### 8.3 Cabinet
 
-`plugins/cabinet/` stores six kinds of document:
+`plugins/cabinet/` stores six kinds of row; four of them are its corpus:
 
 | Kind | Key | Write behavior |
 |---|---|---|
@@ -1451,33 +1451,38 @@ is what the record keeps.
 | `dump` | The tool call that produced the output | Written by the harness. |
 | `image` | The content digest | Written by the harness; bytes in `pictures/`. |
 
-One table holds all kinds; the kinds are one corpus, and a corpus whose rows
-lived in four tables would have to be unioned before it could be ranked. `kind`
-says what a row is, `key` is what a read and a remove take, and columns a kind
-does not use are empty.
+One table holds all six. The corpus is the four the cabinet manages — `note`,
+`diary`, `file` and `report` — and a search ranks them against each other; a
+corpus whose rows lived in four tables would have to be unioned before it could
+be ranked. `kind` says what a row is, `key` is what a read and a remove take,
+and columns a kind does not use are empty. A `dump` and an `image` share the
+table because they share the directory, the key and the write path, but they
+are not in the corpus: the turn's marker is their address (`[DUMP:…]` →
+`dump_read`, `[Image:…]` → `attach_image`).
 
 The cabinet is per conversation: an agent's own conversation has
 `agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
-a fork uses the maker's. A text document's Markdown mirror is written in the
-same operation as its row; a file and an image have none, because their bytes
-are the document. The path is stored rather than derived, so a change to the
+a fork uses the maker's. A text row's Markdown mirror is written in the same
+operation as its row; a file and an image have none, because their bytes are
+the document. The path is stored rather than derived, so a change to the
 naming rule orphans nothing that already exists. Every caller-supplied path is
 resolved against the cabinet root and refused if it leaves it.
 
 A subject that is not already lowercase carries a short digest in its filename,
 because `Python.md` and `python.md` are one file on Windows and macOS.
 
-A file's or an image's bytes are never indexed. What is indexed is what the
-document is: its name, the paths that place it, and a summary once one is
-written.
+A file's bytes are never indexed. What is indexed is what the document is: its
+name, the paths that place it, and a summary once one is written. An image is
+not indexed at all: neither its bytes nor its row is in the corpus.
 
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
-with `image_save`. `dump_read` is the way back for a dump. For an image it is
-`attach_image`: the turn's `[Image:{…}]` reference names the key, `image_source`
-resolves it to a `data:` URL (or the source URL), and the tool attaches it. An
-`http(s)` image is never fetched here; the row keeps the URL and the provider
-fetches it.
+with `image_save`. Neither write produces an index entry; the row is stored for
+its text or bytes and the turn's marker is the address. `dump_read` is the way
+back for a dump. For an image it is `attach_image`: the turn's `[Image:{…}]`
+reference names the key, `image_source` resolves it to a `data:` URL (or the
+source URL), and the tool attaches it. An `http(s)` image is never fetched here;
+the row keeps the URL and the provider fetches it.
 
 `dump_read` is a searching reader: `pattern` finds lines, matched literally and
 ignoring case; `context` adds the lines around each match; `offset` reads from a
@@ -1488,9 +1493,9 @@ running in a shared server.
 Every answer stays within `tool_result.tokens`; the bound is enforced where the
 answer leaves, or a reader could return more than the shortening removed.
 
-A dump is in the same corpus as the other kinds, but a search that names no kind
-does not see dumps. An image *is* seen by a search that names no kind: it is
-content a person attached.
+A dump and an image are not in the corpus. Their address is the marker the turn
+carries — the dump's call id and the image's key — so `dump_read` and
+`attach_image` are the readers, and neither has a search entry to rank.
 
 ### 8.4 Embeddings
 
@@ -2355,10 +2360,7 @@ the field arrives as a test that fails without the fix.
    at the hop, but a provider that legitimately answers with nothing has the same
    shape. *Resolution would require:* deciding whether an empty answer is a
    verdict or a failure, and stating it once.
-4. **Dump search scope.** A dump is in the same corpus as the cabinet's other
-   kinds, but a search that names no kind excludes it. *Resolution would
-   require:* a stated rule, not a query filter.
-5. **Correlation across processes.** A log line carries `agent/subagent`, and a
+4. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
 

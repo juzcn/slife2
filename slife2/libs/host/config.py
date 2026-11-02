@@ -643,8 +643,8 @@ PLUGINS: tuple[Plugin, ...] = (
         probe="wechat_check_status",
         port=24030,
     ),
-    # The private cabinet: notes, a diary, saved files, reports, dumps and the
-    # images a turn carried, one corpus per agent under
+    # The private cabinet: notes, a diary, saved files, reports, and the dumps
+    # and images a turn leaves there — one cabinet per agent under
     # `<data>/agents/<agent>/cabinet/`.  It reads no config
     # section of its own — a cabinet is written by the model and by a person,
     # never configured — so what is here is its address.  It identifies itself by

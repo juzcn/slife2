@@ -1,12 +1,14 @@
 """slife2-cabinet — the private cabinet: notes, a diary, saved files, reports,
-dumps and images.
+and the dumps and images a turn leaves here.
 
 The cabinet is typed knowledge stores — a note, a day, a saved file, a report, a
-dump and an image — dual-written to a markdown file and a SQLite index.  It is
-built the way a plugin here is built: one process, `house_server` plus
-`serve_plugin`, the *store* as a library (`slife2.plugins.cabinet.store`), the
-embedder opened once against the embeddings server, and state keyed by the
-client id every call carries.
+dump and an image — written both as a row and, for the text kinds, as a markdown
+file.  The first four are the corpus a search ranks; the last two are a turn's
+attachments, stored here and addressed by the turn's own markers.  It is built
+the way a plugin here is built: one process, `house_server` plus `serve_plugin`,
+the *store* as a library (`slife2.plugins.cabinet.store`), the embedder opened
+once against the embeddings server, and state keyed by the client id every call
+carries.
 
 **The store's calls hop off the event loop where the hop pays**: opening a
 cabinet, a single read, and any listing, which are the calls that run while
@@ -19,18 +21,24 @@ wait nobody is making.
 replaces, a diary's and a report's append, a file's copies bytes in — the
 difference is the tool's docstring, not three verbs in three names.
 
-**Six kinds, one corpus.**  A note, a day, a saved file, a report, a dump and
-an image are rows of one table with a `kind` column, so a search ranks them
-against each other rather than against their own kind — a rank only means
-something inside the corpus that produced it, and one index per kind would be
-one corpus per kind (SDD §8.3).  What differs per kind is what a
-*document* is, and that is `SPECS` in the store: its key, its time axis, whether
-a second write appends, and where its markdown goes.
+**Six kinds of row, four in the corpus.**  A note, a day, a saved file, a
+report, a dump and an image are rows of one table with a `kind` column, because
+they share a directory, a key and a write path.  The corpus is the four the
+cabinet manages, so a search ranks them against each other rather than against
+their own kind — a rank only means something inside the corpus that produced it,
+and one index per kind would be one corpus per kind (SDD §8.3).  A dump and an
+image are a turn's attachments: the turn's marker is their address
+(`[DUMP:…]` → `dump_read`, `[Image:…]` → `attach_image`), so they are stored
+here and are not indexed.  What differs per kind is what a *document* is, and
+that is `SPECS` in the store: its key, its time axis, whether a second write
+appends, where its markdown goes, and whether it is in the corpus.
 
-**A document is written twice, and one of the two is for a person.**  The row is
-what a search reads; the markdown under `<data>/agents/<agent>/cabinet/` is what
-somebody opens in an editor.  The store owns both writes, because they are one
-operation.
+**A text row is written twice, and one of the two is for a person.**  For the
+corpus documents, the row is what a search reads; the markdown under
+`<data>/agents/<agent>/cabinet/` is what somebody opens in an editor.  A dump is
+mirrored too — it is text a person may want to read — while a file and an image
+have no mirror, because their bytes are the document.  The store owns both
+writes, because they are one operation.
 
 **The bytes of a saved file live on disk and never in the index.**  `file_save`
 copies them into the cabinet (never moving, never deleting what it copied from);
@@ -42,7 +50,8 @@ harness's — the agent server stores what a turn carried — and the model's wa
 back is `attach_image`, not a cabinet read: the turn keeps an `[Image:{…}]`
 reference and `image_source` resolves its key to a `data:` URI or the original
 URL.  An `http(s)` image is never fetched here; the row keeps the URL and the
-provider fetches it.
+provider fetches it.  Like a dump, an image is not in the corpus: the reference
+is its address, so there is no index entry for it.
 
 What this cut does **not** do, each named rather than half-built:
 
@@ -84,15 +93,15 @@ from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import client_reader, house_server, serve_plugin
-from slife2.libs.store import textindex
 from slife2.libs.store.index import Embedder
 from slife2.libs.turn.tokens import estimate_lines_tokens, estimate_text_tokens
 from slife2.plugins.cabinet.store import (
+    CORPUS_KIND_HINT,
     DIARY,
+    DOCUMENT_KINDS,
     DUMP,
     FILE,
     IMAGE,
-    KINDS,
     NOTE,
     REPORT,
     CabinetStore,
@@ -112,12 +121,13 @@ SERVER_NAME = CABINET_SERVER_NAME
 CONFIG_KEY = "cabinet"
 
 INSTRUCTIONS = (
-    "The cabinet: private notes, a diary, saved files, reports and images, all "
-    "in one searchable corpus. A note and a report are keyed by a name you "
-    "choose, a diary by its date, a saved file by the path inside the cabinet, "
-    "an image by its content digest. `file_save` copies a file that is already "
-    "on this machine — nothing here fetches a URL; an image a turn carried is "
-    "`image_save`'s, and `attach_image` is how it comes back."
+    "The cabinet: private notes, a diary, saved files and reports, all in one "
+    "searchable corpus. A note and a report are keyed by a name you choose, a "
+    "diary by its date, and a saved file by the path inside the cabinet. "
+    "`file_save` copies a file that is already on this machine — nothing here "
+    "fetches a URL. A tool output the harness kept whole is read with "
+    "`dump_read` by the call id in its `[DUMP:…]` marker; an image a turn "
+    "carried comes back with `attach_image` from its `[Image:…]` key."
 )
 
 #: The most of a file `file_read` will read.  A cap rather than a preference: a
@@ -328,16 +338,16 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         agent, subagent = client_of(ctx)
         return await store(agent, subagent)
 
-    # ── The three moves every kind makes ─────────────────────────────────
+    # ── The three moves every document kind makes ────────────────────────
     #
-    # Six kinds are served below — notes, diary days, files, reports, the tool
-    # outputs the harness dumps and the images it keeps — and each is the same
-    # three moves: a page,
-    # one row, a delete.  What differs between them is the kind and the sentence
-    # a miss answers with, and those are arguments; what must *not* differ, and
-    # did while each kind had its own copy, is everything a copy gets wrong
-    # quietly: the `""` that means "no bound" on every listing, and the thread
-    # hop that keeps a store call off the loop.
+    # The four corpus kinds are served below — notes, diary days, files and
+    # reports — and each is the same three moves: a page, one row, a delete.
+    # The two attachments a turn leaves here are read by address instead: a dump
+    # by `dump_read`, an image by `image_source`.  What differs between the four
+    # is the kind and the sentence a miss answers with, and those are arguments;
+    # what must *not* differ, and did while each kind had its own copy, is
+    # everything a copy gets wrong quietly: the `""` that means "no bound" on
+    # every listing, and the thread hop that keeps a store call off the loop.
     #
     # Each answers what the store answered — the page, the row, whether it went —
     # so a tool stays three or four lines whatever kind it serves.  **A miss is
@@ -918,6 +928,12 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         A second call under one key replaces, because the key is one call: a
         re-run writes the same output twice rather than two facts.
 
+        **The row is not in the cabinet's corpus.**  Its address is the call id
+        in the turn's `[DUMP:…]` marker, and `dump_read` is the reader, so no
+        keyword entry and no vector are written: a search is not how a dump is
+        found, and machine output ranked against a person's notes is the
+        dilution the store's docstring names.
+
         Answers with a payload and **refuses by raising**, because its caller is
         the harness and not a model: an answer it cannot read has to be
         distinguishable from one that says nothing went wrong.
@@ -955,6 +971,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     # never makes a request nobody asked for, so such a row keeps the URL in
     # `source` and the provider fetches it (`slife2.libs.turn.attachments`
     # states the same rule for the encoder).
+    #
+    # **The row is not in the corpus.**  The turn's `[Image:{…}]` key is the
+    # address and `attach_image` is the reader, so an image is stored here for
+    # its bytes and metadata and is never indexed.
 
     @mcp.tool(name="image_save")
     async def image_save(ctx: Context, url: str) -> dict[str, Any]:
@@ -962,7 +982,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Called by the agent server when a turn is recorded — never by a model.
         A `data:` URI is decoded and written under `pictures/`; an `http(s)`
-        URL is kept as its own source and nothing is fetched here.
+        URL is kept as its own source and nothing is fetched here.  The row is
+        not searched: the turn's `[Image:…]` key is its address, and
+        `attach_image` is how the picture comes back.
 
         Args:
             url: The `image_url` the conversation carries: a base64 `data:` URI
@@ -1113,6 +1135,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         mode, and an empty page means the filters left nothing to rank — not
         that nothing was close.
 
+        A dump and an image are not searched. A dump is read with `dump_read`
+        by the call id its `[DUMP:…]` marker names, and an image comes back with
+        `attach_image` from its `[Image:…]` key.
+
         Args:
             keywords: Words to look for — a path like `files/docs/spec.pdf`
                 works here. They rank documents that carry them first, but
@@ -1121,11 +1147,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 contain them.
             sentences: What you are looking for, asked normally. One per
                 question you have.
-            kind: `note`, `diary`, `file`, `report`, `dump` or `image` — the
-                last two being a tool's saved output and a picture a turn
-                carried — to look in one of them. Empty searches all of them
-                but the dumps, which are reached by the marker naming them
-                rather than by a search.
+            kind: `note`, `diary`, `file` or `report` — to look in one of them.
+                Empty searches all four. A dump or an image has no search
+                entry; address it with its own reader instead.
             since: Only documents from this time on.
             until: Only documents up to this time.
             limit: How many hits this page may hold.
@@ -1148,7 +1172,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 limit=limit,
                 embedder=await embedding.get(),
             )
-        except textindex.EmptyQuery as exc:
+        except ValueError as exc:
             raise ToolError(str(exc)) from exc
         return _hits(found)
 
@@ -1162,14 +1186,18 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> dict[str, Any]:
         """Describe a document already in the cabinet so it can be found.
 
-        Tags work for any kind. A file has no text of its own, so until somebody
-        describes it a search reaches it only by its name and paths; a summary
-        is what a search by meaning reads instead.
+        Tags work for any corpus kind. A file has no text of its own, so until
+        somebody describes it a search reaches it only by its name and paths; a
+        summary is what a search by meaning reads instead.
+
+        A dump and an image are not described: they are not found by a search.
+        A dump is read with `dump_read` and an image is attached with
+        `attach_image`, both by the address the turn carries.
 
         Args:
-            kind: `note`, `diary`, `file`, `report`, `dump` or `image`.
-            key: The document's key — a subject, a date, a cabinet path, a title
-                or the tool call a dump is the output of.
+            kind: `note`, `diary`, `file` or `report`.
+            key: The document's key — a subject, a date, a cabinet path or a
+                title.
             summary: What it is, in words somebody would search with.
             tags: Comma-separated words to file it under.
 
@@ -1178,8 +1206,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """
         opened = await cabinet(ctx)
         wanted = kind.strip()
-        if wanted not in KINDS:
-            raise ToolError(f"`kind` must be one of: {', '.join(KINDS)}.")
+        if wanted not in DOCUMENT_KINDS:
+            raise ToolError(CORPUS_KIND_HINT)
         row = await opened.annotate(
             wanted,
             key,
