@@ -227,6 +227,30 @@ def test_a_limit_below_the_chunk_size_bounds_the_packing_and_loses_nothing() -> 
     assert short_chunks[0].split("\n\n")[-1] == short_chunks[1].split("\n\n")[0]
 
 
+def test_a_chunk_is_packed_by_the_text_it_joins_not_by_its_parts() -> None:
+    """**The blank line between paragraphs is part of the window.**
+
+    A chunk packed by its paragraphs' own lengths ignores the separators that
+    joining them adds, so against a limit that is the smaller of the two the
+    chunk comes out over it and the final `[:limit]` slices the tail off — text
+    that then sits in **no chunk at all**, in the vector index only and in
+    silence.  The earlier fix bounded the packing by `limit`; this is the same
+    failure one level down, and it survives a limit well above the default chunk
+    size whenever the paragraphs are short enough to pack against the boundary.
+
+    Seven paragraphs of twenty-one characters against a limit of sixty-four:
+    three sum to sixty-three and fit by their own lengths, and joined they are
+    sixty-seven.  The paragraphs are all shorter than the limit, so every one of
+    them must come back whole.
+    """
+    paragraphs = [f"paragraph-{number:02d} " + "x" * 8 for number in range(7)]
+    chunks = embed_chunks("\n\n".join(paragraphs), limit=64)
+    packed = "\n\n".join(chunks)
+
+    assert all(len(chunk) <= 64 for chunk in chunks), chunks
+    assert all(paragraph in packed for paragraph in paragraphs)
+
+
 def test_a_turn_with_nothing_to_embed_gets_no_vector() -> None:
     """A turn whose only message is a tool result renders as nothing.
 

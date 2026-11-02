@@ -673,7 +673,22 @@ EMBED_CHUNK_CHARS = 2000
 EMBED_OVERLAP_PARAGRAPHS = 1
 
 
+#: What separates one paragraph from the next in a chunk.  **Spelt once and
+#: counted**, because the limit is on the chunk that is written: a window packed
+#: by the paragraphs' own lengths ignores every separator between them, so a
+#: chunk that fits by that measure comes out longer than the bound — and the
+#: final `[:limit]` then cuts text that is in no other chunk.
+_PARAGRAPH_JOIN = "\n\n"
 _PARAGRAPH_RE = re.compile(r"\n\s*\n")
+
+
+def _packed_size(paragraphs: Sequence[str]) -> int:
+    """How long those paragraphs are once joined into one chunk."""
+    if not paragraphs:
+        return 0
+    return sum(len(paragraph) for paragraph in paragraphs) + len(_PARAGRAPH_JOIN) * (
+        len(paragraphs) - 1
+    )
 
 
 def embed_chunks(
@@ -719,18 +734,20 @@ def embed_chunks(
     window: list[str] = []
     size = 0
     for paragraph in paragraphs:
-        if window and size + len(paragraph) > chars:
-            chunks.append("\n\n".join(window))
+        if window and size + len(_PARAGRAPH_JOIN) + len(paragraph) > chars:
+            chunks.append(_PARAGRAPH_JOIN.join(window))
             window = (
                 window[-EMBED_OVERLAP_PARAGRAPHS:] if EMBED_OVERLAP_PARAGRAPHS else []
             )
-            size = sum(len(kept) for kept in window)
-            if size + len(paragraph) > chars:
+            size = _packed_size(window)
+            if size + len(_PARAGRAPH_JOIN) + len(paragraph) > chars:
                 window = []
                 size = 0
-        window.append(paragraph)
+        if window:
+            size += len(_PARAGRAPH_JOIN)
         size += len(paragraph)
-    chunks.append("\n\n".join(window))
+        window.append(paragraph)
+    chunks.append(_PARAGRAPH_JOIN.join(window))
     # The one chunk that can still be over the limit is a single paragraph longer
     # than it, which the docstring above says is truncated rather than split.
     # Slicing here rather than at each append is what keeps that from being true
