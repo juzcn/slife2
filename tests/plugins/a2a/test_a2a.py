@@ -3861,6 +3861,48 @@ def test_a_foreign_or_stale_group_event_cannot_change_the_roster() -> None:
     assert store.get(GROUP).owner == PEER
 
 
+def test_a_plain_members_message_cannot_rewrite_the_roster() -> None:
+    """**Only owner traffic changes membership**, and a member's message is not it.
+
+    Every message carries its sender's view of the roster, and a receiver that
+    adopted it would let any member do what the module docstring reserves for the
+    owner: add an agent the owner never invited, or omit this receiver and evict
+    it.  The message is still a message from a member, so it is delivered — what
+    it may not do is move the roster, the owner or the tombstone.
+    """
+    store = group_store.GroupStore()
+    group_store.apply_event(
+        store,
+        group_store.GroupEvent(
+            group_store.GROUP_MESSAGE, PEER, GROUP, PEER, GID, (PEER, AGENT), "hi"
+        ),
+        AGENT,
+    )
+
+    widened = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE,
+        AGENT,
+        GROUP,
+        PEER,
+        GID,
+        (PEER, AGENT, "eve"),
+        "let eve in",
+    )
+    result = group_store.apply_event(store, widened, AGENT)
+
+    assert result.deliver and not result.changed
+    assert store.get(GROUP).members == (PEER, AGENT), "the owner's roster stands"
+
+    evicted = group_store.GroupEvent(
+        group_store.GROUP_MESSAGE, AGENT, GROUP, PEER, GID, (PEER,), "you are out"
+    )
+    result = group_store.apply_event(store, evicted, AGENT)
+
+    assert result.deliver and not result.changed, "a member cannot evict the receiver"
+    assert store.get(GROUP) is not None
+    assert not store.is_tombstoned(GROUP, GID)
+
+
 def test_an_owner_set_can_remove_a_member_and_a_tombstone_stops_a_late_message() -> (
     None
 ):

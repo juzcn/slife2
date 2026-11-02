@@ -1617,7 +1617,8 @@ Rules specific to this system:
 12. **A group is a named roster with an owner, kept per member.** The owner
     creates it and names the members; there is no invitation or acceptance. Each
     member persists its own YAML record and learns the roster from group traffic.
-    Only the owner may replace the roster or disband the group.
+    Only the owner may replace the roster or disband the group; a member's message
+    can teach a group this receiver does not hold, never rewrite a roster it has.
 13. **Leaving is autonomous, including for the owner.** An owner's departure
     transfers the group to the first remaining member, or disbands it. A fork is
     never a member: a roster naming one would keep addressing a name nobody

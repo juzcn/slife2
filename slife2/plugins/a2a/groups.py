@@ -342,25 +342,35 @@ def _apply_message(
             return EventResult()
         if event.gid != existing.gid and existing.owner in event.members:
             return EventResult()
-    else:
-        # A plain member may speak, but may change nothing.
-        if event.gid != existing.gid or event.owner != existing.owner:
-            return EventResult()
-        if event.sender not in existing.members:
-            return EventResult()
+        if me not in event.members:
+            store.forget(existing)
+            return EventResult(changed=True)
+        changed = (
+            event.gid != existing.gid
+            or event.owner != existing.owner
+            or event.members != existing.members
+        )
+        if changed:
+            store.learn(event)
+        return EventResult(deliver=True, changed=changed)
 
-    if me not in event.members:
+    # **A plain member may speak, but may change nothing** — and that includes
+    # the roster the message carries.  The members list is the sender's view,
+    # not an instruction: reading it would let any member add a name, or omit
+    # this receiver and evict it, which is the membership change the module
+    # docstring says only owner traffic may make.  A roster the owner changed
+    # reaches this member with the owner's own next message (or a `group_set`),
+    # which is the authority this rule trades convergence for.
+    if event.gid != existing.gid or event.owner != existing.owner:
+        return EventResult()
+    if event.sender not in existing.members:
+        return EventResult()
+    if me not in existing.members:
+        # The store held a group this member is not in — a state no event of
+        # this build writes, and one to clean up rather than deliver from.
         store.forget(existing)
         return EventResult(changed=True)
-
-    changed = (
-        event.gid != existing.gid
-        or event.owner != existing.owner
-        or event.members != existing.members
-    )
-    if changed:
-        store.learn(event)
-    return EventResult(deliver=True, changed=changed)
+    return EventResult(deliver=True)
 
 
 def _apply_set(
