@@ -176,8 +176,8 @@ tool_load:
     - cabinet_search
     - file_read
     - note_read
-    - note_save
-    - report_save
+    - note_write
+    - report_write
     # A tool output the harness shortened.
     - dump_read
     # Images.

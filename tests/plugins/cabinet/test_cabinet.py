@@ -2,11 +2,12 @@
 
 Driven over the in-memory transport with a stub embedder, so what is under test
 is the cabinet itself: what a write lands on disk, what a search finds and what
-it answers, and the four rules the cabinet keeps — a day accumulates while a
-note is replaced, a file's bytes are never indexed, a path from a model cannot
-leave the cabinet, and a save that cannot embed stores nothing.  A dump and an
-image are stored here and addressed by the turn's markers; they are not in the
-corpus, and the tests that used to search them now assert that they cannot.
+it answers, and the four rules the cabinet keeps — a key is created once and
+changed with an update, a file's bytes are never indexed, a path from a model
+cannot leave the cabinet, and a write that cannot embed stores nothing.  A dump
+and an image are stored here and addressed by the turn's markers; they are not
+in the corpus, and the tests that used to search them now assert that they
+cannot.
 
 **Every tool here answers JSON**, which is what a model reads: a `payload` is one
 call's parsed answer, an `ask` is the same call's raw text — the two the budget
@@ -26,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -35,6 +37,7 @@ from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_f
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.libs.store.index import connect_to, table_exists
 from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.plugins.cabinet import server as cabinet_server
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
     build_server,
@@ -48,6 +51,8 @@ from slife2.plugins.cabinet.store import (
     FILE,
     IMAGE,
     NOTE,
+    REPORT,
+    UPSERT,
     CabinetStore,
     index_path,
     slug,
@@ -132,7 +137,7 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
         record.write_text("fork: false\n", encoding="utf-8")
         await payload(
             client,
-            "note_save",
+            "note_write",
             subagent="researcher",
             subject="own",
             content="the subagent's note",
@@ -144,7 +149,7 @@ async def test_a_subagents_cabinet_follows_its_fork_flag(
         record.write_text("fork: true\n", encoding="utf-8")
         await payload(
             client,
-            "note_save",
+            "note_write",
             subagent="researcher",
             subject="shared",
             content="the maker's note",
@@ -176,19 +181,24 @@ async def test_the_tools_are_the_models_except_the_ones_the_harness_calls() -> N
 
     harness = {"dump_save", "image_save", "image_source"}
     assert set(listed) == {
-        "note_save",
-        "note_remove",
+        "note_write",
         "note_read",
+        "note_update",
+        "note_remove",
         "note_list",
-        "diary_save",
+        "diary_write",
         "diary_read",
+        "diary_update",
+        "diary_remove",
         "diary_list",
         "file_save",
-        "file_remove",
         "file_read",
+        "file_remove",
         "file_list",
-        "report_save",
+        "report_write",
         "report_read",
+        "report_update",
+        "report_remove",
         "report_list",
         "dump_read",
         "dump_save",
@@ -219,18 +229,33 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
             await ask(client, "note_list", agent="")
 
 
-# --- notes and the diary: replace, and accumulate -----------------------------
+# --- notes: create, replace, delete -------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
-    """A note is a document: the second write *is* the note, and the file too."""
+async def test_a_note_is_created_then_replaced_by_an_update() -> None:
+    """One verb creates, one replaces, and the key is refused between them.
+
+    A note is a document: `note_write` creates it and refuses a subject that
+    already has one, so a second write can never overwrite what it did not
+    read.  `note_update` is the replacement, and the markdown is rewritten
+    whole — the file is not appended to.
+    """
     async with Client(cabinet()) as client:
         wrote = await payload(
-            client, "note_save", subject="Python", content="first", tags="py"
+            client, "note_write", subject="Python", content="first", tags="py"
         )
-        await ask(client, "note_save", subject="Python", content="second")
+        with pytest.raises(
+            ToolError,
+            match="already a note.*note_read.*note_update",
+        ):
+            await ask(client, "note_write", subject="Python", content="second")
+        replaced = await payload(
+            client, "note_update", subject="Python", content="second", tags=""
+        )
         read = await payload(client, "note_read", subject="Python")
+        with pytest.raises(ToolError, match="no note about"):
+            await ask(client, "note_update", subject="missing", content="x")
 
     assert [wrote[key] for key in ("kind", "key", "title", "tags", "summary")] == [
         NOTE,
@@ -241,6 +266,7 @@ async def test_a_note_is_replaced_and_its_mirror_is_rewritten() -> None:
     ]
     assert wrote["time"], "the write answers the row it stored, stamp and all"
     assert "mirror" not in wrote, "the file's path is the cabinet's, not the model's"
+    assert replaced["tags"] == "", "a replacement is the document, not a patch"
     # The path is the stem's to decide (`mirror_stem`), and that rule has a test
     # of its own: what this one is about is that the file was rewritten, not
     # what it is called.
@@ -362,7 +388,7 @@ def test_two_mirror_writes_do_not_share_a_temporary_file(
 
     def write(text: str) -> None:
         try:
-            cabinet_store._write_mirror(tmp_path, "notes/x.md", text, append=False)
+            cabinet_store._write_mirror(tmp_path, "notes/x.md", text)
         except BaseException as exc:  # noqa: BLE001 - the assertion is the failure
             errors.append(exc)
 
@@ -380,50 +406,88 @@ def test_two_mirror_writes_do_not_share_a_temporary_file(
 
 
 @pytest.mark.asyncio
-async def test_a_days_diary_accumulates_because_two_entries_are_two_facts() -> None:
-    """The first rule, and the reason only two kinds have a remove tool.
+async def test_one_day_is_one_document_and_an_update_replaces_it() -> None:
+    """A day is a key, so a second entry for it is a replacement, not a fact.
 
-    Nothing in a later entry says which part of the earlier one it replaces, so
-    appending is the only honest thing a second write of one day can do — the
-    distinction between a document and a log, kept whole.
+    `diary_write` creates the day and refuses one that already exists, naming
+    `read` and `update` as the way on; `diary_update` replaces the whole entry,
+    markdown included; and `diary_remove` deletes the day — the same four verbs
+    a note has.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "diary_save", content="morning", date="2026-10-11")
-        await ask(client, "diary_save", content="evening", date="2026-10-11")
+        await ask(client, "diary_write", content="morning", date="2026-10-11")
+        with pytest.raises(
+            ToolError,
+            match="already a diary entry.*diary_read.*diary_update",
+        ):
+            await ask(client, "diary_write", content="evening", date="2026-10-11")
+        await ask(
+            client,
+            "diary_update",
+            content="morning and evening",
+            date="2026-10-11",
+        )
         read = await payload(client, "diary_read", date="2026-10-11")
-        with pytest.raises(ToolError, match="no note about"):
-            await ask(client, "note_remove", subject="2026-10-11")
+        mirror = (bag() / "diary" / "2026-10-11.md").read_text(encoding="utf-8")
+        removed = await payload(client, "diary_remove", date="2026-10-11")
+        with pytest.raises(ToolError, match="no diary entry"):
+            await ask(client, "diary_read", date="2026-10-11")
 
-    assert "morning" in read["text"] and "evening" in read["text"]
-    assert read["text"].index("morning") < read["text"].index("evening"), (
-        "the day reads forwards"
-    )
+    assert read["text"] == "morning and evening", "the update is the whole entry"
     assert read["key"] == read["time"] == "2026-10-11", "a day is its own axis"
-    assert (bag() / "diary" / "2026-10-11.md").read_text(encoding="utf-8").count(
-        "## "
-    ) == 2
+    assert mirror == "morning and evening\n"
+    assert removed == {"kind": DIARY, "key": "2026-10-11", "removed": True}
+    assert not (bag() / "diary" / "2026-10-11.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_a_report_is_a_log_under_one_title() -> None:
-    """Reports accumulate for the diary's reason, and keep their own period."""
+async def test_a_report_is_one_document_under_one_title() -> None:
+    """A title is a key; an update replaces the report and keeps its arrival.
+
+    The period is part of the document, so a replacement carries the one it
+    wants — and an omitted one is cleared, because a replacement is not a
+    patch.  The listing's time is still when the report first arrived.
+    """
     async with Client(cabinet()) as client:
-        await ask(
+        wrote = await payload(
             client,
-            "report_save",
+            "report_write",
             title="weekly",
             content="week one",
             period_start="2026-10-05",
             period_end="2026-10-11",
         )
-        await ask(client, "report_save", title="weekly", content="week two")
+        with pytest.raises(
+            ToolError,
+            match="already a report.*report_read.*report_update",
+        ):
+            await ask(client, "report_write", title="weekly", content="week two")
+        replaced = await payload(
+            client,
+            "report_update",
+            title="weekly",
+            content="week one and two",
+            period_start="2026-10-05",
+            period_end="2026-10-18",
+        )
         read = await payload(client, "report_read", title="weekly")
         listed = await payload(client, "report_list")
+        cleared = await payload(
+            client, "report_update", title="weekly", content="week one and two"
+        )
+        removed = await payload(client, "report_remove", title="weekly")
+        with pytest.raises(ToolError, match="no report called"):
+            await ask(client, "report_read", title="weekly")
 
-    assert "week one" in read["text"] and "week two" in read["text"]
+    assert wrote["time"] == replaced["time"], "a replacement does not move a report"
+    assert read["text"] == "week one and two"
     assert keys(listed["entries"]) == ["weekly"]
     assert read["period_start"] == "2026-10-05"
-    assert read["period_end"] == "2026-10-11", "the period is the row's own"
+    assert read["period_end"] == "2026-10-18"
+    assert cleared["period_start"] == "" and cleared["period_end"] == "", (
+        "an omitted period is cleared, not kept"
+    )
+    assert removed == {"kind": REPORT, "key": "weekly", "removed": True}
 
 
 @pytest.mark.asyncio
@@ -431,7 +495,7 @@ async def test_a_bad_date_is_refused_rather_than_stored() -> None:
     """`2026-13-45` is a typo, and a diary keyed by it is a day that cannot sort."""
     async with Client(cabinet()) as client:
         with pytest.raises(ToolError, match="is not a date"):
-            await ask(client, "diary_save", content="x", date="2026-13-45")
+            await ask(client, "diary_write", content="x", date="2026-13-45")
 
     assert store().get(DIARY, "2026-13-45") is None
 
@@ -440,7 +504,7 @@ async def test_a_bad_date_is_refused_rather_than_stored() -> None:
 async def test_removing_a_note_takes_its_file_row_and_vectors() -> None:
     """A remove is one operation over three stores, or it is a leak."""
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="gone", content=f"{WORD} here")
+        await ask(client, "note_write", subject="gone", content=f"{WORD} here")
         assert (bag() / "notes" / "gone.md").exists()
         answer = await payload(client, "note_remove", subject="gone")
         with pytest.raises(ToolError, match="no note about"):
@@ -468,7 +532,7 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
     """
     async with Client(cabinet()) as client:
         for index in range(3):
-            await ask(client, "note_save", subject=f"n{index}", content=f"body {index}")
+            await ask(client, "note_write", subject=f"n{index}", content=f"body {index}")
         first = await payload(client, "note_list", limit=2)
         second = await payload(client, "note_list", limit=2, offset=2)
 
@@ -538,6 +602,141 @@ async def test_two_files_of_one_name_are_two_files() -> None:
     assert listed["total"] == 2
     assert (bag() / "documents" / "notes.txt").read_text(encoding="utf-8") == "one"
     assert (bag() / "documents" / "notes-2.txt").read_text(encoding="utf-8") == "two"
+
+
+@pytest.mark.asyncio
+async def test_a_url_is_fetched_and_its_text_read_back(monkeypatch) -> None:
+    """A URL is the second source `file_save` takes, and the bytes are stored.
+
+    The site's filename and media type are what the row records, the URL is the
+    row's `source`, and `file_read` reads the fetched text like any other saved
+    file — which is the point of fetching it into the cabinet rather than
+    leaving it at the URL.
+    """
+
+    async def fetch(url: str) -> tuple[bytes, str]:
+        assert url == "https://example.test/reports/weekly.txt"
+        return b"the fetched text\n", "text/plain"
+
+    monkeypatch.setattr(cabinet_server, "_fetch_url", fetch)
+
+    async with Client(cabinet()) as client:
+        saved = await payload(
+            client, "file_save", paths=["https://example.test/reports/weekly.txt"]
+        )
+        read = await payload(client, "file_read", path="documents/weekly.txt")
+
+    row = saved["saved"][0]
+    assert row["key"] == "documents/weekly.txt"
+    assert row["source"] == "https://example.test/reports/weekly.txt"
+    assert row["mime"] == "text/plain"
+    assert row["size"] == len(b"the fetched text\n")
+    assert read["text"] == "the fetched text\n"
+
+
+def test_a_fetched_name_is_the_sites_name_and_never_a_path() -> None:
+    """The name is the URL's last segment, made into one filename."""
+    assert cabinet_server._download_name("https://e.test/a/report.pdf", "") == (
+        "report.pdf"
+    )
+    assert cabinet_server._download_name("https://e.test/a/report", "text/plain") == (
+        "report.txt"
+    )
+    assert cabinet_server._download_name("https://e.test/", "text/plain") == (
+        "download.txt"
+    )
+    assert cabinet_server._download_name("https://e.test/a/../../etc/passwd", "") == (
+        "passwd"
+    )
+    assert cabinet_server._download_name("https://e.test/a/a%2Fb.txt", "") == "a-b.txt"
+    assert cabinet_server._download_name("https://e.test/a/CON", "") == "_CON"
+
+
+def test_a_url_that_points_at_this_machine_is_refused() -> None:
+    """**A fetched URL reaches the internet, not this machine.**
+
+    A literal address is the address itself, so it is checked before a request
+    is made; `localhost` is the same destination written as a name.  The
+    schemes that are not `http(s)` and a URL carrying credentials are refused
+    for their own reasons.
+    """
+    for url in (
+        "http://127.0.0.1/x",
+        "http://[::1]/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/x",
+        "http://localhost/x",
+        "http://localhost./x",
+        "http://2130706433/x",
+        "http://0x7f000001/x",
+        "http://user:pass@example.test/x",
+        "file:///etc/passwd",
+        "ftp://example.test/x",
+    ):
+        with pytest.raises(ToolError):
+            cabinet_server._checked_url(url)
+
+    assert cabinet_server._checked_url("https://example.test/a.txt").hostname == (
+        "example.test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_public_redirect_is_followed_and_its_body_returned() -> None:
+    """A relative redirect stays on the same public site, and the fetch follows
+    it; the media type is the one the site answered with."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/start":
+            return httpx2.Response(302, headers={"location": "/final"})
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/plain; charset=utf-8"},
+            content=b"hello",
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        found = await cabinet_server._fetch_url(
+            "https://example.test/start", client=client
+        )
+
+    assert found == (b"hello", "text/plain")
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_a_private_address_is_refused() -> None:
+    """A public URL answering `302 http://127.0.0.1/` is the same request."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": "http://127.0.0.1/secret"})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        with pytest.raises(ToolError, match="this machine|private network"):
+            await cabinet_server._fetch_url("https://example.test/start", client=client)
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_is_stopped_at_the_size_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that streams for ever is stopped, not followed."""
+    monkeypatch.setattr(cabinet_server, "MAX_FETCH_BYTES", 10)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b"x" * 11)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        with pytest.raises(ToolError, match="larger than"):
+            await cabinet_server._fetch_url("https://example.test/big", client=client)
+
+
+@pytest.mark.asyncio
+async def test_a_source_that_is_neither_a_path_nor_an_http_url_is_refused() -> None:
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError, match="not an http"):
+            await ask(client, "file_save", paths=["ftp://example.test/x"])
+        with pytest.raises(ToolError, match="no such file"):
+            await ask(client, "file_save", paths=["/no/such/file"])
 
 
 # --- images: bytes, addressed by content ------------------------------------
@@ -705,7 +904,7 @@ async def test_a_short_embedding_answer_is_refused_at_the_write_path() -> None:
 
     async with Client(server) as client:
         with pytest.raises(Exception, match="searchable only by keyword"):
-            await ask(client, "note_save", subject="partial", content=TWO_CHUNKS)
+            await ask(client, "note_write", subject="partial", content=TWO_CHUNKS)
 
     assert store().get(NOTE, "partial") is None, "a write that raised stored nothing"
     assert not list((bag() / "notes").glob("partial*")), "and wrote no mirror"
@@ -722,7 +921,7 @@ async def test_a_short_embedding_answer_is_refused_at_the_search_path() -> None:
     the sentence is this corpus's.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="alpha", content=f"a note about {WORD}")
+        await ask(client, "note_write", subject="alpha", content=f"a note about {WORD}")
 
     server = build_server(load(), embedder=ShortEmbedder())
     async with Client(server) as client:
@@ -744,8 +943,8 @@ async def test_the_two_legs_answer_different_questions() -> None:
     ordered it.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="alpha", content=f"{WORD} in the body")
-        await ask(client, "note_save", subject="beta", content="nothing to match")
+        await ask(client, "note_write", subject="alpha", content=f"{WORD} in the body")
+        await ask(client, "note_write", subject="beta", content="nothing to match")
         # One row, because the worded row is first and the routed meaning leg
         # also returns the unrelated note behind it at similarity 0.
         by_words = await payload(client, "cabinet_search", keywords=[WORD], limit=1)
@@ -774,7 +973,7 @@ async def test_words_alone_reach_the_meaning_leg() -> None:
     """
     async with Client(cabinet()) as client:
         await ask(
-            client, "note_save", subject="partial", content=f"a note about {WORD}"
+            client, "note_write", subject="partial", content=f"a note about {WORD}"
         )
         answer = await payload(client, "cabinet_search", keywords=[WORD, OTHER])
 
@@ -809,7 +1008,7 @@ async def test_a_mark_is_about_what_the_row_shows() -> None:
     # The word at 300, so the printed excerpt (the first 120) cannot show it.
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(source)], title="quarterly figures")
-        await ask(client, "note_save", subject="deep", content=f"{'x' * 300} {WORD}")
+        await ask(client, "note_write", subject="deep", content=f"{'x' * 300} {WORD}")
         by_title = await payload(client, "cabinet_search", keywords=["quarterly"])
         by_tail = await payload(client, "cabinet_search", keywords=[WORD])
 
@@ -833,7 +1032,7 @@ async def test_a_mark_is_decided_by_the_index_s_own_tokenizer() -> None:
     which is the only way the two can be the same rule.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="spelling", content="A Café on the wall")
+        await ask(client, "note_write", subject="spelling", content="A Café on the wall")
         answer = await payload(client, "cabinet_search", keywords=["cafe"])
 
     assert answer["results"][0]["matched_in"] == "line", (
@@ -879,8 +1078,8 @@ async def test_the_open_pass_runs_on_another_thread() -> None:
 async def test_a_window_narrows_without_deciding() -> None:
     """A range removes rows from the page; it does not re-rank what is left."""
     async with Client(cabinet()) as client:
-        await ask(client, "diary_save", content="old", date="2020-01-01")
-        await ask(client, "diary_save", content="new", date="2030-01-01")
+        await ask(client, "diary_write", content="old", date="2020-01-01")
+        await ask(client, "diary_write", content="new", date="2030-01-01")
         windowed = await payload(
             client, "cabinet_search", kind=DIARY, since="2025-01-01"
         )
@@ -903,7 +1102,7 @@ async def test_a_day_axis_reads_a_datetime_bound_as_the_day_it_names() -> None:
     """
     async with Client(cabinet()) as client:
         for day in ("2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"):
-            await ask(client, "diary_save", content=f"on {day}", date=day)
+            await ask(client, "diary_write", content=f"on {day}", date=day)
         by_day = await payload(client, "diary_list", until="2026-10-07")
         by_moment = await payload(client, "diary_list", until="2026-10-07T12:00:00")
         equal = await payload(
@@ -928,7 +1127,7 @@ async def test_a_search_with_neither_input_browses() -> None:
     the browse a caller did not ask for.
     """
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="one", content="x")
+        await ask(client, "note_write", subject="one", content="x")
         browsed = await payload(client, "cabinet_search")
         with pytest.raises(ToolError, match="no search term"):
             await ask(client, "cabinet_search", keywords=["  "])
@@ -941,14 +1140,37 @@ async def test_a_search_with_neither_input_browses() -> None:
 async def test_a_search_can_name_one_kind() -> None:
     """A filter narrows what is shown and never what is ranked."""
     async with Client(cabinet()) as client:
-        await ask(client, "note_save", subject="same-word", content=WORD)
-        await ask(client, "diary_save", content=WORD, date="2026-10-11")
+        await ask(client, "note_write", subject="same-word", content=WORD)
+        await ask(client, "diary_write", content=WORD, date="2026-10-11")
         only_files = await payload(client, "cabinet_search", keywords=[WORD], kind=FILE)
         only_notes = await payload(client, "cabinet_search", keywords=[WORD], kind=NOTE)
 
     assert keys(only_notes["results"]) == ["same-word"]
     assert only_files["results"] == [], "a filter that matched nothing is an empty page"
     assert only_files["browsed"] is False, "and it was a search, not a browse"
+
+
+@pytest.mark.asyncio
+async def test_a_notes_day_and_reports_text_is_what_the_meaning_leg_ranks() -> None:
+    """**All three text kinds put their body in the vector index.**
+
+    A note, a diary day and a report are one corpus, and the semantic leg ranks
+    each by its own text — not by its title, its key or its path.  The file is
+    the one exception (`vector_text`): it has no text of its own, so its vector
+    is its identity and its summary.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_write", subject="n", content="工具")
+        await ask(client, "diary_write", date="2026-10-11", content=OTHER)
+        await ask(client, "report_write", title="r", content=WORD)
+        found = {
+            word: await payload(client, "cabinet_search", sentences=[word], limit=1)
+            for word in ("工具", OTHER, WORD)
+        }
+
+    for word, kind in (("工具", NOTE), (OTHER, DIARY), (WORD, REPORT)):
+        best = found[word]["results"][0]
+        assert (best["kind"], best["similarity"]) == (kind, 1.0), word
 
 
 @pytest.mark.asyncio
@@ -1402,71 +1624,30 @@ async def test_a_failed_index_rebuild_leaves_the_vectors_table(
 
 
 @pytest.mark.asyncio
-async def test_two_writes_of_one_day_both_survive() -> None:
-    """**The append is composed inside the write, not before it.**
+async def test_two_writes_of_one_key_make_one_document() -> None:
+    """**One key, one document**: the create that loses the race writes nothing.
 
-    A read on one connection and a write on another, with an embedding call
-    between, is the shape `append_context` exists to forbid: two writers that
-    both read the old day and both write `old + own` lose one of the two
-    entries, and the second writer is the ordinary case — the plugin hops to a
-    thread between the halves, so two conversations writing one agent's diary
-    interleave.  The schedule below is that interleaving made deterministic: the
-    first call's embedding is held until the second has begun its own.
+    Both callers can pass the "does this key exist" question before either
+    writes, and the database's uniqueness is what decides between them.  The
+    loser answers `None` and the winner's body is the whole document — there is
+    no second entry to lose, because a write is a create.
     """
     store = store_of(index_path("jack"))
-    seeded = StubEmbedder()
-    await store.sync(seeded)
+    embedder = StubEmbedder()
+    await store.sync(embedder)
     day = "2026-10-11"
-    await store.write(DIARY, day, body="seed", embedder=seeded)
-    embedder = _Interleaving()
 
-    # **Bounded, because a test that hangs reports nothing.**  The interleaving
-    # below is what the stub waits for, and a write that never reaches its
-    # embedding would leave the first caller waiting on an event the second one
-    # never sets — with the suite stopped rather than failed.  The bound is this
-    # file's (`test_sync_ends_with_a_document_that_has_nothing_to_embed`): long
-    # enough that only a deadlock reaches it, and named as the value the test is
-    # built around rather than as a budget.
-    await asyncio.wait_for(
-        asyncio.gather(
-            store.write(DIARY, day, body="morning", embedder=embedder),
-            store.write(DIARY, day, body="evening", embedder=embedder),
-        ),
-        timeout=5.0,  # timeouts: the value this test is built around, not a budget
+    first, second = await asyncio.gather(
+        store.write(DIARY, day, body="morning", embedder=embedder),
+        store.write(DIARY, day, body="evening", embedder=embedder),
     )
 
+    assert (first is None) != (second is None), "exactly one create won"
     row = store.get(DIARY, day)
     assert row is not None
-    for entry in ("seed", "morning", "evening"):
-        assert entry in row["body"], f"{entry!r} was lost: {row['body']!r}"
+    assert row["body"] in ("morning", "evening"), "the winner's body, whole"
     mirror = (bag() / row["mirror"]).read_text(encoding="utf-8")
-    assert mirror.count("## ") == 3, "the whole day, in the file too"
-    assert "morning" in embedder.calls[-1][0] and "evening" in embedder.calls[-1][0], (
-        "the vector is of the body the row ended up with"
-    )
-
-
-class _Interleaving(StubEmbedder):
-    """One embed whose first caller waits for the second to start.
-
-    The gap between `write`'s read and its write is where a lost append lives,
-    and it is one `await` wide — so a stub that holds the first caller there
-    while the second runs past it is what makes the race a test rather than a
-    hope.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.started = 0
-        self.both = asyncio.Event()
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        self.started += 1
-        if self.started == 1:
-            await self.both.wait()
-        else:
-            self.both.set()
-        return await super().embed(texts)
+    assert mirror == f"{row['body']}\n", "the file is the document, not a section"
 
 
 @pytest.mark.asyncio
@@ -1543,7 +1724,7 @@ async def save_dump(call: str, body: str) -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, call, body=body, embedder=embedder)
+    await store.write(DUMP, call, mode=UPSERT, body=body, embedder=embedder)
 
 
 @pytest.mark.asyncio
@@ -1679,10 +1860,13 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, "call", body=f"{WORD} in a tool output", embedder=embedder)
+    await store.write(
+        DUMP, "call", mode=UPSERT, body=f"{WORD} in a tool output", embedder=embedder
+    )
     await store.write(
         IMAGE,
         "pictures/x.png",
+        mode=UPSERT,
         file_path="pictures/x.png",
         mime="image/png",
         embedder=embedder,

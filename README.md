@@ -793,18 +793,23 @@ The cabinet is a per-agent store of notes, diary entries, saved files, reports,
 dumps, and images. The first four are its corpus — what `cabinet_search` ranks;
 dumps and images are a turn's attachments, addressed by the markers in the turn.
 
-| Kind | Key | A second write |
-|---|---|---|
-| `note` | A subject chosen by the user | Replaces the note. |
-| `diary` | A date | Appends a section. |
-| `file` | Its path inside the cabinet | Copies the file in. |
-| `report` | A title | Appends a section. |
-| `dump` | The tool call that produced the output | Written by the harness. |
-| `image` | Its content digest | Written by the harness; bytes in `pictures/`. |
+A note, a diary day and a report share four verbs: `{kind}_write` creates the
+document and refuses a key that already exists (the refusal names
+`{kind}_read` and `{kind}_update`), `{kind}_read` reads it, `{kind}_update`
+replaces the whole document, and `{kind}_remove` deletes it. The key is a
+subject for a note, a date for a diary day, and a title for a report.
 
-Notes, files and images are replaced by a second write, which is why only notes
-and files have remove tools. A diary and a report are logs: two entries under
-one date or title are two facts.
+| Kind | Key | What a write means |
+|---|---|---|
+| `note` | A subject chosen by the user | Creates the note under that subject. |
+| `diary` | A date | Creates that day's entry; one day is one document. |
+| `file` | Its path inside the cabinet | `file_save` copies a local file or fetches an `http(s)` URL in; `file_read` and `file_remove` read and delete it. |
+| `report` | A title | Creates the report under that title. |
+| `dump` | The tool call that produced the output | Written by the harness; a second write of one call replaces it. |
+| `image` | Its content digest | Written by the harness; bytes in `pictures/`; one digest is one row. |
+
+A replacement is the whole document, not a patch: a note's tags and a report's
+period are what the update passes, and an omitted one is cleared.
 
 A dump is a tool output too large for the conversation. The output is stored
 whole, keyed by the tool call id, and the conversation carries a selection of the
@@ -831,8 +836,10 @@ archive by saying what it is.
 `cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
 `cabinet_summarize` writes a description for a document; writing one for a file
 re-embeds it, while a dump or an image is not described because it is not
-searched. `file_save` copies files already on the machine and does not fetch
-URLs.
+searched. `file_save` copies a local file (never moving it) or fetches an
+`http(s)` URL. A fetched URL reaches the public internet only: credentials,
+`localhost`, and literal addresses that are not globally routable are refused,
+and the response is capped at 50 MiB.
 
 ### WeChat
 
@@ -1175,8 +1182,7 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
   text, and the model runs any commands itself.
 - Jobs are code: they run in `slife2-jobs` with the caller's identity and are
   not sandboxed. The top-level tool call is the approval point.
-- The cabinet's `file_save` does not fetch URLs, and the cabinet has no `grep`
-  search leg.
+- The cabinet has no `grep` search leg.
 - There is no approval gate before a configuration edit, including `mcp_set`
   with a `command:` that records a program slife2 will start.
 - An agent task may start another agent task; `agent-task.max_running` bounds

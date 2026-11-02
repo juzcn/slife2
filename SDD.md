@@ -1442,20 +1442,27 @@ is what the record keeps.
 
 `plugins/cabinet/` stores six kinds of row; four of them are its corpus:
 
+A note, a diary day and a report share four verbs: `{kind}_write` creates the
+document and refuses a key that already exists, `{kind}_read` reads it,
+`{kind}_update` replaces the whole document, and `{kind}_remove` deletes it. A
+saved file's write is `file_save`, which copies a local file or fetches an
+`http(s)` URL in; its read and remove keep their own names.
+
 | Kind | Key | Write behavior |
 |---|---|---|
-| `note` | A subject | Replaces. |
-| `diary` | A date | Appends a section. |
-| `file` | Its path inside the cabinet | Copies the file in. |
-| `report` | A title | Appends a section. |
-| `dump` | The tool call that produced the output | Written by the harness. |
+| `note` | A subject | Creates; an existing subject is refused. |
+| `diary` | A date | Creates that day's entry; one day is one document. |
+| `file` | Its path inside the cabinet | `file_save` copies a local file or fetches an `http(s)` URL in. |
+| `report` | A title | Creates; an existing title is refused. |
+| `dump` | The tool call that produced the output | Written by the harness; a second write of one call replaces. |
 | `image` | The content digest | Written by the harness; bytes in `pictures/`. |
 
 One table holds all six. The corpus is the four the cabinet manages — `note`,
 `diary`, `file` and `report` — and a search ranks them against each other; a
 corpus whose rows lived in four tables would have to be unioned before it could
-be ranked. `kind` says what a row is, `key` is what a read and a remove take,
-and columns a kind does not use are empty. A `dump` and an `image` share the
+be ranked. `kind` says what a row is, `key` is what a write, a read, an update
+and a remove take, and columns a kind does not use are empty. A `dump` and an
+`image` share the
 table because they share the directory, the key and the write path, but they
 are not in the corpus: the turn's marker is their address (`[DUMP:…]` →
 `dump_read`, `[Image:…]` → `attach_image`).
@@ -1474,6 +1481,17 @@ because `Python.md` and `python.md` are one file on Windows and macOS.
 A file's bytes are never indexed. What is indexed is what the document is: its
 name, the paths that place it, and a summary once one is written. An image is
 not indexed at all: neither its bytes nor its row is in the corpus.
+
+A saved file's source is a local path or an `http(s)` URL. A local file is
+copied and never moved; a URL is fetched whole, bounded by `MAX_FETCH_BYTES`
+and `transport.file_fetch`. The URL is untrusted input: only `http(s)` is accepted,
+credentials in a URL are refused, and a host written as an address or as
+`localhost` must be globally routable, so a fetched URL reaches the internet
+rather than this machine. Every redirect is checked by the same rule, so a
+public URL cannot hop to a private one. Names are left to the machine's
+resolver; a fake-ip proxy answers an address the proxy owns rather than the
+destination, so resolving one in the guard would test the proxy rather than the
+site.
 
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
@@ -2373,7 +2391,6 @@ The following are not implemented in this version:
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Executing `cli:` entries | The entry is already a catalogue row; execution is an argv, not a shell. | Entries are catalogued and discoverable; no tool runs them. |
 | Executing playbook scripts | Same shape as the `cli:` entry, plus `skills:` environment injection. | `skill_use` returns the playbook text; the model runs commands itself. |
-| Fetching a URL in `file_save` | Not designed yet. | `file_save` copies local files only. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
 | The pass behind the context ceiling | The selection is bounded by construction. | A very large turn can exceed the ceiling until the next selection. |

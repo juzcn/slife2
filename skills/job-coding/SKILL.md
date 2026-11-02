@@ -209,7 +209,7 @@ async def daily_report(topic: str) -> str:
          "subagent": "job-daily-report"},
     )
     saved = await call_tool(
-        "report_save", {"title": topic, "body": answer.text}
+        "report_write", {"title": topic, "content": answer.text}
     )
     return answer.text if saved.ok else f"Saved? {saved.ok}: {saved.text}"
 ```

@@ -184,6 +184,9 @@ class Transport:
     window: float = 10.0
     #: One call to the schedule plugin.
     tasks: float = 30.0
+    #: Fetching one URL into the cabinet (`file_save`), connect to last byte.
+    #: The time half of the fetch's bound; `MAX_FETCH_BYTES` is the byte half.
+    file_fetch: float = 30.0
 
 
 @dataclass

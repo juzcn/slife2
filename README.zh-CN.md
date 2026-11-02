@@ -704,17 +704,20 @@ unexpose_local_image(token)   -> 该 URL 失效
 corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件，由 turn 里的 marker
 寻址。
 
-| 种类 | key | 第二次写入 |
-|---|---|---|
-| `note` | 用户选定的主题 | 替换该笔记。 |
-| `diary` | 日期 | 追加一节。 |
-| `file` | 柜内路径 | 把文件复制进来。 |
-| `report` | 标题 | 追加一节。 |
-| `dump` | 产生输出的工具调用 | 由 harness 写入。 |
-| `image` | 内容摘要 | 由 harness 写入；字节在 `pictures/`。 |
+笔记、日记的某一天和报告共用四个动词：`{kind}_write` 创建，key 已存在时拒绝（提示用
+`{kind}_read` 和 `{kind}_update`）；`{kind}_read` 读取；`{kind}_update` 整篇替换；
+`{kind}_remove` 删除。key 对笔记是主题，对日记是日期，对报告是标题。
 
-笔记、文件和图片第二次写入即替换，所以只有笔记和文件有删除工具。日记和报告是日志：
-同一日期或标题下的两条是两件事实。
+| 种类 | key | 写入的含义 |
+|---|---|---|
+| `note` | 用户选定的主题 | 在该主题下创建笔记。 |
+| `diary` | 日期 | 创建当天的条目；一天就是一篇文档。 |
+| `file` | 柜内路径 | `file_save` 复制本地文件或抓取 `http(s)` URL 进来；`file_read` 和 `file_remove` 读与删除。 |
+| `report` | 标题 | 在该标题下创建报告。 |
+| `dump` | 产生输出的工具调用 | 由 harness 写入；同一调用的第二次写入即替换。 |
+| `image` | 内容摘要 | 由 harness 写入；字节在 `pictures/`；同一摘要只有一行。 |
+
+替换是整篇文档而不是补丁：笔记的 tags 和报告的 period 以 update 传入的为准，省略即清空。
 
 dump 是对对话而言过大的工具输出。输出完整存储，以工具调用 id 为键，对话携带的是在
 `tool_result.tokens` 内从输出自己的行中选出的片段；不做任何改写。模型用 `dump_read`
@@ -734,7 +737,9 @@ provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 ke
 
 `cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
 `cabinet_summarize` 为文档写描述；为文件写描述会重新嵌入它，而 dump 和图片不写描述，
-因为它们不参与搜索。`file_save` 只复制机器上已有的文件，不抓取 URL。
+因为它们不参与搜索。`file_save` 复制本地文件（从不移动它），或抓取 `http(s)` URL。
+抓取只面向公网：带凭据的 URL、`localhost` 和非全局可路由的字面地址会被拒绝，响应上限
+为 50 MiB。
 
 ### 微信
 
@@ -1025,7 +1030,7 @@ Windows 上 `uv run pytest` 不能在活栈旁边运行：`uv` 每次运行都�
 - playbook 脚本不由 slife2 执行；`skill_use` 返回 playbook 文本，命令由模型自己运行。
 - job 是代码：它在 `slife2-jobs` 中以调用方身份运行，不在沙箱中。顶层工具调用是审批
   点。
-- 文件柜的 `file_save` 不抓取 URL，文件柜也没有 `grep` 搜索腿。
+- 文件柜没有 `grep` 搜索腿。
 - 配置编辑之前没有审批关卡，包括带 `command:` 的 `mcp_set`——它记录的是 slife2 将
   启动的程序。
 - agent task 可以再启动 agent task；`agent-task.max_running` 限制并发，不限制一段

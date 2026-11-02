@@ -38,10 +38,10 @@ bound is a property of the tool rather than a hope about how a model uses it.
 **An image is the same shape with a different reader.**  A picture a turn
 carried is kept whole because the turn log is text; the conversation keeps an
 `[Image:{…}]` reference and `attach_image` is how the picture comes back.  An
-`http(s)` URL has no bytes here at all — this system never fetches one — so the
-row keeps the URL as its `source` and the provider fetches it.  Like a dump, it
-is addressed by the turn rather than found by a search, so it is not in the
-corpus either.
+`http(s)` URL has no bytes here at all — an image URL is never fetched, unlike a
+saved file's (`file_save`) — so the row keeps the URL as its `source` and the
+provider fetches it.  Like a dump, it is addressed by the turn rather than
+found by a search, so it is not in the corpus either.
 
 **One row per call, keyed by the call id.**  That id is the one identifier both
 sides already carry: the turn's own messages hold it on the tool message, and
@@ -65,11 +65,10 @@ which is how both of slife2's other stores do it and why this module has no
 trigger at all.
 
 **The per-kind facts are a table of their own** (`SPECS`): which column is the
-key, which column is the time axis a list orders by, whether a second write
-appends or replaces, where the markdown mirror goes, and whether the kind is in
-the corpus.  Every one of those is a fact about a kind rather than about a
-document, so each is spelled out once rather than once per table, view arm,
-trigger set and upsert.
+key, which column is the time axis a list orders by, where the markdown mirror
+goes, and whether the kind is in the corpus.  Every one of those is a fact
+about a kind rather than about a document, so each is spelled out once rather
+than once per table, view arm, trigger set and write.
 
 **Every corpus write embeds, and there is no drainer.**  There is no background
 walk over unembedded documents catching them up on its own schedule, and none
@@ -182,8 +181,9 @@ DUMP = "dump"
 #: tool: the conversation keeps an `[Image:{…}]` reference and `attach_image`
 #: is how the picture comes back (`slife2.libs.turn.attachments`).  A local
 #: path or `data:` URI is stored as bytes under `pictures/`; an `http(s)` URL
-#: has no bytes here at all — this system never fetches one — so the row keeps
-#: the URL as its `source` and the provider fetches it.
+#: has no bytes here at all — an image URL is never fetched, unlike a saved
+#: file's `file_save` — so the row keeps the URL as its `source` and the
+#: provider fetches it.
 IMAGE = "image"
 
 #: The index file, inside the cabinet it indexes.
@@ -205,11 +205,12 @@ CABINET_DIR = "cabinet"
 class Spec:
     """What is true of one *kind* rather than of one document.
 
-    The key is what a read tool and a remove tool take, and it is the only
-    column a kind is addressed by: a note by its subject, a day by its date, a
-    file by the path it was saved to, a report by its title, a dump by the
-    tool call it is the output of, and an image by its digest.  Six kinds and
-    six keys, which is why this is a column and not six tables.
+    The key is what every per-kind tool takes — a write, a read, an update and
+    a remove — and it is the only column a kind is addressed by: a note by its
+    subject, a day by its date, a file by the path it was saved to, a report by
+    its title, a dump by the tool call it is the output of, and an image by its
+    digest.  Six kinds and six keys, which is why this is a column and not six
+    tables.
     """
 
     #: The column a list orders by and a since/until window filters on.  Each
@@ -221,11 +222,6 @@ class Spec:
     #: is `YYYY-MM-DD`, so a window on it is day-granular and a datetime bound
     #: is read as its day.
     day: bool
-    #: Whether a second write under one key **appends** rather than replaces.
-    #: A day and a report's title accumulate — two entries under one date are two
-    #: facts about it — and the two kinds that hold one current thing per key are
-    #: the two with a remove tool.
-    appends: bool
     #: The markdown mirror's directory, or `""` for the kind whose bytes *are*
     #: the file.  A saved file is not mirrored: the cabinet keeps the bytes, and
     #: a second copy of them as text would be a copy of something that is not
@@ -243,20 +239,21 @@ class Spec:
 
 SPECS: dict[str, Spec] = {
     NOTE: Spec(
-        time="updated_at", day=False, appends=False, mirror="notes", searchable=True
+        time="updated_at", day=False, mirror="notes", searchable=True
     ),
     # The diary's time axis **is** its key: a day keyed by `YYYY-MM-DD` sorts
     # chronologically as a string, so the column that addresses the row is the
     # column that orders it and there is no second one to keep in step.
-    DIARY: Spec(time="key", day=True, appends=True, mirror="diary", searchable=True),
-    FILE: Spec(time="created_at", day=False, appends=False, mirror="", searchable=True),
-    REPORT: Spec(
-        time="created_at", day=False, appends=True, mirror="reports", searchable=True
-    ),
-    # A dump replaces and does not append: the key is one call, and a second
-    # write under it is that call shortened again rather than a second fact
-    # about anything.  Its time axis is when the output arrived — the only
-    # moment this row has, since nobody wrote it.
+    DIARY: Spec(time="key", day=True, mirror="diary", searchable=True),
+    FILE: Spec(time="created_at", day=False, mirror="", searchable=True),
+    # A report's axis is when it was first written: an update replaces its
+    # body, and the moment the report arrived is the one that does not move.
+    REPORT: Spec(time="created_at", day=False, mirror="reports", searchable=True),
+    # A dump's key is one call, and a second write under it is that call
+    # shortened again rather than a second fact about anything — which is why
+    # the harness's write is an upsert (`UPSERT`) and not a document's create.
+    # Its time axis is when the output arrived — the only moment this row has,
+    # since nobody wrote it.
     #
     # **Mirrored like a note, unlike a file.**  The kind whose `mirror` is empty
     # is the one whose bytes are the document; a dump's content *is* text, and
@@ -266,17 +263,13 @@ SPECS: dict[str, Spec] = {
     # **Not in the corpus.**  Its address is the call id in the turn's
     # `[DUMP:{…}]` marker, and `dump_read` is the reader, so there is nothing
     # for a search to add — and everything for machine output to dilute.
-    DUMP: Spec(
-        time="created_at", day=False, appends=False, mirror="dumps", searchable=False
-    ),
+    DUMP: Spec(time="created_at", day=False, mirror="dumps", searchable=False),
     # An image is a saved-file's shape with a different reader: bytes on disk
     # (`pictures/`), no markdown mirror, one row per content digest so a
     # picture attached twice is stored once.  An `http(s)` source has no file
     # and is found by its URL; the row is still one per digest of that URL.
     # Its address is the turn's `[Image:{…}]` key, so it is not in the corpus.
-    IMAGE: Spec(
-        time="created_at", day=False, appends=False, mirror="", searchable=False
-    ),
+    IMAGE: Spec(time="created_at", day=False, mirror="", searchable=False),
 }
 
 #: The corpus: the kinds a search ranks, in `SPECS` order.
@@ -304,6 +297,16 @@ CORPUS_KIND_HINT = (
     "the call id in its `[DUMP:…]` marker with `dump_read`, and an image by "
     "its `[Image:…]` key with `attach_image`"
 )
+
+#: How a write treats the key it is given.  The first two are a document's own
+#: verbs — `write` creates and refuses an existing key, `update` replaces and
+#: refuses a missing one — and the third is the harness's: a dump and an image
+#: are keyed by an identity the turn already carries, so writing one again is
+#: the same fact restated rather than a second document.  A property of the
+#: call, not of the kind, which is why it is not a `Spec` field.
+CREATE = "create"
+REPLACE = "replace"
+UPSERT = "upsert"
 
 
 def cabinet_dir(agent: str, subagent: str = "") -> Path:
@@ -505,25 +508,20 @@ def mirror_path(spec: Spec, key: str) -> str:
 #: One mirror is written at a time.  **Not for the temp name** — that is
 #: unique per write — but for the destination: on Windows two threads replacing
 #: onto one path at the same moment can make the second `os.replace` fail after
-#: its row has already committed, which reports a failed save for a document
+#: its row has already committed, which reports a failed write for a document
 #: that was stored.  The writes are small, and the cabinet is one process.
 _MIRROR_LOCK = threading.Lock()
 
 
-def _write_mirror(root: Path, relative: str, text: str, *, append: bool) -> None:
+def _write_mirror(root: Path, relative: str, text: str) -> None:
     """Put the markdown at *relative*, creating the directory it needs.
 
-    A temp file and `os.replace` when the mirror is *replaced*, so a reader
-    never sees half a note; a plain append when it is *added to*, because that
-    is what an append is — and a day's mirror is the accumulation itself, so
-    rewriting it would be a second implementation of the row's own rule.
+    A temp file and `os.replace`, so a reader never sees half a document: the
+    mirror is always the whole of what the row holds, because a document is
+    replaced rather than added to.
     """
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    if append:
-        with _MIRROR_LOCK, path.open("a", encoding="utf-8") as handle:
-            handle.write(text)
-        return
     # **A temp name per write, not per path.**  Two writes of one key overlap
     # normally (the embedding before the transaction is awaited), and a shared
     # `<name>.tmp` would let the second writer's `os.replace` find the first had
@@ -1049,6 +1047,7 @@ class CabinetStore:
         kind: str,
         key: str,
         *,
+        mode: str = CREATE,
         body: str = "",
         title: str = "",
         tags: str = "",
@@ -1060,16 +1059,18 @@ class CabinetStore:
         period_start: str = "",
         period_end: str = "",
         embedder: Embedder,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Write one row, its mirror and — for a corpus kind — its vector.
 
-        **The append kinds append and the rest replace**, which is `SPECS`'s
-        rule and the whole difference between a note and a day: two writes under
-        one date are two facts about it, and nothing in the later text says
-        which part of the earlier one it replaces.  A report's title is the same
-        kind of key for the same reason.  What appends also *replaces the key's
-        title and tags* rather than appending them, because those are the
-        document's own and not part of the log.
+        **`mode` says what the key means to this call.**  `CREATE` is a
+        document's write: an existing key is refused, and `None` is the answer
+        rather than a row, so nothing is overwritten and nothing is embedded.
+        `REPLACE` is a document's update: a missing key is `None`, and an
+        existing one is overwritten whole — body, tags and a report's period are
+        what the caller passed, including the empty ones, because a replacement
+        is not a patch.  `UPSERT` is the harness's: a dump and an image are
+        keyed by an identity the turn already carries, so a second write under
+        one key is the same fact restated and the row keeps its `created_at`.
 
         **A corpus write embeds before anything is written.**  The model is
         asked first (`vectors`), and only then does one transaction write the
@@ -1078,43 +1079,39 @@ class CabinetStore:
         `file_save` relies on when it takes back the bytes it copied.  A dump
         or an image is not in the corpus: its row is written with no keyword
         entry and no vector, because the turn's marker is its address.
-
-        **And an append is composed against the body that is in the row when it
-        is written.**  A read here and a write there with a model call between
-        them is the shape `append_context` exists to forbid: two writers that
-        both read the old day and both write `old + own` lose one of the two
-        entries, and the second writer is the ordinary case rather than a race —
-        the plugin hops to a thread between the halves, so a wechat turn and a
-        tui turn for one agent interleave.  So the row is written only if it
-        still holds the body this call composed from (`_replace`'s `expected`),
-        and a call that lost that race composes again against the body that won:
-        what re-runs is the read, the compose and the embedding, because the
-        vector has to be a vector *of* the text that ends up in the row and the
-        model is asked before the write rather than inside it.
         """
+        if mode not in (CREATE, REPLACE, UPSERT):
+            raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
         stamp = now()
-        # **A log's every write is a section, its first included**, so a
-        # day's file reads the same way from the top as it does after the
-        # fiftieth entry — and so nothing downstream has to know which write
-        # happened to be the one that created the row.
-        added = _section(stamp, body) if spec.appends else body
-        while True:
-            with self._connect() as connection:
-                found = connection.execute(
-                    "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
-                ).fetchone()
-            existing = dict(found) if found is not None else None
-            row: dict[str, Any] = dict(existing) if existing is not None else {}
-            if spec.appends and existing is not None:
-                row["body"] = f"{existing.get('body') or ''}\n{added}".strip("\n")
-            else:
-                row["body"] = added
+        with self._connect() as connection:
+            found = connection.execute(
+                "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
+            ).fetchone()
+        existing = dict(found) if found is not None else None
+        if mode == CREATE and existing is not None:
+            return None
+        if mode == REPLACE and existing is None:
+            return None
+        row: dict[str, Any] = dict(existing) if existing is not None else {}
+        if mode == REPLACE:
+            # **A replacement is the document the caller describes**, so the
+            # fields it owns are the caller's — an empty tag is a tag cleared,
+            # not one left alone.  What it does not own stays: the summary is
+            # `annotate`'s, the created stamp is when the report arrived, and a
+            # saved file's bytes and a dump's source still describe this row.
             row.update(
-                kind=kind,
-                key=key,
+                body=body,
+                tags=tags,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            row["title"] = row.get("title") or title or key
+        else:
+            row.update(
+                body=body,
                 title=title or row.get("title") or key,
                 tags=tags or row.get("tags") or "",
                 summary=summary or row.get("summary") or "",
@@ -1124,71 +1121,53 @@ class CabinetStore:
                 size=size or int(row.get("size") or 0),
                 period_start=period_start or row.get("period_start") or "",
                 period_end=period_end or row.get("period_end") or "",
-                created_at=row.get("created_at") or stamp,
-                updated_at=stamp,
             )
-            if spec.mirror and not row.get("mirror"):
-                row["mirror"] = mirror_path(spec, key)
-            # **A corpus row is embedded before anything is written**, so a
-            # write that cannot embed has written nothing — see `vectors`.  What
-            # the row *is* does not depend on the vectors, so this is a question
-            # asked of the model about the document rather than a step in
-            # storing it.  An attachment is not asked about at all: it has no
-            # index entry to place, and its address is the marker in the turn.
-            vectors = await self.vectors(row, embedder) if spec.searchable else []
-            with self._connect() as connection:
-                placed = self._replace(
-                    connection,
-                    row,
-                    expected=existing.get("body")
-                    if spec.appends and existing
-                    else None,
-                )
-                if placed is None:
-                    # Another writer got there between this call's read and its
-                    # write.  Recomposed rather than reported: both writes are
-                    # facts about the same day, and the caller asked for this one
-                    # to be in it.
-                    continue
-                row["id"] = placed
-                if spec.searchable:
-                    self._index(connection, row)
-                    self.place(connection, placed, vectors)
-            break
+        row.update(
+            kind=kind,
+            key=key,
+            created_at=row.get("created_at") or stamp,
+            updated_at=stamp,
+        )
+        if spec.mirror and not row.get("mirror"):
+            row["mirror"] = mirror_path(spec, key)
+        # **A corpus row is embedded before anything is written**, so a write
+        # that cannot embed has written nothing — see `vectors`.  What the row
+        # *is* does not depend on the vectors, so this is a question asked of
+        # the model about the document rather than a step in storing it.  An
+        # attachment is not asked about at all: it has no index entry to place,
+        # and its address is the marker in the turn.
+        vectors = await self.vectors(row, embedder) if spec.searchable else []
+        with self._connect() as connection:
+            placed = self._store(connection, row, mode)
+            if placed is None:
+                return None
+            row["id"] = placed
+            if spec.searchable:
+                self._index(connection, row)
+                self.place(connection, placed, vectors)
         if spec.mirror:
             # Last, because a file cannot be inside the database's transaction.
-            # A mirror that fails leaves a row whose markdown is missing, and the
-            # next write of the same key writes it — which is the lesser of the
-            # two failures: markdown with no row is a document nothing can find.
-            _write_mirror(
-                self.root,
-                str(row["mirror"]),
-                _mirror_text(kind, row, added, first=existing is None),
-                append=bool(spec.appends and existing is not None),
-            )
+            # A mirror that fails leaves a row whose markdown is missing, and
+            # the next write of the same key writes it — which is the lesser of
+            # the two failures: markdown with no row is a document nothing can
+            # find.
+            _write_mirror(self.root, str(row["mirror"]), _mirror_text(kind, row, body))
         return row
 
-    def _replace(
-        self,
-        connection: sqlite3.Connection,
-        row: Mapping[str, Any],
-        *,
-        expected: str | None = None,
+    def _store(
+        self, connection: sqlite3.Connection, row: Mapping[str, Any], mode: str
     ) -> int | None:
-        """The row, written whole, and its id — or `None` if it lost a race.
+        """The row, written by the rule its `mode` names, and its id.
 
-        *expected* is the body this call composed its own body from, and it is
-        what makes an append a compare-and-set: the `UPDATE` matches only while
-        the row still holds that text, so a second writer's entry cannot be
-        overwritten by a body composed before it arrived.  `None` means there is
-        nothing to compare — a kind that replaces is *meant* to overwrite
-        whatever is there, and a first write has no old body to lose.
-
-        An insert that collides answers `None` too, and for the same reason: the
-        row appeared under this key after this call read for it, which is the
-        race seen from the other side.  The collision is checked against the key
-        rather than trusted, so a constraint that fails for any *other* reason is
-        raised instead of retried for ever.
+        **Three statements, because the three modes ask three different
+        questions of the key.**  A create is an `INSERT` that collides only when
+        another writer got there first, and the collision is checked against the
+        key so a constraint that failed for any other reason is raised.  A
+        replacement is an `UPDATE` by the key, and a row that disappeared
+        between the read and the write answers `None` rather than being
+        resurrected.  The harness's upsert is `INSERT … ON CONFLICT … DO
+        UPDATE`, which leaves `created_at` alone: the output of one call may be
+        written twice, but it arrived once.
         """
         columns = (
             "kind",
@@ -1213,24 +1192,33 @@ class CabinetStore:
             else int(row.get("size") or 0)
             for column in columns
         ]
-        if row.get("id"):
-            where = "WHERE id = ?"
-            guard: list[Any] = []
-            if expected is not None:
-                where += " AND body = ?"
-                guard.append(expected)
+        if mode == REPLACE:
             placed = connection.execute(
                 f"UPDATE cabinet_doc SET {', '.join(f'{c} = ?' for c in columns)}"
-                f" {where}",
-                (*values, int(row["id"]), *guard),
+                " WHERE kind = ? AND key = ?",
+                (*values, row.get("kind"), row.get("key")),
             )
             return int(row["id"]) if placed.rowcount else None
-        try:
-            placed = connection.execute(
-                f"INSERT INTO cabinet_doc ({', '.join(columns)})"
-                f" VALUES ({', '.join('?' * len(columns))})",
-                values,
+        insert = (
+            f"INSERT INTO cabinet_doc ({', '.join(columns)})"
+            f" VALUES ({', '.join('?' * len(columns))})"
+        )
+        if mode == UPSERT:
+            updates = ", ".join(
+                f"{column} = excluded.{column}"
+                for column in columns
+                if column not in ("kind", "key", "created_at")
             )
+            connection.execute(
+                f"{insert} ON CONFLICT (kind, key) DO UPDATE SET {updates}", values
+            )
+            found = connection.execute(
+                "SELECT id FROM cabinet_doc WHERE kind = ? AND key = ?",
+                (row.get("kind"), row.get("key")),
+            ).fetchone()
+            return int(found["id"])
+        try:
+            placed = connection.execute(insert, values)
         except sqlite3.IntegrityError:
             if (
                 connection.execute(
@@ -1258,19 +1246,15 @@ class CabinetStore:
     async def remove(self, kind: str, key: str) -> dict[str, Any] | None:
         """Delete one document: its vector, its row, its index entry, its mirror.
 
-        **Only the two kinds with one current thing per key have this**, which is
-        `SPECS.appends` read from the other side: a day and a report accumulate,
-        so there is no "the" version of one to delete.  The bytes of a saved file
-        go too — and never what it was copied *from*, which `source` records and
-        which this has no business touching.
+        **The whole document under the key**, which for a diary is that day's
+        entries and for a report everything filed under that title — there is no
+        smaller unit, because the key is the only address a document has.  The
+        bytes of a saved file go too — and never what it was copied *from*,
+        which `source` records and which this has no business touching.
         """
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
-        if spec.appends:
-            raise ValueError(
-                f"a {kind} is a log and has nothing to remove — it accumulates"
-            )
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
@@ -1547,7 +1531,6 @@ class CabinetStore:
                 else Spec(
                     time="updated_at",
                     day=False,
-                    appends=False,
                     mirror="",
                     searchable=True,
                 )
@@ -1997,30 +1980,16 @@ def _like_literal(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _section(stamp: str, body: str) -> str:
-    """One appended entry, as the section it is written as.
-
-    The timestamp is kept because an append's *order* is the only thing that
-    says which of two entries came later, and a file a person reads needs to be
-    able to say so without the database.
-    """
-    return f"## {stamp}\n\n{body}"
-
-
-def _mirror_text(kind: str, row: Mapping[str, Any], added: str, *, first: bool) -> str:
+def _mirror_text(kind: str, row: Mapping[str, Any], body: str) -> str:
     """What is written to one kind's markdown.
 
-    **A heading on the first write and never again**, which is the difference
-    between a note (rewritten whole every time, so it always carries its
-    heading) and a report (a log, so a second save appends a section under the
-    heading the first one wrote).  A diary has no heading: its file *is* a day,
-    and the day is its name.
+    A note and a report carry their title as a heading; a diary has none,
+    because its file *is* a day and the day is its name.  A dump is raw —
+    nothing here wrote it, so there is no title of its own to put above it.
     """
-    if kind == NOTE:
-        return f"# {row.get('title') or row.get('key')}\n\n{added}\n"
-    if kind == REPORT and first:
-        return f"# {row.get('title') or row.get('key')}\n\n{added}\n"
-    return f"{added}\n"
+    if kind in (DIARY, DUMP):
+        return f"{body}\n"
+    return f"# {row.get('title') or row.get('key')}\n\n{body}\n"
 
 
 def discard_file(path: Path) -> None:
