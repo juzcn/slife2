@@ -21,6 +21,7 @@ from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     _TURN_COLUMNS,
+    MAX_AGENT_NAME,
     StaleSchema,
     TurnStore,
     database_path,
@@ -488,7 +489,7 @@ async def test_an_oversized_tool_result_is_kept_whole(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "expected"),
+    ("name", "head"),
     [
         ("jack", "jack"),
         ("jack/../jill", "jack_.._jill"),
@@ -497,10 +498,54 @@ async def test_an_oversized_tool_result_is_kept_whole(tmp_path) -> None:
         # as a relative path.
         ("../../etc/passwd", "etc_passwd"),
         (" jack ", "jack"),
+        (".jack", "jack"),
     ],
 )
-def test_an_agent_name_becomes_a_filename(name: str, expected: str) -> None:
-    assert safe_agent_name(name) == expected
+def test_an_agent_name_becomes_a_filename(name: str, head: str) -> None:
+    """A name already fit to be a file is itself; a changed one keeps a digest.
+
+    The readable head is still the sanitised name — that is what makes a
+    directory listing legible — and the digest is what keeps two names that
+    clean alike from sharing it.  A name that needed no change carries no
+    digest: that is the half which makes the two families disjoint.
+    """
+    made = safe_agent_name(name)
+
+    if name == head:
+        assert made == head, "a name that is already a filename is not changed"
+    else:
+        assert made.startswith(f"{head}-"), made
+        assert len(made) <= MAX_AGENT_NAME
+
+
+def test_a_sanitised_name_is_already_a_filename() -> None:
+    """**The answer is a fixed point**, and a subagent's identity depends on it.
+
+    A subagent's directory name is the name it is recorded and addressed by, so
+    `agent_dir`/`subagent_file` sanitise that name again on every later call.  A
+    reduced name that changed on the second pass would address a directory
+    nobody created — the sanitised spelling has to be one this function leaves
+    alone.
+    """
+    for name in ("my agent", "a/b", ".jack", " jack ", "a" * 100):
+        made = safe_agent_name(name)
+        assert safe_agent_name(made) == made
+
+
+def test_two_names_that_clean_alike_do_not_share_a_store() -> None:
+    """**Injective, because it names a database.**  The sanitised spelling is
+    not the identity: `my agent` and `my_agent` are two agents, and reading a
+    replacement as the name gave them one `turns.db`, one cabinet and one
+    schedule ledger between them, with nothing saying so.  A distinct raw name
+    must keep a distinct directory.
+    """
+    for first, second in (
+        ("my agent", "my_agent"),
+        (".jack", "jack"),
+        ("a/b", "a?b"),
+        (" a", "a"),
+    ):
+        assert safe_agent_name(first) != safe_agent_name(second)
 
 
 @pytest.mark.parametrize("name", ["..", "../", "...", "/", "", "  "])

@@ -151,7 +151,7 @@ _DIGEST_CHARS = 9
 
 
 def safe_agent_name(name: str) -> str:
-    """An agent name fit to be a filename.  **Injective, because it is a path.**
+    """An agent name fit to be a filename, **and still naming one agent**.
 
     `--agent` comes from a command line, and `jack` becoming `jack.turn.db` is
     exactly the kind of thing a `..` in the wrong place turns into a write
@@ -159,6 +159,22 @@ def safe_agent_name(name: str) -> str:
     rather than escaped, and a name that reduces to nothing — or to `.` or `..`
     — is refused, because silently writing to a surprising path is worse than
     saying no.
+
+    **Replacement alone is many-to-one, so a changed name carries a digest of
+    itself.**  `my agent` and `my_agent` are two agents, and both used to become
+    `my_agent`: one `turns.db` between two conversations, one cabinet, one
+    schedule ledger — isolation lost with nothing said.  A name already fit to
+    be a file is returned untouched; every other one keeps its readable cleaned
+    form with a digest of the original appended, so two names that clean alike
+    differ in the digest.
+
+    **The answer is a fixed point of this function**, and that is load-bearing
+    rather than tidy: a subagent's directory name *is* its identity, so it is
+    handed back to `agent_dir` and `subagent_file` on every later call — a
+    reduced name that changed again there would address a directory nobody
+    created.  The digest is made of characters the cleaned form can hold and the
+    result never begins or ends with one `strip` removes, so the second pass
+    returns it as it is.
 
     **A name that is too long keeps a digest.**  Truncating alone would be a
     many-to-one function, and this one names a *directory*: two long names
@@ -174,6 +190,10 @@ def safe_agent_name(name: str) -> str:
     cleaned = _SAFE_NAME.sub("_", name).strip("._-")
     if not cleaned:
         raise ValueError(f"agent name {name!r} cannot name a database file")
+    if cleaned != name:
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
+        keep = MAX_AGENT_NAME - _DIGEST_CHARS - 1
+        return f"{cleaned[:keep]}-{digest}"
     if len(cleaned) <= MAX_AGENT_NAME:
         return cleaned
     digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]

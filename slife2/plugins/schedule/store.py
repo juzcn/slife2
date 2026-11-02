@@ -20,8 +20,9 @@ minted handle would be a second name for the same fact that can be lost.
 file rather than by a `WHERE` clause, and this is a store with one writer, so
 `<data>/agents/<agent>/schedule.db` is the same shape `turns.db` has — see
 `slife2.libs.host.paths`.  The `meta` row exists because the directory *cannot* carry the
-name: `safe_agent_name` is injective but not the identity (`a/b` becomes `a_b`),
-and the poll loop, which is shared, has nothing but the directory to go on.
+name: `safe_agent_name` keeps two names apart but is not the identity (`a/b`
+becomes `a_b-<digest>`), and the poll loop, which is shared, has nothing but
+the directory to go on.
 Firing a task by a name that has been sanitised would hand the trigger to a
 conversation that is not the one that asked for it — the failure is silent, so it
 is worth the one row.
