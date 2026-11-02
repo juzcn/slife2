@@ -1886,6 +1886,12 @@ class ToolStore:
         )
         where = filter_clause(clauses)
         with self._connect() as connection:
+            # **One read snapshot for the count and the page**, because two
+            # autocommit statements let a merge between them put a row on the
+            # page that `total` did not count (or the reverse), and the page
+            # boundary a caller computes from the two repeats or skips a row.
+            # The turn store and the cabinet say the same at their own listing.
+            connection.execute("BEGIN")
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM tool {where}", values

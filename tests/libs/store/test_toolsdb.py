@@ -34,7 +34,7 @@ from slife2.libs.store.catalogue import (
     UNLOADED,
     ToolStore,
 )
-from slife2.libs.store.index import fuse_ranked
+from slife2.libs.store.index import connect_to, fuse_ranked
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -1530,6 +1530,63 @@ def test_a_page_says_how_much_is_behind_it(tmp_path) -> None:
         "arxiv__fetch",
         "arxiv__search",
     ], "category, source, then name — and the name is unique"
+
+
+def test_a_page_counts_and_pages_one_snapshot(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merge between the two statements used to split the page from `total`.
+
+    The count and the page were separate autocommit reads.  A row committed
+    between them appeared on the page but not in `total`, so a caller paging by
+    `offset + len(tools) < total` either repeated or skipped a row — and the hub
+    merges sources while it serves `tool_list`, so the two statements have a
+    writer between them that is this system's own.  The turn store and the
+    cabinet made their listings one read snapshot for the same reason.
+    """
+    store = store_at(tmp_path)
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO tool (name, category, source_id, remote_name)"
+            " VALUES (?, ?, ?, ?)",
+            ("one", "mcp", "src", "one"),
+        )
+    real_connect = store._connect
+
+    class Interleaving:
+        def __init__(self) -> None:
+            # `ToolStore._connect` is a context manager rather than the cabinet's
+            # bare connection, so the entry has to be made here and the exit
+            # delegated below.
+            self._context = real_connect()
+            self.connection = self._context.__enter__()
+            self.injected = False
+
+        def execute(self, sql: str, params=()):
+            found = self.connection.execute(sql, params)
+            if sql.startswith("SELECT COUNT") and not self.injected:
+                self.injected = True
+                other = connect_to(store.path)
+                other.execute(
+                    "INSERT INTO tool (name, category, source_id, remote_name)"
+                    " VALUES (?, ?, ?, ?)",
+                    ("two", "mcp", "src", "two"),
+                )
+                other.commit()
+                other.close()
+            return found
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._context.__exit__(*exc)
+
+    monkeypatch.setattr(store, "_connect", Interleaving)
+    browsed = store.page()
+
+    assert browsed["total"] == 1
+    assert [row["name"] for row in browsed["tools"]] == ["one"]
 
 
 def test_a_listing_calls_every_row_a_tool_and_carries_no_score(tmp_path) -> None:
