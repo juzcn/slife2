@@ -88,11 +88,20 @@ def _reference(moment: datetime, timezone: str) -> datetime:
     Naive input is taken as the system's local time, which is what
     `datetime.now()` returns and what `slife2.helpers.clock` stamps — so the one caller
     that has no zone to name still asks a question with an answer.
+
+    **An empty timezone is this machine's local zone even when the moment
+    carries another offset.**  A fire is a wall-clock reading in the task's zone
+    (the module docstring's rule), and the moment is only an instant: left in
+    the offset it was written in, `0 9 * * *` would mean nine there rather than
+    nine here, and one window written in UTC and in local time would name two
+    different fires.  Restating it costs nothing when it is already local, and
+    the fixed offset is what "the local zone as it is now" means for a task
+    that named no zone that could follow a DST change.
     """
     if moment.tzinfo is None:
         moment = moment.astimezone()
     found = zone(timezone)
-    return moment.astimezone(found) if found is not None else moment
+    return moment.astimezone(found) if found is not None else moment.astimezone()
 
 
 def is_valid(expression: str, *, strict: bool = True) -> bool:

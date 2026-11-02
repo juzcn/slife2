@@ -28,7 +28,7 @@ import socket
 import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1748,6 +1748,38 @@ async def test_the_newest_fire_is_chosen_by_instant_not_by_clock_reading() -> No
     assert found is not None, "the newest fire is an hour newer by the clock"
     assert found.timestamp() > anchor.timestamp()
     assert found.timestamp() <= until.timestamp()
+
+
+async def test_an_empty_timezone_reads_a_zoned_moment_in_this_machines_zone() -> None:
+    """**The empty timezone is the local clock, whatever offset the moment says.**
+
+    A fire is a wall-clock reading in the task's zone, and a task that names no
+    zone fires on this machine's clock.  The moment handed in is only an
+    *instant*, so restating the same window in another offset has to find the
+    same fire — left in the offset it was written in, `0 9 * * *` means nine
+    there rather than nine here, and the two spellings of one window answer two
+    different questions.
+
+    **The offset is chosen far from this machine's rather than fixed**, because
+    the failure is invisible when the two coincide: a runner in UTC cannot tell
+    the two readings apart with a UTC moment.  Twelve hours away makes nine
+    o'clock there fall outside this window whatever zone the runner is in, so the
+    assertion is about the rule rather than about the machine.
+    """
+    before = datetime(2026, 10, 7, 8, 0).astimezone()
+    after = datetime(2026, 10, 7, 10, 0).astimezone()
+    local_offset = before.utcoffset() or timedelta(0)
+    far = timezone(
+        timedelta(hours=-12) if local_offset >= timedelta(0) else timedelta(hours=12)
+    )
+
+    local_fire = latest_fire("0 9 * * *", before, after)
+    far_fire = latest_fire("0 9 * * *", before.astimezone(far), after.astimezone(far))
+
+    assert local_fire is not None
+    assert far_fire is not None, "the same window written in another offset"
+    assert far_fire.timestamp() == local_fire.timestamp()
+    assert local_fire.astimezone().strftime("%H:%M") == "09:00"
 
 
 async def test_a_fall_back_repeat_fires_once_and_not_twice() -> None:
