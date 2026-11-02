@@ -26,7 +26,7 @@ because it is a fact about the window rather than about the message: every calle
 gets the same patience, and none of them has to know why the window was away.
 
 **Three answers, and the middle one is why this is not a boolean.**  Everything a
-tool handler raises arrives at this end as a `ToolError` (`serve` pins
+tool handler raises arrives at this end as a `ToolError` (`house_server` pins
 `mask_error_details=False`, which is what keeps the text), so the exception
 *type* cannot tell a refusal from a dropped stream — `slife2.plugins.tui.server.refused`
 has to be asked, and it is the module that writes the refusal that answers.  A

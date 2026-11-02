@@ -721,11 +721,12 @@ class SlifeApp(App[None]):
         """Connect, restore, and raise when a server still cannot be reached.
 
         `_ensure_connected` plus the check it leaves to its caller, written once:
-        `_send`, `_finish_switch` and `_finish_approval` all need the same two
-        statements, and the sentence the raise carries is a fact about this
-        window rather than about any one of them — so it is stated here once,
-        with the reason the caller wants it: a turn, a switch and an answer all
-        need a transport, and the failure reads the same to a person watching.
+        `_send`, `_finish_switch`, `_finish_approval` and `_choose_subagent` all
+        need the same two statements, and the sentence the raise carries is a
+        fact about this window rather than about any one of them — so it is
+        stated here once, with the reason the caller wants it: a turn, a switch,
+        an answer and a subagent choice all need a transport, and the failure
+        reads the same to a person watching.
         """
         await self._ensure_connected()
         if not self._connected:

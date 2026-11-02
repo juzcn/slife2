@@ -46,8 +46,8 @@ from slife2.libs.turn.attachments import MEDIA_TYPES
 logger = logging.getLogger(__name__)
 
 # ── Cadence and bounds ──────────────────────────────────────────────────────
-# There is no global timeouts registry here — a number is a constant beside the
-# call it paces — and the values were measured against the providers: a render
+# The time values are `slife2.helpers.timeouts`' (`transport.media_*` and
+# `pacing.media_poll`), and they were measured against the providers: a render
 # is slow, a connect is not, and an artifact is megabytes.
 
 #: The artifacts' directory inside one agent's own.
@@ -84,9 +84,9 @@ def stamp(moment: datetime | None = None) -> str:
 
     `slife2.helpers.clock` writes this project's house format — `2026-10-11T14:20:00+08:00`
     — and a colon is not a character a Windows filename may hold, so this is the
-    same instant in a shape a filesystem takes.  Seconds and six random hex
-    digits are what make a collision impossible in practice; the stamp is the
-    house format respelled.
+    same instant in a shape a filesystem takes.  The stamp is the house format
+    respelled; `ArtifactSaver.path` adds the six random hex digits that make a
+    collision impossible in practice.
     """
     return f"{moment or datetime.now():%Y%m%d-%H%M%S}"
 

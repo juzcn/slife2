@@ -104,11 +104,12 @@ _OVERFETCH = 4
 #: fused list — two over-fetched legs fuse to twice the length either one had,
 #: which is the number that has to stay under this.
 #:
-#: **Public, because the cabinet is the third store to bind a fused list.**
-#: `slife2.plugins.cabinet.store` imports it for the same reason it imports `MAX_PAGE`:
-#: a second cap of its own would be a second number to keep under SQLite's, and
-#: the failure when one of them is wrong is an `OperationalError` about too many
-#: variables raised by whichever store nobody tested at that size.
+#: **Public, because every store that binds a fused list needs the same number.**
+#: The turn store and the catalogue import it, and the cabinet's search caps the
+#: same list inside `fuse_shortlist`; a second cap of its own would be a second
+#: number to keep under SQLite's, and the failure when one of them is wrong is
+#: an `OperationalError` about too many variables raised by whichever store
+#: nobody tested at that size.
 MAX_SQL_VARS = 900
 
 
@@ -541,8 +542,8 @@ def rebuild_vector_index(
     embedded and the rest of the corpus must not be waited for.
 
     Answers whether it rebuilt.  A store that has something to say about a
-    rebuild says it there — the catalogue logs a line naming the file and the
-    identity, and the other two say nothing.
+    rebuild says it there — the catalogue and the cabinet log a line naming the
+    file and the identity, and the turn store says nothing.
 
     `also_delete` is the cabinet's: its marker table records "this row has been
     tried", and a rowid a `vec0` table has freed is reused, so a document taking
@@ -858,10 +859,10 @@ async def embed_rows(
 def as_similarity(distance: float) -> float:
     """A `vec0` distance as the *similarity* everything above this reads.
 
-    **One place, because there are two indexes.**  Both `turn_vec` and
-    `tool_vec` are declared `distance_metric=cosine`, so a distance is `1 -
-    cosine` and this is its inverse — and the two readers of that fact are a
-    thousand lines apart.  A caller that forgot it would hand a number whose
+    **One place, because there are three indexes.**  `turn_vec`, `tool_vec` and
+    `cabinet_vec` are declared `distance_metric=cosine`, so a distance is `1 -
+    cosine` and this is its inverse — and the readers of that fact are far
+    apart.  A caller that forgot it would hand a number whose
     scale runs the other way to something that gates on it: `decisions.gate`
     keeps what is *above* the floor, so a store offering distances would keep
     the farthest candidates and drop the nearest, and the keyword leg's exempt

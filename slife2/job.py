@@ -18,7 +18,7 @@ moment it exists, with no runtime change.  There are two ways to reach one:
   `stream_chat` on a model backend, any plugin's own tools.  Nothing checks that
   the pair is "a capability"; the server answers whether it has the tool.
 * :func:`call_tool` — the **hub's** catalogue, by the name the model calls
-  (`turn_read`, `mcp__serper__search`, another `job__…`).  It is a convenience
+  (`turn_read`, `serper__search`, another `job__…`).  It is a convenience
   over the hub's `call_tool`, and it is the path for every external MCP/REST
   tool.
 

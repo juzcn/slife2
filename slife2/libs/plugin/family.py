@@ -961,7 +961,7 @@ def refusal(config: Config, name: str) -> str | None:
 
 
 # ── The management tools' shared half ───────────────────────────────────
-# `mcp_tools` and `restapi_tools` serve the same four tools over one mechanism
+# `mcp_tools` and `restapi` serve the same four tools over one mechanism
 # and answer with the same payloads; the words they differ by live in a
 # `FamilyWords`, and the builders that consume it live here.  What stays in each
 # family is the part that is genuinely its own: `*_set`'s argument list (the

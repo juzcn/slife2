@@ -266,7 +266,7 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
     """The `agent_of(ctx)` a plugin binds its own refusal words to.
 
     **A factory rather than a function, because every caller already has the
-    call shape it wants.**  Three plugins call the result `agent_of(ctx)` from a
+    call shape it wants.**  Two plugins call the result `agent_of(ctx)` from a
     dozen tool bodies, so what each declares here is exactly the part that is
     its own: the two words its refusal varies by
     (`slife2.libs.plugin.audience.UNADDRESSED`), named once, at the top of the
@@ -299,7 +299,8 @@ def agent_or_blank(ctx: Any) -> str:
     model-facing tool *raises* now — a refusal is a `ToolError`, so that the
     call's status and its text agree (`SDD` §7.6) — which is what
     `agent_reader` and `client_reader` build and what the mesh, the context
-    store, the task server, the clock, the cabinet and media use.  This is the other shape: a plugin that asks the question in a
+    store, the task server, the schedule, the cabinet and media use.  This is
+    the other shape: a plugin that asks the question in a
     *class* whose tool bodies decide what to do with the blank, which is the
     login's (`slife2.plugins.wechat.server.Wechat.who`), and whose `unaddressed`
     method exists so the wording stays with the class that owns it.
@@ -597,8 +598,8 @@ class Peer(Client):
     store a turn is remembered in, the cabinet a tool result is saved to, the hub
     a tool is routed through — would resolve the files in its own directory.
 
-    A subclass rather than a wrapper, so that the fifteen call sites that hold one
-    of these are unchanged and still typed as a `Client`: what changed is what a
+    A subclass rather than a wrapper, so that the call sites that hold one of
+    these are unchanged and still typed as a `Client`: what changed is what a
     call says, not what a client is.
     """
 
@@ -826,10 +827,11 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
 class ServeTheCallersHome(Middleware):
     """Resolve a home's files in *the caller's* home for the length of a call.
 
-    **Registered by `serve`, so every server has it and no tool has to remember
-    it.**  The servers are one set per machine (`slife2.libs.host.launcher._reuse`),
-    so the process writing an agent's turn file is generally not the one that was
-    started with `--data-dir`: it is whichever is already up.  What decides where
+    **Registered by `house_server`, so every server has it and no tool has to
+    remember it.**  The servers are one set per machine
+    (`slife2.libs.host.launcher._reuse`), so the process writing an agent's turn
+    file is generally not the one that was started with `--data-dir`: it is
+    whichever is already up.  What decides where
     that file goes is therefore the call, which says whose home it is for
     (`slife2.libs.plugin.audience.client_meta`), and this is the one place that
     turns the saying into an answer — `slife2.libs.host.paths.home` for everything the

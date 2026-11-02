@@ -117,7 +117,7 @@ def client_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any
     there is: a client, a launcher and a test are one home from start to finish,
     and a plugin making a call on somebody else's behalf is *inside* a call of
     its own, where `slife2.libs.host.paths.home` already answers with the caller's
-    (`slife2.libs.plugin.protocol.serve` is what put it there).
+    (`slife2.libs.plugin.protocol.ServeTheCallersHome` is what put it there).
 
     An explicit argument is for the case the ambient answer is the wrong one —
     a caller acting for a home it is not itself in — and there is no such caller

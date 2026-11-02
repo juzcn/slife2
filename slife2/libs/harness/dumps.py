@@ -262,8 +262,8 @@ def window(
     *and* broken the address while looking like success.  A budget too small to
     hold it is therefore a failure and not a shorter window: nothing here can
     decide to spend fewer tokens than the address costs, so it says so
-    (`tool_result.tokens` is validated as `>= 1` and nothing else, so an operator
-    can configure this; see the raise below).
+    (the config refuses a `tool_result.tokens` below `MIN_TOOL_RESULT_TOKENS`;
+    the raise below is the budget that still cannot hold this address).
     """
     total = len(lines)
     head = f"{MARKER}{json.dumps({'call': call, 'total': total}, ensure_ascii=False)}{MARKER_END}"

@@ -163,10 +163,10 @@ DESCRIPTION_CHARS = 120
 RUNS_MAX = 200
 
 #: The page `schedule_list` answers with, and the most it will answer with.
-#: **The same two numbers the ledger's listing uses**, one order of magnitude
-#: apart, because the two tables are: a task row is a name, an expression and a
-#: shortened description, and there is one per task somebody wrote down, where a
-#: run row is one per fire and the ledger never stops growing.  A task listing
+#: **The same ceiling the ledger's listing uses** (`RUNS_MAX`), and a default
+#: between the two because the tables differ: a task row is a name, an expression
+#: and a shortened description, and there is one per task somebody wrote down,
+#: where a run row is one per fire and the ledger never stops growing.  A task listing
 #: is therefore a page rather than a wall for the same reason the run listing
 #: is — a model that has scheduled for a year is a model whose `schedule_list`
 #: would otherwise be shortened by the harness and read back through `dump_read`

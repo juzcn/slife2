@@ -1,7 +1,6 @@
 """The scheduled-task ledger: what is scheduled, and what came of it.
 
-**Two tables and one rule that is not written down as a constraint: no note
-means it failed.**  A **task** is a name, a description and a cron expression; a
+**Two tables.**  A **task** is a name, a description and a cron expression; a
 **run** is one fire of it, keyed by the moment it was due.  Nothing here decides
 *when* anything happens — that is `slife2.plugins.schedule.expressions` and the poll loop — and
 nothing here decides what a run means to the person reading it: this is the

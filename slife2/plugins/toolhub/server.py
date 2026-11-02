@@ -1023,9 +1023,9 @@ def _server_row(
     """One row of `servers()`, for a source whichever way the hub reaches it.
 
     **One shape, because it is one question.**  "Why is my tool missing" has to
-    read the same whether the answer is a plugin, an entry under `mcp:` that
-    this process connects to, or a source a plugin holds on its behalf — and two
-    builders of the same row is how the third one ends up missing a field.
+    read the same whether the answer is a plugin, or a source a plugin holds on
+    its behalf (an `mcp:` entry, a REST API, a playbook) — and two builders of
+    the same row is how the third one ends up missing a field.
 
     **A source nobody has counted says so, rather than reporting zero.**  The
     counts come from `catalogue.sources`, which has an entry only for a source
@@ -2755,12 +2755,12 @@ def build_server(
     plugins slife2 starts, one set of ports for every home, which is the whole
     reason a second home costs no second stack.
 
-    **The hub's own tools are rows too.**  `tool_search`, `func_tool_load` and
-    `_func_tool_unload` are this plugin's, and the hub merges them into the
-    catalogue when it starts — so one query answers "what may the model call",
-    with no list of exceptions kept beside it.  What has a *body* is still only
-    known here: the row says what the tool is, and `local_route` says what
-    running it means.
+    **The hub's own tools are rows too.**  `tool_search`, `tool_list`,
+    `func_tool_load` and `_func_tool_unload` are this plugin's, and the hub
+    merges them into the catalogue when it starts — so one query answers "what
+    may the model call", with no list of exceptions kept beside it.  What has a
+    *body* is still only known here: the row says what the tool is, and
+    `local_route` says what running it means.
 
     **This function is long and is not going to be split.**  Measured: of its
     455 lines, 202 are docstrings and 80 are blank or comment, leaving 173 lines
@@ -2831,7 +2831,7 @@ def build_server(
         )
         # **Everything the machine already holds goes in before this home is
         # asked anything**, or the home opens with its own `mcp:` entries and
-        # none of the plugins' tools — the hub's own three among them, which are
+        # none of the plugins' tools — the hub's own four among them, which are
         # what finds and loads the others.  See `Catalogue.remember`.
         #
         # The key is this process's ambient home: a store is only opened from
@@ -3187,7 +3187,7 @@ def build_server(
 
         **The plugins are asked for their tools, and everything this process
         already knows is written down.**  The upstreams find theirs by
-        connecting, this process's own three are known without connecting to
+        connecting, this process's own four are known without connecting to
         anything, and what each plugin *holds* is asked for once every plugin
         that answered is in hand.
 

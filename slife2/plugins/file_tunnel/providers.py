@@ -68,8 +68,8 @@ import slife2.helpers.timeouts as _T
 
 logger = logging.getLogger(__name__)
 
-#: The provider used when the section is absent, unreadable, or names a
-#: provider this build does not have.
+#: The provider used when the section, or its `active:`, is absent.  A name this
+#: build does not have is a `ConfigError` instead (`_file_tunnel`).
 DEFAULT_PROVIDER = "ngrok"
 
 #: Providers this build can actually construct (see :func:`create_provider`).

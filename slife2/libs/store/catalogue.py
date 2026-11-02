@@ -495,8 +495,8 @@ def _listing_dict(row: sqlite3.Row) -> dict[str, Any]:
 class ToolStore:
     """The tool catalogue: what the model may call, and what it has loaded.
 
-    The hub writes and reads it, over MCP, and this is the half that remembers —
-    see the section banner above for why the two are separate.
+    The hub writes and reads it in-process, and this is the half that remembers
+    — see the section banner above for why the two are separate.
 
     **Nothing here is per-conversation.**  One file, and one loaded set in it:
     the hub serves every conversation and cannot tell them apart, so what is
@@ -771,8 +771,9 @@ class ToolStore:
     ) -> dict[str, Any]:
         """Merge one source's whole tool list into the catalogue.
 
-        **Four outcomes and no fifth**: a name that is not here is *added*, one
-        the source dropped is *deleted*, one whose columns changed is *updated*,
+        **Five outcomes**: a name that is not here is *added*, one the source
+        dropped is *deleted*, one whose columns changed is *updated*, one that
+        was not `enabled` and whose source is answering again is *reconnected*,
         and one already identical is *left alone*.  A steady state — the hub
         asks before every model call — therefore touches no row at all, which
         matters because the keyword document is rewritten with every write.
@@ -2110,10 +2111,10 @@ class ToolStore:
         back is `sync_indexes`, and the two are separate for the same reason
         they are in the turn store.
 
-        The rebuild is `slife2.libs.store.index.rebuild_vector_index`'s.  Two of its three
-        callers pass `meta_table="meta"`, and this is that difference: the
-        catalogue's file has called its table `meta` since before the other two
-        existed.
+        The rebuild is `slife2.libs.store.index.rebuild_vector_index`'s.  The
+        other two callers use its default `index_meta`; this one passes
+        `meta_table="meta"`, because the catalogue's file has called its table
+        `meta` since before the other two existed.
         """
         identity = _vector_identity(embedder)
         with self._connect(write=True) as connection:

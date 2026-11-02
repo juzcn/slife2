@@ -64,9 +64,9 @@ keyword text is written in the same transaction as the row that produced it,
 which is how both of slife2's other stores do it and why this module has no
 trigger at all.
 
-**The per-kind facts are a table of their own** (`SPECS`): which column is the
-key, which column is the time axis a list orders by, where the markdown mirror
-goes, and whether the kind is in the corpus.  Every one of those is a fact
+**The per-kind facts are a table of their own** (`SPECS`): the time axis a list
+orders by, whether that axis is a day, where the markdown mirror goes, and
+whether the kind is in the corpus.  Every one of those is a fact
 about a kind rather than about a document, so each is spelled out once rather
 than once per table, view arm, trigger set and write.
 

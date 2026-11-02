@@ -151,8 +151,9 @@ INSTRUCTIONS = (
 
 #: The most of a file `file_read` will read.  A cap rather than a preference: a
 #: tool that returns a gigabyte of text to a model has spent a context window to
-#: say "this is not a document".  A URL has no share of this cap, because
-#: nothing here fetches a URL — the instructions above say so.
+#: say "this is not a document".  A URL is bounded at the fetch instead
+#: (`MAX_FETCH_BYTES`); this is what `file_read` will print back from what was
+#: saved.
 MAX_READ_BYTES = 2 * 1024 * 1024
 
 #: How much of a file is sniffed for the two things that settle its encoding
@@ -162,7 +163,7 @@ SNIFF_BYTES = 8192
 #: Where a saved file goes, by what it is.  Auto-filing by extension is
 #: deliberate: the cabinet is browsed by a person, and `images/` is a
 #: directory they can find something in.  An extension nobody here knows lands in
-#: `files/other/`, which is a name that says exactly that rather than guessing.
+#: `other/`, which is a name that says exactly that rather than guessing.
 CATEGORIES: dict[str, tuple[str, ...]] = {
     "images": (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"),
     "documents": (

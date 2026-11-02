@@ -33,9 +33,10 @@ slife's harness glue:
 
 Two connections, distinct client ids: the local responder connects on its own
 (presence publishing stays there); the outbound client (identifier
-``{org}/{unit}/{agent}-out``) only subscribes discovery + our reply sessions
-and publishes requests — never presence.  The responder's connection is the
-agent's exact profile identity; the auxiliary one is the requester role.
+``{org}/{unit}/{agent}-out``) subscribes discovery, our reply sessions and the
+two event topics, and publishes requests and events — never presence.  The
+responder's connection is the agent's exact profile identity; the auxiliary one
+is the requester role.
 
 **One mesh per member, in a process that serves several.**  The plugin holds one
 per member it serves, and everything below follows from that — the collision
@@ -206,9 +207,9 @@ class FIFOCache(dict):
 #
 # The card sits beside the mesh rather than in a module of its own, because no
 # reader needs it apart from the mesh — the TUI draws a `PeerAgent(<peer>)> `
-# bubble from the channel, and a presence *change* reaches the model as a
-# message — so the two things this project actually uses, the record and the
-# scrubber, are here beside the code that produces them.
+# bubble from the channel, and a presence *change* reaches the window as a note
+# — so the two things this project actually uses, the record and the scrubber,
+# are here beside the code that produces them.
 
 AgentName = NewType("AgentName", str)
 """Identifies an agent by its name — the mesh identity, and the MQTT client id."""
@@ -1094,8 +1095,9 @@ class A2AMesh:
     async def _run_outbound(self) -> None:
         """Persistent outbound client: sends, reply listening, discovery.
 
-        Subscribes discovery wildcard + our reply sessions; reconnects on drop
-        until shutdown.  Publishes requests only — the responder owns presence.
+        Subscribes discovery, our reply sessions and the event topics; reconnects
+        on drop until shutdown.  Publishes requests and events — the responder
+        owns presence.
 
         **Only the MQTT library's own errors are read as a dropped connection.**
         ``AttributeError`` and ``ValueError`` are exactly what a bug in

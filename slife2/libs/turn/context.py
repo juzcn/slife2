@@ -109,10 +109,10 @@ KEEP_NONE = "clear"
 #: makes the footnote *findable* rather than merely present: a reader looking for
 #: one has a string to look for.
 #:
-#: **One of this build's two markers**, and the other is
-#: `slife2.plugins.wechat.server.marker`'s `[Wechat:{…}]` on a turn somebody sent over WeChat.
-#: This envelope holds one thing — the footnote, on the user message a turn
-#: opened with.  A trim note saying how many old turns had just been cut would be
+#: **The harness's own marker**, beside `slife2.plugins.wechat.server.marker`'s
+#: `[Wechat:{…}]` on a turn somebody sent over WeChat.  This envelope holds one
+#: thing — the footnote, on the user message a turn opened with.  A trim note
+#: saying how many old turns had just been cut would be
 #: a second occupant, but the trim is deferred here (SDD §14.2), which leaves
 #: this envelope with one occupant — and an envelope with one occupant can say
 #: what it holds.  `TURN` is what it holds: the turn this message opened.

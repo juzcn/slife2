@@ -2042,8 +2042,8 @@ class A2ASettings:
     provider: str = "mosquitto"
     #: Whether the operator wrote the section.  Not a field in the file — it is
     #: what "the section was there" means, and it is what the plugin reads to
-    #: decide whether this machine is on the mesh (`a2a_dbs` is the other half,
-    #: and it says which *agents* are).
+    #: decide whether this machine is on the mesh.  Which *agents* are is the
+    #: other half, and that is a live fact (`Session.reasons`), not a setting.
     configured: bool = False
     #: Where the broker is.  **The operator's to run, unless it is this
     #: machine's own and nothing is there**: `slife2.plugins.a2a.broker` probes the
@@ -2811,14 +2811,13 @@ def _a2a(
     nested with `host` and `port` under it, so a config file that already says
     where the broker is needs no rewriting.
 
-    **An unknown `provider:` is refused rather than downgraded.**  This is the
-    section's whole difference from `file_tunnel.active`, the one remaining
-    section that falls back (SDD §12.1): that names a *subordinate* dependency this
-    build may not have, where falling back leaves a working system; this names
-    the transport of the feature, where falling back would leave `a2a_*` tools
-    offered to a model for a mesh that is not running.  Answering that case
-    with a warning and `enabled = False` would be the silence-with-tools
-    outcome, so it is refused here.
+    **An unknown `provider:` is refused rather than downgraded.**  The same rule
+    `file_tunnel.active` states (SDD §12.1): a name in a file a person edits is
+    either one this build has or a mistake to report.  Falling back here would
+    be worse than an error, though, because it would leave `a2a_*` tools offered
+    to a model for a mesh that is not running.  Answering that case with a
+    warning and `enabled = False` would be the silence-with-tools outcome, so
+    it is refused here.
 
     **`--a2a-broker` is applied here, after the file**, so the flag wins over the
     section it is an override of and everything downstream sees one answer.  It

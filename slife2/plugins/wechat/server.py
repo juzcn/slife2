@@ -90,8 +90,9 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = WECHAT_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name the launcher
-#: starts it under and the hub connects to it by.  Also the `wechat:` section
-#: it owns, because the two coincide here the way they do for `context`.
+#: starts it under and the hub connects to it by.  It owns no section of its
+#: own: the only thing written down about it is an address, and a login is
+#: scanned rather than configured (`slife2.plugins.wechat.ilink`).
 CONFIG_KEY = "wechat"
 
 INSTRUCTIONS = (
@@ -102,10 +103,9 @@ INSTRUCTIONS = (
 )
 
 # ── Cadence ─────────────────────────────────────────────────────────────
-# A number is a constant beside the loop it paces, not a value in a global
-# timeouts registry every plugin reads: a module about WeChat does not need to
-# be reachable from a module about anything else.  Each value was arrived at
-# against the live bridge, and nothing here changes the bridge.
+# A number is read from the global timeouts registry (`pacing.wechat_*`) at
+# call time, so a test can patch it.  Each value was arrived at against the live
+# bridge, and nothing here changes the bridge.
 
 #: How long to wait between polls.  The call itself blocks until the bridge has
 #: something to say, so this is the pause *after* an answer, not the latency.
@@ -116,7 +116,7 @@ BACKOFF_FACTOR = 1.5
 #: re-serving it rather than as somebody typing the same thing twice.
 #: How many messages one person's burst may have in flight before this process
 #: stops handing them over.  A bound rather than a queue: `send_message` blocks
-#: until its turn is done, so these are turns, and twenty of them is somebody
+#: until its turn is done, so these are turns, and sixteen of them is somebody
 #: flooding a conversation rather than talking to it.
 MAX_INFLIGHT = 16
 

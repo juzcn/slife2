@@ -248,11 +248,11 @@ def make_client(transport: Any, handler: MessageHandler) -> Client:
 
     `timeout` is deliberately *not* set.  FastMCP turns it into the session's
     `read_timeout_seconds`, which the SDK applies as a **total deadline on every
-    request made over that connection** — so the 60 s connect budget would
-    become a 60 s cap on every tool call to somebody else's server, whatever the
-    caller had asked for, and a twenty-minute render called with the model's
-    `_timeout: 600` would die at 60 s as an ordinary-looking `ok=False` with the
-    tool still running at the far end.  The rule the registry states is the one
+    request made over that connection** — so the connect budget would become a
+    cap on every tool call to somebody else's server, whatever the caller had
+    asked for, and a twenty-minute render called with the model's `_timeout:
+    600` would die at that cap as an ordinary-looking `ok=False` with the tool
+    still running at the far end.  The rule the registry states is the one
     that holds: the layer that awaits owns the bound, and a client library must
     not set a total for every caller that borrows it.
 

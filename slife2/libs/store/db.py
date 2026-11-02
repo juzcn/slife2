@@ -63,7 +63,7 @@ changed embedding model a rebuild instead of a migration — and it is one
 mechanism for all four things that can invalidate one (`slife2.libs.store.index`).
 
 **A turn is written with its vector, in one transaction.**  `save_turn` is
-async because the embedding is a call to a model, and its three writes are
+async because the embedding is a call to a model, and its four writes are
 atomic because the alternative is a turn that is half indexed — and because a
 save that raises has to be a save that stored nothing.  That is the one property
 that makes the failure honest, and it is why the embedding model is a hard
@@ -1020,7 +1020,7 @@ class TurnStore:
         return await off_loop(self._write_turn, record, vectors)
 
     def _write_turn(self, record: _Stored, vectors: list[list[float]]) -> int:
-        """The three inserts, in one transaction, on a thread of their own."""
+        """The four writes, in one transaction, on a thread of their own."""
         with self._connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO turn (messages, summary, tags, created_at,"
@@ -1048,7 +1048,7 @@ class TurnStore:
             )
             _write_vectors(connection, turn_id, vectors)
             # **The live-context list is appended here, in this transaction.**
-            # The reason is the one the three writes above already answer to: a
+            # The reason is the one the writes above already answer to: a
             # turn that is stored but not in the list is a turn the next restore
             # silently drops, and the window in which that is true is exactly the
             # window between two transactions.  One transaction

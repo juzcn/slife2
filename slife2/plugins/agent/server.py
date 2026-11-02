@@ -977,8 +977,8 @@ def build_server(
     #: The toolhub client, on the same terms.
     hub_conn: Client | None = hub_client
     hub_owned = hub_client is None
-    #: The cabinet, on the same terms — though it is opened on one path only: a
-    #: tool result too large for the conversation it was called in.
+    #: The cabinet, on the same terms.  It is reached for a tool result too large
+    #: for the conversation it was called in, and for a turn's images.
     cabinet_conn: Client | None = cabinet_client
     #: And whether *we* opened it, which the lifespan needs for the same reason
     #: it needs the other two: this client has no `clients` entry to be swept up
@@ -1173,12 +1173,13 @@ def build_server(
     async def cabinet() -> Client:
         """The client for the cabinet, opened on first use.
 
-        **A direct peer and not a hub route.**  The two tools this process needs
-        sit on opposite sides of the audience line — `dump_save` is the harness's
-        and carries no mark, `dump_read` is the model's and does — and the hub
-        holds rows only for what the model may see, so the harness reaches the
-        plugin itself, exactly as `slife2-context` reaches a model backend.  Both
-        tools travel over this one client: one implementation, two callers.
+        **A direct peer and not a hub route.**  The four cabinet tools this
+        process needs sit across the audience line — `dump_save`, `image_save`
+        and `image_source` are the harness's and carry no mark, `dump_read` is
+        the model's and does — and the hub holds rows only for what the model may
+        see, so the harness reaches the plugin itself, exactly as
+        `slife2-context` reaches a model backend.  All four travel over this one
+        client.
         """
         nonlocal cabinet_conn
         if cabinet_conn is not None:
@@ -3098,13 +3099,14 @@ def build_server(
                 await close_server(hub_conn)
                 hub_conn = None
             # The third client this server opens for itself, for the same rule:
-            # `cabinet()` is reached only by a turn with a result past
-            # `tool_result.tokens`, and a cabinet left open across a session
-            # boundary is handed to the next session already shut — every
-            # oversized result then calling `dump_save` on a shut client.
-            # `compress_for` deliberately does not catch a failed write ("nothing
-            # else here falls back"), so that is not a lost dump: it is every
-            # such turn failing at its first hop.
+            # `cabinet()` is reached by a turn whose result is past
+            # `tool_result.tokens` and by a turn carrying images, and a cabinet
+            # left open across a session boundary is handed to the next session
+            # already shut — every oversized result then calling `dump_save` on
+            # a shut client, every image `image_save`.  `compress_for`
+            # deliberately does not catch a failed write ("nothing else here
+            # falls back"), so that is not a lost dump: it is every such turn
+            # failing at its first hop.
             if cabinet_owned and cabinet_conn is not None:
                 await close_server(cabinet_conn)
                 cabinet_conn = None

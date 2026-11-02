@@ -350,11 +350,11 @@ def build_server(
     makes a `model_switch` reach the next task.
     """
 
-    #: Every task this process has run, live and recently ended, by
-    #: `(agent, name)`.  **Not cleared on the way out**, for the reason the
-    #: agent server's loop registry is not: the lifespan is not the process's
-    #: lifetime over the in-memory transport, and clearing here would forget
-    #: tasks every time a caller disconnected.
+    #: Every task this process has run, live and recently ended, by the client
+    #: id — `(home, agent, name)`.  **Not cleared on the way out**, for the
+    #: reason the agent server's loop registry is not: the lifespan is not the
+    #: process's lifetime over the in-memory transport, and clearing here would
+    #: forget tasks every time a caller disconnected.
     tasks: dict[tuple[str, str, str], AgentTask] = {}
 
     #: The ended ones, oldest first, so that the cap has an order to forget in.

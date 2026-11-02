@@ -44,13 +44,14 @@ from slife2.tui.widgets import WINDOW_CHANNEL
 def _unreadable(what: str, answer: Any) -> ConnectionError:
     """The loud failure a tool's answer that is not its shape raises, worded once.
 
-    Three answers here are contracts rather than data — a turn's `text`, the
-    transcript's `turns`, and the switch `model_switch` reports — and each has an
-    obvious empty that reads as a legitimate one: an answer with no words, a
-    conversation that never ran, a switch that worked.  So each quotes the
-    payload rather than summarising it, because a shape this build cannot read is
-    the only evidence there is that the far end is a different build (SDD
-    SDD Appendix C: a value that cannot be read is not a value that is absent).
+    Four answers here are contracts rather than data — a turn's `text`, the
+    transcript's `turns`, the subagent list, and the switch `model_switch`
+    reports — and each has an obvious empty that reads as a legitimate one: an
+    answer with no words, a conversation that never ran, an agent with no
+    subagents, a switch that worked.  So each quotes the payload rather than
+    summarising it, because a shape this build cannot read is the only evidence
+    there is that the far end is a different build (SDD Appendix C: a value that
+    cannot be read is not a value that is absent).
     """
     return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
 
