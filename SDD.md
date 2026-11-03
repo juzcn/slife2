@@ -1651,8 +1651,10 @@ Rules specific to this system:
     the roster and a generation id, so a member that missed a control learns the
     group from the next message and a delayed event cannot resurrect a group it
     left. **A group chat is casual**: no member owes an answer, silence is not
-    `pending` or `undelivered`, `sent` is only a publish count, and a task request
-    is the only send with an expected answer.
+    `pending` or `undelivered`, `sent` confirms publication, not that anyone
+    read it, and a task request is the only send with an expected answer. A
+    group whose roster holds only the sender is empty; a send there is refused
+    rather than fanned out to nobody.
 15. **Group messages have their own vocabulary.** The peer network uses the
     `PeerAgentGroup` channel and marker; the local network uses `SubagentGroup`,
     for the maker and its subagents alike. The marker carries `from`, the group and

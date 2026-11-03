@@ -999,7 +999,8 @@ waiting on.
 A group is a named roster with an owner; no invitation or acceptance is involved.
 Group messages are fire-and-forget events to every other member — never back to
 the sender — and arrive with a `[PeerAgentGroup:{"from": …, "group": …,
-"owner": …}]` marker on the `peer_agent_group:<group>:<sender>` channel. Viewing
+"owner": …}]` marker on the `peer_agent_group:<group>:<sender>` channel. A group
+whose only member is the sender is empty, and a send there is refused. Viewing
 the members is a separate read. **A group chat is casual**: no member owes an
 answer, silence is not `pending` or `undelivered`, and `sent` confirms the send,
 not that anyone read it; use the direct send tool when you need an answer. Each

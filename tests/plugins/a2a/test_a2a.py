@@ -4266,6 +4266,52 @@ async def test_group_tools_on_the_peer_network(
 
 
 @pytest.mark.asyncio
+async def test_a_send_to_an_empty_group_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A group whose only member is the sender is empty, and a send is refused.**
+
+    The roster can end this way — everyone else left or was removed — and the
+    fan-out would publish to nobody while answering `sent`, which a model reads
+    as a delivery.  The refusal is the fact the model can act on.
+    """
+    published: list[tuple[list[str], dict[str, Any]]] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def fanout(self: Any, recipients: Any, **kwargs: Any) -> int:
+        targets = sorted(name for name in set(recipients) if name != self.agent_name)
+        published.append((targets, kwargs))
+        return len(targets)
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "group_fanout", fanout)
+
+    with in_home(tmp_path):
+        # The state a member is left in when everyone else has gone: its own
+        # persisted record, which the session loads on its first call.
+        path = group_store.groups_path(AGENT)
+        store = group_store.GroupStore(path)
+        store.learn(
+            group_store.GroupEvent(
+                group_store.KIND_SET, AGENT, GROUP, AGENT, GID, (AGENT,), ""
+            )
+        )
+        store.save()
+        server = build(on_the_mesh=True)
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="is empty"):
+                await client.call_tool(
+                    PEER_GROUP_SEND_MESSAGE,
+                    {"group": GROUP, "message": "@jill hello"},
+                    meta=client_meta(AGENT),
+                )
+
+    assert published == [], "a send to an empty group publishes nothing"
+
+
+@pytest.mark.asyncio
 async def test_the_local_group_roster_refuses_unknown_and_forked_members(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4376,6 +4422,28 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
     assert "A group chat is casual" in description
     assert "silence" in description
     assert "'pending' or 'undelivered'" in description
+
+
+@pytest.mark.asyncio
+async def test_the_group_set_schema_spells_out_the_roster_contract() -> None:
+    """**The three facts a model gets wrong are in the schema**, on both
+    networks: that `members` is the other members and not a delta, that a
+    replacement drops anyone left out, and that only the owner may call it."""
+    for factory, set_tool, member_tool in (
+        (build, PEER_GROUP_SET, PEER_GROUP_MEMBER_LIST),
+        (local_build, LOCAL.tool(GROUP_SET), LOCAL.tool(GROUP_MEMBER_LIST)),
+    ):
+        tools = {tool.name: tool for tool in await factory().list_tools()}
+
+        # Wrapped at the source, so compare the words rather than the line breaks.
+        description = " ".join(tools[set_tool].description.split())
+
+        assert "`members` is every other member (at least one)" in description
+        assert "you are added automatically" in description
+        assert "replaces the roster" in description
+        assert "anyone you omit is removed" in description
+        assert member_tool in description
+        assert "Only the owner can change the roster" in description
 
 
 @pytest.mark.asyncio

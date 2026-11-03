@@ -870,7 +870,8 @@ peer 可能暂停任务并索取输入；那一行类型是 `task_input`，并�
 
 群组是有 owner 的具名名册；没有邀请或接受流程。群消息是向其他每个成员的即发即忘事件
 ——绝不回到发送者——带 `[PeerAgentGroup:{"from": …, "group": …, "owner": …}]` marker
-从 `peer_agent_group:<group>:<sender>` channel 到达。查看成员是单独的一次读取。**群聊
+从 `peer_agent_group:<group>:<sender>` channel 到达。只剩发送者一人的群组为空，向它
+发送会被拒绝。查看成员是单独的一次读取。**群聊
 是随意的**：没有成员必须回答，沉默不是 `pending` 或 `undelivered`，`sent` 只确认已
 发送，不表示有人读过；需要回答时用直接发送工具。每个成员把自己的认知保存在
 `agents/<agent>/groups.yaml`，因此群组能跨重启存活。发送时离线的成员会错过消息。

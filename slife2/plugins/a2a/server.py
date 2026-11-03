@@ -2274,14 +2274,15 @@ def build_server(
     async def peer_agent_group_set(
         ctx: Context, group: str, members: list[str]
     ) -> dict[str, Any]:
-        """Create a group chat and pull in the members you name.
+        """Create a group chat from the members you name.
 
-        **You become the owner.**  The roster is the whole membership — there
-        is no invitation or acceptance, and calling this again on a group you
-        own replaces it (the only way to add or remove someone).  Every other
-        member is notified; the notice is fire-and-forget, and the next group
-        message carries the same roster, so a member that missed it still
-        learns the group.
+        **You become the owner.**  ``members`` is every other member (at least
+        one); you are added automatically.  Calling this again on a group you
+        own replaces the roster — anyone you omit is removed, so pass the
+        existing members too.  Only the owner can change the roster.  Every
+        other member is notified; the notice is fire-and-forget, and the next
+        group message carries the same roster, so a member that missed it
+        still learns the group.
 
         On the local network a member must be the maker itself or one of its
         subagents, and a **forked** subagent is refused: a fork is a temporary
@@ -2290,7 +2291,8 @@ def build_server(
 
         Args:
             group: The group's name. Naming one you own replaces its roster.
-            members: The other members, by name; you are added as the owner.
+            members: Every other member; you are added as the owner.  Anyone
+                omitted when replacing an existing roster is removed.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2571,7 +2573,9 @@ def build_server(
         **A reply is this call**: ending a turn sends nothing.  The sender is
         never one of the recipients.  Delivery is fire-and-forget — no task,
         no completion — so a member that is not listening now may miss it; use
-        the direct send tool when you need an answer.
+        the direct send tool when you need an answer.  A group whose only
+        member is you is empty, and a send there is refused: nobody would
+        receive it.
 
         The message is delivered to each member as a group message on the
         group's own channel, and in the local network every subagent in the
@@ -2606,6 +2610,17 @@ def build_server(
             raise unknown_group(group)
         if me not in found.members:
             raise ToolError(f"you are not a member of the group {group!r}.")
+        # **An empty group is refused, not a fan-out to nobody.**  The roster
+        # can end this way — every other member left or was removed — and the
+        # fan-out would publish nothing while answering `sent`, which a model
+        # reads as a delivery.  The roster is this member's own state, so the
+        # call can say what it is instead of pretending it went somewhere.
+        recipients = tuple(member for member in found.members if member != me)
+        if not recipients:
+            raise ToolError(
+                f"the group {group!r} is empty — you are its only member, so "
+                f"there is nobody to send to."
+            )
         await place_for_group(sender, found.members, me)
         await session.mesh.group_fanout(
             found.members,
@@ -2742,10 +2757,12 @@ _TOOL_TEXTS: dict[str, str] = {
         "An answer that already arrived is not listed; it is in this conversation."
     ),
     GROUP_SET: (
-        "Create a group chat and pull in the {group_them} you name. **You become\n"
-        "its owner**, and the roster is the whole membership — nobody has to\n"
-        "accept. Calling this again on a group you own replaces the roster (the\n"
-        "way to add or remove someone); a member leaves with `{group_leave}`.\n"
+        "Create a group chat from the {group_them} you name. **You become its\n"
+        "owner.** `members` is every other member (at least one); you are added\n"
+        "automatically, and nobody has to accept. Calling this again on a group\n"
+        "you own replaces the roster — anyone you omit is removed, so pass the\n"
+        "existing members too (`{group_member_list}` lists them). Only the\n"
+        "owner can change the roster; a member leaves with `{group_leave}`.\n"
         "\n"
         "Every member's group list learns the roster from a group-set event.\n"
         "That notice is fire-and-forget: a member not on the network now may\n"
@@ -2756,9 +2773,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "you were pulled into.\n"
         "\n"
         'Every row is `{{"group": …, "owner": …, "role": "owner"|"member"}}`.\n'
-        "`role` says whether the group is yours to disband. The members are a\n"
-        "separate read: `{group_member_list}`. This is what this conversation\n"
-        "has persisted locally, not a live check of who is connected.\n"
+        "`role` says whether the group is yours to change or disband. The\n"
+        "members are a separate read: `{group_member_list}`. This is what this\n"
+        "conversation has persisted locally, not a live check of who is connected.\n"
         "\n"
         "`error` says when the local record could not be read."
     ),
@@ -2791,7 +2808,9 @@ _TOOL_TEXTS: dict[str, str] = {
         "Send a message to every other member of a group you belong to.\n"
         "\n"
         "**A reply is this call**: ending a turn sends nothing. You are never\n"
-        "one of the recipients. The message arrives with a {group_marker}\n"
+        "one of the recipients. A group whose only member is you is empty, and\n"
+        "a send there is refused: nobody would receive it. The message arrives\n"
+        "with a {group_marker}\n"
         "naming `from` (the sender), the group and its owner. The members are a\n"
         "separate read — `{group_member_list}` — so a large group is not\n"
         "repeated in every message. Address people with `@name` as in a chat\n"
