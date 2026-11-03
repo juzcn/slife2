@@ -151,13 +151,16 @@ context:
 
 tool_load:
   # Above this many loaded tools, the least recently used are unloaded at a
-  # turn boundary. Nothing in `autoload` below is ever evicted.
+  # turn boundary. Nothing in `autoload` below is ever evicted, and the model
+  # cannot unload it either — only this file changes the list.
   threshold: 100
   # The tools that start in the model's list, by the name the model calls them.
   # Everything else — a plugin's tools included — is found with `tool_search`,
-  # listed with `tool_list`, and loaded with `func_tool_load`, and is evicted
-  # when unused. The first eight are what the system works by; a list without
-  # them fails the start.
+  # listed with `tool_list`, and loaded with `func_tool_load`. Keep this list to
+  # what a turn almost always needs: it is re-sent with every request and the
+  # model cannot take a name back out. Removing a name does not unload it; it
+  # only stops being protected from eviction. The first eight are what the
+  # system works by; a list without them fails the start.
   autoload:
     - tool_search
     - tool_list
@@ -168,36 +171,19 @@ tool_load:
     # The two that can use the task id an `_async` call returns.
     - check_async
     - cancel_async
-    # Memory and recorded turns.
+    # Memory: past turns, and the cabinet's search plus its write paths.
     - turn_search
     - turn_read
     - turn_list
-    # Files, notes and reports.
     - cabinet_search
-    - file_read
-    - note_read
     - note_write
+    - diary_write
     - report_write
-    # A tool output the harness shortened.
-    - dump_read
-    # Images.
+    # Images: the only way a picture reaches the model.
     - attach_image
-    # Web search and fetch, by each server's `{server}__{tool}` name — the
-    # list is per tool, so the rest of each server stays on demand.
+    # Web search: Google via Serper, and Baidu for Chinese.
     - serper__google_search
-    - deepseek-search__webSearch
-    - deepseek-search__webFetch
     - baidu-search__chatCompletions
-    # Delegation and the subagent network.
-    - subagent_set
-    - subagent_list
-    - subagent_send_message
-    - subagent_task_list
-    - subagent_group_send_message
-    # Asynchronous tasks.
-    - agent_task_start
-    - agent_task_status
-    - agent_task_list
 
 tool_result:
   # A result over this is kept whole as a dump; the conversation carries a
@@ -345,7 +331,7 @@ mcp:
     url: https://qianfan.baidubce.com/v2/ai_search/mcp
     headers:
       Authorization: Bearer ${BAIDU_API_KEY}
-    description: '百度智能云千帆「AI 搜索」官方 MCP Server（Streamable HTTP 远程端点）。工具 AIsearch：实时联网搜索，可选 model（ERNIE 等）由服务端大模型直接总结。鉴权：Authorization: Bearer <千帆/AppBuilder API Key（bce-v3/ALTAK-...）>，经环境变量 BAIDU_API_KEY 注入。'
+    description: '百度智能云千帆「AI 搜索」官方 MCP Server（Streamable HTTP 远程端点）。工具 chatCompletions：实时联网搜索，可选 model（ERNIE 等）由服务端大模型直接总结。鉴权：Authorization: Bearer <千帆/AppBuilder API Key（bce-v3/ALTAK-...）>，经环境变量 BAIDU_API_KEY 注入。'
 rest-api:
   # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
   # `command:` uses a proxy of your own instead. A large spec is worth
