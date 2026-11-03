@@ -433,8 +433,8 @@ def _current_input(messages: Sequence[Message]) -> str:
 #:
 #: Being declared is not enough for it to survive: `slife2.libs.store.catalogue`
 #: admits `_`-prefixed names to the model's list only from its own set, and
-#: `slife2.plugins.toolhub.server.ALWAYS_LOADED` is what stops the model
-#: unloading a name its own history refers to.  Both spellings are this string,
+#: `tool_load.autoload` is what stops the model unloading a name its own
+#: history refers to.  Both spellings are this string,
 #: and the string itself lives in `slife2.libs.turn.tools.CHECK_NEW_INPUT`
 #: because the display that rebuilds a transcript reads it too.
 

@@ -293,7 +293,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | Attribute | Mechanism |
 |---|---|
 | **Isolation** | Credentials stay in the consuming process; state is keyed by client id. |
-| **Recoverability** | Turns, the live-context list, the cabinet, and the schedule ledger are persisted; a restart restores the conversation. |
+| **Recoverability** | Turns, the live-context list, the cabinet, the schedule ledger, and the loaded tool set are persisted; a restart restores the conversation and the model's list. |
 | **Testability** | The loop is pure; servers run over in-memory transports in tests. |
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
 | **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation. |
@@ -1220,10 +1220,19 @@ Initial state:
 - The names the system itself refers to (the four set-level tools, the two
   harness pairs, `skill_use`, and the two background-call tools) are required in
   that list; a configuration that omits one fails the start.
-- Everything else, a plugin's tools included, is discoverable but not loaded.
-  One tool the model never calls is a prompt spent on every request. A call to
-  one is checked against its catalogue row and, when it fits the row's current
-  schema, the harness loads it and runs it in the same turn.
+- Everything else, a plugin's tools included, is discoverable and starts
+  unloaded when first seen. One tool the model never calls is a prompt spent on
+  every request. A call to one is checked against its catalogue row and, when it
+  fits the row's current schema, the harness loads it and runs it in the same
+  turn.
+
+**A restart restores what was left, not a fresh state.** The conversation's
+context and the loaded tool set both come back as they were; only a change to
+the configuration alters what a restart restores. The loaded set lives in the
+catalogue, not in a process, so the boot pass's only move is to load a name on
+`tool_load.autoload` that is still unloaded. Stopping or starting a process never
+takes a tool out of the model's list; only eviction at a turn boundary, or the
+model's own unload of an unprotected name, does.
 
 A model can call a name returned by `tool_search` or `tool_list` without loading
 it: the call is validated against the schema the catalogue holds *now*, loaded
@@ -1238,7 +1247,11 @@ Over the limit, the least recently **called** tools are unloaded; the names in
 loaded is ordered by its load time. The trim happens at a turn boundary: the
 harness calls `_func_tool_unload` before saving the turn and writes the pair into
 the conversation, so the model learns that the list shrank from the transcript.
-Nothing is written when nothing was removed. Recency is learned by the hub: it
+Nothing is written when nothing was removed. The same list bounds the model's own
+unloads: `_func_tool_unload` refuses a name in `tool_load.autoload`, so the tools
+that start loaded, the tools the budget may not evict and the tools the model may
+not unload are one list. Editing the list changes only that protection. Recency
+is learned by the hub: it
 stamps `last_used` beside the call it just routed, including a refused call,
 before returning the answer, so the stamp cannot land after the trim.
 

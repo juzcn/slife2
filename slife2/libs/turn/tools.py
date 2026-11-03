@@ -44,10 +44,10 @@ That is a condition, not an invitation.  Each of the two is the *machinery's*
 move, made at a moment the machinery knows is the right one, and a call from the
 model is not wanted — the boundary is how a message is meant to arrive.  What the
 design guarantees is only that the unwanted call is not a damaging one:
-`_func_tool_unload` refuses the names the system works by and can otherwise only
-shorten the model's own list, and `_check_new_input` hands over a message the next
-boundary would have handed over anyway, so a call from the model is the same thing
-sooner rather than something new.  A tool that *would* do damage there is not
+`_func_tool_unload` refuses the names in `tool_load.autoload` and can otherwise
+only shorten the model's own list, and `_check_new_input` hands over a message
+the next boundary would have handed over anyway, so a call from the model is
+the same thing sooner rather than something new.  A tool that *would* do damage there is not
 protected from being one; it is simply not one — it stays undeclared, which is
 what the audience gate is for.
 
@@ -69,7 +69,7 @@ answer to the other three:
 * **who calls it** — :data:`HARNESS_PREFIX`;
 * **may the model be given it** — `slife2.libs.plugin.audience` for ours, and the operator's
   config for everybody else's;
-* **may the model unload it** — `slife2.plugins.toolhub.server.ALWAYS_LOADED`;
+* **may the model unload it** — `tool_load.autoload`;
 * **does a screen draw it** — `slife2.tui.restore`.
 
 The middle two do line up with the mark for the tools the harness writes *pairs*

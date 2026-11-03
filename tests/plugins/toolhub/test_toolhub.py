@@ -2183,7 +2183,7 @@ async def test_the_harness_trims_the_list_and_says_what_it_took() -> None:
     party that has to know what the model just lost, and — because the trim is
     written into the conversation as a tool pair — so is the model.  It is in
     the model's list for that second reason, the one `_`-prefixed name that is,
-    and the four tools the system works by are refused rather than obeyed.
+    and the names in `tool_load.autoload` are refused rather than obeyed.
 
     The budget itself is the store's (`tests/libs/store/test_toolsdb.py` has the
     counting); what this checks is the hop and the two ways to call it.
@@ -2268,6 +2268,11 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
     *separation* that was wrong: any two of them collapsed would pass a test of
     one.  The fourth, `no_load_state`, is the document families' and is the
     sibling test above.
+
+    **And `refused` is `tool_load.autoload`, not a set of the hub's own.**  The
+    operator's entry below (`fake__echo`) is refused beside the required
+    `tool_search`: the list that starts a tool loaded is the list the model may
+    not empty, which is why one name a test loaded by hand still moves.
     """
     entries = {"fake": ToolServerSettings(name="fake", command="in-memory")}
     async with Client(
@@ -2275,22 +2280,32 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
             connected={"fake": lambda settings: upstream_server()},
             entries=entries,
             load_fake_tools=False,
+            autoload=("fake__echo",),
         )
     ) as client:
-        # A listing first, so the rows exist: a tool server's are on demand
-        # (not in `tool_load.autoload`), and the one loaded here is the one
-        # that moves.
+        # A listing first, so the rows exist: `fake__echo` is in the operator's
+        # list, and `fake__boom` is loaded by hand so that one name still moves.
         await client.call_tool("list_tools", {})
-        await call(client, "func_tool_load", {"names": ["fake__echo"]})
+        await call(client, "func_tool_load", {"names": ["fake__boom"]})
         answer = await client.call_tool(
             "_func_tool_unload",
-            {"names": ["fake__echo", "fake__boom", "nowhere", "tool_search"]},
+            {
+                "names": [
+                    "fake__echo",
+                    "fake__boom",
+                    "fake__read_file",
+                    "nowhere",
+                    "tool_search",
+                ]
+            },
         )
 
-    assert answer.data["unloaded"] == ["fake__echo"], "the one that moved"
-    assert answer.data["not_loaded"] == ["fake__boom"], "a row with the state asked for"
+    assert answer.data["unloaded"] == ["fake__boom"], "the one that moved"
+    assert answer.data["not_loaded"] == ["fake__read_file"], "a row with the state asked for"
     assert answer.data["unknown"] == ["nowhere"], "a name nothing holds"
-    assert answer.data["refused"] == ["tool_search"], "and only a name the system needs"
+    assert answer.data["refused"] == ["fake__echo", "tool_search"], (
+        "the operator's list and the system's, and nothing else"
+    )
 
 
 @pytest.mark.asyncio
@@ -3475,7 +3490,10 @@ async def test_an_edited_autoload_reaches_an_open_store(
     catalogue: the window kept the old loaded set until the machine's daemons
     were restarted — which one home's edit cannot ask of the others.
     `load_cached` hands back a new `Config` object when the file changes, so a
-    different object is the edit signal and the list is applied in place.
+    different object is the edit signal and the list is applied in place.  The
+    application is the baseline only: adding a name loads it, and removing one
+    leaves its state alone — the loaded set is the model's after the first
+    start, and an edit must not empty it behind the model's back.
     """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "home"))
     configs = {
@@ -3529,7 +3547,7 @@ async def test_an_edited_autoload_reaches_an_open_store(
         tool_load=ToolLoadSettings(threshold=100, autoload=()),
     )
     await catalogue.store()
-    assert load_status() == UNLOADED
+    assert load_status() == LOADED, "an edit does not unload; it stops protecting"
 
 
 @pytest.mark.asyncio

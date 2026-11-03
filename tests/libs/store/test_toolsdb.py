@@ -511,7 +511,9 @@ def test_reconfiguring_applies_an_edited_autoload(tmp_path) -> None:
     hub, so an edited list reached every reader but the catalogue: the window
     kept showing the old loaded set until the daemons were restarted, which one
     home's edit cannot ask of the others.  `ToolStore.reconfigure` is the pass
-    that applies the operator's baseline to the rows already there.
+    that applies the operator's baseline to the rows already there — and only
+    that baseline: a name added to the list loads, and one taken off it keeps
+    the state it had.
     """
     store = store_at(tmp_path)
     merge(store, "toolhub", "plugin", [tool("turn_read")])
@@ -521,7 +523,9 @@ def test_reconfiguring_applies_an_edited_autoload(tmp_path) -> None:
     assert rows_in(store) == [("turn_read", STATUS_ENABLED, LOADED)]
 
     store.reconfigure(threshold=100, autoload=(), known={"toolhub"})
-    assert rows_in(store) == [("turn_read", STATUS_ENABLED, UNLOADED)]
+    assert rows_in(store) == [("turn_read", STATUS_ENABLED, LOADED)], (
+        "an edit stops the protection; it does not unload"
+    )
 
 
 def test_a_skill_row_carries_no_load_state(tmp_path) -> None:
@@ -895,22 +899,23 @@ def test_the_autoload_list_decides_which_tools_start_loaded(tmp_path) -> None:
     ]
 
 
-def test_a_new_list_is_applied_to_rows_that_already_exist(tmp_path) -> None:
-    """**An edited list takes effect at the next start, and only for plugins.**
+def test_a_name_the_new_list_drops_keeps_the_state_it_had(tmp_path) -> None:
+    """**Leaving the list stops protection, not loading.**
 
-    A merge never touches a load state, so a row seeded under an older list
-    would keep it for ever.  The boot pass is what makes the list the baseline:
-    names on it are loaded, and a plugin's loaded rows it does not name are
-    unloaded — their loading was the old rule's, not the model's.  Somebody
-    else's tool that the model loaded itself is left alone: "a tool loaded
-    yesterday is still loaded after a restart" is the catalogue's promise, and
-    only the plugin set has an operator-defined baseline.
+    The loaded set is the model's once the list has seeded it; an edit that
+    removes a name must not take a tool out of the model's list behind its back.
+    What the edit changes is the budget and the model's own unload: the name
+    stops being kept from eviction and stops being refused to
+    `_func_tool_unload`.  It stays loaded until one of those two moves it.
+
+    A merge never touches a load state, so only this boot pass could have
+    unloaded the rows — and it deliberately does not, whoever owns them.
     """
     path = tmp_path / "tools.db"
     first = ToolStore(
         path,
         threshold=100,
-        autoload=("turn_list",),
+        autoload=("turn_list", "turn_search", "cabinet_search"),
         known={"context", "serper"},
     )
     merge(
@@ -920,10 +925,9 @@ def test_a_new_list_is_applied_to_rows_that_already_exist(tmp_path) -> None:
         [tool("turn_list"), tool("turn_search"), tool("cabinet_search")],
     )
     merge(first, "serper", "mcp", [tool("serper__search")])
-    # What a previous session left: two plugin tools and somebody else's tool,
-    # all loaded by the model.  `turn_list` is the one the new list keeps.
-    for name in ("turn_search", "cabinet_search", "serper__search"):
-        first.set_load(name, LOADED)
+    # Somebody else's tool the model loaded itself; the next list does not name
+    # it either, and it is left alone for the same reason.
+    first.set_load("serper__search", LOADED)
 
     second = ToolStore(
         path,
@@ -935,22 +939,21 @@ def test_a_new_list_is_applied_to_rows_that_already_exist(tmp_path) -> None:
     loaded = {name: state for name, _, state in rows_in(second)}
     assert loaded == {
         "turn_list": LOADED,
-        "turn_search": UNLOADED,
-        "cabinet_search": UNLOADED,
+        "turn_search": LOADED,
+        "cabinet_search": LOADED,
         "serper__search": LOADED,
-    }, "the list is the plugin baseline; a model's own load is not a plugin's"
+    }, "an edit does not unload; only the budget or the model does"
 
 
 def test_a_name_on_the_list_is_loaded_again_at_the_next_start(tmp_path) -> None:
-    """The boot pass is a baseline, not only a victim pass.
+    """The boot pass loads what the list names; that is the move it exists for.
 
-    **A name the model unloaded in an earlier session must come back.**  That
-    is the first move `seed_autoload` exists for, and it is the half no test
-    covered: the test above starts with every name already loaded, so it only
-    proves that names *off* the list are unloaded.  A parameter order that put
-    `UNLOADED` among the name placeholders turned the load pass into a silent
-    no-op — the restart left the name unloaded and the next `list_tools`
-    simply did not have it.
+    **A name the model unloaded in an earlier session must come back.**  The
+    test above starts with every name already loaded and proves the other half
+    — that an edit does not unload — so this is the half that could silently
+    stop working: a parameter order that put `UNLOADED` among the name
+    placeholders turns the load pass into a no-op, and the restart leaves the
+    name unloaded with the next `list_tools` simply not carrying it.
     """
     path = tmp_path / "tools.db"
     first = ToolStore(

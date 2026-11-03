@@ -184,22 +184,24 @@ def test_every_plugin_that_starts_by_name_has_a_console_script() -> None:
 
 
 def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
-    """`skill_use` is served by a plugin and refused by the hub.
+    """`skill_use` is served by a plugin and kept in the list by the config.
 
     The name crosses a process boundary — `slife2-skills` serves the tool, and
-    `slife2.plugins.toolhub.server` keeps it on the list the model cannot unload, because the
-    playbooks are what every session is meant to reach for — so it is written
-    twice.  This is what notices when one side is renamed and the other is not,
-    and the failure it prevents is silent in both directions: a hub spelling a
-    name nothing serves protects nothing, and a server renamed out from under
-    the hub hands the model a tool it can throw away.
+    `slife2.libs.host.config.REQUIRED_AUTOLOAD` names it in the list that starts
+    loaded and that the model may not empty, because the playbooks are what
+    every session is meant to reach for — so it is written twice.  This is what
+    notices when one side is renamed and the other is not, and the failure it
+    prevents is silent in both directions: a config naming a tool nothing
+    serves protects nothing, and a server renamed out from under the list hands
+    the model a tool it can throw away.
     """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
     from slife2.plugins.skills import playbooks as skills
     from slife2.plugins.skills.server import CONFIG_KEY, SOURCE
-    from slife2.plugins.toolhub.server import ALWAYS_LOADED, SKILL_USE
+    from slife2.plugins.toolhub.server import SKILL_USE
 
     assert SKILL_USE == skills.USE_TOOL
-    assert SKILL_USE in ALWAYS_LOADED
+    assert SKILL_USE in REQUIRED_AUTOLOAD
 
     # And the two ids a declared row must keep apart: the source is what the
     # catalogue files the rows under and the key is what the launcher starts.
@@ -242,7 +244,8 @@ def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     is read back by the model:
 
     * `slife2.plugins.agent.server` declares it and writes the call,
-    * `slife2.plugins.toolhub.server` keeps it on the list the model cannot unload,
+    * `slife2.libs.host.config.REQUIRED_AUTOLOAD` keeps it on the list the model
+      cannot unload,
     * `slife2.libs.store.db` is the gate that lets a `_`-prefixed name through at all, and
     * the request's `tools` array has to carry it, or the Responses and Messages
       backends reject every turn that follows the delivery.
@@ -252,12 +255,12 @@ def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     one turn later — so the spellings are held together here rather than left to
     a comment.
     """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
     from slife2.libs.store.catalogue import MODEL_VISIBLE_HARNESS_TOOLS
     from slife2.plugins.agent.server import CHECK_NEW_INPUT
-    from slife2.plugins.toolhub.server import ALWAYS_LOADED
 
     assert CHECK_NEW_INPUT == "_check_new_input"
-    assert CHECK_NEW_INPUT in ALWAYS_LOADED
+    assert CHECK_NEW_INPUT in REQUIRED_AUTOLOAD
     assert CHECK_NEW_INPUT in MODEL_VISIBLE_HARNESS_TOOLS
 
 
@@ -450,22 +453,6 @@ def test_the_autoload_list_defaults_to_the_names_the_system_works_by(
     path = write(tmp_path, "tool_load:\n  autoload:\n    - ''\n")
     with pytest.raises(ConfigError, match="cannot be blank"):
         load(path)
-
-
-def test_the_required_autoload_is_what_the_hub_never_lets_go() -> None:
-    """Two spellings of one set, and they answer different questions.
-
-    `REQUIRED_AUTOLOAD` is what the config insists starts loaded;
-    `ALWAYS_LOADED` is what the hub refuses to let the model unload.  They are
-    the same names because they are the same fact — "the system needs this tool
-    to be reachable or manageable" — seen from the two processes that have to
-    act on it, and the config module cannot import a server to read the other
-    spelling.
-    """
-    from slife2.libs.host.config import REQUIRED_AUTOLOAD
-    from slife2.plugins.toolhub.server import ALWAYS_LOADED
-
-    assert frozenset(REQUIRED_AUTOLOAD) == ALWAYS_LOADED
 
 
 def test_no_cap_is_spelt_zero_or_not_at_all(tmp_path) -> None:

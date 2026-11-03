@@ -621,8 +621,9 @@ The hub serves four set-level tools:
   when there is no word to search with. It filters by `category` and `source`
   and answers `total`, `limit` and `offset`.
 - `func_tool_load` puts one or more tools into the list shown to the model.
-- `_func_tool_unload` removes tools from that list. The harness also calls it at
-  a turn boundary to enforce the budget.
+- `_func_tool_unload` removes tools from that list; a tool named in
+  `tool_load.autoload` is refused. The harness also calls it at a turn boundary
+  to enforce the budget.
 
 A model can call a name returned by `tool_search` or `tool_list` without loading
 it: when the call fits the tool's current catalogue schema, the harness loads it
@@ -636,10 +637,14 @@ discovered and loaded on demand.
 A call for a tool whose catalogue is still starting answers "not in the catalogue
 yet"; retry it in a few seconds rather than searching for a replacement.
 
-The loaded list is bounded by `tool_load.threshold` (default 100). Over the
-limit, the least recently called tools are unloaded; nothing in
-`tool_load.autoload` is ever evicted. The trim happens at a turn boundary and is
-written into the conversation as a tool call and its result.
+A restart restores what was left: the conversation's context, and the tool list
+as it stood. The loaded set lives in the catalogue, not in a process; only a
+change to `tool_load.autoload` alters it, and that only adds. The list is bounded
+by `tool_load.threshold` (default 100). Over the limit, the least recently
+called tools are unloaded; nothing in `tool_load.autoload` is ever evicted, and
+the model cannot unload one of those names either. Removing a name from the list
+does not unload it: it only stops being protected. The trim happens at a turn
+boundary and is written into the conversation as a tool call and its result.
 
 Tool names: a tool from an `mcp:` entry is `{server}__{tool}`, for example
 `arxiv__arxiv_search_papers`; a plugin's own tools use bare names.

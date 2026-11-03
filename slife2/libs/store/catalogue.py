@@ -525,12 +525,14 @@ class ToolStore:
         #: call because the count it bounds is a `SELECT COUNT(*)` over these
         #: rows: the budget and the rows it applies to live in one place.
         self.threshold = max(1, int(threshold))
-        #: The names that start in the model's list and that the budget may
-        #: never take back (`tool_load.autoload`).  **A set of tool names**, not
-        #: of sources: the unit of the decision is what the model calls, and one
-        #: server may offer ninety tools of which two are wanted every turn.  It
-        #: is the same set `_seed` loads and `evict` protects, so "starts loaded"
-        #: and "cannot be evicted" have one spelling.
+        #: The names that start in the model's list and that neither the budget
+        #: nor the model may take back (`tool_load.autoload`).  **A set of tool
+        #: names**, not of sources: the unit of the decision is what the model
+        #: calls, and one server may offer ninety tools of which two are wanted
+        #: every turn.  It is the same set `_seed` loads, `evict` protects and
+        #: the hub refuses to unload, so "starts loaded", "cannot be evicted" and
+        #: "cannot be unloaded" have one spelling.  Taking a name off the list
+        #: unloads nothing: it only stops that protection.
         #:
         #: Passed at construction because the config it comes from is read once,
         #: per home, where the store is opened (`slife2.plugins.toolhub.server.open_catalogue`) —
@@ -1059,13 +1061,13 @@ class ToolStore:
         """What a tool's load state is when it is first seen.
 
         **The operator's list decides, and nothing else does.**  A name in
-        `tool_load.autoload` starts in the model's list and the budget will never
-        take it back; everything else — a plugin's tools included — is on
-        demand.  A plugin used to be loaded in full because its tools were few;
-        they are not few any more, and one of its tools a model never calls is a
-        prompt spent on every request.  The list is also why the old
-        `autoload: true` on a server is gone: the decision belongs to a tool, not
-        to the server that happens to offer it.
+        `tool_load.autoload` starts in the model's list, and neither the budget
+        nor the model's own unload will take it back; everything else — a
+        plugin's tools included — is on demand.  A plugin used to be loaded in
+        full because its tools were few; they are not few any more, and one of
+        its tools a model never calls is a prompt spent on every request.  The
+        list is also why the old `autoload: true` on a server is gone: the
+        decision belongs to a tool, not to the server that happens to offer it.
 
         The required names are in that list by construction (`REQUIRED_AUTOLOAD`;
         the config refuses a list without them), so the tools the system works by
@@ -1272,37 +1274,32 @@ class ToolStore:
         return {"forgotten": len(names)}
 
     def seed_autoload(self) -> dict[str, int]:
-        """Put the configured baseline in the model's list — run at open.
+        """Load the names `tool_load.autoload` names that are not loaded yet.
 
-        **The one pass that overwrites `load_status`, and the reason it is not a
-        merge.**  A merge is about what a *server* says, and the load state is
-        the model's; this is about what the *operator* says, and it runs once
-        per open so an edited `tool_load.autoload` takes effect at the next start
-        rather than during a session.
+        **The list is a floor, not an overwrite.**  A name on it is loaded if it
+        was unloaded — including one the model unloaded in an earlier session,
+        because every process starts from this baseline.  A name already loaded
+        is left untouched, and a name the list does *not* name keeps whatever
+        state it has: the loaded set is the model's after the first start, and
+        editing the operator's list must not take a tool out of it behind the
+        model's back.
 
-        Two moves, and the second is what makes a shorter list take effect:
+        **What leaving the list changes is protection, not loading.**  The name
+        stops being kept from the budget (`evict`) and stops being refused to
+        the model's own unload; it stays loaded until one of those two moves it.
+        This runs once per open, and `reconfigure` runs the same pass for a
+        store that is already open, so an edited list reaches rows that exist.
 
-        * every configured name becomes `loaded` — including one the model
-          unloaded in an earlier session, because the list is the baseline every
-          process starts from.  Only names with a load state move; a skill or a
-          command has none.
-        * a **plugin's** rows the list does not name become `unloaded`.  Those
-          and no others: their loading used to be the rule "all of a plugin's
-          tools are loaded", so it was never the model's decision, and the first
-          start under the new rule is where that rule is replaced.  Somebody
-          else's server that the model loaded itself stays loaded — "a tool
-          loaded yesterday is still loaded after a restart" is this file's
-          promise, and only the plugin set has an operator-defined baseline.
-
-        A name with no row does nothing: the list may name a tool whose server
-        has not answered yet, and the next merge seeds it loaded (`_seed` reads
-        the same set).  A store nobody told which sources the config carries
-        does not run this — `known` of `None` is a process that has not read a
+        Only names with a load state move; a skill or a command has none.  A
+        name with no row does nothing: the list may name a tool whose server has
+        not answered yet, and the next merge seeds it loaded (`_seed` reads the
+        same set).  A store nobody told which sources the config carries does
+        not run this — `known` of `None` is a process that has not read a
         config, and the list it would enforce is one it was never given.
         """
         if self.known is None:
-            return {"loaded": 0, "unloaded": 0}
-        loaded = unloaded = 0
+            return {"loaded": 0}
+        loaded = 0
         stamp = now()
         with self._connect(write=True) as connection:
             for chunk in chunks(sorted(self.autoload)):
@@ -1317,28 +1314,9 @@ class ToolStore:
                     (LOADED, stamp, *chunk, UNLOADED),
                 )
                 loaded += int(cursor.rowcount)
-            held = [
-                str(row["name"])
-                for row in connection.execute(
-                    "SELECT name FROM tool WHERE category = ? AND load_status = ?",
-                    (PLUGIN, LOADED),
-                )
-            ]
-            victims = [name for name in held if name not in self.autoload]
-            for chunk in chunks(victims):
-                cursor = connection.execute(
-                    f"UPDATE tool SET load_status = ?"
-                    f" WHERE name IN ({_marks(chunk)}) AND load_status = ?",
-                    (UNLOADED, *chunk, LOADED),
-                )
-                unloaded += int(cursor.rowcount)
-        if loaded or unloaded:
-            logger.info(
-                "tool_load.autoload: %d tool(s) loaded, %d plugin tool(s) unloaded",
-                loaded,
-                unloaded,
-            )
-        return {"loaded": loaded, "unloaded": unloaded}
+        if loaded:
+            logger.info("tool_load.autoload: %d tool(s) loaded", loaded)
+        return {"loaded": loaded}
 
     def reconfigure(
         self,
@@ -1356,9 +1334,10 @@ class ToolStore:
         machine's daemons were restarted, which is not something a person editing
         one home's file can do for the hub serving the others.
 
-        The pass is `seed_autoload`'s, so an edited list loads and unloads exactly
-        as it would at a start; `reset` is re-run for the rows a source the config
-        no longer names would otherwise leave standing.
+        The pass is `seed_autoload`'s, so an edited list loads what it names and
+        leaves every other state alone, exactly as it would at a start; `reset`
+        is re-run for the rows a source the config no longer names would
+        otherwise leave standing.
         """
         self.threshold = max(1, int(threshold))
         self.autoload = frozenset(str(name) for name in autoload)

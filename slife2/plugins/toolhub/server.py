@@ -77,11 +77,11 @@ that exist.**  Three tools find, list and load (`tool_search`, `tool_list`,
 `func_tool_load`), one reads a skill, and everything else arrives on demand: a
 server with ninety tools is a catalogue entry until one of them is wanted, and
 so is a plugin's tool the operator did not put in `tool_load.autoload` — the
-list of names that are wanted every turn, and the only tools the budget may
-never take back.  The catalogue is where that state lives, in the home's own
-`agents/tools.db`, so a tool loaded in one conversation is loaded for the next,
-and a tool loaded yesterday is still loaded after a restart — the two things a
-snapshot in this process could never do.
+list of names that are wanted every turn, which neither the budget nor the
+model's own unload may take back.  The catalogue is where that state lives, in
+the home's own `agents/tools.db`, so a tool loaded in one conversation is
+loaded for the next, and a tool loaded yesterday is still loaded after a
+restart — the two things a snapshot in this process could never do.
 
 The budget that bounds it is enforced by the *harness*, not by the gate:
 `_func_tool_unload` is called by the agent server before it saves a turn, and the
@@ -91,7 +91,7 @@ for a tool the machinery calls rather than one a model chooses, and the names
 that carry it *and* are in the model's list are the ones whose pairs the harness
 writes into a conversation — the trim, and the message a running turn is handed
 (`_check_new_input`).  A pair has to name a declared tool, so the model has them
-too; `ALWAYS_LOADED` is where they are kept from leaving.
+too; `tool_load.autoload` is where they are kept from leaving.
 
 Why the tools are *here* and not in the agent
 ---------------------------------------------
@@ -284,8 +284,8 @@ JOB = "job"
 DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST, JOB})
 
 #: The tools this process serves a *model* to read and manage its own tool
-#: list.  Named here because they are also what the hub will not let go of: see
-#: `ALWAYS_LOADED`.
+#: list.  Named here because they are also what the operator's
+#: `tool_load.autoload` keeps from leaving: see `Catalogue.autoload`.
 #:
 #: **`tool_list` is the browse, and `tool_search` is the other half.**  One
 #: ranks what matches a question; the other pages what exists, in an order the
@@ -301,7 +301,7 @@ FUNC_TOOL_LOAD = "func_tool_load"
 #: because a name crossing a process boundary is spelled on both sides and the
 #: hub has no other business with the module — `tests/libs/host/test_config.py`
 #: holds the two spellings together.  What the hub uses it for is the one thing that is
-#: still the hub's: not letting the model throw it away (see `ALWAYS_LOADED`).
+#: still the hub's: not letting the model throw it away (see `Catalogue.autoload`).
 SKILL_USE = "skill_use"
 
 #: The three **source** names the families file their rows under: `skills` and
@@ -331,7 +331,7 @@ JOB_SOURCE = _JOB_SOURCE
 #: the request declares (the rule, and the reason `_func_tool_unload` is a `_`
 #: tool a model sees).  The other is `_check_new_input`, which reaches the
 #: model the same way from the other direction — a message delivered inside a
-#: running turn (`ALWAYS_LOADED`, and `slife2.plugins.agent.server`).  So the model may
+#: running turn (`tool_load.autoload`, and `slife2.plugins.agent.server`).  So the model may
 #: call it with the names it
 #: is done with, while the *harness* calls it with none — on this server's API
 #: rather than through `call_tool`, so the trim does not depend on the
@@ -341,39 +341,6 @@ JOB_SOURCE = _JOB_SOURCE
 #: other end of this hop, and it holds `slife2.libs.turn.tools.FUNC_TOOL_UNLOAD`.  Two
 #: copies of a tool name across a wire is a rename that half-works.
 FUNC_TOOL_UNLOAD = _FUNC_TOOL_UNLOAD
-
-#: What a model may not take out of its own list: the tools something *else*
-#: refers to by name.  The four this process serves are how a tool list is read
-#: and managed at all; `skill_use` is what every session reaches for; the rest
-#: are the agent process's — `_check_new_input`, the pair a mid-turn delivery is
-#: written under, and the two background-call tools that consume an `_async`
-#: task id.
-#:
-#: `tool_load.autoload` already keeps these out of the budget's reach; this set
-#: is the other half, refusing the model's own `_func_tool_unload`.  The question
-#: is unloadability, not who calls the tool: a tool the model calls for itself,
-#: however important (`attach_image`), is not here, because nothing else names
-#: it.  `_check_new_input` is the sharp case: a history that calls a tool its
-#: request no longer declares is a 400 the model could not have avoided.
-ALWAYS_LOADED = frozenset(
-    {
-        TOOL_SEARCH,
-        TOOL_LIST,
-        FUNC_TOOL_LOAD,
-        FUNC_TOOL_UNLOAD,
-        SKILL_USE,
-        # slife2.plugins.agent.server.CHECK_NEW_INPUT — the tool a message that arrives
-        # mid-turn is delivered under.  Spelled here rather than imported for the
-        # reason this module spells `SKILL_USE`: the hub is the model's tool
-        # list, and it must not be importable from an agent.
-        "_check_new_input",
-        # The agent process's two background-call tools.  They are ordinary
-        # catalogue rows (the agent plugin declares them), and they are here so
-        # a model cannot unload the only way back to a task id it was handed.
-        "check_async",
-        "cancel_async",
-    }
-)
 
 
 def _refused(exc: BaseException) -> bool:
@@ -871,6 +838,17 @@ class Catalogue:
         hand.  See `ToolStore.injectable`.
         """
         return await off_loop((await self.store()).injectable, list(sources))
+
+    async def autoload(self) -> frozenset[str]:
+        """The names the model may not unload: this home's `tool_load.autoload`.
+
+        **One list, three answers.**  These are the names that start loaded
+        (`seed_autoload`), the names the budget may never take (`evict`), and
+        the names the model's own unload refuses — because each is the operator
+        saying "this one stays in the list", and a second set would be a second
+        answer to that.  Read from the store, which is where the config put it.
+        """
+        return (await self.store()).autoload
 
     async def evict(self, sources: Sequence[str]) -> list[str]:
         """Trim the loaded set to the configured budget; name what it took out.
@@ -1865,8 +1843,8 @@ FUNC_TOOL_UNLOAD_PARAMETERS: dict[str, Any] = {
 #: own docstring is where the double life is argued.
 FUNC_TOOL_UNLOAD_DESCRIPTION = (
     "Take tools out of your list. Name the ones you are done with, or leave it "
-    "empty and the harness's trim runs at a turn boundary. Either way the "
-    "answer names what went."
+    "empty and the harness's trim runs at a turn boundary. A tool the list "
+    "always starts with is refused. Either way the answer names what went."
 )
 
 
@@ -2114,10 +2092,11 @@ async def unload_tools(
 ) -> dict[str, Any]:
     """Take tools out of the model's list — the harness's trim.
 
-    **Two ways to say it, and one meaning.**  With names, exactly those go, and
-    the four the system works by are refused.  With no names, the *budget* is
-    enforced: the catalogue unloads whatever is over `tool_load.threshold`,
-    least recently used first.
+    **Two ways to say it, and one meaning.**  With names, exactly those go,
+    except for the names in `tool_load.autoload`: the list that starts tools
+    loaded is also the list the model may not empty.  With no names, the
+    *budget* is enforced: the catalogue unloads whatever is over
+    `tool_load.threshold`, least recently used first.
 
     **The names that moved are the answer**, and that is the whole reason the
     trim is a call rather than something the gate does quietly: the caller is
@@ -2125,10 +2104,10 @@ async def unload_tools(
     just lost* is a fact only this side can tell it.
 
     Returns:
-        `unloaded`, `refused` (named but not unloadable: one of
-        `ALWAYS_LOADED`), `no_load_state` (a playbook or an installed command —
-        a row with no load state to take away), `unknown` (no row has that
-        name), and `not_loaded` (named but already out of the list).
+        `unloaded`, `refused` (named and in `tool_load.autoload`),
+        `no_load_state` (a playbook or an installed command — a row with no
+        load state to take away), `unknown` (no row has that name), and
+        `not_loaded` (named but already out of the list).
 
         The three that are not `unloaded` are apart on purpose.  Three of them
         are facts about a row's *state* and one about the name itself, and each
@@ -2145,13 +2124,14 @@ async def unload_tools(
             "unknown": [],
             "not_loaded": [],
         }
+    autoload = await catalogue.autoload()
     unloaded: list[str] = []
     refused: list[str] = []
     no_load_state: list[str] = []
     unknown: list[str] = []
     not_loaded: list[str] = []
     for name in names:
-        if name in ALWAYS_LOADED:
+        if name in autoload:
             refused.append(name)
             continue
         outcome = str((await catalogue.set_load(name, "unloaded")).get("outcome") or "")
@@ -3086,9 +3066,10 @@ def build_server(
     #: trim asks the catalogue for what the model is *holding*, and only this
     #: process knows which sources are answering; `refresh_declared` because a
     #: search is where a plugin's declarations have to be current.  Which tools
-    #: the budget may not take is **not** handed in: it is
-    #: `tool_load.autoload`, read where the catalogue is opened, so the trim and
-    #: the seed read the same set without a second copy to keep in step.
+    #: the budget may not take, and which the model may not unload, is **not**
+    #: handed in: it is `tool_load.autoload`, read where the catalogue is
+    #: opened, so the trim, the seed and the model's own unload read the same
+    #: set without a second copy to keep in step.
     local: list[LocalTool] = local_tools(
         catalogue,
         live_sources,
@@ -3661,8 +3642,8 @@ def build_server(
                 "enforce the budget"**: whatever is over
                 `tool_load.threshold` goes, least recently used first, and
                 nothing named in `tool_load.autoload` is ever a candidate.
-                Naming one of the five this system works by is refused rather
-                than obeyed.
+                Naming one of those is refused rather than obeyed: the list
+                that starts loaded is the list the model may not empty.
 
         Returns:
             `unloaded` — the names that moved, which is the answer this exists

@@ -1638,9 +1638,10 @@ DEFAULT_TOOL_LOAD = 100
 #: **Spelled here rather than imported from the hub**, because this module is a
 #: library and `slife2.plugins.toolhub.server` is a server — the same split
 #: `slife2.plugins.toolhub.server.SKILL_USE` documents.  The two spellings are held
-#: together by `tests/libs/host/test_config.py`; what the hub adds on its side is
-#: the other fact about the same names, that the model may not unload them
-#: (`ALWAYS_LOADED`).
+#: together by `tests/libs/host/test_config.py`; the hub reads the list itself
+#: from the store (`ToolStore.autoload`), and refuses an unload of any name on
+#: it, so the tools that start loaded, the tools the budget may not evict and
+#: the tools the model may not unload are one list.
 REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "tool_search",
     "tool_list",
@@ -1668,7 +1669,9 @@ class ToolLoadSettings:
     decision is about: a plugin's set grows, and not every tool in it is wanted
     every turn.  Everything not named here — a plugin's tools included — is
     discoverable by `tool_search` and callable once found, and is a candidate for
-    the budget.
+    the budget.  Taking a name off the list does not unload it: the loaded set
+    is the model's once the list has seeded it, so an edit stops the protection
+    and leaves the state alone.
 
     The names in `REQUIRED_AUTOLOAD` must be present: a configuration that leaves
     one out fails the start rather than quietly producing a model that cannot

@@ -563,7 +563,8 @@ hub 提供四个集合级工具：
 - `tool_list` 分页列出整个目录——所有工具、skill、CLI 条目和 job——用于没有词可以搜索
   的时候。可按 `category` 和 `source` 过滤，回答里带 `total`、`limit` 和 `offset`。
 - `func_tool_load` 将一个或多个工具放入模型看到的清单。
-- `_func_tool_unload` 从清单中移除工具。harness 也会在轮次边界调用它来执行预算。
+- `_func_tool_unload` 从清单中移除工具；`tool_load.autoload` 里的名字会被拒绝。
+  harness 也会在轮次边界调用它来执行预算。
 
 模型可以调用 `tool_search` 或 `tool_list` 返回的名字而不加载它，但加载会让它保留在
 每次请求随附的清单中。`tool_load.autoload` 列出启动即加载的工具，按模型调用它们的名字——plugin 的
@@ -572,9 +573,12 @@ hub 提供四个集合级工具：
 调用一个目录仍在启动中的工具会回答 "not in the catalogue yet"；几秒后重试，而不是
 去找替代品。
 
-已加载清单由 `tool_load.threshold` 限制（默认 100）。超出后，最久未被调用的工具被
-卸载；`tool_load.autoload` 里的名字永不被逐出。裁剪发生在轮次边界，并以一次工具调用
-及其结果写入对话。
+重启恢复的是离开时的样子：对话上下文，以及当时已加载的工具清单。已加载集合存在
+catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变它，而且只会增加。
+它由 `tool_load.threshold` 限制（默认 100）。超出后，最久未被调用的工具被卸载；
+`tool_load.autoload` 里的名字永不被逐出，模型也不能卸载其中任何一个。从列表里移除
+一个名字不会卸载它，只是不再保护它。裁剪发生在轮次边界，并以一次工具调用及其结果
+写入对话。
 
 工具命名：`mcp:` 条目的工具是 `{server}__{tool}`，例如
 `arxiv__arxiv_search_papers`；plugin 自己的工具用裸名字。

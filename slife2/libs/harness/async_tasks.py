@@ -65,10 +65,11 @@ stop being.
 
 **The two tools are model tools and are managed like every other one.**  The
 agent server declares them as MCP tools, so the toolhub catalogues them, the
-operator's `tool_load.autoload` keeps them loaded, and the budget may not take
-them away (`REQUIRED_AUTOLOAD` / `ALWAYS_LOADED`).  They are not a private
-registry the model cannot see: their bodies live here because the task table is
-this process's memory, not because their names are outside the catalogue.
+operator's `tool_load.autoload` keeps them loaded, and neither the budget nor
+the model's own unload may take them away (`REQUIRED_AUTOLOAD`).  They are not
+a private registry the model cannot see: their bodies live here because the
+task table is this process's memory, not because their names are outside the
+catalogue.
 """
 
 from __future__ import annotations
