@@ -85,6 +85,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2 import __version__
+from slife2.helpers.proactor import tolerate_reset_on_close
 from slife2.libs.host.config import (
     Config,
     ConfigError,
@@ -1171,6 +1172,11 @@ def serve_plugin(
     """
     args = parse_serve_args(argv, server_name)
     configure_logging()
+    # **Before `serve`, because the loop is uvicorn's and is made inside it.**
+    # A server holds a connection per client, and a client that leaves in the
+    # middle of a streamed answer is the ordinary way one ends; `proactor`
+    # states what Windows then does to the close.
+    tolerate_reset_on_close()
     try:
         config_path = find_config_path()
         config = load()

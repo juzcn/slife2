@@ -943,6 +943,13 @@ def _probe(
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `slife2` console script."""
+    # **Before any loop is made**, because every command may make one and none
+    # of them owns the Windows Proactor's close: `probe` and `_open_catalogue`
+    # each run their own `asyncio.run`, and the window's loop is Textual's.
+    # `slife2.helpers.proactor` states what this fixes.
+    from slife2.helpers.proactor import tolerate_reset_on_close
+
+    tolerate_reset_on_close()
     args = _parse_args(argv)
     if args.lang:
         # **Set before anything is built**, because every string the window draws
