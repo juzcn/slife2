@@ -1,14 +1,16 @@
 """Rendering the text this system puts in front of a model.
 
-Three of them, and two entry points: the **system prompt**, which the config
+Five templates, and two entry points: the **system prompt**, which the config
 names and which is rendered when a conversation starts; the **recall
-instruction**, which `slife2.libs.turn.context` renders per turn; and the
-**subagent's prompt** (`subagent.j2`), which is shipped rather than configured
-because what a subagent has to be told — what it is, whose it is, and where its
-work comes from — is not something an operator's prompt for their own agent
-says.  The last two ship beside the default prompt in
-`slife2/libs/turn/templates/`.  They are all prompts with holes in them, so
-they are all templates here rather than one template and one f-string.
+instruction**, which `slife2.libs.turn.context` renders per turn; the **compact
+instruction** (`slife2.libs.harness.dumps`); the **agent-task opening**
+(`slife2.plugins.agent_task.server`); and the **subagent's prompt**
+(`subagent.j2`), which is shipped rather than configured because what a subagent
+has to be told — what it is, whose it is, and where its work comes from — is not
+something an operator's prompt for their own agent says.  The last four ship
+beside the default prompt in `slife2/libs/turn/templates/`.  They are all
+prompts with holes in them, so they are all templates here rather than one
+template and one f-string.
 
 **The two entry points are the difference between the prompt and an
 instruction.**  `render_system_prompt` puts the home's **`AGENTS.md`** — the
@@ -104,10 +106,10 @@ def _renderer(directory: Path) -> Environment:
 def render_instruction(template: str | Path, **context: object) -> str:
     """Render an instruction template: one turn's text, from the package.
 
-    The callers are the recall instruction (`slife2.libs.turn.context`) and the
-    compact instruction (`slife2.libs.harness.dumps`).  A bare name is looked up
-    among the shipped templates; a path is
-    looked up beside itself.
+    The callers are the recall instruction (`slife2.libs.turn.context`), the
+    compact instruction (`slife2.libs.harness.dumps`), and the agent-task
+    opening (`slife2.plugins.agent_task.server`).  A bare name is looked up
+    among the shipped templates; a path is looked up beside itself.
 
     **Nothing from the home is in its context**, and `agents_md` is a value
     that raises if asked for (`_NoGuide`): these templates say what to do with

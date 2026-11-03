@@ -170,7 +170,7 @@ def group_marker(net: Net, sender: str, group: str, owner: str) -> str:
     ``[SubagentGroup:…]``.
 
     **The roster is deliberately not here.**  Viewing the members is a separate
-    read (`group_list`), as it is in a chat app: a large group would otherwise
+    read (`group_member_list`), as it is in a chat app: a large group would otherwise
     repeat every name in every message, in every member's context.  The wire
     payload still carries the roster (`mesh.group_fanout`) because membership
     has to converge from traffic; this marker is only the subset a conversation

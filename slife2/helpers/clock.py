@@ -29,9 +29,10 @@ from datetime import datetime
 def at(moment: datetime) -> str:
     """A given moment, written the way everything here writes time.
 
-    The second caller is `slife2.helpers.timeutil`, which takes a bound a model wrote —
-    `+00:00`, a bare `Z`, whatever the provider's clock said — and has to put it
-    back into the local-offset form the `created_at` column holds.  A bound
+    The callers are `slife2.helpers.timeutil`, which takes a bound a model wrote
+    — `+00:00`, a bare `Z`, whatever the provider's clock said — and has to put
+    it back into the local-offset form the `created_at` column holds, and the
+    stores and the schedule, which present a moment they were handed.  A time
     converted anywhere else would be the same string shape written twice, which
     is the drift this module exists to prevent.
     """

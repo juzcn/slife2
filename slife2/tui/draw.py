@@ -6,8 +6,8 @@ turn and a turn the person typed cannot come to look different: every widget
 call here is the one the live transcript has always made
 (`slife2.tui.restore` is the same argument for the history half).
 
-Two events are deliberately not drawn here, because they are not display in the
-same sense:
+Three events are deliberately not drawn here, because they are not display in
+the same sense:
 
 * **`ToolApprovalRequested`** is a question, and the only party who can answer it
   is the turn's own caller (`Pending.watched`).  The window draws the prompt and

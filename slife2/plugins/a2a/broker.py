@@ -8,7 +8,7 @@ feature's on/off switch: no broker, no mesh, everything else carries on.  Here
 a machine whose config says `peer_agent:` has said it wants the mesh, so a
 missing broker is a missing dependency rather than a preference — the plugin
 brings one up, and a broker that will not serve is a start that fails loudly
-instead of an `a2a_*` tool surface quietly attached to nothing.
+instead of a tool surface quietly attached to nothing.
 
 **And it is stopped by the take-down, because otherwise nothing ever would.**  The
 first version of this left it running — "a broker is a machine's, not a run's" —
@@ -27,8 +27,8 @@ every plugin together and refuses to start at all if one of them will not come
 up (`slife2.libs.plugin.protocol.open_server`), reporting the child's own log tail — so
 raising here arrives as a named server, a reason, and mosquitto's last twenty
 lines.  The alternative, starting anyway with a mesh that is not on the mesh, is
-the failure this project keeps choosing against: the model would be handed four
-tools whose every call refused, and nothing would say why.
+the failure this project keeps choosing against: the model would be handed a
+tool surface whose every call refused, and nothing would say why.
 
 **Only a local broker is started.**  `broker.host` naming another machine is a
 broker this process cannot bring up — there is no listener to create on somebody
@@ -155,11 +155,11 @@ def _probe(host: str, port: int) -> bool | None:
 
 
 def log_url(settings: A2ASettings) -> str:
-    """The key this broker's log file is filed under.
+    """The broker's URL — the key `spawn` and `tail_log` file its log under.
 
-    A `runtime.endpoint_key` digest of a URL, which is the shape `spawn` and
-    `tail_log` both take — the scheme is `mqtt` so a broker's log cannot collide
-    with the log of an MCP server on the same port.
+    `runtime.log_path` digests it (`endpoint_key`), and the scheme is `mqtt` so
+    a broker's log cannot collide with the log of an MCP server on the same
+    port.
     """
     return f"mqtt://{settings.broker_host}:{settings.broker_port}"
 
@@ -215,7 +215,7 @@ def ensure(
     the one edit that reads as "make it reachable" and silently makes the mesh
     reachable by everybody, so it fails with the reason rather than being
     started.  The operator who wants a reachable broker runs one, with
-    authentication, and points `a2a.broker.host` at it.
+    authentication, and points `peer_agent.broker.host` at it.
 
     **The start is serialised by the broker's own endpoint lock.**  `peer_agent:`
     and `subagent:` are two server processes, and the launcher starts them in
@@ -239,7 +239,8 @@ def ensure(
             f"{settings.broker_host!r} binds every interface — a broker started "
             f"here would answer the whole network with `allow_anonymous true` "
             f"and let any host impersonate a peer. Start a broker yourself on a "
-            f"concrete address, or point `a2a.broker.host` at `localhost`."
+            f"concrete address, or point `broker.host` in its section at "
+            f"`localhost`."
         )
     if not is_local(settings.broker_host):
         if probe(settings.broker_host, settings.broker_port):
@@ -248,7 +249,8 @@ def ensure(
             f"nothing is listening on {settings.address}, and "
             f"{settings.broker_host!r} is not this machine — a broker on somebody "
             f"else's host is theirs to start, and a local one cannot stand in for "
-            f"it. Start it there, or point `a2a.broker.host` at this one."
+            f"it. Start it there, or point `broker.host` in its section at this "
+            f"one."
         )
 
     with start_lock(log_url(settings)):

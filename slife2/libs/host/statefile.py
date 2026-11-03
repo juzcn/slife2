@@ -1,10 +1,10 @@
 """The small YAML file a plugin keeps beside an agent's own state.
 
-Two write one: `slife2-wechat` its login (`<agent>/wechat.yaml`) and `slife2-a2a`
-the inbound tasks a restart orphaned (`<agent>/inbound.yaml`).  Both had worked out
-the same two things for themselves, and the second said so — its `_yaml`
-docstring read "set up the way `slife2.plugins.wechat.server`'s is", which is a
-cross-reference standing in for a call.
+Three write one: `slife2-wechat` its login (`<agent>/wechat.yaml`), `slife2-a2a`
+its groups (`<agent>/groups.yaml`), and the agent server a subagent's record
+(`<agent>/subagents/<name>/subagent.yaml`).  Each had worked out the same two
+things for itself — the atomic write and the block-style document — so the
+shared half lives here rather than in three copies.
 
 **A plain document, not an edited one.**  `slife2.libs.host.configfile` loads
 `slife2.yaml` in round-trip mode to keep an operator's comments and quote styles;
@@ -61,9 +61,8 @@ def write(path: Path, payload: Mapping[str, Any]) -> None:
     is the one failure they cannot have.
 
     Raises whatever the filesystem raises — an unwritable directory, a full
-    disk — because what to do about it is the caller's: one of the two callers
-    here logs it and carries on, and the other one is writing a login that the
-    caller asked for by name.
+    disk — because what to do about it is the caller's: a receive path logs it
+    and carries on, while a write the caller asked for by name lets it fail.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")

@@ -3,7 +3,7 @@
 The TUI design: a dark, low-chrome look with warm amber accents, GitHub-dark
 values.  The colours live here and nowhere else.
 
-The alternative is to write each hex value twice — once in `slife.tcss` and once
+The alternative is to write each hex value twice — once in `app.tcss` and once
 in the Python that builds styled text — so the two can drift, and one of them is
 not checked by anything.  Textual lets an app publish custom CSS variables
 (:meth:`App.get_css_variables`), so the stylesheet reads `$slife-bg` and the
@@ -24,9 +24,9 @@ PALETTE: dict[str, str] = {
     # Lines.
     "border": "#30363d",
     "border-dim": "#484f58",
-    # Text, brightest first.  Four steps, because the transcript uses all four
-    # to mean different things: what you said, what the model said, what the
-    # system did, and what is merely there.
+    # Text, brightest first.  Five steps, because the transcript ranks what it
+    # prints: what you said, what a tool returned, what the system did, what is
+    # merely there, and what is only a separator.
     "text": "#e6edf3",
     "text-secondary": "#c9d1d9",
     "muted": "#8b949e",

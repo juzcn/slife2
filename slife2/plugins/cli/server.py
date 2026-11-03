@@ -158,22 +158,22 @@ def _prepare(name: str, entry: dict[str, Any]) -> CliToolSettings:
     too.  A line nothing can split is a row a search finds and no call can run,
     so it is refused here rather than written over a success.  Neither is a name
     collision: a `cli:` row is called `cli:{name}`, so it cannot collide with
-    anything — which is why this family needs no `toolfamily.refusal` and the
-    other two do.
+    anything — which is why this family needs no
+    `slife2.libs.plugin.family.refusal` and the other two do.
 
     **No `Config`, unlike the two connection families' `_prepare`s.**  Theirs
-    take it because they ask `toolfamily.refusal` whether the name is one the hub
-    already owns, and that question needs the whole config; this family has no
-    such question, so the parameter used to sit here unreferenced while
-    `cli_set` still paid a `load()` for it on every call.  The parser below
-    (`_cli_tool`) needs only the entry and the name, and the write is
-    `slife2.libs.host.configfile`'s own.
+    take it because they ask `slife2.libs.plugin.family.refusal` whether the
+    name is one the hub already owns, and that question needs the whole config;
+    this family has no such question, so the parameter used to sit here
+    unreferenced while `cli_set` still paid a `load()` for it on every call.
+    The parser below (`_cli_tool`) needs only the entry and the name, and the
+    write is `slife2.libs.host.configfile`'s own.
     """
     command = entry.get("command")
     try:
-        # The same split `_on_path` makes, moved before the write: the entry is
-        # what the argv runner reads, and refusing an unsplittable line here is
-        # the only way the refusal lands on the call rather than a note.
+        # The same split `_missing_program` makes, moved before the write: the
+        # entry is what the argv runner reads, and refusing an unsplittable line
+        # here is the only way the refusal lands on the call rather than a note.
         shlex.split(command if isinstance(command, str) else "", posix=False)
     except ValueError as exc:
         raise ToolError(

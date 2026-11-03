@@ -348,22 +348,22 @@ def build_request(
 def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderEvent]:
     """Turn one Responses stream event into provider events.
 
-    Pure, and takes `Any` rather than the SDK's event union on purpose: it reads
-    only the handful of attributes it needs, which keeps it testable against
-    hand-built objects while still working with the real ones.  The event's own
-    `type` string is the discriminant, so an event this adapter has never heard
-    of produces no events rather than an exception — the API's event list grows,
+    Takes `Any` rather than the SDK's event union on purpose: it reads only the
+    handful of attributes it needs, which keeps it testable against hand-built
+    objects while still working with the real ones.  The event's own `type`
+    string is the discriminant, so an event this adapter has never heard of
+    produces no events rather than an exception — the API's event list grows,
     and a new `response.*` event is not a reason to fail a turn.
 
     `streamed` is the caller's memory of which **output indexes this stream has
     already delivered content for** — the function-call arguments and the answer
-    text that arrived as deltas.  It is written here and not at the call site,
-    because this is the only place that knows an event's `output_index`: a
-    `Chunk` carries the index of a *tool call* and nothing at all about which
-    text item it belongs to.  What reads it is the terminal event, which carries
-    both kinds of content in full, and which would otherwise repeat an answer
-    that already streamed (`_arguments_that_never_streamed`,
-    `_text_that_never_streamed`).
+    text, whether it arrived as deltas or whole.  It is written here and not at
+    the call site, because this is the only place that knows an event's
+    `output_index`: a `Chunk` carries the index of a *tool call* and nothing at
+    all about which text item it belongs to.  The terminal event reads it to
+    back-fill only what never streamed (`_arguments_that_never_streamed`,
+    `_text_that_never_streamed`), and `response.output_text.done` reads it to
+    avoid repeating text its deltas already delivered.
 
     Two events here are errors rather than results, and both **raise**:
     `response.failed` and a bare `error`.  The alternative — returning an empty
@@ -497,11 +497,13 @@ def _text_that_never_streamed(
 ) -> list[ProviderEvent]:
     """The answer text of a response whose deltas never came.
 
-    **The text half of `_arguments_that_never_streamed`, one function up**: the
-    turn's answer is assembled from `response.output_text.delta` and from nothing
-    else, so an endpoint that sends the text whole — a gateway that implements
+    **The text half of `_arguments_that_never_streamed`**: the turn's answer is
+    assembled from `response.output_text.delta` — or, for an endpoint that sends
+    text whole, from `response.output_text.done`, which `translate` treats as
+    the same content — so a response that sends neither leaves `text_parts`
+    empty.  An endpoint that sends the text whole is a gateway that implements
     the Responses API partially, which this module already treats as real for
-    `store` (`store_parameter`) — left `text_parts` empty.  A `Finish` arrives
+    `store` (`store_parameter`).  A `Finish` arrives
     regardless, so the cut-stream check passes, and the turn is stored and shown
     with the answer `""`: a blank reply recorded as the model's whole output,
     with nothing anywhere saying a thing was lost.
@@ -655,7 +657,7 @@ def _make_streamer() -> Streamer:
 
         `streamed` is what a *later* event needs to know about an earlier one —
         which is why it lives across the stream rather than inside `translate`,
-        whose own contract is that it is a function of the event in front of it
+        whose only input beyond the event itself is this set
         (`_arguments_that_never_streamed`, `_text_that_never_streamed`).
         """
         streamed: set[int] = set()

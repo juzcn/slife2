@@ -292,9 +292,10 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     raises here and each caller reports it at its own level.
 
     Returns:
-        The hub's payload: `unloaded` (the names that moved), `refused` and
-        `not_loaded`, and `text` — the same thing in a sentence.  **An answer
-        this build cannot read comes back as the empty mapping**, not as one of
+        The hub's payload: `unloaded` (the names that moved), `refused`,
+        `no_load_state`, `unknown` and `not_loaded` — the four that did not
+        move — and `text`, the same thing in a sentence.  **An answer this
+        build cannot read comes back as the empty mapping**, not as one of
         these: the caller reads it with `trim_answer`, which is where the
         refusal belongs.
     """
@@ -494,7 +495,7 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
     **Here rather than in the two servers that trim**, which is where it was:
     the agent server and the agent-task server each carried a byte-identical
     copy of this function, down to the two messages — which are
-    `slife2.libs.plugin.protocol.unreadable`'s, now one function the four modules
+    `slife2.libs.plugin.protocol.unreadable`'s, now one function the five modules
     that read a peer's answer share.  The rule belongs with the call whose answer
     it reads.
     """

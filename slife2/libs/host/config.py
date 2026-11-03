@@ -2031,8 +2031,8 @@ class A2ASettings:
     implement, and answering that by disabling the feature with a warning at
     config load is the shape this project refuses: a config naming a transport
     that does not exist is a mistake in a file a person edits, and a warning on
-    the way past it means the model is offered `a2a_*` tools for a mesh that was
-    silently switched off.  So the field is a `provider:` naming the broker
+    the way past it means the model is offered `peer_agent_*` tools for a mesh
+    that was silently switched off.  So the field is a `provider:` naming the broker
     implementation, exactly one value is accepted, and anything else is a
     `ConfigError` at load.  Adding a provider is adding a branch to
     `_a2a` and a driver to `slife2/a2a/`; it is not a config value.
@@ -2814,8 +2814,8 @@ def _a2a(
     **An unknown `provider:` is refused rather than downgraded.**  The same rule
     `file_tunnel.active` states (SDD §12.1): a name in a file a person edits is
     either one this build has or a mistake to report.  Falling back here would
-    be worse than an error, though, because it would leave `a2a_*` tools offered
-    to a model for a mesh that is not running.  Answering that case with a
+    be worse than an error, though, because it would leave `peer_agent_*` tools
+    offered to a model for a mesh that is not running.  Answering that case with a
     warning and `enabled = False` would be the silence-with-tools outcome, so
     it is refused here.
 
@@ -3660,7 +3660,7 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         # **The first of the three fields, and the last to be refused.**  `port`
         # and `path` are refused below and the host was copied through,
         # so `host: "::1"` — the natural spelling of an IPv6 loopback, and one
-        # `a2a.broker.host` accepts — built `http://::1:24010/mcp`.
+        # `peer_agent.broker.host` accepts — built `http://::1:24010/mcp`.
         # `ServerSettings.url` writes the address as `host:port` and puts no
         # brackets on it, so the first thing to *read* that URL
         # (`runtime.normalize_url`'s `urlsplit(...).port`, inside `start_lock`)

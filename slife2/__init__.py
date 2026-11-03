@@ -341,7 +341,7 @@ def _broker_not_honoured(config: Config) -> int:
     on the wrong broker.**  A broker is where a process's MQTT sessions point,
     and the process holding them is the a2a server: one that is already running
     was started with some address, and this command did not choose it.  Carrying
-    on would hand a model `a2a_*` tools that answer, peers that answer, and a
+    on would hand a model `peer_agent_*` tools that answer, peers that answer, and a
     broker nobody asked for — the "feature that quietly does nothing" this
     project refuses everywhere else, and the one way this flag can fail that
     looks like success.

@@ -41,7 +41,7 @@ One queue, one writer, two kinds — because arrival order is worth keeping acro
 both.
 
 **Who is on the mesh is a window.**  A shared process has to decide: the mesh
-is joined by `join` for as long as a window holds that call, and by an `a2a_*`
+is joined by `join` for as long as a window holds that call, and by an A2A
 call for as long as the task it started may be answered.
 
 **A restart drops the inbound tasks the previous process was holding**, and that
@@ -1325,7 +1325,7 @@ def build_server(
 
         Built rather than connected, and the difference is the whole of what
         enrollment means here: building joins nothing.  What connects is `join`
-        (a window is showing the agent), the first `a2a_*` call that needs the
+        (a window is showing the agent), the first A2A call that needs the
         mesh, or a message to a subagent, which gives it its place before
         publishing (`place_for`).
         """
@@ -1622,7 +1622,7 @@ def build_server(
 
         **Nothing joins the mesh here, and that is deliberate.**  A shared
         process has no moment at which it is simply online.  What puts an agent
-        on the mesh is a window showing it (`join`), and an `a2a_*` call for as
+        on the mesh is a window showing it (`join`), and an A2A call for as
         long as the task it started may be answered.
 
         **And nothing is announced.**  A restart starts with no inbound bridges —
@@ -1687,7 +1687,7 @@ def build_server(
         the record of inbound tasks a process died holding, which is a fact about
         work already received rather than a claim about who is here; a window is
         the only thing that is both true while somebody is present and untrue the
-        moment they leave.  An `a2a_*` call still joins its agent lazily, for as
+        moment they leave.  An A2A call still joins its agent lazily, for as
         long as the task it started may be answered.
 
         **Nobody is told that the agent itself arrived.**  A window showing *jack*

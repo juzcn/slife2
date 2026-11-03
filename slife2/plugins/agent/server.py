@@ -4881,10 +4881,9 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     notice, and this file is deleted with it.
 
     Written whole every time, because it is one small mapping and a merge would
-    be a second rule about which keys survive a `set`.  Block style, like the two
-    neighbours this file sits beside (`wechat.yaml`, `inbound.yaml`): somebody opening
-    an agent's directory should not have to read three formats to see three
-    facts.
+    be a second rule about which keys survive a `set`.  Block style, like
+    `wechat.yaml` and `groups.yaml`: somebody reading one of them should not have
+    to read a second format to see the next fact.
 
     **A write is a rename**, through `statefile.write`, so a process that dies
     mid-write leaves the old record or the new one and never half of either.  A

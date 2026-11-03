@@ -21,7 +21,7 @@ tunnel in every importer.
 serves a single MCP endpoint at `servers.<name>.path`; this one answers
 `/share/{token}` beside it, on the same port, registered with FastMCP's
 `custom_route` and served by the same `mcp.run(...)` the house `serve()` makes.
-Nothing about `mcp_server.py` changes for it — but it is a real difference, and
+Nothing about `house_server` changes for it — but it is a real difference, and
 it is why this plugin cannot be reached by a client that only speaks MCP.
 
 LLM-visible tools: ``expose_local_image``, ``unexpose_local_image``.

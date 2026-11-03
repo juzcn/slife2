@@ -50,7 +50,7 @@ arguments below — and the name it answers as is the one it is addressed by.
 **What puts an agent on the mesh is somebody being there.**  One of these is
 connected because a window is showing that agent — `slife2.tui.client.MeshClient`
 holds the call that says so, and cancelling it is the departure, so the card and
-the last will are both honest about when the agent left — or because an `a2a_*`
+the last will are both honest about when the agent left — or because an A2A
 call needed the mesh and kept it for as long as the task it started may still be
 answered.  A shared process has to decide, and `slife2.plugins.a2a.server`'s
 `join` is where it is decided.

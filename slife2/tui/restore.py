@@ -226,9 +226,9 @@ def _draw_tool(chat: ChatView, call: ToolCall, result: str) -> None:
     """A tool panel, opened and completed — the two halves of a live call.
 
     The result is shown through `preview`, exactly as a live one is: the wire
-    caps what a panel displays (`slife2/events.PREVIEW_CHARS`) so that a tool
-    returning 100 KB is not duplicated into every widget and log line, and the
-    count carried beside it is the *whole* result's.  Passing the stored text
+    caps what a panel displays (`slife2.libs.turn.events.PREVIEW_CHARS`) so that
+    a tool returning 100 KB is not duplicated into every widget and log line, and
+    the count carried beside it is the *whole* result's.  Passing the stored text
     through unshaped would make a restored panel the one place a tool's entire
     output is rendered — and make it unlike the same call seen live.
     """

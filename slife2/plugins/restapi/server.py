@@ -93,7 +93,7 @@ WORDS = FamilyWords(
 
 
 # ── The management tools ────────────────────────────────────────────────
-# The same five names as the MCP family, over this section — the split is kept
+# The same four names as the MCP family, over this section — the split is kept
 # because a REST API and an MCP server are different things to a person even
 # when one is served by the other.  What differs is only the entry: an API is
 # written as a spec and a base URL, and the config layer expands it into the

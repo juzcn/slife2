@@ -35,7 +35,8 @@ class ToolCallDelta:
     disagree on how they index those fragments — OpenAI repeats
     ``tool_calls[].index``, Anthropic uses a content-block index — so both are
     normalised into this one shape by the LLM server, and the reassembly happens
-    there.  Nothing downstream of that hop sees a fragment.
+    there.  **The loop builds its message from the result, not from these**: a
+    fragment travels onward only inside a `Chunk`, for display.
     """
 
     index: int

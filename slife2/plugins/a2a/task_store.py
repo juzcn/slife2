@@ -12,8 +12,8 @@ is the one non-terminal word beyond `pending`: the peer paused the task and a
 continuation can resume it.
 
 The same in-memory store serves every agent's mesh in this process.  That is
-right for a reason rather than by inheritance: a task id is a `uuid4` hex
-string, so two agents cannot collide in the table, and the agent a record
+right for a reason rather than by inheritance: a task id is a `uuid4` string,
+so two agents cannot collide in the table, and the agent a record
 names is written into the record and read from it rather than taken from
 whichever mesh is asking.  What the sharing costs is one prune cap instead of
 one per agent, which is a bound on memory and not a fact about any task.

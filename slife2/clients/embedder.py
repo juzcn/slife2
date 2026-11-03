@@ -1,12 +1,13 @@
-"""The hop to the embeddings server, as a library both stores build one from.
+"""The hop to the embeddings server, as a library every store builds one from.
 
 **A library and not a server, because it has nothing of its own.**  It holds no
 credential — the credential is the embeddings *server's*, which is the process
 that reads the endpoint and the key off the config — and no state beyond one
-connection.  What it is is a client, and there are two of them now: the context
-plugin, for the turns' vectors, and the toolhub, for the catalogue's.  Two copies
-of "ask the far side, check the shape of the answer" is how the two would come to
-disagree about what an embedding is, so it is written once here.
+connection.  What it is is a client, and there are three of them now: the context
+plugin for the turns' vectors, the toolhub for the catalogue's, and the cabinet
+for its documents.  Three copies of "ask the far side, check the shape of the
+answer" is how they would come to disagree about what an embedding is, so it is
+written once here.
 
 That is also why this is not in `slife2.plugins.llm`: it is the *client* half, and the
 one thing the client half must not do is drag a server into the process that
@@ -128,7 +129,7 @@ class EmbedderConnection:
 
     The same arrangement the agent server makes with a model backend and for the
     same reason: a handshake per call is a handshake per call.  It is a class
-    rather than a function because two plugins now want it and neither may open a
+    rather than a function because three plugins now want it and none may open a
     connection before there is a loop to open one on — so what is handed round is
     this object, and whoever asks first pays.
 

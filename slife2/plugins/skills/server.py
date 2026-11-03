@@ -151,7 +151,7 @@ def catalogue(entries: Mapping[str, SkillSettings]) -> list[dict[str, object]]:
         if found is not None and not found.enabled:
             # The switch wins over the folder's verdict: both are true, and this
             # is the one the model has to act on — a switched-off skill is not a
-            # broken one, and `_func_tool_load`'s two refusals say different
+            # broken one, and `func_tool_load`'s two refusals say different
             # things about what to do next.
             status = "disabled"
         documents.append(
@@ -442,9 +442,9 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         """
         # **Refused by raising, like `skill_use`** — see that tool for why `ok`
         # false and not a `[refused]` sentence: a refusal is a failure the caller
-        # can see.  The connection families raise too (`toolfamily.prepare_entry`
-        # serves `mcp_set` and `rest_api_set`), so this is one contract and not
-        # two.
+        # can see.  The connection families raise too
+        # (`slife2.libs.plugin.family.prepare_entry` serves `mcp_set` and
+        # `rest_api_set`), so this is one contract and not two.
         if not name.strip():
             raise ToolError("a skill needs a name")
         # **Resolved before anything changes.**  A `keyring:` reference with no

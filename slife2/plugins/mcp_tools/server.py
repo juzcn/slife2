@@ -7,12 +7,13 @@ paragraph of the hub is the same one `skills-server` and `cli-server` have — a
 config section belongs to the thing that owns it, and the hub's job is the tool
 *set*, not twenty links.
 
-**What it serves is `list_sources` and `call_source`**, and nothing else: the
-model never sees this server.  Each entry is declared as a source, the hub merges
-its rows and enforces the naming rule, and a call comes back here to be run.  The
-whole arrangement is `slife2.libs.plugin.family`'s, which is also `restapi-tools`'s — the
-two differ in which section they read and nothing else, which is the honest
-consequence of REST being an MCP server behind a proxy.
+**What it serves the hub is `list_sources` and `call_source`**, and what it
+serves the model is the four `mcp_*` management tools.  Each entry is declared
+as a source, the hub merges its rows and enforces the naming rule, and a call
+comes back here to be run.  The whole arrangement is
+`slife2.libs.plugin.family`'s, which is also `restapi-tools`'s — the two differ
+in which section they read and nothing else, which is the honest consequence of
+REST being an MCP server behind a proxy.
 """
 
 from __future__ import annotations
