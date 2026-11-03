@@ -188,16 +188,20 @@ FORGET = "forget"
 
 #: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
-#: needs the mesh and never released, because what follows a send is a reply the
-#: agent is waiting for — and a local roster read that takes the caller's place
-#: is a call that needs the mesh too, since nothing else on that network speaks
-#: for the maker.  `WINDOW` is a window's (`join`), and it is released the
-#: moment that window stops holding the call.  `MEMBER` is a subagent's, and it
-#: is never released either — but for a different reason, and that is why it is
-#: a third word rather than `USED`: nothing here is waiting for a reply, it is
-#: that a *name* has to be listened for before the message that would wake it can
-#: arrive (`send_message`).  A member holds it for as long as the process serves
-#: its maker, and leaving with the process is the offline card being honest.
+#: needs the mesh and is not released by that call, because what follows a send
+#: is a reply the agent is waiting for — and a local roster read that takes the
+#: caller's place is a call that needs the mesh too, since nothing else on that
+#: network speaks for the maker.  What ends it is the window: once the last
+#: `join` has been gone for `pacing.mesh_departure`, the process that could have
+#: taken a reply has gone too, and `Session.leave_later` takes the agent off the
+#: mesh — `USED` does not keep a card up with no window to draw on.  `WINDOW` is
+#: a window's (`join`), and it is released the moment that window stops holding
+#: the call.  `MEMBER` is a subagent's, and it is never released — but for a
+#: different reason, and that is why it is a third word rather than `USED`:
+#: nothing here is waiting for a reply, it is that a *name* has to be listened
+#: for before the message that would wake it can arrive (`send_message`).  A
+#: member holds it for as long as the process serves its maker, and leaving with
+#: the process is the offline card being honest.
 USED = "used"
 WINDOW = "window"
 MEMBER = "member"
@@ -385,13 +389,17 @@ class Session:
     connect_error: str = ""
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(MAX_QUEUED))
     writer: asyncio.Task | None = None
+    #: The departure waiting out the window's retry — see :meth:`leave_later`.
+    departure: asyncio.Task | None = None
     #: Why this agent is on the mesh — and the mesh lives exactly as long as this
     #: table has something in it.  `USED` is added by any call that needs the mesh
-    #: and is never taken back: a send is followed by a reply the agent is
-    #: waiting for, so an agent with a task outstanding *is* on the mesh and
-    #: nothing inside this process's life makes that stop being true.  `WINDOW` is
-    #: added by `join` for as long as its call is open, which is what makes a
-    #: closed window show up as `✗ offline` rather than as a card nobody retires.
+    #: and is not taken back by that call: a send is followed by a reply the
+    #: agent is waiting for, so an agent with a task outstanding *is* on the
+    #: mesh.  What takes it back is the window's departure — a reply is delivered
+    #: to a window, and one whose last `join` ended cannot take it
+    #: (`leave_later`).  `WINDOW` is added by `join` for as long as its call is
+    #: open, which is what makes a closed window show up as `✗ offline` rather
+    #: than as a card nobody retires.
     #:
     #: **A count per reason rather than a set of them**, so two holders of one
     #: reason are two reasons to stay (`hold`).
@@ -418,6 +426,46 @@ class Session:
         else:
             self.reasons[reason] = held - 1
         return not self.reasons
+
+    def leave_later(self) -> None:
+        """Take this agent off the mesh unless its window comes back first.
+
+        **A `join` that ended is not yet a window that has gone.**  It ends for
+        two reasons — the process is exiting, or its stream dropped and
+        `slife2.tui.app._hold_mesh` retries the call — and only the first is a
+        departure.  So the teardown waits `pacing.mesh_departure`, a little
+        longer than the retry's own pause, and a `join` that arrives inside it
+        keeps the mesh where it is.
+
+        **And `USED` does not keep it here.**  A tool's reason says a reply may
+        be on its way, and while a window is held that is exactly right.  But a
+        reply is delivered *to a window*, and a window whose last `join` ended
+        is a process on its way out: an agent kept online by `USED` alone is one
+        nothing can reach, which is the card's job to say (SDD §9.2: presence
+        follows a window).
+        """
+        if self.departure is not None and not self.departure.done():
+            return
+        self.departure = asyncio.create_task(self._depart())
+
+    async def _depart(self) -> None:
+        """The wait `leave_later` starts: leave once no window is held."""
+        await asyncio.sleep(_T.timeouts.pacing.mesh_departure)
+        async with self.lock:
+            if self.reasons.get(WINDOW):
+                return  # the window came back; its `join` is the presence again
+            # The callers that held `USED` belonged to the process that has just
+            # gone; a reason nothing can act on is not a reason to stay.
+            self.reasons.pop(USED, None)
+            try:
+                await self.mesh.disconnect()
+            except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left (SDD §9.2)
+                logger.error(
+                    "a2a %s: the mesh would not leave the broker as its window "
+                    "left, so the agent may stay advertised: %s",
+                    self.agent,
+                    e,
+                )
 
     def settle(self, task_id: str, outcome: str, text: str = "") -> None:
         """Settle the round a queued line belongs to, when it can.
@@ -1715,9 +1763,14 @@ def build_server(
             # only at the end of `disconnect`, so a caller arriving mid-teardown
             # must not be handed a mesh whose reply topic is being unsubscribed.
             #
-            # Only when this was the last reason: an agent that has sent
-            # something is waiting for a reply, and a window closing is not a
-            # reason to stop listening for it.  The reason itself was taken by
+            # **Two departures, because a join ends for two reasons.**  If
+            # nothing else is held this is the last reason and the mesh goes
+            # now.  If a tool's `USED` is still held, the window may be retrying
+            # its call (`slife2.tui.app._hold_mesh`) rather than gone — so the
+            # teardown waits it out (`Session.leave_later`) instead of keeping
+            # the agent online for ever on a call nobody can answer.  Another
+            # *window* still holding the join is neither: that is a departure
+            # that has not happened.  The reason itself was taken by
             # `connected`, which is where every caller says which one it is.
             async with session.lock:
                 if session.release(WINDOW):
@@ -1730,6 +1783,8 @@ def build_server(
                             session.agent,
                             e,
                         )
+                elif not session.reasons.get(WINDOW):
+                    session.leave_later()
 
     # ═══════════════════════════════════════════════════════════════════════
     # The mesh tools (the standard A2A operations and the profile's task verbs)

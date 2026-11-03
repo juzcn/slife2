@@ -2498,6 +2498,92 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
                 await mesh.close()
 
 
+@pytest.mark.asyncio
+async def test_a_call_does_not_keep_a_card_up_after_its_window_has_gone(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**Presence follows a window, not the last thing a call did.**
+
+    `USED` is a tool's reason and the call does not release it, on the argument
+    that a reply may still be on its way.  But a reply is delivered to a
+    *window*, and once the last `join` has ended there is no window to deliver
+    to: after any peer call at all — `peer_agent_group_remove` was enough — the
+    agent stayed `online` for the life of the plugin, and every peer saw a card
+    with nobody behind it.
+
+    So the teardown waits the window's own retry (`pacing.mesh_departure`) and
+    then leaves even though `USED` is held.  The test below is the other half:
+    a `join` that comes back inside that wait keeps the mesh.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "mesh_departure", 0.05)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: holds != [], "the join never reached its hold")
+        # A tool used the mesh before the window went — the real tools take
+        # this with `connected(agent, USED, ...)`.
+        sessions[0].hold(USED)
+
+        holding.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await holding
+
+        await until(
+            lambda: left == [AGENT],
+            "a tool's reason kept the agent online after its window left",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """The half the wait exists for: a dropped stream is not a departure.
+
+    `SlifeApp._hold_mesh` retries a `join` after `pacing.reconnect`, so the card
+    must not go offline in the gap between the old call ending and the new one
+    starting: the mesh is still the same agent's, and a reply published in the
+    gap is still receivable.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "mesh_departure", 0.4)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        first = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 1, "the join never reached its hold")
+        sessions[0].hold(USED)
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 2, "the retried join never arrived")
+        # Past the first departure's deadline: the second join holds WINDOW, so
+        # the timer must find it and leave the mesh alone.
+        await asyncio.sleep(0.6)
+        assert left == [], "the mesh left between two windows of one agent"
+
+        second.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await second
+        await until(lambda: left == [AGENT], "the second departure never came")
+
+
 def _a_mesh_that_records_its_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[list[str], list[str]]:
@@ -2524,6 +2610,25 @@ def _a_mesh_that_records_its_ends(
     monkeypatch.setattr(A2AMesh, "connect", connect)
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     return joined, left
+
+
+def _sessions_that_hold_a_window(monkeypatch: pytest.MonkeyPatch) -> list[Session]:
+    """The session a `join` holds, captured when it takes `WINDOW`.
+
+    The session table lives inside `build_server`, so this is the seam a test
+    has: the hold is the call the tool makes, and the object that holds it is
+    the one a tool's `USED` belongs to.
+    """
+    found: list[Session] = []
+    real = Session.hold
+
+    def hold(self: Session, reason: str) -> None:
+        real(self, reason)
+        if reason == WINDOW and all(one is not self for one in found):
+            found.append(self)
+
+    monkeypatch.setattr(Session, "hold", hold)
+    return found
 
 
 def _joins_that_wait(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Event]:
@@ -2555,9 +2660,10 @@ def test_a_window_leaving_is_not_the_last_word_when_a_tool_is_still_waiting() ->
     the process, and a `join` that ignored a tool's reason would take it offline
     while an answer was still on its way.
 
-    `USED` is never released by anything — a task's result may come many turns
-    later, and nothing inside this process knows when the last one has arrived —
-    which is what makes it the caller's to add and nobody's to remove.
+    `USED` is not released by the call that took it — a task's result may come
+    many turns later, and nothing inside this process knows when the last one
+    has arrived — so it is the caller's to add and the window's departure to
+    end (`Session.leave_later`), never `release`'s here.
     """
     session = Session(
         agent=AGENT,

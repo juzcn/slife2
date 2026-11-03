@@ -291,6 +291,12 @@ class Pacing:
     #: poll.
     broker_poll: float = 0.1
     mesh_retry_delay: float = 1.0
+    #: How long an agent may stay `online` after its window's `join` ended.  A
+    #: join ends for two reasons — the process is exiting, or the stream dropped
+    #: and the window retries it — and only the first is a departure.  Longer
+    #: than `reconnect`, because the retry also has to reconnect and re-join
+    #: before it holds again.
+    mesh_departure: float = 5.0
     #: How long a terminal inbound task is kept for retry dedup, and how long
     #: an interrupted one is kept waiting for a continuation.  The profile's
     #: SDK uses 300 s for completed dedup; an interrupted task can wait on a
