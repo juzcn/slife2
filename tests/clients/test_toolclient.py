@@ -332,12 +332,24 @@ def hub_with_upstream() -> FastMCP:
 
 @pytest.mark.asyncio
 async def test_the_two_halves_agree_over_a_real_hop() -> None:
-    """One round trip, both contracts: the hub's payload and the loop's tools.
+    """One turn's round trip, both contracts: the hub's payload and the loop's tools.
 
     The names, the schemas and the dispatch are all crossing MCP here rather
-    than being read off a dict this file wrote itself.
+    than being read off a dict this file wrote itself.  The start-up ask below
+    is the setup a real start does before the window opens; the turn-path ask
+    that follows is what the loop actually sees.
     """
     async with Client(hub_with_upstream()) as hub:
+        # **The start-up ask first, because a turn's ask is not the one that
+        # builds the catalogue.**  `slife2` makes this `wait=True` call before
+        # the window opens (`open_catalogue`); the turn-path `remote_tools`
+        # below reads what it built and only starts a refresh in the background.
+        # Entering the hub runs the same pass in its lifespan, but that pass's
+        # settle is bounded and can miss a plugin on a loaded machine — which
+        # left the declared `fake__echo` out of the first answer and made this
+        # test flaky under a full-suite run.  Asking as start-up does is the
+        # ordering every real turn sees.
+        await remote_catalogue(hub, wait=True)
         registry = ToolRegistry(await remote_tools(hub))
         # In the catalogue's order, which is the name's.  **Ours are bare** —
         # a plugin's tools read the same as the hub's own, because there is one
