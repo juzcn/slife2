@@ -912,7 +912,8 @@ subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，
 `subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。成员身份就是目录集合，点名的名字不是成员时，
 发送在发布前被拒绝。这个网络上的群消息带 `[SubagentGroup:…]` 和
 `subagent_group:<group>:<sender>` channel，无论发送者是创建者还是兄弟，每个成员
-维护自己的 `groups.yaml`。
+维护自己的 `subagent-groups.yaml`——本地网络的文件，与 peer 网络的 `groups.yaml`
+放在同一目录，两个网络的群组因此不会互相覆盖。
 
 | 键 | 含义 |
 |---|---|

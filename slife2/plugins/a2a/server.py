@@ -377,8 +377,10 @@ class Session:
     #: lives.  A fork is never a group member: it ends with the next start and
     #: would leave a name behind that its maker's roster still addressed.
     fork: bool = False
-    #: The groups this member knows, loaded from the member's own
-    #: `groups.yaml` (`slife2.plugins.a2a.groups`).  A directly constructed
+    #: The groups this member knows on this network, loaded from the member's
+    #: own groups file — `groups.yaml` for the peer network and
+    #: `subagent-groups.yaml` for the local one
+    #: (`slife2.plugins.a2a.groups.groups_path`).  A directly constructed
     #: Session in a test gets the in-memory store; only `session_of` loads the
     #: file.
     groups: group_store.GroupStore = field(default_factory=group_store.GroupStore)
@@ -1399,8 +1401,11 @@ def build_server(
                     # A fork's record is read once; it ends with the next start
                     # and is never a group member.
                     fork=forked(agent, subagent) if subagent else False,
+                    # **Per network**: the peer server and the local one both
+                    # serve this member's directory, and one shared file would
+                    # be a store each process rewrites from its own stale copy.
                     groups=group_store.GroupStore.load(
-                        group_store.groups_path(agent, subagent)
+                        group_store.groups_path(agent, subagent, net=net)
                     ),
                 )
             _wire(found)

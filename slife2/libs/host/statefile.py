@@ -1,10 +1,11 @@
 """The small YAML file a plugin keeps beside an agent's own state.
 
 Three write one: `slife2-wechat` its login (`<agent>/wechat.yaml`), `slife2-a2a`
-its groups (`<agent>/groups.yaml`), and the agent server a subagent's record
-(`<agent>/subagents/<name>/subagent.yaml`).  Each had worked out the same two
-things for itself — the atomic write and the block-style document — so the
-shared half lives here rather than in three copies.
+its groups (`<agent>/groups.yaml` for the peer network and
+`<agent>/subagent-groups.yaml` for the local one), and the agent server a
+subagent's record (`<agent>/subagents/<name>/subagent.yaml`).  Each had worked
+out the same two things for itself — the atomic write and the block-style
+document — so the shared half lives here rather than in three copies.
 
 **A plain document, not an edited one.**  `slife2.libs.host.configfile` loads
 `slife2.yaml` in round-trip mode to keep an operator's comments and quote styles;

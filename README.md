@@ -1051,7 +1051,9 @@ a peer agent, under `subagent_*` names: `subagent_send_message`,
 so a send naming anything that is not a member is refused before it is published.
 Group traffic on this network wears `[SubagentGroup:…]` and the
 `subagent_group:<group>:<sender>` channel, whether the sender is the maker or a
-sibling, and each member keeps its own `groups.yaml`.
+sibling, and each member keeps its own `subagent-groups.yaml` — the local
+network's file, beside the peer network's `groups.yaml` in the same directory, so
+the two networks' groups never overwrite each other.
 
 | Key | Meaning |
 |---|---|

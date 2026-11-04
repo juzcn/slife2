@@ -3891,6 +3891,60 @@ def test_group_state_round_trips_through_yaml(tmp_path: Path) -> None:
     assert again.is_tombstoned("old-project", "g0")
 
 
+def test_the_two_networks_keep_their_group_stores_apart(tmp_path: Path) -> None:
+    """**A group is per network, and so is its file.**
+
+    Both plugin processes serve the same member directory.  One shared file
+    would be loaded once into each process's memory and rewritten whole by
+    each, so the last save wins and can resurrect a group the other process
+    disbanded.  The same group name on the two networks is two groups.
+    """
+    with in_home(tmp_path):
+        peer_path = group_store.groups_path(AGENT, net=REMOTE)
+        local_path = group_store.groups_path(AGENT, net=LOCAL)
+        assert peer_path != local_path
+
+        peer = group_store.GroupStore.load(peer_path)
+        peer.learn(
+            group_store.GroupEvent(
+                group_store.KIND_SET, AGENT, GROUP, AGENT, "peer-gid", (AGENT, PEER), ""
+            )
+        )
+        peer.save()
+
+        local = group_store.GroupStore.load(local_path)
+        assert local.get(GROUP) is None, "a peer group is not a local group"
+        local.learn(
+            group_store.GroupEvent(
+                group_store.KIND_SET,
+                AGENT,
+                GROUP,
+                AGENT,
+                "local-gid",
+                (AGENT, "tester"),
+                "",
+            )
+        )
+        local.save()
+
+        assert group_store.GroupStore.load(peer_path).get(GROUP).members == (
+            AGENT,
+            PEER,
+        )
+        assert group_store.GroupStore.load(local_path).get(GROUP).members == (
+            AGENT,
+            "tester",
+        )
+
+        # A disband is the peer store's alone; the local store's next save
+        # cannot write the group back.
+        peer = group_store.GroupStore.load(peer_path)
+        peer.forget(peer.get(GROUP))
+        peer.save()
+        assert group_store.GroupStore.load(peer_path).get(GROUP) is None
+        assert group_store.GroupStore.load(local_path).get(GROUP) is not None
+
+
 def test_a_corrupt_group_file_is_set_aside_not_overwritten(tmp_path: Path) -> None:
     path = tmp_path / "groups.yaml"
     path.write_text("groups: [not-a-mapping", encoding="utf-8")
@@ -4259,7 +4313,7 @@ async def test_a_learned_group_is_saved_and_a_restart_reads_it(
     tmp_path: Path, window: Window
 ) -> None:
     with in_home(tmp_path):
-        path = group_store.groups_path(AGENT)
+        path = group_store.groups_path(AGENT, net=REMOTE)
         session = Session(
             agent=AGENT,
             net=REMOTE,
@@ -4361,14 +4415,79 @@ async def test_group_tools_on_the_peer_network(
         assert left.data["owner"] == PEER
         assert left.data["members"] == [PEER, "bob"]
         assert (
-            group_store.GroupStore.load(group_store.groups_path(AGENT)).get(GROUP)
+            group_store.GroupStore.load(group_store.groups_path(AGENT, net=REMOTE)).get(
+                GROUP
+            )
             is None
         )
         assert removed.data["disbanded"] is True
         assert (
-            group_store.GroupStore.load(group_store.groups_path(AGENT)).get("other")
+            group_store.GroupStore.load(group_store.groups_path(AGENT, net=REMOTE)).get(
+                "other"
+            )
             is None
         )
+
+
+@pytest.mark.asyncio
+async def test_a_peer_group_and_a_local_group_stay_in_their_own_lists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shape reported from a live session: each tool listed the other
+    network's groups, and a disbanded group stayed listed because the other
+    process kept writing its stale copy back.
+
+    With a file per network, each server is the only writer of its store: a
+    group set on one network is absent from the other's list, and disbanding
+    it survives every save the other server makes.
+    """
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def fanout(self: Any, recipients: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "group_fanout", fanout)
+
+    async def listed(server: FastMCP, tool: str) -> list[str]:
+        async with Client(server) as client:
+            answer = await client.call_tool(tool, {}, meta=client_meta(AGENT))
+        return [one["group"] for one in answer.data["groups"]]
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        peer = build(on_the_mesh=True)
+        async with Client(peer) as client:
+            await client.call_tool(
+                PEER_GROUP_SET,
+                {"group": "peer-g2", "members": [PEER]},
+                meta=client_meta(AGENT),
+            )
+
+        assert await listed(local_build(), LOCAL.tool(GROUP_LIST)) == []
+
+        local = local_build()
+        async with Client(local) as client:
+            await client.call_tool(
+                LOCAL.tool(GROUP_SET),
+                {"group": "sub-g1", "members": ["tester"]},
+                meta=client_meta(AGENT),
+            )
+
+        assert await listed(build(on_the_mesh=True), PEER_GROUP_LIST) == ["peer-g2"]
+
+        # Disband on the peer side, then let the local side save its own store.
+        peer = build(on_the_mesh=True)
+        async with Client(peer) as client:
+            removed = await client.call_tool(
+                PEER_GROUP_REMOVE, {"group": "peer-g2"}, meta=client_meta(AGENT)
+            )
+        assert removed.data["disbanded"] is True
+
+        assert await listed(build(on_the_mesh=True), PEER_GROUP_LIST) == []
+        assert await listed(local_build(), LOCAL.tool(GROUP_LIST)) == ["sub-g1"]
 
 
 @pytest.mark.asyncio
@@ -4397,7 +4516,7 @@ async def test_a_send_to_an_empty_group_is_refused(
     with in_home(tmp_path):
         # The state a member is left in when everyone else has gone: its own
         # persisted record, which the session loads on its first call.
-        path = group_store.groups_path(AGENT)
+        path = group_store.groups_path(AGENT, net=REMOTE)
         store = group_store.GroupStore(path)
         store.learn(
             group_store.GroupEvent(
@@ -4472,7 +4591,7 @@ async def test_only_the_owner_can_change_or_disband_a_group(
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
         write_subagent(AGENT, "tester2")
-        tester_path = group_store.groups_path(AGENT, "tester")
+        tester_path = group_store.groups_path(AGENT, "tester", net=LOCAL)
         tester_store = group_store.GroupStore(tester_path)
         tester_store.learn(
             group_store.GroupEvent(

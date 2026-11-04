@@ -8,13 +8,20 @@ so a non-member never receives the group's traffic and a member that missed an
 earlier control event still has a fixed subscription to learn from the next
 message.
 
-**The state is the member's own.**  Each member persists a ``groups.yaml``
-under its directory (``agents/<agent>/groups.yaml`` or the subagent's), and
-every group event it receives is applied to that copy.  There is no shared
-group database: a member learns the roster from an owner's ``group_set`` or
-from the first message that names it.  QoS 0 means a missed control is
-ordinary, so the rules below are written to converge from messages, not to
-assume every control arrived.
+**The state is the member's own.**  Each member persists a groups file under
+its directory (``agents/<agent>/groups.yaml`` for the peer network, or the
+subagent's directory for the local one), and every group event it receives is
+applied to that copy.  There is no shared group database: a member learns the
+roster from an owner's ``group_set`` or from the first message that names it.
+QoS 0 means a missed control is ordinary, so the rules below are written to
+converge from messages, not to assume every control arrived.
+
+**A member has one store per network.**  The peer server and the local server
+are two processes, and both keep groups for the same agent directory; one file
+they both read once and rewrite whole would be a last-writer-wins overwrite
+that resurrects whatever the other process just disbanded.  The file name
+carries the network (`groups_file`), so each process is the only writer of its
+own store.
 
 **A gid names the group instance.**  Without it a delayed event could
 resurrect a group a member left or the owner disbanded, and reusing a name
@@ -43,18 +50,17 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from slife2.libs.host import statefile
+from slife2.libs.host.config import REMOTE, Net
 from slife2.libs.host.paths import agent_dir
 from slife2.plugins.a2a.inbound_store import iso_now
 
-if TYPE_CHECKING:
-    from slife2.libs.host.config import Net
-
 logger = logging.getLogger(__name__)
 
-#: The per-member file, under that member's own directory.
+#: The per-member file, under that member's own directory.  **The network is
+#: part of the name** — see `groups_file`.
 GROUPS_FILE = "groups.yaml"
 
 #: The document's shape.  A version this build does not know is treated like
@@ -90,9 +96,28 @@ class GroupError(ValueError):
     """A group operation the caller asked for that cannot be done."""
 
 
-def groups_path(agent: str, subagent: str = "") -> Path:
-    """The file one member keeps its groups in: its own directory."""
-    return agent_dir(agent, subagent) / GROUPS_FILE
+def groups_file(net: Net) -> str:
+    """The file one member's groups on *net* live in.
+
+    **The peer network keeps the name the file has always had**, and every
+    other network prefixes it with its own `Net.key` (`subagent-groups.yaml`).
+    The two plugin processes both serve one member's directory, so a single
+    shared file would be read once into two in-memory stores and rewritten
+    whole by each — the last save wins, and a group the other process just
+    disbanded comes back with that process's next write.  A file per network
+    makes each process the only writer of its own groups.
+    """
+    return GROUPS_FILE if net.key == REMOTE.key else f"{net.key}-{GROUPS_FILE}"
+
+
+def groups_path(agent: str, subagent: str = "", *, net: Net) -> Path:
+    """The file one member keeps its groups in on *net*: its own directory.
+
+    *net* is required: the one file both networks shared is the bug this
+    parameter exists to prevent, and a default would let a new caller fall
+    back into it.
+    """
+    return agent_dir(agent, subagent) / groups_file(net)
 
 
 def valid_member_name(name: object) -> bool:
