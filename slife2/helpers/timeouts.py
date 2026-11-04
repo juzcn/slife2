@@ -205,8 +205,12 @@ class Stream:
     """Retries, which are counts and not durations — here for the same reason
     as the durations: one file answers "what is this number", whatever it is."""
 
-    #: The embeddings server's.  Zero: an embedding that failed is a caller's
-    #: problem to retry, not the server's to repeat.
+    #: The embeddings server's SDK-level retries.  Zero: an embedding that
+    #: failed is a caller's problem to retry, not the server's to repeat — a
+    #: request that reached the provider may have been billed, and a 429 is the
+    #: caller's to pace.  A connection that never opened is the one exception,
+    #: and the embeddings server tries that again itself
+    #: (`slife2.plugins.llm.embeddings_server.EmbeddingClient.embed`).
     retries: int = 0
     #: Handing a message to a window (`slife2.libs.harness.handover`): how many
     #: times it is offered before the offer is a failure.  Three, because what

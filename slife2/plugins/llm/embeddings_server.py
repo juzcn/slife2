@@ -273,13 +273,39 @@ class EmbeddingClient:
         how much to put in one, and it decides one chunk at a time because a
         long document batched together can exceed the timeout on a service
         computing embeddings on a CPU.
+
+        **A connection that never opened is tried once more.**  The SDK is
+        constructed with `max_retries=0` (`timeouts.stream.retries`) because a
+        request that reached the provider must not be repeated — a timeout may
+        have been billed, and a 429 is the caller's to pace.  A `ConnectError`
+        is the one failure that is none of those: nothing was sent, so the
+        repeat cannot double-charge or change the answer, and embedding is
+        idempotent.  It matters on a cold start, where one blip in the link to
+        a remote provider otherwise fails the catalogue build and takes the
+        whole stack down (`RemoteEmbedder.embed` makes the same case for the
+        hop it owns).
         """
         if not texts:
             return []
-        response = await self.client().embeddings.create(
+        from openai import APIConnectionError
+
+        try:
+            response = await self._embed_request(texts)
+        except APIConnectionError as exc:
+            logger.warning(
+                "%s: %s could not be reached (%s); trying once more",
+                self.provider.model,
+                self.provider.base_url,
+                exc,
+            )
+            response = await self._embed_request(texts)
+        return [list(item.embedding) for item in response.data]
+
+    async def _embed_request(self, texts: list[str]) -> Any:
+        """The one request, split out so the retry repeats exactly that call."""
+        return await self.client().embeddings.create(
             model=self.provider.model, input=texts
         )
-        return [list(item.embedding) for item in response.data]
 
 
 def provider_refusal(exc: Any) -> str:

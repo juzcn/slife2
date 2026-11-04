@@ -303,6 +303,66 @@ async def test_embed_answers_with_the_vectors_over_the_wire() -> None:
     assert tool_payload(result)["vectors"] == [[1.0, 0.0], [2.0, 0.0]]
 
 
+def _unreachable() -> Any:
+    """The SDK's connect failure: nothing was sent, so nothing was billed."""
+    import httpx2
+    from openai import APIConnectionError
+
+    return APIConnectionError(
+        request=httpx2.Request("POST", "http://example.invalid/v1/embeddings")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_connection_that_never_opened_is_tried_once_more() -> None:
+    """**The one embedding failure the server repeats**, because it is not one.
+
+    A `ConnectError` means the request never reached the provider: the repeat
+    cannot double-charge, and embedding is idempotent.  On a cold start this is
+    the difference between a catalogue build and a stack that will not start.
+    """
+    fake = _FakeOpenAI(dimension=2)
+    answer = fake.embeddings.create
+    attempts: list[list[str]] = []
+
+    async def flaky(*, model: str, input: list[str]) -> Any:
+        attempts.append(list(input))
+        if len(attempts) == 1:
+            raise _unreachable()
+        return await answer(model=model, input=input)
+
+    fake.embeddings.create = flaky
+    server = build_server(default_config(), client=_client("mystery", fake))
+
+    async with Client(server) as client:
+        result = await client.call_tool("embed", {"texts": ["a"]})
+
+    assert tool_payload(result)["vectors"] == [[1.0, 0.0]]
+    assert attempts == [["a"], ["a"]], "the retry asked with exactly that request"
+
+
+@pytest.mark.asyncio
+async def test_a_connection_that_keeps_failing_is_not_retried_for_ever() -> None:
+    """One retry, and then the caller hears the failure — no loop, no silence."""
+    from fastmcp.exceptions import ToolError
+
+    fake = _FakeOpenAI(dimension=2)
+    attempts: list[list[str]] = []
+
+    async def unreachable(*, model: str, input: list[str]) -> Any:
+        attempts.append(list(input))
+        raise _unreachable()
+
+    fake.embeddings.create = unreachable
+    server = build_server(default_config(), client=_client("mystery", fake))
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="Connection error"):
+            await client.call_tool("embed", {"texts": ["a"]})
+
+    assert attempts == [["a"], ["a"]], "exactly the one retry, and no more"
+
+
 @pytest.mark.asyncio
 async def test_a_provider_refusal_is_a_sentence_not_a_traceback() -> None:
     """A 402 is operational news, and the sentence names the setting that moves it.

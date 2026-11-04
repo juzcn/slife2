@@ -1540,6 +1540,14 @@ Embeddings are a hard dependency: a turn is written with its vector in one
 transaction, so a save that cannot embed stores nothing. That is why there is no
 background drainer and no "index not ready" state.
 
+The SDK's own retries are zero (`timeouts.stream.retries`): a request that
+reached the provider may have been billed, and a 429 is the caller's to pace.
+The one repeat the server makes is a connection that never opened — a
+`ConnectError` means nothing was sent and an embedding is idempotent, so the
+retry cannot double-charge or change the answer, and a transient blip in the
+link to a remote provider does not fail a cold catalogue build. A second failure
+is the caller's, and the hard dependency above stands.
+
 The width is measured, and the input limit is asked for: an input limit cannot
 be measured without sending an oversized input, so a model whose endpoint
 reports no limit is refused rather than given a guess.
