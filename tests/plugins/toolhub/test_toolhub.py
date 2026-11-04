@@ -2301,7 +2301,9 @@ async def test_the_four_trim_outcomes_are_four_different_words() -> None:
         )
 
     assert answer.data["unloaded"] == ["fake__boom"], "the one that moved"
-    assert answer.data["not_loaded"] == ["fake__read_file"], "a row with the state asked for"
+    assert answer.data["not_loaded"] == ["fake__read_file"], (
+        "a row with the state asked for"
+    )
     assert answer.data["unknown"] == ["nowhere"], "a name nothing holds"
     assert answer.data["refused"] == ["fake__echo", "tool_search"], (
         "the operator's list and the system's, and nothing else"
