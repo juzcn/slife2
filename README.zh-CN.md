@@ -852,7 +852,7 @@ broker 管理状态、原生二进制 artifact、端到端载荷保护、推送�
 | `peer_agent_group_member_list` | 列出群组的 owner 和成员。 |
 | `peer_agent_group_remove` | 解散你拥有的群组。 |
 | `peer_agent_group_leave` | 自行退群；作为 owner 时，所有权交给剩余成员中的第一位。 |
-| `peer_agent_group_send_message` | 向其他所有成员发送即发即忘的消息。`@name` 和 `@all` 像聊天群一样点名。 |
+| `peer_agent_group_send_message` | 向其他所有成员发送即发即忘的消息。`@name`（一个或多个）和 `@所有人`（或 `@all`）像微信群一样点名。 |
 
 `task_request` 立即返回 id；结果稍后带
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker 到达。id 和

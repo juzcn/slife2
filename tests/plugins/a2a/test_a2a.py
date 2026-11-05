@@ -2113,6 +2113,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     group_send = by_name[LOCAL.tool(GROUP_SEND_MESSAGE)]
     assert "@name" in group_send.description
     assert "@all" in group_send.description
+    assert "@所有人" in group_send.description
     assert "every other member" in group_send.description
     assert LOCAL.group_marker in group_send.description
     assert REMOTE.group_marker not in group_send.description
@@ -4638,6 +4639,8 @@ async def test_the_group_send_schema_teaches_the_mention_convention() -> None:
 
     assert "@name" in description
     assert "@all" in description
+    assert "@所有人" in description, "the Chinese form, for a Chinese conversation"
+    assert "@jack @jill" in description, "several mentions are one more name"
     assert "A mention is attention, not delivery" in description
     assert "still receives the message" in description
     assert "`from` (the sender), the group and its owner" in description

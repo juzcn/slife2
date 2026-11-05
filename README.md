@@ -974,7 +974,7 @@ payload protection, push notifications) are not implemented.
 | `peer_agent_group_member_list` | List a group's owner and members. |
 | `peer_agent_group_remove` | Disband a group you own. |
 | `peer_agent_group_leave` | Leave a group; as owner, ownership passes to the first remaining member. |
-| `peer_agent_group_send_message` | Send a fire-and-forget message to every other member. `@name` and `@all` address members, as in a chat group. |
+| `peer_agent_group_send_message` | Send a fire-and-forget message to every other member. `@name` (one or several) and `@all`/`@所有人` address members, as in a WeChat group. |
 
 A `task_request` returns an id immediately; the result arrives later with a
 `[PeerAgent:{"from": …, "type": "task_response", "task_id": …}]` marker. The id

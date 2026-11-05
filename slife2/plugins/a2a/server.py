@@ -2642,16 +2642,17 @@ def build_server(
         roster is given its place before the fan-out.
 
         **Mentions are written into the words**, WeChat-style: ``@name``
-        addresses a member and ``@all`` addresses every member.  A mention is
-        attention, not a delivery filter — every other member still receives
-        the message, which is also what keeps the tool's contract simple: the
-        roster decides who is delivered to, and the text decides who is being
-        asked.  The recipients read the mention as part of the message; the
-        harness does not parse it.
+        addresses a member (``@jack @jill`` addresses several) and ``@all``
+        addresses every member — ``@所有人`` when the group speaks Chinese.  A
+        mention is attention, not a delivery filter — every other member still
+        receives the message, which is also what keeps the tool's contract
+        simple: the roster decides who is delivered to, and the text decides
+        who is being asked.  The recipients read the mention as part of the
+        message; the harness does not parse it.
 
         Args:
             group: The group to speak in, by name.
-            message: What to say; `@name` and `@all` address people in it.
+            message: What to say; `@name`, `@all` and `@所有人` address people in it.
         """
         sender, mine = speaker(ctx)
         refuse_fork(sender, mine)
@@ -2873,10 +2874,10 @@ _TOOL_TEXTS: dict[str, str] = {
         "with a {group_marker}\n"
         "naming `from` (the sender), the group and its owner. The members are a\n"
         "separate read — `{group_member_list}` — so a large group is not\n"
-        "repeated in every message. Address people with `@name` as in a chat\n"
-        "group:\n"
-        "`@researcher` puts that member's name in the message, and `@all`\n"
-        "addresses everyone. A mention is attention, not delivery — every other\n"
+        "repeated in every message. Address people with `@name`, as in a\n"
+        "WeChat group: `@jack` names a member, `@jack @jill` names several,\n"
+        "and `@all` — `@所有人` when the group speaks Chinese — addresses\n"
+        "everyone. A mention is attention, not delivery — every other\n"
         "member still receives the message. Delivery is fire-and-forget — no\n"
         "task, no completion — so a member that is not on the network now may\n"
         "miss it. **A group chat is casual**: nobody has to answer, and silence\n"

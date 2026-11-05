@@ -1684,8 +1684,9 @@ Rules specific to this system:
     for the maker and its subagents alike. The marker carries `from`, the group and
     its owner; the roster is a separate read (`group_member_list`) and rides the
     wire payload only so membership converges from traffic.
-16. **Mentions are text, not delivery.** `@name` and `@all` address members the
-    way a chat group does; every other member still receives the message.
+16. **Mentions are text, not delivery.** `@name` (one or several) and `@all` —
+    `@所有人` in a Chinese conversation — address members the way a WeChat group
+    does; every other member still receives the message.
 17. **Membership controls are silent.** A join, leave or disband changes the
     local record and nothing else; the member list is what this conversation has
     persisted, not a live check. Membership is not activity.
