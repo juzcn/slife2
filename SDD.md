@@ -1441,8 +1441,9 @@ Rules:
    `vec0` row carries its own rowid and a vector left behind is a row the next
    write collides with.
 3. **The vector width is discovered, never configured.** A rebuild is decided by
-   an identity recorded in the file (model, width, normalization rule); `vec0`
-   fixes a table's width in its DDL, and a wrong width fails silently.
+   an identity recorded in the file (model, width, normalization rule,
+   vectorized kinds); `vec0` fixes a table's width in its DDL, and a wrong width
+   fails silently.
 4. **One normalization rule** applies to stored text and to queries alike.
 5. **A list the caller sized is bound in chunks**, because SQLite limits the
    values in a statement.
@@ -1498,20 +1499,33 @@ table because they share the directory, the key and the write path, but they
 are not in the corpus: the turn's marker is their address (`[DUMP:…]` →
 `dump_read`/`dump_grep`, `[Image:…]` → `attach_image`).
 
+**The meaning leg covers the three agent-written kinds.** A note, a day and a
+report are vectorized by their whole file text. A saved file is in the keyword
+corpus only, and a dump and an image are in neither. **A file's and a dump's
+size are not the agent's to control**, so meaning search over them is deferred
+until a pass that chunks and embeds their contents exists (a RAG concern, not a
+cabinet one); until then a file is found by its words.
+
 The cabinet is per conversation: an agent's own conversation has
 `agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
-a fork uses the maker's. A text row's Markdown mirror is written in the same
-operation as its row; a file and an image have none, because their bytes are
-the document. The path is stored rather than derived, so a change to the
-naming rule orphans nothing that already exists. Every caller-supplied path is
-resolved against the cabinet root and refused if it leaves it.
+a fork uses the maker's. **The file is the document.** For every mirrored kind —
+note, diary, report, dump — the text is written to its file in the same
+operation as its row, and **there is no body column**: the row is metadata and
+the address, not a second copy. A file and an image have no mirror, because
+their bytes are the document. The path is stored rather than derived, so a
+change to the naming rule orphans nothing that already exists. Every
+caller-supplied path is resolved against the cabinet root and refused if it
+leaves it.
 
 A subject that is not already lowercase carries a short digest in its filename,
 because `Python.md` and `python.md` are one file on Windows and macOS.
 
-A file's bytes are never indexed. What is indexed is what the document is: its
-name, the paths that place it, and a summary once one is written. An image is
-not indexed at all: neither its bytes nor its row is in the corpus.
+A file's bytes are never indexed, and it has no vector. The keyword leg indexes
+its name, the paths that place it, and a summary once one is written; the
+summary of a file is therefore keyword text and re-embeds nothing. An image is
+not indexed at all: neither its bytes nor its row is in the corpus. A
+note/diary/report's vector is its file's whole text; its summary is keyword text
+only, so there is no re-embedding asymmetry left in `annotate`.
 
 A saved file's source is a local path or an `http(s)` URL. A local file is
 copied and never moved; a URL is fetched whole, bounded by `MAX_FETCH_BYTES`

@@ -708,8 +708,8 @@ unexpose_local_image(token)   -> 该 URL 失效
 ### 文件柜
 
 文件柜是每个 agent 的存储：笔记、日记、保存的文件、报告、dump 和图片。前四种是它的
-corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件，由 turn 里的 marker
-寻址。
+corpus。语义检索只覆盖 agent 自己写的三类——note、diary、report——按文件的全文排序；
+保存的文件只按词检索；dump 和图片是 turn 的附件，由 turn 里的 marker 寻址。
 
 笔记、日记的某一天和报告共用四个动词：`{kind}_write` 创建，key 已存在时拒绝（提示用
 `{kind}_read` 和 `{kind}_update`）；`{kind}_read` 读取；`{kind}_update` 整篇替换；
@@ -747,17 +747,20 @@ PDF、图片或压缩包没有文本，按字节日志显示为有界的转义�
 `image_source` 解析引用，`attach_image` 是模型再次看到图片的方式；`http(s)` 图片由
 provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 key 就是它的地址。
 
-笔记、日记和报告写两份：文件柜索引中的一行，以及 `agents/<agent>/cabinet/` 下的
-Markdown 文件（`notes/`、`diary/`、`reports/`），可以脱离 slife2 打开、编辑或删除。
-dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下，不被索引，
-也没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。`file_read` 和
-`file_grep` 按行或按字符读写保存文件的解码文本；PDF、图片或压缩包按其字节的转义
-渲染来显示。
+笔记、日记和报告只存**一份**：`agents/<agent>/cabinet/` 下的文件（`notes/`、
+`diary/`、`reports/`）；行只是地址和元数据，文件的全文就是语义检索 embed 的内容。
+dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下；标题、路径
+和 summary 是关键词文本，它没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。
+`file_read` 和 `file_grep` 按行或按字符读写保存文件的解码文本；PDF、图片或压缩包按其
+字节的转义渲染来显示。
 
-`cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
-`cabinet_summarize` 为文档写描述；为文件写描述会重新嵌入它，而 dump 和图片不写描述，
-因为它们不参与搜索。`file_save` 复制本地文件（从不移动它），或抓取 `http(s)` URL。
-抓取只面向公网：带凭据的 URL、`localhost` 和非全局可路由的字面地址会被拒绝，响应上限
+`cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。语义排序只覆盖
+note、diary、report 的文件全文；保存的文件只按词匹配；dump 和图片完全不参与搜索——
+它们的大小不受 agent 控制，语义检索暂时搁置，以后要做可能需要一层 RAG。
+`cabinet_summarize` 为文档写描述；文件的描述只是关键词文本，不会重新 embed；dump 和
+图片不写描述，因为它们不参与搜索。`file_save` 复制本地文件（从不移动它），或抓取
+`http(s)` URL。抓取只面向公网：带凭据的 URL、`localhost` 和非全局可路由的字面地址
+会被拒绝，响应上限
 为 50 MiB。
 
 ### 微信

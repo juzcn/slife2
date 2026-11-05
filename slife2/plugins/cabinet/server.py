@@ -629,6 +629,16 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             )
         return target
 
+    async def document_text(ctx: Context, row: dict[str, Any]) -> str:
+        """One corpus document's text, from the file its row points at.
+
+        A note, a day and a report are one copy on disk; the row carries the
+        metadata and the address.  An old row written before that still has its
+        body and is read from there (`body_of`).
+        """
+        opened = await cabinet(ctx)
+        return await off_loop(opened.body_of, row)
+
     async def file_target(ctx: Context, path: str) -> Path:
         """The saved file a path names, resolved and checked.
 
@@ -749,7 +759,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, NOTE, subject, f"there is no note about {subject!r}."
         )
-        return _document(row)
+        return _document(row, text=await document_text(ctx, row))
 
     @mcp.tool(name="note_list", meta=FOR_THE_MODEL)
     async def note_list(
@@ -829,7 +839,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, DIARY, date, f"there is no diary entry for {date}."
         )
-        return _document(row)
+        return _document(row, text=await document_text(ctx, row))
 
     @mcp.tool(name="diary_update", meta=FOR_THE_MODEL)
     async def diary_update(
@@ -1231,7 +1241,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
         )
-        return _document(row)
+        return _document(row, text=await document_text(ctx, row))
 
     @mcp.tool(name="report_update", meta=FOR_THE_MODEL)
     async def report_update(
@@ -1645,11 +1655,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         to browse what is there, newest first.
 
         **A hit need not contain the words.**  Meaning ranks the nearest
-        documents whether or not they carry them, and adding a sentence only
-        adds hits; `matched_in` says when the words were found, and
-        `similarity` says how close a meaning hit came. There is no exact-only
-        mode, and an empty page means the filters left nothing to rank — not
-        that nothing was close.
+        agent-written documents — notes, days and reports — by their whole file
+        text, whether or not they carry the words, and adding a sentence only
+        adds hits; `matched_in` says when the words were found, and `similarity`
+        says how close a meaning hit came. A saved file has no vector: it is
+        found by its words (title, path, summary) and never appears as a
+        meaning-only hit. There is no exact-only mode, and an empty page means
+        the filters left nothing to rank — not that nothing was close.
 
         A dump and an image are not searched. A dump is read with `dump_read`
         or searched with `dump_grep` by the call id its `[DUMP:…]` marker names,
@@ -1659,8 +1671,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             keywords: Words to look for — a path like `files/docs/spec.pdf`
                 works here. They rank documents that carry them first, but
                 they are not a filter: with no sentence, the same words are
-                also read by meaning, so a hit may be a document that does not
-                contain them.
+                also read by meaning, so a note, day or report hit may not
+                contain them. A file hit does.
             sentences: What you are looking for, asked normally. One per
                 question you have.
             kind: `note`, `diary`, `file` or `report` — to look in one of them.
@@ -1702,9 +1714,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     ) -> dict[str, Any]:
         """Describe a document already in the cabinet so it can be found.
 
-        Tags work for any corpus kind. A file has no text of its own, so until
-        somebody describes it a search reaches it only by its name and paths; a
-        summary is what a search by meaning reads instead.
+        Tags work for any corpus kind. A note, a day and a report are found by
+        their whole file text by meaning; a summary is keyword text for them.
+        A saved file has no vector, so its summary and tags are what a search
+        has besides its name and paths.
 
         A dump and an image are not described: they are not found by a search.
         A dump is read with `dump_read` or `dump_grep`, and an image is
@@ -1729,7 +1742,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             key,
             summary=summary,
             tags=parse_tags(tags),
-            embedder=await embedding.get(),
         )
         if row is None:
             raise ToolError(f"there is no {wanted} with the key {key!r}.")
@@ -2309,18 +2321,14 @@ def _wire(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def _document(row: dict[str, Any], *, text: str | None = None) -> dict[str, Any]:
+def _document(row: dict[str, Any], *, text: str) -> dict[str, Any]:
     """One document as the payload a model reads: its own fields, and its text.
 
-    `text` is the caller's where the document's text is not the row's — a saved
-    file's bytes are on disk and its `body` column is empty — and the row's own
-    `body` otherwise.  One key for both, because "the text of this document" is
-    one question however a kind answers it.
+    The text is always the caller's: a note, a day and a report live in their
+    file, and the row holds no body.  One key for every kind, because "the text
+    of this document" is one question however a kind answers it.
     """
-    return {
-        **facts(row),
-        "text": str(row.get("body") or "") if text is None else text,
-    }
+    return {**facts(row), "text": text}
 
 
 def _hits(found: dict[str, Any]) -> dict[str, Any]:

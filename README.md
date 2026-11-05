@@ -798,8 +798,10 @@ is not exposed to the model.
 ### Cabinet
 
 The cabinet is a per-agent store of notes, diary entries, saved files, reports,
-dumps, and images. The first four are its corpus — what `cabinet_search` ranks;
-dumps and images are a turn's attachments, addressed by the markers in the turn.
+dumps, and images. The first four are its corpus. Meaning search covers the
+three agent-written kinds — note, diary, report — by their whole file text; a
+saved file is found by words only, and dumps and images are a turn's
+attachments, addressed by the markers in the turn.
 
 A note, a diary day and a report share four verbs: `{kind}_write` creates the
 document and refuses a key that already exists (the refusal names
@@ -852,22 +854,27 @@ resolves the reference and `attach_image` is how the model sees the picture
 again; an `http(s)` image is fetched by the provider, not here. An image is not
 searched either: the `[Image:…]` key is its address.
 
-A note, diary entry, and report are written twice: a row in the cabinet index
-and a Markdown file under `agents/<agent>/cabinet/` (`notes/`, `diary/`,
-`reports/`), which can be opened, edited, or deleted without slife2. A dump's
-text lives only in its file under `dumps/`; its row is the address. A saved
-file's bytes live under the cabinet and are not indexed, and it has no Markdown
-mirror; an image is the same shape under `pictures/`. `file_read` and `file_grep` read a saved file's decoded text by
+A note, diary entry, and report live **once**, as a file under
+`agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`); the row is the
+address and metadata, and the file's whole text is what the meaning leg embeds.
+A dump's text lives only in its file under `dumps/`; its row is the address. A
+saved file's bytes live under the cabinet; its title, path, and summary are
+keyword text, and it has no Markdown mirror; an image is the same shape under
+`pictures/`. `file_read` and `file_grep` read a saved file's decoded text by
 line or character; a PDF, image, or archive is shown as an escaped rendering of
 its bytes.
 
-`cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
-`cabinet_summarize` writes a description for a document; writing one for a file
-re-embeds it, while a dump or an image is not described because it is not
-searched. `file_save` copies a local file (never moving it) or fetches an
-`http(s)` URL. A fetched URL reaches the public internet only: credentials,
-`localhost`, and literal addresses that are not globally routable are refused,
-and the response is capped at 50 MiB.
+`cabinet_search` accepts `keywords` and `sentences` like `tool_search`. Meaning
+ranks notes, diary days, and reports by their whole file text; a saved file is
+found by words only, and dumps and images are not searched at all — their size
+is not the agent's to control, and meaning search over them is deferred until a
+RAG pass over their contents exists. `cabinet_summarize` writes a description
+for a document; a file's description is keyword text and re-embeds nothing,
+while a dump or an image is not described because it is not searched.
+`file_save` copies a local file (never moving it) or fetches an `http(s)` URL. A
+fetched URL reaches the public internet only: credentials, `localhost`, and
+literal addresses that are not globally routable are refused, and the response
+is capped at 50 MiB.
 
 ### WeChat
 

@@ -6,20 +6,27 @@ The cabinet holds **notes** (keyed by subject), a **diary** (keyed by date),
 **images** (a picture a turn carried, keyed by its digest).  The first four are
 the **documents the cabinet manages**: a model writes them through its own
 tools, a key is a name it or a person gives, and a search ranks them against
-each other.  The last two are a **turn's attachments**: the harness writes
-them, the key is an identity the turn already carries, and the turn's own
-marker is the address — so they are stored here and are **not in the corpus**.
-What is kept is the *design* that made those things one directory, and what is
-dropped is the machinery slife2 does without:
+each other — by words for all four, and by meaning for the three agent-written
+kinds (note, diary, report); a saved file has no vector.  The last two are a
+**turn's attachments**: the harness writes them, the key is an identity the turn
+already carries, and the turn's own marker is the address — so they are stored
+here and are **not in the corpus**.
+
+**The file is the document.**  A note, a day, a report and a dump keep their
+text in the file their row points at; the row holds the key, the metadata and
+the address, and **there is no body column**.  Only the agent-written kinds are
+vectorized (their whole file text); a saved file is keyword text, and a dump is
+not searched.  What is kept is the *design* that made those things one
+directory, and what is dropped is the machinery slife2 does without:
 
 **A dump is the harness's, and it is here because it is text.**  A result too
 large for the conversation is truncated for the model and kept whole for
 everybody else — and *nothing decides which part of it mattered*, because that
 is the tool designer's judgement and not the harness's.  So the whole of it is
 stored **as one file**, and the conversation carries a fixed head of it within
-the budget.  The row is its address and nothing more: a dump's body column is
-empty, because the text is already on disk and a second copy in SQLite would be
-the same bytes twice.  What that does not make it is a document: the address a
+the budget.  The row is its address and nothing more: it has no body, because
+the text is already on disk and a second copy in SQLite would be the same bytes
+twice.  What that does not make it is a document: the address a
 model has for it is the `[DUMP:{…}]` marker in the transcript, which names the
 call id `dump_read` and `dump_grep` take, and ranking machine output against a
 person's notes is the dilution SDD §8.3 warns about.  So the row is written by
@@ -197,6 +204,13 @@ INDEX_NAME = ".index.db"
 #: — `agents/jack/files/files/images/a.png` — read as nothing at all.
 CABINET_DIR = "cabinet"
 
+#: Bump when the **vectorized kinds** or what their vectors are built from
+#: change.  It rides in the vector identity, so an index built under the old
+#: rules is dropped and rebuilt rather than ranked against the new one: only the
+#: agent-written documents (note, diary, report) are vectors now, and their
+#: text is their file's whole body.
+VECTOR_RULES_VERSION = "agent-written-v1"
+
 # `SYNC_BATCH` is `slife2.libs.store.index`'s, imported above.  The bound it puts
 # on one `sync` call — every corpus document is embedded eventually, because a
 # document without a vector is simply missing from the index and the next open
@@ -225,31 +239,46 @@ class Spec:
     #: is `YYYY-MM-DD`, so a window on it is day-granular and a datetime bound
     #: is read as its day.
     day: bool
-    #: The markdown mirror's directory, or `""` for the kind whose bytes *are*
-    #: the file.  A saved file is not mirrored: the cabinet keeps the bytes, and
-    #: a second copy of them as text would be a copy of something that is not
-    #: text.
+    #: The document file's directory, or `""` for the kind whose bytes *are*
+    #: the file.  For every mirrored kind — note, diary, report, dump — the file
+    #: is the text and the row holds no body.  A saved file is not mirrored: the
+    #: cabinet keeps the bytes, and a second copy of them as text would be a
+    #: copy of something that is not text.
     mirror: str
     #: Whether this kind is in the cabinet's **corpus** — the rows the keyword
-    #: and vector indexes cover, and therefore the only ones a search ranks.
-    #: A note, a day, a saved file and a report are documents the cabinet
-    #: manages.  A dump and an image are a turn's attachments: the turn's marker
-    #: is their address (`dump_read`, `attach_image`), so an index over them
-    #: would be a second retrieval path nothing uses — and machine output ranked
-    #: against a person's notes is the dilution SDD §8.3 warns about.
+    #: index covers, and therefore the only ones a search ranks.  A note, a
+    #: day, a saved file and a report are documents the cabinet manages.  A dump
+    #: and an image are a turn's attachments: the turn's marker is their address
+    #: (`dump_read`, `attach_image`), so an index over them would be a second
+    #: retrieval path nothing uses — and machine output ranked against a
+    #: person's notes is the dilution SDD §8.3 warns about.
     searchable: bool
+    #: Whether this kind has a **vector**.  The agent-written documents — a
+    #: note, a day and a report — do; their text is the document, and it is read
+    #: from the file the row points at.  A saved file does not: it is found by
+    #: its words (title, path, summary).  **Its size is not the agent's to
+    #: control**, and meaning search over a file needs a RAG pass over its
+    #: contents — deferred until one exists.  A dump is deferred for the same
+    #: reason, and an image is not text at all.
+    vectorized: bool
 
 
 SPECS: dict[str, Spec] = {
-    NOTE: Spec(time="updated_at", day=False, mirror="notes", searchable=True),
+    NOTE: Spec(
+        time="updated_at", day=False, mirror="notes", searchable=True, vectorized=True
+    ),
     # The diary's time axis **is** its key: a day keyed by `YYYY-MM-DD` sorts
     # chronologically as a string, so the column that addresses the row is the
     # column that orders it and there is no second one to keep in step.
-    DIARY: Spec(time="key", day=True, mirror="diary", searchable=True),
-    FILE: Spec(time="created_at", day=False, mirror="", searchable=True),
+    DIARY: Spec(time="key", day=True, mirror="diary", searchable=True, vectorized=True),
+    FILE: Spec(
+        time="created_at", day=False, mirror="", searchable=True, vectorized=False
+    ),
     # A report's axis is when it was first written: an update replaces its
     # body, and the moment the report arrived is the one that does not move.
-    REPORT: Spec(time="created_at", day=False, mirror="reports", searchable=True),
+    REPORT: Spec(
+        time="created_at", day=False, mirror="reports", searchable=True, vectorized=True
+    ),
     # A dump's key is one call, and a second write under it is that call
     # truncated again rather than a second fact about anything — which is why
     # the harness's write is an upsert (`UPSERT`) and not a document's create.
@@ -265,18 +294,26 @@ SPECS: dict[str, Spec] = {
     # **Not in the corpus.**  Its address is the call id in the turn's
     # `[DUMP:{…}]` marker, and `dump_read` is the reader, so there is nothing
     # for a search to add — and everything for machine output to dilute.
-    DUMP: Spec(time="created_at", day=False, mirror="dumps", searchable=False),
+    DUMP: Spec(
+        time="created_at", day=False, mirror="dumps", searchable=False, vectorized=False
+    ),
     # An image is a saved-file's shape with a different reader: bytes on disk
     # (`pictures/`), no markdown mirror, one row per content digest so a
     # picture attached twice is stored once.  An `http(s)` source has no file
     # and is found by its URL; the row is still one per digest of that URL.
     # Its address is the turn's `[Image:{…}]` key, so it is not in the corpus.
-    IMAGE: Spec(time="created_at", day=False, mirror="", searchable=False),
+    IMAGE: Spec(
+        time="created_at", day=False, mirror="", searchable=False, vectorized=False
+    ),
 }
 
 #: The corpus: the kinds a search ranks, in `SPECS` order.
 DOCUMENT_KINDS: tuple[str, ...] = tuple(
     kind for kind, spec in SPECS.items() if spec.searchable
+)
+#: The vectorized corpus: the agent-written documents, in `SPECS` order.
+VECTOR_KINDS: tuple[str, ...] = tuple(
+    kind for kind, spec in SPECS.items() if spec.vectorized
 )
 #: The turn's attachments: stored here, addressed by its markers, never indexed.
 ATTACHMENT_KINDS: tuple[str, ...] = tuple(
@@ -373,40 +410,24 @@ def search_text(row: Mapping[str, Any]) -> str:
 
 
 def vector_text(row: Mapping[str, Any]) -> str:
-    """The text a document is **about** — what its vector is a vector of.
+    """The text a document is a vector of: the body of an agent-written document.
 
-    The body alone for the text kinds, which is the document itself.  A **file**
-    is the exception and the reason this is a function: it has no text of its
-    own, so what it is about is what it **is** — its title, the paths that place
-    it, and the summary once a model writes one.  That is not decoration:
-    without the identity in it, a file would have nothing to embed until
-    somebody described it, so a cabinet of saved files would be missing from
-    the vector index from the moment it was saved — and `sync` would report
-    every one of them as a document with no vector, a "failed save" it could
-    never clear.  That is why a file's body is composed the same way (SDD §8.3).
+    **Only a note, a day and a report are vectorized.**  Their text is the
+    document the agent wrote, and it lives in the file the row points at; the
+    caller loads it before asking (`CabinetStore._with_body`).
 
-    A dump and an image are never asked: they are not in the corpus, so they
-    have no vector to compose (`Spec.searchable`).
+    **A saved file is not vectorized.**  It is found by its words — title, path
+    and a summary — through the keyword leg; its bytes are not a text this
+    cabinet wrote, its size is not the agent's to control, and meaning search
+    over it needs a RAG pass over its contents.  `file_read`/`file_grep` are how
+    they are read.  A dump is deferred for the same reason, and an image is not
+    in the corpus at all (`Spec.vectorized`).
 
     Tags are out of it, unlike the keyword text: a tag is a word somebody chose
     to file a document under, and a vector built from one describes the filing
     rather than the document.
     """
-    parts = (
-        [row.get("title"), row.get("source"), row.get("file_path"), row.get("summary")]
-        if str(row.get("kind") or "") == FILE
-        # **Body alone, and the summary is deliberately not here.**  A summary is
-        # something a model wrote *about* the row, and it is read by the keyword
-        # leg on either side; the vector is what the document *is*.  Only a file
-        # carries one into its vector, because a file has no text of its own —
-        # and that is the one kind `annotate` re-embeds.  Including it here made
-        # `cabinet_summarize(kind="note", …)` change the text a vector should
-        # come from while leaving the stored vector alone, so the new words were
-        # unreachable by meaning and nothing could repair them ("missing" means
-        # "has no chunks", and it had them).
-        else [row.get("body")]
-    )
-    return storable("\n\n".join(str(part) for part in parts if part))
+    return storable(str(row.get("body") or ""))
 
 
 # ── Slugs and mirrors ───────────────────────────────────────────────────────
@@ -516,11 +537,11 @@ _MIRROR_LOCK = threading.Lock()
 
 
 def _write_mirror(root: Path, relative: str, text: str) -> None:
-    """Put the markdown at *relative*, creating the directory it needs.
+    """Put the document's text at *relative*, creating the directory it needs.
 
-    A temp file and `os.replace`, so a reader never sees half a document: the
-    mirror is always the whole of what the row holds, because a document is
-    replaced rather than added to.
+    **The mirror is the document**, for every mirrored kind: the row holds the
+    metadata and the address, and this file is the one copy of the text.  A
+    temp file and `os.replace`, so a reader never sees half a document.
     """
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -574,6 +595,10 @@ _SCHEMA = f"""
 -- what the row is, `key` is what a read and a remove tool take, and the columns
 -- the kinds do not use are empty rather than absent.
 --
+-- **There is no body column.**  A mirrored kind's text is its file; a saved
+-- file's bytes are its file; the row is the address and the metadata.  A
+-- document is one copy, not a file plus a database copy.
+--
 -- **A corpus row's rowid is the corpus id**, which is what lets a search fuse
 -- its two legs on it (`slife2.libs.store.index.fuse_ranked`) exactly as the
 -- turns and the catalogue do.  A dump and an image are rows here and not in
@@ -591,7 +616,6 @@ CREATE TABLE IF NOT EXISTS cabinet_doc (
     kind         TEXT NOT NULL CHECK (kind IN ({",".join(f"'{k}'" for k in KINDS)})),
     key          TEXT NOT NULL,
     title        TEXT NOT NULL DEFAULT '',
-    body         TEXT NOT NULL DEFAULT '',
     tags         TEXT NOT NULL DEFAULT '',
     source       TEXT NOT NULL DEFAULT '',
     file_path    TEXT NOT NULL DEFAULT '',
@@ -720,7 +744,7 @@ class CabinetStore:
         blocking call is exactly the bug, and the hop has to be spelled out per
         step.
         """
-        identity = vector_identity(embedder)
+        identity = f"{vector_identity(embedder)}|{VECTOR_RULES_VERSION}"
         problems: list[str] = []
         text_stale = await asyncio.to_thread(
             self._mark_stale, identity, embedder.dimension
@@ -800,7 +824,7 @@ class CabinetStore:
         return text_stale
 
     def _documents_without_vectors(self) -> list[int]:
-        """Corpus documents the vector pass finished with and the index lacks.
+        """Vectorized documents the pass finished with and the index lacks.
 
         `TurnStore._turns_without_vectors` read against a table that remembers
         what it has *tried*: the pass stops asking about a document the moment
@@ -823,14 +847,16 @@ class CabinetStore:
         """
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, kind, key, body, title, summary, tags, source, file_path"
-                " FROM cabinet_doc"
+                "SELECT id, kind, key, title, summary, tags, source,"
+                " file_path, mirror FROM cabinet_doc"
                 " WHERE id IN (SELECT doc_id FROM cabinet_embedded)"
                 " AND id NOT IN (SELECT doc_id FROM cabinet_chunk)"
-                f" AND kind IN ({_marks(DOCUMENT_KINDS)})",
-                DOCUMENT_KINDS,
+                f" AND kind IN ({_marks(VECTOR_KINDS)})",
+                VECTOR_KINDS,
             ).fetchall()
-        return [int(row["id"]) for row in rows if vector_text(dict(row)).strip()]
+        return [
+            int(row["id"]) for row in rows if vector_text(self._with_body(row)).strip()
+        ]
 
     async def embed_missing(
         self, embedder: Embedder, *, limit: int | None = None
@@ -875,26 +901,28 @@ class CabinetStore:
         return remaining, done
 
     def _unembedded(self, limit: int) -> list[sqlite3.Row]:
-        """One batch of corpus documents the vector pass has not tried yet.
+        """One batch of vectorized documents the pass has not tried yet.
 
         The selection `embed_missing` walks, blocking and therefore on a worker
         thread: `cabinet_embedded` is the marker, and "has no chunk" is a
         question that never ends — see that method for why.  The kind filter is
-        the corpus boundary: an attachment is not embedded, so it must not come
-        back for ever as a document this pass still has to try.
+        the vectorized set: a saved file, a dump and an image have no vector, so
+        they must not come back for ever as documents this pass still has to
+        try.  Each row carries its text loaded from its file.
         """
         with self._connect() as connection:
-            return connection.execute(
-                "SELECT id, kind, key, body, title, summary, tags, source, file_path"
-                " FROM cabinet_doc"
+            rows = connection.execute(
+                "SELECT id, kind, key, title, summary, tags, source,"
+                " file_path, mirror FROM cabinet_doc"
                 " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
-                f" AND kind IN ({_marks(DOCUMENT_KINDS)})"
+                f" AND kind IN ({_marks(VECTOR_KINDS)})"
                 " ORDER BY id LIMIT ?",
-                (*DOCUMENT_KINDS, limit),
+                (*VECTOR_KINDS, limit),
             ).fetchall()
+        return [self._with_body(row) for row in rows]
 
     def _unembedded_count(self) -> int:
-        """How many corpus documents are still to try, read after the batch.
+        """How many vectorized documents are still to try, read after the batch.
 
         From its own connection, so it cannot disagree with what was just placed:
         the count is what `embed_missing` answers the caller's loop with, and a
@@ -906,8 +934,8 @@ class CabinetStore:
                 connection.execute(
                     "SELECT COUNT(*) AS n FROM cabinet_doc"
                     " WHERE id NOT IN (SELECT doc_id FROM cabinet_embedded)"
-                    f" AND kind IN ({_marks(DOCUMENT_KINDS)})",
-                    DOCUMENT_KINDS,
+                    f" AND kind IN ({_marks(VECTOR_KINDS)})",
+                    VECTOR_KINDS,
                 ).fetchone()["n"]
             )
 
@@ -929,14 +957,14 @@ class CabinetStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM cabinet_fts")
             rows = connection.execute(
-                "SELECT id, kind, key, title, body, tags, source, file_path, summary"
-                " FROM cabinet_doc"
+                "SELECT id, kind, key, title, tags, source, file_path,"
+                " summary, mirror FROM cabinet_doc"
                 f" WHERE kind IN ({_marks(DOCUMENT_KINDS)})",
                 DOCUMENT_KINDS,
             ).fetchall()
             connection.executemany(
                 "INSERT INTO cabinet_fts (rowid, search) VALUES (?, ?)",
-                [(int(row["id"]), search_text(dict(row))) for row in rows],
+                [(int(row["id"]), search_text(self._with_body(row))) for row in rows],
             )
             set_index_meta(connection, text_version=textindex.RULES_VERSION)
 
@@ -1030,18 +1058,20 @@ class CabinetStore:
         )
 
     def count(self) -> int:
-        """How many documents the corpus holds — the four searchable kinds.
+        """How many documents the vector index is supposed to cover.
 
         `sync` answers with this number, and the number it is about is the one
-        the vector index is supposed to cover.  A dump or an image is a row in
-        this directory and not a document the pass can be missing.
+        the vector pass can be missing: the agent-written kinds — note, diary,
+        report.  A saved file is in the keyword corpus and has no vector; a dump
+        or an image is a row in this directory and not a document the pass can
+        be missing.
         """
         with self._connect() as connection:
             return int(
                 connection.execute(
                     f"SELECT COUNT(*) AS n FROM cabinet_doc"
-                    f" WHERE kind IN ({_marks(DOCUMENT_KINDS)})",
-                    DOCUMENT_KINDS,
+                    f" WHERE kind IN ({_marks(VECTOR_KINDS)})",
+                    VECTOR_KINDS,
                 ).fetchone()["n"]
             )
 
@@ -1065,7 +1095,7 @@ class CabinetStore:
         period_end: str = "",
         embedder: Embedder,
     ) -> dict[str, Any] | None:
-        """Write one row, its mirror and — for a corpus kind — its vector.
+        """Write one row, its file and — for an agent-written kind — its vector.
 
         **`mode` says what the key means to this call.**  `CREATE` is a
         document's write: an existing key is refused, and `None` is the answer
@@ -1077,15 +1107,19 @@ class CabinetStore:
         keyed by an identity the turn already carries, so a second write under
         one key is the same fact restated and the row keeps its `created_at`.
 
-        **A corpus write embeds before anything is written.**  The model is
-        asked first (`vectors`), and only then does one transaction write the
-        row, its keyword text and its vectors — so a corpus write that cannot
-        embed raises having stored nothing, which is what the plugin's
-        `file_save` relies on when it takes back the bytes it copied.  A dump
-        or an image is not in the corpus: its row is written with no keyword
-        entry and no vector, because the turn's marker is its address.  **A
-        dump's row is written without its body** — the mirror below is the one
-        copy of the text — so the row is an address rather than a second copy.
+        **The text lives in the file, not in the row.**  Every mirrored kind —
+        note, diary, report, dump — writes its body to `mirror`; **there is no
+        body column**, so a document is one copy on disk rather than two.  The
+        row is the address and the metadata.  (A saved file's bytes are already
+        on disk; an image's are too.)
+
+        **An agent-written document embeds before anything is written.**  The
+        model is asked first (`vectors`), and only then does one transaction
+        write the row, its keyword text and its vectors — so a write that
+        cannot embed raises having stored nothing, which is what the plugin's
+        `file_save` relies on when it takes back the bytes it copied.  A saved
+        file is in the keyword corpus but has no vector; a dump and an image are
+        in neither, because the turn's marker is their address.
         """
         if mode not in (CREATE, REPLACE, UPSERT):
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
@@ -1103,11 +1137,11 @@ class CabinetStore:
         if mode == REPLACE and existing is None:
             return None
         row: dict[str, Any] = dict(existing) if existing is not None else {}
-        # **A dump's text lives only in its file.**  The row is the address —
-        # the call id and the mirror path — so its body column stays empty and
-        # SQLite never holds a second copy of an output that may be huge.  The
-        # mirror below is written from the argument, not from the row.
-        stored = "" if kind == DUMP else body
+        # **There is no body column.**  A mirrored document's text lives only in
+        # its file, a saved file's bytes are already on disk, and the row is the
+        # address and the metadata — so SQLite never holds a second copy of the
+        # text.  The mirror is written from the argument.
+        row.pop("body", None)
         if mode == REPLACE:
             # **A replacement is the document the caller describes**, so the
             # fields it owns are the caller's — an empty tag is a tag cleared,
@@ -1115,7 +1149,6 @@ class CabinetStore:
             # `annotate`'s, the created stamp is when the report arrived, and a
             # saved file's bytes and a dump's source still describe this row.
             row.update(
-                body=stored,
                 tags=tags,
                 period_start=period_start,
                 period_end=period_end,
@@ -1123,7 +1156,6 @@ class CabinetStore:
             row["title"] = row.get("title") or title or key
         else:
             row.update(
-                body=stored,
                 title=title or row.get("title") or key,
                 tags=tags or row.get("tags") or "",
                 summary=summary or row.get("summary") or "",
@@ -1142,28 +1174,30 @@ class CabinetStore:
         )
         if spec.mirror and not row.get("mirror"):
             row["mirror"] = mirror_path(spec, key)
-        # **A corpus row is embedded before anything is written**, so a write
-        # that cannot embed has written nothing — see `vectors`.  What the row
-        # *is* does not depend on the vectors, so this is a question asked of
-        # the model about the document rather than a step in storing it.  An
-        # attachment is not asked about at all: it has no index entry to place,
-        # and its address is the marker in the turn.
-        vectors = await self.vectors(row, embedder) if spec.searchable else []
+        # **An agent-written document is embedded before anything is written**,
+        # so a write that cannot embed has written nothing — see `vectors`.  The
+        # index views the row as it will be, with the body the row does not
+        # keep: the keyword text and the vector are derived from the file's
+        # text, and they are written in the same transaction as the row.
+        index_row = {**row, "body": body}
+        vectors = await self.vectors(index_row, embedder) if spec.vectorized else []
         with self._connect() as connection:
             placed = self._store(connection, row, mode)
             if placed is None:
                 return None
             row["id"] = placed
+            index_row["id"] = placed
             if spec.searchable:
-                self._index(connection, row)
+                self._index(connection, index_row)
+            if spec.vectorized:
                 self.place(connection, placed, vectors)
         if spec.mirror:
             # Last, because a file cannot be inside the database's transaction.
-            # A mirror that fails leaves a row whose markdown is missing, and
-            # the next write of the same key writes it — which is the lesser of
-            # the two failures: markdown with no row is a document nothing can
-            # find.
-            _write_mirror(self.root, str(row["mirror"]), _mirror_text(kind, row, body))
+            # The row is written first; a mirror that fails leaves an address
+            # with no text, and the next write of the same key writes it.  (A
+            # file written before the row would leave a document nothing can
+            # find, which is the worse of the two failures.)
+            _write_mirror(self.root, str(row["mirror"]), body)
         return row
 
     def _store(
@@ -1185,7 +1219,6 @@ class CabinetStore:
             "kind",
             "key",
             "title",
-            "body",
             "tags",
             "source",
             "file_path",
@@ -1294,32 +1327,18 @@ class CabinetStore:
         *,
         summary: str = "",
         tags: str = "",
-        embedder: Embedder,
     ) -> dict[str, Any] | None:
         """`cabinet_summarize`: a model's description of a corpus document.
 
-        **A file is re-embedded and the text kinds are not**, which is the one
-        asymmetry SDD §8.3 states: a summary is part of the text a file's
-        vector is built from, since it has no text of its own, so the stored
-        vector is now the wrong vector for its row and has to be replaced.  A
-        note's vector is its body, which a summary does not change — and
-        rebuilding it anyway would be spending an embedding call to store the
-        same vector.
+        **The summary changes the keyword text and no vector.**  A vectorized
+        document's vector is its body (`vector_text`), and a summary is not
+        part of it; a saved file has no vector at all, so its summary is found
+        by the keyword leg only.  Nothing here re-embeds, which is also why
+        there is no `embedder` argument.
 
-        **A dump and an image are refused**, because they are not in the
-        corpus: a description is what makes a document findable, and neither is
-        found by a search — the turn's marker is the address.
-
-        **The re-embedding happens before anything is written**, which is
-        `write`'s order and not a detail: with the summary committed first and
-        the vector second, a `cabinet_summarize` that could not reach the model
-        would leave the row holding the new summary, its keyword text rewritten
-        and its vector still describing the text without it.  Nothing could
-        repair that — `cabinet_embedded` marks a document the vector pass has
-        *finished* with, and it has chunks, so `sync`/`embed_missing` never
-        select it again: the words permanently unreachable by meaning and the
-        cabinet reporting itself ready.  A failed re-embed raises having written
-        nothing, the same contract every other write in this module keeps.
+        **A dump and an image are refused**, because they are not in the corpus:
+        a description is what makes a document findable, and neither is found by
+        a search — the turn's marker is the address.
         """
         spec = SPECS.get(kind)
         if spec is None:
@@ -1332,15 +1351,10 @@ class CabinetStore:
             ).fetchone()
         if found is None:
             return None
-        row = dict(found)
+        row = self._with_body(dict(found))
         row["summary"] = summary or row.get("summary") or ""
         row["tags"] = tags or row.get("tags") or ""
         row["updated_at"] = now()
-        # A file's vector is of its identity *including* the summary
-        # (`vector_text`), so the model is asked about the row as it will be —
-        # and asked here, before the `UPDATE`, because a summary that cannot be
-        # embedded is a summary that is not written.
-        vectors = await self.vectors(row, embedder) if kind == FILE else None
         with self._connect() as connection:
             connection.execute(
                 "UPDATE cabinet_doc SET summary = ?, tags = ?, updated_at = ? WHERE id = ?",
@@ -1352,8 +1366,6 @@ class CabinetStore:
                 ),
             )
             self._index(connection, row)
-            if vectors is not None:
-                self.place(connection, int(row["id"]), vectors)
         return row
 
     # ── Reading ─────────────────────────────────────────────────────────
@@ -1365,6 +1377,45 @@ class CabinetStore:
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
         return dict(found) if found is not None else None
+
+    def body_of(self, row: Mapping[str, Any]) -> str:
+        """One document's text: its file.
+
+        The row has no body column.  A missing file raises: a document whose
+        text is gone is not one with an empty text.
+        """
+        mirror = str(row.get("mirror") or "")
+        if not mirror:
+            return ""
+        return (self.root / mirror).read_bytes().decode("utf-8")
+
+    def _with_body(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """A row with `body` filled in, for the index passes."""
+        found = dict(row)
+        found["body"] = self.body_of(found)
+        return found
+
+    def _with_excerpt(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """A row with enough of its text for the line a chooser prints.
+
+        A listing or a search shows a summary or the first `EXCERPT_CHARS` of
+        the body; reading a whole document for that would be the read tool's
+        job, not a picker's.  Four bytes per character is the UTF-8 ceiling, so
+        this head is enough for every script.
+        """
+        found = dict(row)
+        if found.get("summary"):
+            return found
+        mirror = str(found.get("mirror") or "")
+        if not mirror:
+            return found
+        try:
+            with (self.root / mirror).open("rb") as handle:
+                head = handle.read((EXCERPT_CHARS + 1) * 4)
+        except OSError:
+            return found
+        found["body"] = head.decode("utf-8", "ignore")
+        return found
 
     def listing(
         self,
@@ -1426,7 +1477,7 @@ class CabinetStore:
             "total": total,
             "limit": limit,
             "offset": max(0, offset),
-            "entries": [choice_row(dict(row)) for row in rows],
+            "entries": [choice_row(self._with_excerpt(row)) for row in rows],
         }
 
     def _window(
@@ -1517,6 +1568,12 @@ class CabinetStore:
         kind, and a query spanning them would answer with an order nothing
         measured.  The corpus boundary is a filter like any other.
 
+        **The meaning leg covers the agent-written documents.**  Only note,
+        diary and report have vectors — their whole file text.  A saved file is
+        keyword-only (title, paths, summary); a dump and an image are not in the
+        corpus at all.  A file's or a dump's size is not the agent's to control,
+        so meaning search over them is deferred until a RAG pass exists.
+
         The window is the one `listing` uses, per kind — and with no kind it is
         the *document's* `updated_at`, which every corpus kind has, because a
         window has to have a column and "when was this written" is the only axis
@@ -1559,7 +1616,10 @@ class CabinetStore:
                     f" ORDER BY julianday(d.updated_at) DESC, d.id DESC LIMIT ?",
                     (*values, limit),
                 ).fetchall()
-            return {"results": [_found(dict(row)) for row in rows], "browsed": True}
+            return {
+                "results": [_found(self._with_excerpt(row)) for row in rows],
+                "browsed": True,
+            }
 
         # **The words are a sentence when they are all there is.**  The keyword
         # leg asks for every word at once, so a word form the text does not
@@ -1587,7 +1647,7 @@ class CabinetStore:
         return {
             "results": [
                 _found(
-                    dict(row),
+                    self._with_excerpt(row),
                     meaning.get(int(row["id"])),
                     matched_in=(
                         None
@@ -1786,7 +1846,10 @@ class CabinetStore:
             connection.executemany(
                 "INSERT INTO printed (rowid, search) VALUES (?, ?)",
                 [
-                    (int(row["id"]), textindex.normalize(line_text(dict(row))))
+                    (
+                        int(row["id"]),
+                        textindex.normalize(line_text(self._with_excerpt(row))),
+                    )
                     for row in rows
                 ],
             )
@@ -1944,22 +2007,6 @@ def _like_literal(text: str) -> str:
     `file_list(category="my_notes")` would answer about `myXnotes`.
     """
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _mirror_text(kind: str, row: Mapping[str, Any], body: str) -> str:
-    """What is written to one kind's markdown.
-
-    A note and a report carry their title as a heading; a diary has none,
-    because its file *is* a day and the day is its name.  A dump is **the body
-    itself, with no byte added** — it is the one copy of the output, and the
-    reader's addresses count its characters; a trailing newline would be a
-    character no tool wrote.
-    """
-    if kind == DUMP:
-        return body
-    if kind == DIARY:
-        return f"{body}\n"
-    return f"# {row.get('title') or row.get('key')}\n\n{body}\n"
 
 
 def discard_file(path: Path) -> None:

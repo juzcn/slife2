@@ -275,7 +275,7 @@ async def test_a_note_is_created_then_replaced_by_an_update() -> None:
     # of its own: what this one is about is that the file was rewritten, not
     # what it is called.
     written = bag() / "notes" / f"{cabinet_store.mirror_stem('Python')}.md"
-    assert written.read_text(encoding="utf-8") == "# Python\n\nsecond\n"
+    assert written.read_text(encoding="utf-8") == "second"
     assert read["text"] == "second"
     assert "first" not in json.dumps(read), "the older body is gone"
 
@@ -292,8 +292,8 @@ def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None
     def add(key: str, stamp: str) -> None:
         with store._connect() as connection:
             connection.execute(
-                "INSERT INTO cabinet_doc (kind, key, title, body, created_at,"
-                " updated_at) VALUES (?, ?, ?, '', ?, ?)",
+                "INSERT INTO cabinet_doc (kind, key, title, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?)",
                 (NOTE, key, key, stamp, stamp),
             )
 
@@ -439,7 +439,7 @@ async def test_one_day_is_one_document_and_an_update_replaces_it() -> None:
 
     assert read["text"] == "morning and evening", "the update is the whole entry"
     assert read["key"] == read["time"] == "2026-10-11", "a day is its own axis"
-    assert mirror == "morning and evening\n"
+    assert mirror == "morning and evening"
     assert removed == {"kind": DIARY, "key": "2026-10-11", "removed": True}
     assert not (bag() / "diary" / "2026-10-11.md").exists()
 
@@ -969,22 +969,21 @@ async def test_a_saved_file_is_searched_like_a_dump() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_save_that_cannot_embed_stores_nothing() -> None:
-    """The contract every write in this system keeps, and the bytes are the tell.
+async def test_a_vectorized_write_that_cannot_embed_stores_nothing() -> None:
+    """The contract an agent-written document keeps: embed before writing.
 
-    A copy that succeeded and an index that did not is a file the cabinet has
-    forgotten and cannot find again — so the copy is what is taken back.
+    A note that cannot be embedded is a note the meaning leg can never find, so
+    the write raises before the row or its file exists.
     """
-    source = data_dir() / "orphan.txt"
-    source.write_text("no vector for this\n", encoding="utf-8")
     server = build_server(load(), embedder=FailingEmbedder())
+    mirror = bag() / "notes" / f"{cabinet_store.mirror_stem('orphan')}.md"
 
     async with Client(server) as client:
         with pytest.raises(Exception, match="down"):
-            await ask(client, "file_save", paths=[str(source)])
+            await ask(client, "note_write", subject="orphan", content="no vector")
 
-    assert not (bag() / "documents" / "orphan.txt").exists()
-    assert store().get(FILE, "documents/orphan.txt") is None
+    assert store().get(NOTE, "orphan") is None
+    assert not mirror.exists()
 
 
 class ShortEmbedder(StubEmbedder):
@@ -1274,12 +1273,13 @@ async def test_a_search_can_name_one_kind() -> None:
 
 @pytest.mark.asyncio
 async def test_a_notes_day_and_reports_text_is_what_the_meaning_leg_ranks() -> None:
-    """**All three text kinds put their body in the vector index.**
+    """**The three agent-written kinds put their file's whole body in the
+    vector index.**
 
     A note, a diary day and a report are one corpus, and the semantic leg ranks
-    each by its own text — not by its title, its key or its path.  The file is
-    the one exception (`vector_text`): it has no text of its own, so its vector
-    is its identity and its summary.
+    each by its own text — not by its title, its key or its path.  A saved file
+    has no vector: it is found by its words (title, path, summary) through the
+    keyword leg.
     """
     async with Client(cabinet()) as client:
         await ask(client, "note_write", subject="n", content="工具")
@@ -1318,16 +1318,15 @@ async def test_a_search_answer_without_results_is_not_nothing_matched(
 
 
 @pytest.mark.asyncio
-async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
-    """A file has no text of its own, so describing it is the only way in — and
-    writing a summary **re-embeds** it, because the stored vector was the text
-    without it (SDD §8.3's one asymmetry)."""
+async def test_a_file_summary_is_keyword_text_and_never_a_vector() -> None:
+    """**A saved file has no vector.**  Its summary is found by the keyword leg,
+    and the meaning leg — which covers only note, diary and report — does not
+    return it at all."""
     source = data_dir() / "spec.txt"
     source.write_text("body text\n", encoding="utf-8")
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(source)], title="spec sheet")
-        before = await payload(client, "cabinet_search", sentences=[OTHER])
         written = await payload(
             client,
             "cabinet_summarize",
@@ -1335,18 +1334,13 @@ async def test_a_summary_is_what_makes_a_file_findable_by_meaning() -> None:
             key="documents/spec.txt",
             summary=f"about {OTHER}",
         )
-        after = await payload(client, "cabinet_search", sentences=[OTHER])
+        by_words = await payload(client, "cabinet_search", keywords=[OTHER])
+        by_meaning = await payload(client, "cabinet_search", sentences=[OTHER])
 
-    assert before["results"][0]["key"] == "documents/spec.txt", (
-        "the meaning leg found it, and found nothing in it"
-    )
-    assert before["results"][0]["similarity"] == 0.0, (
-        "nothing describes it yet but its name"
-    )
     assert written["summary"] == f"about {OTHER}"
-    assert "reembedded" not in written, "the work it did is not the model's to track"
-    assert after["results"][0]["key"] == "documents/spec.txt"
-    assert after["results"][0]["similarity"] == 1.0, "and now it is what it is about"
+    assert [row["key"] for row in by_words["results"]] == ["documents/spec.txt"]
+    assert "similarity" not in by_words["results"][0], "a file has no vector"
+    assert by_meaning["results"] == [], "the meaning leg does not cover files"
 
 
 @pytest.mark.asyncio
@@ -1416,12 +1410,12 @@ def test_a_slug_keeps_what_a_person_reads_and_never_collides_silently() -> None:
     assert slug("///").startswith("doc-"), "a name with no word in it is still a name"
 
 
-def test_a_file_is_what_it_is_when_it_has_nothing_else() -> None:
-    """The vector text of a file is its identity, or it has no vector at all.
+def test_a_file_has_no_vector_text() -> None:
+    """**A saved file is keyword-only.**  Its identity is not embedded.
 
-    Measured: composing a file's vector text from its summary alone
-    left every summary-less file with no vector, which `sync` then reported as a
-    failed save it could never clear.
+    A file's size is not the agent's to control, so meaning search over files
+    is deferred until a RAG pass exists; `vector_text` is the agent-written
+    document's body, and a file has no body.
     """
     row = {
         "kind": FILE,
@@ -1431,11 +1425,7 @@ def test_a_file_is_what_it_is_when_it_has_nothing_else() -> None:
         "summary": "",
     }
 
-    text = vector_text(row)
-
-    assert "spec sheet" in text
-    assert "spec.pdf" in text
-    assert "C:/tmp/spec.pdf" in text
+    assert vector_text(row) == ""
 
 
 def test_a_category_says_what_a_file_is_only_when_it_knows() -> None:
@@ -1623,8 +1613,8 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
     assert first is not None and second is not None
 
     assert first["mirror"] != second["mirror"]
-    assert (bag() / first["mirror"]).read_text(encoding="utf-8") == "# a b\n\nfirst\n"
-    assert (bag() / second["mirror"]).read_text(encoding="utf-8") == "# a/b\n\nsecond\n"
+    assert (bag() / first["mirror"]).read_text(encoding="utf-8") == "first"
+    assert (bag() / second["mirror"]).read_text(encoding="utf-8") == "second"
 
     await store.remove(NOTE, "a b")
 
@@ -1633,58 +1623,32 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_summary_that_cannot_be_embedded_is_not_stored() -> None:
-    """`annotate` embeds before it writes, which is `write`'s order.
+async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
+    """**A saved file has no vector.**  A summary is written and indexed as
+    words, and `annotate` does not ask the embedding model at all.
 
-    The summary used to be committed first and the re-embedding second, so a
-    `cabinet_summarize` while the embeddings endpoint was down left the row
-    holding the new summary, its keyword text rewritten around it, and its
-    vector still describing the text *without* it.  Nothing could repair that:
-    the document has chunks, so `cabinet_embedded` stops the vector pass
-    selecting it again, and the cabinet still reported itself ready — the words
-    were permanently unreachable by meaning.
+    The vectorized documents are the agent-written ones — note, diary, report —
+    and their vector is the body's file, which a summary does not change.
     """
     store = store_of(index_path("jack"))
-    source = data_dir() / "spec.txt"
-    source.write_text("body text\n", encoding="utf-8")
     await store.sync(StubEmbedder())
     await store.write(
         FILE,
         "documents/spec.txt",
-        body="body text",
+        body="",
         file_path="documents/spec.txt",
         title="spec sheet",
         embedder=StubEmbedder(),
     )
-    before = store.get(FILE, "documents/spec.txt")
-    assert before is not None
+    after = await store.annotate(FILE, "documents/spec.txt", summary="about needleword")
 
-    with pytest.raises(RuntimeError, match="down"):
-        await store.annotate(
-            FILE,
-            "documents/spec.txt",
-            summary=f"about {OTHER}",
-            embedder=FailingEmbedder(),
-        )
-
-    after = store.get(FILE, "documents/spec.txt")
     assert after is not None
-    assert after["summary"] == "", "a summary that could not be embedded was stored"
+    assert after["summary"] == "about needleword"
     with store._connect() as connection:
         indexed = connection.execute(
             "SELECT search FROM cabinet_fts WHERE rowid = ?", (int(after["id"]),)
         ).fetchone()["search"]
-    assert OTHER not in indexed, "and the keyword text moved with it"
-    assert indexed == _keyword_text(before)
-
-
-def _keyword_text(row: dict[str, Any]) -> str:
-    """One row's keyword text, as `_index` would write it.
-
-    The comparison the summary test needs: what the index held before the write
-    that failed, composed the same way the store composes it.
-    """
-    return cabinet_store.search_text(row)
+    assert "needleword" in indexed, "the summary is keyword text"
 
 
 @pytest.mark.asyncio
@@ -1770,10 +1734,9 @@ async def test_two_writes_of_one_key_make_one_document() -> None:
 
     assert (first is None) != (second is None), "exactly one create won"
     row = store.get(DIARY, day)
-    assert row is not None
-    assert row["body"] in ("morning", "evening"), "the winner's body, whole"
+    assert row is not None and "body" not in row, "the text is not in the row"
     mirror = (bag() / row["mirror"]).read_text(encoding="utf-8")
-    assert mirror == f"{row['body']}\n", "the file is the document, not a section"
+    assert mirror in ("morning", "evening"), "the file is the document, whole"
 
 
 @pytest.mark.asyncio
