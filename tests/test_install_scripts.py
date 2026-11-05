@@ -225,6 +225,20 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+def _shell_functions(text: str, *names: str) -> str:
+    """The named function definitions, in the order given.
+
+    A function that runs another one needs that helper in the same file; the
+    harnesses below source only what they extract.
+    """
+    functions = []
+    for name in names:
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} is missing from install.sh"
+        functions.append(match.group(0))
+    return "\n".join(functions) + "\n"
+
+
 def test_mosquitto_install_downloads_the_libraries_it_links(tmp_path: Path) -> None:
     """The dependency closure is downloaded one package at a time.
 
@@ -408,14 +422,16 @@ printf '#!/bin/sh\\necho new-cloudflared\\n' > "$out"
     process = subprocess.Popen([str(running), "30"])
 
     try:
-        match = re.search(
-            r"^install_cloudflared\(\) \{.*?^\}$",
-            SHELL.read_text(encoding="utf-8"),
-            re.MULTILINE | re.DOTALL,
-        )
-        assert match, "install_cloudflared is missing from install.sh"
         function_file = tmp_path / "function.sh"
-        function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+        function_file.write_text(
+            _shell_functions(
+                SHELL.read_text(encoding="utf-8"),
+                "curl_retry",
+                "fetch",
+                "install_cloudflared",
+            ),
+            encoding="utf-8",
+        )
 
         harness = tmp_path / "harness.sh"
         harness.write_text(
@@ -484,14 +500,13 @@ echo "cloudflared version $INSTALLED (built now)"
 """,
     )
 
-    match = re.search(
-        r"^cloudflared_current\(\) \{.*?^\}$",
-        SHELL.read_text(encoding="utf-8"),
-        re.MULTILINE | re.DOTALL,
-    )
-    assert match, "cloudflared_current is missing from install.sh"
     function_file = tmp_path / "function.sh"
-    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+    function_file.write_text(
+        _shell_functions(
+            SHELL.read_text(encoding="utf-8"), "curl_retry", "cloudflared_current"
+        ),
+        encoding="utf-8",
+    )
 
     def current(installed: str) -> int:
         return subprocess.run(
@@ -545,14 +560,11 @@ done
 printf 'downloaded\\n' > "$out"
 """,
     )
-    text = SHELL.read_text(encoding="utf-8")
-    functions = []
-    for name in ("curl_retry", "fetch"):
-        match = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.MULTILINE | re.DOTALL)
-        assert match, f"{name} is missing from install.sh"
-        functions.append(match.group(0))
     function_file = tmp_path / "function.sh"
-    function_file.write_text("\n".join(functions) + "\n", encoding="utf-8")
+    function_file.write_text(
+        _shell_functions(SHELL.read_text(encoding="utf-8"), "curl_retry", "fetch"),
+        encoding="utf-8",
+    )
     out = tmp_path / "out.bin"
 
     result = subprocess.run(
@@ -568,6 +580,7 @@ printf 'downloaded\\n' > "$out"
             "FUNCTION_FILE": str(function_file),
             "CURL_LOG": str(log),
             "OUT": str(out),
+            "PATH": f"{stub_bin}:{os.environ['PATH']}",
         },
     )
 
