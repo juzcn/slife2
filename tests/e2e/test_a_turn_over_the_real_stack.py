@@ -46,7 +46,7 @@ from slife2.libs.host.paths import DATA_ENV_VAR, data_dir
 from slife2.libs.plugin.audience import client_meta
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.tokens import estimate_text_tokens
-from slife2.plugins.cabinet.store import DUMP, index_path, store_of
+from slife2.plugins.cabinet.store import DUMP, UPSERT, index_path, store_of
 from slife2.tui.client import MCPAgentClient
 from tests.fakes import StubEmbedder, a_home, wait_until_settled
 
@@ -76,7 +76,9 @@ INPUT_TOKENS = 8192
 #: How much of one tool output a model may be handed, in the config this test
 #: writes.  Small on purpose: the window is what the reader is asserted
 #: against, and a window near the default would be a window no test can see.
-WINDOW = 300
+#: It is the config's own floor: a smaller one cannot hold the dump marker's
+#: address, so `load()` refuses it before a child ever reads the file.
+WINDOW = 512
 
 
 #: Where this worker's ports come from.  **A band per xdist worker, because the
@@ -723,7 +725,7 @@ async def _save_dump(agent: str, call: str, body: str) -> None:
     store = store_of(index_path(agent))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, call, body=body, embedder=embedder)
+    await store.write(DUMP, call, mode=UPSERT, body=body, embedder=embedder)
 
 
 async def _read(

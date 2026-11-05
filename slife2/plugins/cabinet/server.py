@@ -144,16 +144,19 @@ INSTRUCTIONS = (
     "The cabinet: private notes, a diary, saved files and reports, all in one "
     "searchable corpus. A note and a report are keyed by a name you choose, a "
     "diary by its date, and a saved file by the path inside the cabinet. A "
-    "note, a day and a report share four tools: write creates, read reads, "
-    "update replaces the whole document, and remove deletes it — "
-    "`note_write`/`note_read`/`note_update`/`note_remove`, and the same with "
-    "`diary_` and `report_` in place of `note_`. `file_save` copies a local "
-    "file or fetches an `http(s)` URL into the cabinet; `file_read` and "
-    "`file_grep` read and search it in the same line-or-character units. A "
-    "tool output the harness kept whole is read with `dump_read` by the call "
-    "id in its `[DUMP:…]` marker, in line or character units, and searched "
-    "with `dump_grep`; an image a turn carried comes back with `attach_image` "
-    "from its `[Image:…]` key."
+    "note, a day and a report share the same verbs: write creates, read reads, "
+    "update replaces the whole document, remove deletes it, and list pages "
+    "them — `note_write`/`note_read`/`note_update`/`note_remove`/`note_list`, "
+    "and the same with `diary_` and `report_` in place of `note_`. `file_save` "
+    "copies a local file or fetches an `http(s)` URL into the cabinet; "
+    "`file_read` and `file_grep` read and search it in the same "
+    "line-or-character units, `file_remove` deletes it, and `file_list` pages "
+    "it. `cabinet_search` ranks all four kinds by words and by meaning, and "
+    "`cabinet_summarize` describes one so it can be found. A tool output the "
+    "harness kept whole is read with `dump_read` by the call id in its "
+    "`[DUMP:…]` marker, in line or character units, and searched with "
+    "`dump_grep`; an image a turn carried comes back with `attach_image` from "
+    "its `[Image:…]` key."
 )
 
 #: How much of a file is sniffed for the two things that settle its encoding
@@ -402,6 +405,18 @@ async def _fetch_url(
         raise ToolError(
             f"fetching {url} took longer than {budget:.0f} seconds."
         ) from exc
+
+
+def _local_path(entry: str) -> Path:
+    """One local source path, as the caller's own working directory spells it.
+
+    **A relative path is the model's**, and its working directory is the data
+    directory — where its own tools run, and where a path a tool printed is
+    relative to.  This daemon's working directory is `runtime/`, so resolving a
+    relative path here would name a different file, or none at all.
+    """
+    path = Path(entry)
+    return path if path.is_absolute() or path.drive else home() / path
 
 
 #: What survives into a fetched file's name.  Letters, digits, dots and spaces
@@ -675,7 +690,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         Args:
             subject: What the note is about — its name, and the key it is read
                 by.
-            content: The note itself.
+            content: The note itself — the whole of its file; the subject is
+                not prepended.
             tags: Comma-separated words to file it under.
 
         Returns:
@@ -709,7 +725,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Args:
             subject: The note's subject.
-            content: The note, whole.
+            content: The note, whole — the whole of its file; the subject is
+                not prepended.
             tags: Comma-separated words to file it under. Empty clears them.
 
         Returns:
@@ -754,7 +771,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The note's `kind`, `key`, `title`, `time`, `tags` and `summary`,
-            and the whole of it under `text`.
+            and its whole file text under `text`; the subject is the key, not
+            part of the text.
         """
         row = await missing_row(
             ctx, NOTE, subject, f"there is no note about {subject!r}."
@@ -800,7 +818,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         `diary_update`.
 
         Args:
-            content: The entry.
+            content: The entry — the whole of its file; the date is not
+                prepended.
             date: The day it is about, `YYYY-MM-DD`. Empty means today.
             tags: Comma-separated words to file it under.
 
@@ -834,7 +853,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The day's `kind`, `key`, `title`, `time`, `tags` and `summary`, and
-            the whole entry under `text`.
+            its whole file text under `text`; the date is the key, not part of
+            the text.
         """
         row = await missing_row(
             ctx, DIARY, date, f"there is no diary entry for {date}."
@@ -852,7 +872,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         `diary_write` creates it.
 
         Args:
-            content: The entry, whole.
+            content: The entry, whole — the whole of its file; the date is not
+                prepended.
             date: The day, `YYYY-MM-DD`. Empty means today.
             tags: Comma-separated words to file it under. Empty clears them.
 
@@ -937,12 +958,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         name, where it came from and any `summary` you write.
 
         Args:
-            paths: Local paths or `http(s)` URLs. Name the files in a directory
-                rather than the directory itself.
+            paths: Local paths or `http(s)` URLs. A relative path is relative
+                to your working directory. Name the files in a directory rather
+                than the directory itself.
             title: A name for it. Empty uses the filename.
             tags: Comma-separated words to file it under.
-            summary: What the file is, in your words — the text its semantic
-                search is built from.
+            summary: What the file is, in your words — words a search can
+                find it by.
             category: The directory inside the cabinet — `images`, `documents`
                 and so on. Empty picks one from the extension.
 
@@ -965,7 +987,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 raise ToolError(
                     f"{entry!r} is not an http(s) URL — only those are fetched."
                 )
-            local.append(Path(entry))
+            local.append(_local_path(entry))
         missing = [str(path) for path in local if not path.is_file()]
         if missing:
             raise ToolError("no such file: " + ", ".join(missing))
@@ -982,7 +1004,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 name = _download_name(entry, mime)
                 mime = mime or (mimetypes.guess_type(name)[0] or "")
             else:
-                source = Path(entry)
+                source = _local_path(entry)
                 name = source.name
                 mime = mimetypes.guess_type(name)[0] or ""
             chosen = category.strip() or category_for(name)
@@ -1198,7 +1220,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Args:
             title: What it is a report of. This is its key.
-            content: The report.
+            content: The report — the whole of its file; the title is not
+                prepended.
             tags: Comma-separated words to file it under.
             period_start: The first day the report covers, `YYYY-MM-DD`.
             period_end: The last day it covers.
@@ -1235,8 +1258,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The report's `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `period_start` and `period_end`, and the whole of it under `text`.
-            `time` is when the report was first written.
+            `period_start` and `period_end`, and its whole file text under
+            `text`; the title is the key, not part of the text.  `time` is when
+            the report was first written.
         """
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
@@ -1260,7 +1284,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Args:
             title: The report's title.
-            content: The report, whole.
+            content: The report, whole — the whole of its file; the title is
+                not prepended.
             tags: Comma-separated words to file it under. Empty clears them.
             period_start: The first day it covers, `YYYY-MM-DD`. Empty clears
                 it.
@@ -1668,7 +1693,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         and an image comes back with `attach_image` from its `[Image:…]` key.
 
         Args:
-            keywords: Words to look for — a path like `files/docs/spec.pdf`
+            keywords: Words to look for — a path like `documents/spec.pdf`
                 works here. They rank documents that carry them first, but
                 they are not a filter: with no sentence, the same words are
                 also read by meaning, so a note, day or report hit may not

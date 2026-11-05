@@ -589,6 +589,28 @@ async def test_a_saved_file_is_copied_never_moved() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_relative_local_path_is_the_models_working_directory() -> None:
+    """**A relative path is the data directory's, not this daemon's.**
+
+    The agent's tools run in the data directory, so a path one of them printed
+    is relative to it.  The cabinet's own process runs in `runtime/`, so
+    resolving a relative path here named a different file — or, as here, no
+    file at all.
+    """
+    source = data_dir() / "relative.txt"
+    source.write_bytes(b"found\n")
+
+    async with Client(cabinet()) as client:
+        saved = await payload(client, "file_save", paths=["relative.txt"])
+        read = await payload(
+            client, "file_read", path="documents/relative.txt", mode="char"
+        )
+
+    assert saved["saved"][0]["source"] == str(source), "the resolved source is kept"
+    assert read["text"] == "found\n"
+
+
+@pytest.mark.asyncio
 async def test_two_files_of_one_name_are_two_files() -> None:
     """A cabinet that keeps one of them is a cabinet that lost the other."""
     first = data_dir() / "one" / "notes.txt"
@@ -1786,13 +1808,13 @@ async def test_a_search_caps_the_shortlist_it_hands_to_sql(
 
 # --- the dump, and the two readers that have to stay inside the budget --------
 #
-#  A dump is the kind no tool of this plugin writes: the harness saves a tool
-#  output that was too large for the conversation, keeps the whole of it, and
-#  writes a marked head into the conversation instead.  `dump_read` and
-#  `dump_grep` are how a model gets the part the head did not carry — and the
-#  property these tests are about is that their answers cannot out-run the head,
-#  because a reader that could would be feeding the thing that truncates
-#  results.
+#  A dump is the kind no model-facing tool of this plugin writes: the harness
+#  calls `dump_save` directly, keeping a tool output that was too large for the
+#  conversation whole, and writes a marked head into the conversation instead.
+#  `dump_read` and `dump_grep` are how a model gets the part the head did not
+#  carry — and the property these tests are about is that their answers cannot
+#  out-run the head, because a reader that could would be feeding the thing
+#  that truncates results.
 
 
 def dump_body(lines: int = 4000, *, every: int = 0) -> str:

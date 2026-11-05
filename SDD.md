@@ -1511,7 +1511,9 @@ The cabinet is per conversation: an agent's own conversation has
 a fork uses the maker's. **The file is the document.** For every mirrored kind —
 note, diary, report, dump — the text is written to its file in the same
 operation as its row, and **there is no body column**: the row is metadata and
-the address, not a second copy. A file and an image have no mirror, because
+the address, not a second copy. The file holds the text exactly as the caller
+gave it; a note's subject, a day's date and a report's title are the row's and
+are never prepended to it. A file and an image have no mirror, because
 their bytes are the document. The path is stored rather than derived, so a
 change to the naming rule orphans nothing that already exists. Every
 caller-supplied path is resolved against the cabinet root and refused if it
@@ -1528,7 +1530,9 @@ note/diary/report's vector is its file's whole text; its summary is keyword text
 only, so there is no re-embedding asymmetry left in `annotate`.
 
 A saved file's source is a local path or an `http(s)` URL. A local file is
-copied and never moved; a URL is fetched whole, bounded by `MAX_FETCH_BYTES`
+copied and never moved; a relative path is resolved against the data directory,
+where the agent's own tools run, rather than against the cabinet daemon's own
+working directory. A URL is fetched whole, bounded by `MAX_FETCH_BYTES`
 and `transport.file_fetch`. The URL is untrusted input: only `http(s)` is accepted,
 credentials in a URL are refused, and a host written as an address or as
 `localhost` must be globally routable, so a fetched URL reaches the internet

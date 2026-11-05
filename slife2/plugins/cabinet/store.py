@@ -79,29 +79,29 @@ whether the kind is in the corpus.  Every one of those is a fact
 about a kind rather than about a document, so each is spelled out once rather
 than once per table, view arm, trigger set and write.
 
-**Every corpus write embeds, and there is no drainer.**  There is no background
-walk over unembedded documents catching them up on its own schedule, and none
-is needed: a turn is stored with its vector in one transaction, and this store
-is the same — **a corpus write that cannot embed stores nothing**, which is why
-the plugin removes the bytes it copied when the embedding call fails.  A dump
-and an image are not embedded at all, because they are not in the corpus; their
+**Every vectorized write embeds, and there is no drainer.**  There is no
+background walk over unembedded documents catching them up on its own schedule,
+and none is needed: a turn is stored with its vector in one transaction, and
+this store is the same — **a note, a day or a report that cannot embed stores
+nothing**.  A saved file is in the keyword corpus and has no vector; a dump and
+an image are not embedded at all, because they are not in the corpus; their
 address is in the turn.  What stands in place of a drainer is the one pass
 `sync` makes when a cabinet is opened by a *different* embedding model, and it
 is a rebuild rather than a drain: it does not remember which rows are missing
 (the index is derived, so "missing" is a query) and it does not run in the
 background.
 
-**A document is written twice, and the file is the one a person reads.**  Every
-text kind — a note, a diary, a report, a dump — also lands as markdown under
-the cabinet directory (`notes/`, `diary/`, `reports/`, `dumps/`), because a
-cabinet nobody can open in an editor is a database with a nicer name.  A file
-and an image have no mirror: their bytes are the document.  The two writes are
-one operation and they are this module's: a row without its mirror is a note
-that exists and cannot be read by the person it was written for, and the mirror
-a row holds is a function of its *key* rather than of its key's slug, so two
-subjects that slugify alike cannot silently share one file (see `mirror_stem` —
-the readable name where it is unambiguous, and the readable name plus a digest
-of the key where it is not).
+**A document is written once, to its file, and the row is the address.**  Every
+text kind — a note, a diary, a report, a dump — lands as markdown under the
+cabinet directory (`notes/`, `diary/`, `reports/`, `dumps/`), because a cabinet
+nobody can open in an editor is a database with a nicer name; the row holds no
+copy of the text.  A file and an image have no mirror: their bytes are the
+document.  The row and the file are one operation and they are this module's: a
+row without its mirror is a note that exists and cannot be read by the person it
+was written for, and the mirror a row holds is a function of its *key* rather
+than of its key's slug, so two subjects that slugify alike cannot silently share
+one file (see `mirror_stem` — the readable name where it is unambiguous, and the
+readable name plus a digest of the key where it is not).
 
 **The cabinet is one directory per agent** — `agents/<agent>/cabinet/` — and it
 is one *directory* rather than a set of files, which is what makes copying or
@@ -180,11 +180,11 @@ FILE = "file"
 REPORT = "report"
 #: A tool's output, kept whole as a file because nothing here may decide what
 #: part of it mattered.  The row carries the address (the call id and the mirror
-#: path), not the text; the file is the one copy.  The only kind **no tool of
-#: this plugin writes**: the harness dumps it (`slife2.libs.harness`) and writes
-#: a marked head into the conversation, and `dump_read`/`dump_grep` are how a
-#: model gets the part it did not get — a bounded answer, for the reason the
-#: module docstring gives.
+#: path), not the text; the file is the one copy.  The only kind **no
+#: model-facing tool of this plugin writes**: the harness calls `dump_save`
+#: directly and writes a marked head into the conversation, and
+#: `dump_read`/`dump_grep` are how a model gets the part it did not get — a
+#: bounded answer, for the reason the module docstring gives.
 DUMP = "dump"
 #: An image attached to a turn, kept whole because the turn log is text.
 #: **The second bytes-backed kind**, and the one whose reader is not a text
@@ -410,7 +410,7 @@ def search_text(row: Mapping[str, Any]) -> str:
 
 
 def vector_text(row: Mapping[str, Any]) -> str:
-    """The text a document is a vector of: the body of an agent-written document.
+    """The text a document is a vector of: the whole text of an agent-written one.
 
     **Only a note, a day and a report are vectorized.**  Their text is the
     document the agent wrote, and it lives in the file the row points at; the
@@ -714,11 +714,11 @@ class CabinetStore:
     async def sync(self, embedder: Embedder) -> dict[str, Any]:
         """Make both indexes this embedder's over the corpus, or say what is missing.
 
-        **One pass, and it is a rebuild rather than a catch-up.**  A corpus
+        **One pass, and it is a rebuild rather than a catch-up.**  A vectorized
         document can only be missing from the index when the index belongs to a
         different embedder or was built by different rules -- because every
-        corpus write embeds in the same transaction, and a vector is dropped
-        only by the branch below.  So the question "does this index need
+        vectorized write embeds in the same transaction, and a vector is
+        dropped only by the branch below.  So the question "does this index need
         rebuilding" is one read of `index_meta`, and the answer is a *rebuild*
         of everything rather than a hunt for holes.
 
@@ -861,14 +861,14 @@ class CabinetStore:
     async def embed_missing(
         self, embedder: Embedder, *, limit: int | None = None
     ) -> tuple[int, int]:
-        """Embed corpus documents the vector index does not hold.  `(remaining, done)`.
+        """Embed vectorized documents the vector index does not hold.  `(remaining, done)`.
 
         **Every one of them, a batch at a time** — the caller loops until the
         first number is zero.  Batching is what keeps one call from embedding a
         thousand documents before it answers, and it is why this can be called
         from anywhere rather than only from `sync`: a document whose embedding
-        failed at save time is found by the same query.  An attachment is never
-        selected: it is not in the corpus and has no vector to place.
+        failed at save time is found by the same query.  A saved file and an
+        attachment are never selected: neither is vectorized.
 
         `(remaining, done)`: how many are still to try, and how many this call
         tried.  `remaining` is the count *after* the batch, read from the same
@@ -879,13 +879,13 @@ class CabinetStore:
         would hand it back for ever and the caller's loop would not end.
 
         **Its SQLite hops off the loop, one call at a time.**  This is the loop
-        `sync` runs at open, and the documents it walks are the whole corpus the
-        first time a changed model makes it run: a selection, a placement per
-        document and a count, all of it blocking, all of it on the loop unless
-        each one is sent to a worker (`sync` states why that is this side's job
-        and not its caller's).  The embed between two of them is the one step
-        that stays on the loop, because it is the one step that is already
-        awaited.
+        `sync` runs at open, and the documents it walks are the whole vectorized
+        corpus the first time a changed model makes it run: a selection, a
+        placement per document and a count, all of it blocking, all of it on the
+        loop unless each one is sent to a worker (`sync` states why that is this
+        side's job and not its caller's).  The embed between two of them is the
+        one step that stays on the loop, because it is the one step that is
+        already awaited.
         """
         limit = limit or SYNC_BATCH  # read here, so a test can size the batch
         rows = await asyncio.to_thread(self._unembedded, limit)
@@ -1108,10 +1108,11 @@ class CabinetStore:
         one key is the same fact restated and the row keeps its `created_at`.
 
         **The text lives in the file, not in the row.**  Every mirrored kind —
-        note, diary, report, dump — writes its body to `mirror`; **there is no
-        body column**, so a document is one copy on disk rather than two.  The
-        row is the address and the metadata.  (A saved file's bytes are already
-        on disk; an image's are too.)
+        note, diary, report, dump — writes the text it was given to `mirror`,
+        exactly; **there is no body column**, so a document is one copy on disk
+        rather than two.  The row is the address and the metadata, and a title
+        is the row's: it is never prepended to the file.  (A saved file's bytes
+        are already on disk; an image's are too.)
 
         **An agent-written document embeds before anything is written.**  The
         model is asked first (`vectors`), and only then does one transaction

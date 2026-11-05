@@ -751,7 +751,7 @@ provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 ke
 `diary/`、`reports/`）；行只是地址和元数据，文件的全文就是语义检索 embed 的内容。
 dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下；标题、路径
 和 summary 是关键词文本，它没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。
-`file_read` 和 `file_grep` 按行或按字符读写保存文件的解码文本；PDF、图片或压缩包按其
+`file_read` 和 `file_grep` 按行或按字符读取与搜索保存文件的解码文本；PDF、图片或压缩包按其
 字节的转义渲染来显示。
 
 `cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。语义排序只覆盖
