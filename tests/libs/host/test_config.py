@@ -550,8 +550,8 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     keeps nothing.
     """
     assert load(write(tmp_path, "")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
-    stated = load(write(tmp_path, "tool_result:\n  tokens: 500\n")).tool_result
-    assert stated.tokens == 500
+    stated = load(write(tmp_path, "tool_result:\n  tokens: 800\n")).tool_result
+    assert stated.tokens == 800
 
     path = write(tmp_path, "tool_result:\n  tokens: 0\n")
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
@@ -561,12 +561,13 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
 def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
     """**Refused where it is written, not at the turn it would ruin.**
 
-    A window over a shortened result opens with the line that says where the
-    whole of it is, and that address costs 50-61 tokens for the call ids the
-    providers emit — more than a small budget has in total.  `dumps.window`
-    refuses to hand back a window whose address it had to cut, so such a budget
-    can only ever fail a turn; the config is where that is worth saying, which
-    is the argument this section already makes about zero.
+    A window over a shortened result opens with the marker and the sentence
+    that say where the whole of it is, and that address costs about 140 tokens
+    for the call ids the providers emit and the home-relative path — more than
+    a small budget has in total.  `dumps.window` refuses to hand back a window whose
+    address it had to cut, so such a budget can only ever fail a turn; the
+    config is where that is worth saying, which is the argument this section
+    already makes about zero.
     """
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
         load(write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS - 1}\n"))

@@ -471,9 +471,9 @@ async def test_an_oversized_tool_result_is_kept_whole(tmp_path) -> None:
     is the tool designer's judgement rather than the store's.
 
     What a model is shown is bounded where text enters a context — the harness
-    windows a result, and the cabinet's `dump_read` reads back what it windowed
-    out.  Bounding it here as well would be a second rule about the same thing,
-    and one the model cannot read past.
+    truncates a result, and the cabinet's `dump_read`/`dump_grep` read back
+    what it was cut from.  Bounding it here as well would be a second rule
+    about the same thing, and one the model cannot read past.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     big = "A" * 50000

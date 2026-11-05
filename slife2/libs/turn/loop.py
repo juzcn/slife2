@@ -241,13 +241,12 @@ class AgentLoop:
         self._deliver = deliver
         #: How a tool result that does not fit is fitted, or None for one that
         #: goes in as it came.  **Handed in for the third time and the same
-        #: reason**: the loop does not know what the conversation is about, and
-        #: the party that chooses which lines of a long output this conversation
-        #: needs is the party that can see it (`slife2.libs.harness.dumps`).
-        #: None means the result is passed through, which is the loop's answer to
-        #: "nobody said otherwise" — and the cost of that answer is a turn that
-        #: carries whatever the tool returned, which is a fact about the tool and
-        #: not about this decision.
+        #: reason**: the loop does not know which cabinet holds a
+        #: conversation's files, and the callback that writes one does
+        #: (`slife2.libs.harness.dumps`).  None means the result is passed
+        #: through, which is the loop's answer to "nobody said otherwise" — and
+        #: the cost of that answer is a turn that carries whatever the tool
+        #: returned, which is a fact about the tool and not about this decision.
         self._compress = compress
         #: Model calls allowed in one turn before it is cut off, or **0 for no
         #: cap at all**.  A cap is something somebody asks for: an absent key is
@@ -485,10 +484,10 @@ class AgentLoop:
             # with no await between them.**  An assistant message whose calls are
             # only partly answered is the one history state every provider
             # rejects.  `_fit` is the caller's own callback, so it is the
-            # iteration that can fail (a cabinet that will not open, a
-            # discriminator that stalled), and a failed turn keeps its messages:
-            # appending the message before its answers would fail every later
-            # turn until the conversation was rebuilt.
+            # iteration that can fail (a cabinet that will not open), and a
+            # failed turn keeps its messages: appending the message before its
+            # answers would fail every later turn until the conversation was
+            # rebuilt.
             #
             # **An interruption is completed rather than dropped**, a different
             # rule from the failure above: nothing downstream could reconstruct
@@ -497,9 +496,6 @@ class AgentLoop:
             # completed batch is the one thing that survives the turn, and the
             # agent server keeps it (`send_message`'s cancellation repair).
             #
-            # What `_fit` is handed is therefore the conversation *before* this
-            # iteration's answer, which is also the honest list to judge a result
-            # against: it contains no half-written batch.
             answers: list[Message] = []
             cutins: list[tuple[str, str, str]] = []
             for index, call in enumerate(result.tool_calls):
@@ -507,7 +503,7 @@ class AgentLoop:
                 before = injected() if injected is not None else 0
                 try:
                     text, _ok = await self._one(call, observer, iteration, messages)
-                    fitted = await self._fit(call, text, messages)
+                    fitted = await self._fit(call, text)
                 except asyncio.CancelledError:
                     # **The batch is completed on the way out, not dropped.**
                     # Calls that already ran keep their answers, a call whose fit
@@ -680,7 +676,7 @@ class AgentLoop:
         # not have shown one whatever it did with it.
         started = time.monotonic()
         if meta.background:
-            text, ok = await self._background(dispatch, bound, messages)
+            text, ok = await self._background(dispatch, bound)
         else:
             text, ok = await self._foreground(dispatch, bound)
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -710,17 +706,17 @@ class AgentLoop:
             )
         return text, ok
 
-    async def _fit(self, call: ToolCall, text: str, messages: Sequence[Message]) -> str:
-        """What the conversation carries for one result: the result, or a window.
+    async def _fit(self, call: ToolCall, text: str) -> str:
+        """What the conversation carries for one result: the result, or its head.
 
         **The harness's move and not the tool's**, which is why it is a callback
-        the caller injects rather than anything this module decides: fitting a
-        result is choosing what *this conversation* needs from it, and the loop
-        knows neither the conversation nor the model's budget — so it hands over
-        the call, the text and the list, and takes back what to append.  A loop
-        with no callback hands the result on unchanged: the same
-        None-means-nobody-said rule `approve` and `deliver` follow, and the cost
-        of it is a turn whose size is whatever the tool returned.
+        the caller injects rather than anything this module decides: the bound
+        is `tool_result.tokens`, and the party that writes the dump and knows
+        where it went is the agent server.  The loop hands over the call and the
+        text and takes back what to append.  A loop with no callback hands the
+        result on unchanged: the same None-means-nobody-said rule `approve` and
+        `deliver` follow, and the cost of it is a turn whose size is whatever
+        the tool returned.
 
         **Two callers, and one window.**  The ordinary one is the iteration loop
         below, where the fit happens after the call is announced and before the
@@ -735,7 +731,7 @@ class AgentLoop:
         """
         if self._compress is None:
             return text
-        return await self._compress(call, text, messages)
+        return await self._compress(call, text)
 
     async def _foreground(
         self, dispatch: ToolCall, bound: float | None
@@ -763,7 +759,6 @@ class AgentLoop:
         self,
         dispatch: ToolCall,
         bound: float | None,
-        messages: Sequence[Message],
     ) -> tuple[str, bool]:
         """Hand a call to the background, and answer the id the model polls.
 
@@ -787,17 +782,11 @@ class AgentLoop:
         only, at the far end (`slife2.libs.harness.async_tasks.hand_back`), because
         the marker and the sentence that name the call this answers are not
         something a window may take away.
-
-        `messages` is handed over as the list it is and not as a copy: the
-        hand-back can arrive long after this turn ended — after a rebuild has
-        replaced the conversation, even — and the honest thing for the
-        discriminator to be shown is the conversation as it stands *then*, which
-        only a reference to the live list can be.
         """
 
         async def fit(body: str) -> str:
             """What the conversation carries for this result, decided when it lands."""
-            return await self._fit(dispatch, body, messages)
+            return await self._fit(dispatch, body)
 
         # **The call's own id and name go with it**, because nothing else can
         # supply them later: `check_async` is given a task id and nothing else —

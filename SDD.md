@@ -790,31 +790,48 @@ nor a failed delivery.
 #### 5.2.4 Dumps
 
 A tool result too large for the conversation is stored whole as a `dump` row in
-the cabinet, keyed by the tool call id. The conversation carries a selection of
-the output's own lines, chosen by a **discriminator** model call that receives
-the result, the conversation in hand, and the current input. It answers with
-line ranges and nothing else; it never quotes or paraphrases, and the harness
-cuts the original at the returned line numbers. A wrong selection costs a
-re-read, not a fabricated fact.
+the cabinet, keyed by the tool call id. The conversation carries a fixed
+**head** of it within `tool_result.tokens`, and the marker in front of the head
+names the call, the file's byte size and its path relative to the data
+directory — where the agent's own tools run, so moving the home does not
+invalidate a marker already in a turn. The size is one `stat` of the file the
+cabinet wrote; the marker counts no lines and no characters, because a count is
+a scan the marker does not need — the readers answer it when asked.
+
+The head is a truncation by rule, not a selection by model. It is the largest
+prefix of the tool's own text that fits, so nothing is rewritten; the file is
+the same text, and the agent can open it. `dump_read` reads it by line
+(`mode="line"`) or by character (`mode="char"`), and `dump_grep` finds text in
+it and answers both addresses — the line and the character offset — so either
+reader can continue from a match. Character mode exists because some text files
+are not organized in lines: minified JSON, one long record, output whose
+separators are not line breaks.
+
+**Why not a discriminator.** A model asked which lines matter is a second model
+call for every oversized result, carrying the result and the conversation. That
+is expensive, and its input can itself be larger than the context it was meant
+to protect. A fixed head costs one measurement and cannot overflow; the model
+that needs a part the head did not carry reads it from the file.
 
 **Why 8,000 tokens.** The window is meant to fire rarely: on the 2026-10 turn
 log (349 results), the largest result was 5,284 tokens, so an 8,000-token window
 shortened none, while a 4,000-token window would have shortened 2%. The case the
 mechanism exists for is a tool bound to be long, such as a 10,000-word essay.
 
-A non-text result is dumped and not shortened: there are no lines to select. The
-whole result is kept, a stub says so, and the row's MIME records the decision.
+A non-text result gets the same treatment: the head is what tells a model what
+it is, and the readers are bounded, so an attempt to read bytes is a bounded
+answer rather than a second overflow.
+
 The harness reaches the cabinet directly for `dump_save`, because that tool
-carries no audience mark; the model's route back is `dump_read`.
+carries no audience mark; the model's routes back are `dump_read` and
+`dump_grep`.
 
 #### 5.2.5 Fallbacks
 
-Exactly one step in this path has a fallback registered in Appendix C: an
-unreadable answer to the dump discriminator leaves the conversation with the
-first window. Every other step MUST succeed. Keeping the output, writing it, and
-reading the window back fail the turn loudly if they fail: a conversation
-carrying an output that cannot be read back gives up the bound and breaks the
-address while looking like success.
+No step in this path has a fallback registered in Appendix C. Keeping the
+output, writing it, and building the head MUST succeed, and each fails the turn
+loudly if it does not: a conversation carrying a marker whose file is not there
+has given up the bound and broken the address while looking like success.
 
 ### 5.3 Harness tool pairs
 
@@ -972,8 +989,8 @@ A batch of tool calls is written atomically:
    no `await` between them.
 
 **Why this order.** Running a call cannot raise; the registry turns failure into
-text. Fitting a result can raise — a cabinet that will not open, a discriminator
-that stalled — so the assistant message is written only after every result is
+text. Fitting a result can raise — a cabinet that will not open — so the
+assistant message is written only after every result is
 fitted. Writing it first would leave the rejected history behind, and a failed
 turn keeps its messages, so that conversation would fail every later turn. An
 interrupted turn's row is always written because a write conditional on how a
@@ -1355,9 +1372,9 @@ schema.
 - **Two tools answer with text rather than JSON, because the text is the
   thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
   hands over the skill's whole `SKILL.md`.
-- **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 128). A
+- **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 512). A
   listing pages; an output that cannot be bounded is the harness's dump, and
-  `dump_read` is a searching reader within the same budget.
+  `dump_read` and `dump_grep` are bounded readers within the same budget.
 
 A field may contain a sentence, because a person reads some answers too. The
 rule is that the envelope is one shape, so a reader that knows one tool knows
@@ -1405,8 +1422,8 @@ every known home carries on past a file it refuses: the refusal is that file's.
 The live-context list is a row, not a file. It is written in the same transaction
 as the turn that changed it. A turn can point outside itself: a tool output too
 large for the conversation is stored whole in the cabinet, and the turn keeps a
-marked selection of it, so the row still holds exactly what the model saw and
-the whole is reachable by the tool call id.
+marked head of it, so the row still holds exactly what the model saw and the
+whole is reachable by the tool call id.
 
 ### 8.2 Index machinery
 
@@ -1459,7 +1476,8 @@ A note, a diary day and a report share four verbs: `{kind}_write` creates the
 document and refuses a key that already exists, `{kind}_read` reads it,
 `{kind}_update` replaces the whole document, and `{kind}_remove` deletes it. A
 saved file's write is `file_save`, which copies a local file or fetches an
-`http(s)` URL in; its read and remove keep their own names.
+`http(s)` URL in; its read, search and remove keep their own names
+(`file_read`, `file_grep`, `file_remove`).
 
 | Kind | Key | Write behavior |
 |---|---|---|
@@ -1478,7 +1496,7 @@ and a remove take, and columns a kind does not use are empty. A `dump` and an
 `image` share the
 table because they share the directory, the key and the write path, but they
 are not in the corpus: the turn's marker is their address (`[DUMP:…]` →
-`dump_read`, `[Image:…]` → `attach_image`).
+`dump_read`/`dump_grep`, `[Image:…]` → `attach_image`).
 
 The cabinet is per conversation: an agent's own conversation has
 `agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
@@ -1509,24 +1527,46 @@ site.
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
 with `image_save`. Neither write produces an index entry; the row is stored for
-its text or bytes and the turn's marker is the address. `dump_read` is the way
-back for a dump. For an image it is `attach_image`: the turn's `[Image:{…}]`
-reference names the key, `image_source` resolves it to a `data:` URL (or the
-source URL), and the tool attaches it. An `http(s)` image is never fetched here;
-the row keeps the URL and the provider fetches it.
+its text or bytes and the turn's marker is the address. `dump_read` and
+`dump_grep` are the ways back for a dump. For an image it is `attach_image`: the
+turn's `[Image:{…}]` reference names the key, `image_source` resolves it to a
+`data:` URL (or the source URL), and the tool attaches it. An `http(s)` image is
+never fetched here; the row keeps the URL and the provider fetches it.
 
-`dump_read` is a searching reader: `pattern` finds lines, matched literally and
-ignoring case; `context` adds the lines around each match; `offset` reads from a
-line, negative from the end; `limit` reads fewer lines. The pattern is text, not
-a regular expression: a regex over a 240,000-line output is an unbounded program
+`dump_read` reads by line or by character. `mode="line"` takes a 1-based
+`offset`, negative from the end; `mode="char"` takes a 0-based character
+`offset`, negative from the end. `limit` caps lines or characters, and `0`
+shows as many as fit. Line mode numbers the lines it returns; character mode
+returns the raw slice, which is the way to read a file that is not organized in
+lines. Line mode answers with the line count (it splits the file to page it);
+every answer carries the character count, which is O(1). `next` is where the
+following window starts in the mode's own units.
+
+`dump_grep` matches a literal pattern within one line, ignoring case. Nothing
+the caller wrote is quoted back. Every match answers its line number and the
+0-based character offset where it starts, so either read mode can continue from
+it; `matched` counts the whole output rather than the page, and `next` names the
+line of the next match when not all matches fit. The pattern is text, not a
+regular expression: a regex over a 240,000-line output is an unbounded program
 running in a shared server.
+
+`file_read` and `file_grep` are the same two readers over a saved file's
+decoded text — the file counterpart of `dump_read`/`dump_grep`, differing only
+in where the body comes from. Both stream: `file_grep` holds only the page as
+it scans; `file_read` makes one counting pass for the totals and a second that
+seeks the window (skipping lines, or decoding forward to a character offset),
+so its memory is the window rather than the file. A saved file is whole on
+disk and is not truncated; the window is the answer's bound, and `next` asks
+for the following one. Path resolution and the binary rendering live in one
+function, and the encoding sniff in another, so the two readers cannot disagree
+about what the file's text is.
 
 Every answer stays within `tool_result.tokens`; the bound is enforced where the
 answer leaves, or a reader could return more than the shortening removed.
 
 A dump and an image are not in the corpus. Their address is the marker the turn
-carries — the dump's call id and the image's key — so `dump_read` and
-`attach_image` are the readers, and neither has a search entry to rank.
+carries — the dump's call id and the image's key — so `dump_read`/`dump_grep`
+and `attach_image` are the readers, and neither has a search entry to rank.
 
 ### 8.4 Embeddings
 
@@ -2005,7 +2045,7 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | `embeddings:` | The context store, the cabinet, and the tool hub |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
-| `tool_result:` | The harness, the cabinet's `dump_read`, and the media server |
+| `tool_result:` | The harness, the cabinet's `dump_read` and `dump_grep`, and the media server |
 | `mcp:` | `slife2-mcp-tools`, and the tool hub for its source names |
 | `rest-api:` | `slife2-restapi-tools`, and the tool hub for its source names |
 | `cli:` | `slife2-cli` |
@@ -2432,10 +2472,9 @@ The following are not implemented in this version:
 | The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
-| A `grep` search leg | A bounded literal reader exists for dumps; a system-wide regex leg is a larger change. | Partial spellings and symbols rely on the two existing legs. |
+| A corpus-wide `grep` search leg | `dump_grep` is a bounded literal reader for one dump; a system-wide regex leg is a larger change. | Partial spellings and symbols in the corpus rely on the two existing legs. |
 | A policy that forces approval | The model-driven `_approve` exists; a named list does not. | `skill_set` and `mcp_set` rely on model judgment. |
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
-| A discriminator result larger than its own window | The fix needs the provider's window. | Such a result fails the turn loudly. |
 | A bound on tool-call arguments | Arguments are the model's own words; shortening them is a different problem. | A model can write an unbounded argument into the conversation. |
 
 ## Appendix A. Invariants
@@ -2546,7 +2585,6 @@ The four shapes an undeclared fallback takes:
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
 | A trim answer cannot be read | Return `{}`; `trim_answer` refuses it | The trim and the names the model would have seen | A call that could not be made, which raises | A refusal in the server log |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | A debug line naming the link |
-| The dump discriminator reply is unreadable | Carry the first window | The selection | Keeping, writing, and reading the dump, which fail the turn | An info line naming the call |
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
 | A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |

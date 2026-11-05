@@ -74,8 +74,14 @@ MEDIA_TYPES: dict[str, str] = {
 MAX_BYTES = 20 * 1024 * 1024
 
 
-def _encode(source: str) -> tuple[str, str]:
+def _encode(source: str, base: Path | None = None) -> tuple[str, str]:
     """One source as `(url, refusal)` — exactly one of the two is filled in.
+
+    `base` is where a relative path is resolved: the agent's data directory for
+    a model's `attach_image`, so a path a tool printed relative to its working
+    directory can be attached.  An absolute path ignores it, and so does a
+    `data:` or `http(s)` URL.  A caller with no base (a person's own message)
+    leaves a relative path as the process sees it.
 
     **A `data:` URI and an `http(s)` URL pass straight through**, worth stating
     because it looks like a capability this process does not have: a remote URL
@@ -100,6 +106,8 @@ def _encode(source: str) -> tuple[str, str]:
     if source.startswith(("data:", "http://", "https://")):
         return source, ""
     path = Path(source).expanduser()
+    if base is not None and not path.is_absolute():
+        path = base / path
     if not path.is_file():
         return "", f"{source}: no such file"
     media_type = MEDIA_TYPES.get(path.suffix.lower(), "")
@@ -131,9 +139,11 @@ def _encode(source: str) -> tuple[str, str]:
     return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}", ""
 
 
-def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
+def resolve(
+    sources: Sequence[str], *, base: Path | None = None
+) -> tuple[list[tuple[str, str]], list[str]]:
     """Those sources, as `([(source, data_url)], refusals)` — one bad one costs
-    only itself.
+    only itself.  `base` is where a relative path is resolved (`_encode`).
 
     The source travels back with its encoded form so that a caller can *name*
     what it attached: a data URL is megabytes and is never printed, while the
@@ -155,7 +165,7 @@ def resolve(sources: Sequence[str]) -> tuple[list[tuple[str, str]], list[str]]:
             # read twice.
             continue
         seen.add(source)
-        url, refusal = _encode(source)
+        url, refusal = _encode(source, base)
         if refusal:
             refusals.append(refusal)
             continue

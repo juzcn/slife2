@@ -383,15 +383,15 @@ async def test_a_background_result_is_windowed_before_it_is_handed_back() -> Non
     that the loop's own fit does not cover.  So the whole output entered the
     conversation and its turn log and was carried by every later request, and one
     call's answer was bounded or unbounded depending only on whether that
-    delivery landed.  The window is over the body alone: the marker and the
+    delivery landed.  The fit is over the body alone: the marker and the
     sentence that name the call this answers are how the model pairs the result
-    with the call that asked for it, and a window may not take them away.
+    with the call that asked for it, and a truncation may not take them away.
     """
     big = "\n".join(f"line {number} of a tool output" for number in range(1, 400))
     fitted: list[tuple[str, int]] = []
     handed: list[str] = []
 
-    async def fit(call: ToolCall, text: str, _messages: list[Message]) -> str:
+    async def fit(call: ToolCall, text: str) -> str:
         fitted.append((call.name, len(text)))
         return "WINDOW"
 

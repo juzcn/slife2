@@ -1685,18 +1685,17 @@ class ToolLoadSettings:
 
 
 #: How much of one tool result a model is handed.  **One number for both
-#: sides**: the harness spends it shortening a result too large for the
-#: conversation, and a tool that hands text back — `dump_read` — caps itself with
-#: it.  Two numbers would be two answers to "how much fits", and the failure is a
-#: loop with this system's machinery at both ends.
+#: sides**: the harness spends it on the head it carries for a result too large
+#: for the conversation, and the tools that hand text back — the cabinet's
+#: `dump_read` and `dump_grep` — cap themselves with it.  Two numbers would be
+#: two answers to "how much fits", and the failure is a loop with this system's
+#: machinery at both ends.
 #:
 #: **Measured, and above every ordinary result.**  On the 2026-10 turn log (349
 #: results) the median was 48 tokens, p90 1,587, the largest 5,284: at 8,000 the
 #: mechanism fires on none of them, and still catches the case it exists for — an
 #: output whose length nobody controls (a shell command, a huge file read) riding
-#: in every later request.  A result over the window pays a discriminator call
-#: carrying the whole conversation plus a dump file, to save at most ~1,300
-#: tokens; a model call to save a kilobyte is a bad trade at any window size.
+#: in every later request.
 #:
 #: The case it exists for is the tool *bound* to be long (a ten-thousand-word
 #: essay is ~13,000 tokens): 8,000 sits above the ordinary and below the
@@ -1705,12 +1704,14 @@ class ToolLoadSettings:
 #: move it again (SDD §7.4).
 DEFAULT_TOOL_RESULT_TOKENS = 8000
 
-#: The smallest window that can be *read*, measured rather than chosen.  The line
-#: that says where the whole of a shortened result is —
-#: `[DUMP:{"call": "…", "total": N}]` — costs 50 tokens for a short call id and 61
-#: for the ~20-character ids providers emit.  A budget below that can only fail,
-#: which is a configuration that looks like a working one and answers nothing.
-MIN_TOOL_RESULT_TOKENS = 128
+#: The smallest window that can hold the *address* and still show a head.  The
+#: marker and the sentence that says where the rest is —
+#: `[DUMP:{"call": …, "bytes": …, "file": …}] Too large for the conversation: …`
+#: — cost about 100 tokens for a long provider call id and the home-relative
+#: path.  A budget below that cannot hold the address at all, and one just above
+#: it would show so little of the output that a model could not tell what kind
+#: of file it has; 512 leaves room for a readable head.
+MIN_TOOL_RESULT_TOKENS = 512
 
 
 @dataclass(frozen=True)
@@ -1721,11 +1722,11 @@ class ToolResultSettings:
     tool returned.**  Whether an output is the right length is the tool
     designer's business; what the harness owns is the context that has to carry
     it and the whole of what was returned, and the two are answered separately —
-    the whole is kept (a dump, or the file it already came from) and the model
-    is handed a window of it, addressed by line, which it can read past.  There
-    is no truncation and no summary anywhere in that arrangement, on purpose:
-    both decide something about the content, and neither can be undone by the
-    model that needs the part they dropped.
+    the whole is kept (a dump, or the file it already came from) and over the
+    bound the model is handed a fixed head of it with the call id that reads the
+    rest.  The head is chosen by a rule, not by a model: the boundary is what
+    this section sets, and the model's route back is `dump_read` and
+    `dump_grep`.
 
     There is deliberately no "off".  A window with no bound is the whole output,
     which is the thing this exists to prevent.
@@ -2176,9 +2177,10 @@ class Config:
     #: a `SELECT COUNT(*)` over its own rows.
     tool_load: ToolLoadSettings = field(default_factory=ToolLoadSettings)
     #: How much of one tool result a model is handed.  Read by whoever hands
-    #: text back (the cabinet's `dump_read`) and spent by the harness when it
-    #: shortens a result too large for the conversation — one number, because
-    #: two would let a reader return more than the shortening removed.
+    #: text back (the cabinet's `dump_read` and `dump_grep`) and spent by the
+    #: harness when it truncates a result too large for the conversation — one
+    #: number, because two would let a reader return more than the truncation
+    #: removed.
     tool_result: ToolResultSettings = field(default_factory=ToolResultSettings)
     #: The endpoints vectors come from, and which one is in use.  Its own
     #: section rather than entries under `providers:`, for the reason
@@ -3011,9 +3013,10 @@ def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
 
     Absent means the default rather than an error, the rule every other section
     follows.  A present one has to hold a positive number: a budget of zero is a
-    reader that can return no line at all and a shortening that can keep none,
-    and the model would be left with a marker naming a file it is not allowed to
-    read — a configuration that looks like a working one and answers nothing.
+    reader that can return no line at all and a truncation that can keep no
+    head, and the model would be left with a marker naming a file it is not
+    allowed to read — a configuration that looks like a working one and answers
+    nothing.
     """
     if raw is None:
         return base

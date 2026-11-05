@@ -41,9 +41,10 @@ from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet import server as cabinet_server
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
+    _binary_text,
+    _head_encoding,
     build_server,
     category_for,
-    decode,
     unique_path,
 )
 from slife2.plugins.cabinet.store import (
@@ -194,6 +195,7 @@ async def test_the_tools_are_the_models_except_the_ones_the_harness_calls() -> N
         "diary_list",
         "file_save",
         "file_read",
+        "file_grep",
         "file_remove",
         "file_list",
         "report_write",
@@ -202,6 +204,7 @@ async def test_the_tools_are_the_models_except_the_ones_the_harness_calls() -> N
         "report_remove",
         "report_list",
         "dump_read",
+        "dump_grep",
         "dump_save",
         "image_save",
         "image_source",
@@ -570,15 +573,16 @@ async def test_a_saved_file_is_copied_never_moved() -> None:
         saved = await payload(
             client, "file_save", paths=[str(source)], summary=f"a {WORD} file"
         )
-        read = await payload(client, "file_read", path="documents/report.txt")
+        read = await payload(
+            client, "file_read", path="documents/report.txt", mode="char"
+        )
         removed = await payload(client, "file_remove", path="documents/report.txt")
         listed = await payload(client, "file_list")
 
     assert keys(saved["saved"]) == ["documents/report.txt"]
     assert saved["saved"][0]["size"] == len(b"the contents\n")
     assert read["text"] == "the contents\n"
-    assert read["kind"] == FILE and read["mime"] == "text/plain"
-    assert "encoding" not in read, "utf-8 is the cabinet's own, and needs no label"
+    assert read["chars"] == len("the contents\n")
     assert source.read_bytes() == b"the contents\n", "the original stays"
     assert removed == {"kind": FILE, "key": "documents/report.txt", "removed": True}
     assert listed["total"] == 0 and listed["entries"] == []
@@ -627,7 +631,9 @@ async def test_a_url_is_fetched_and_its_text_read_back(monkeypatch) -> None:
         saved = await payload(
             client, "file_save", paths=["https://example.test/reports/weekly.txt"]
         )
-        read = await payload(client, "file_read", path="documents/weekly.txt")
+        read = await payload(
+            client, "file_read", path="documents/weekly.txt", mode="char"
+        )
 
     row = saved["saved"][0]
     assert row["key"] == "documents/weekly.txt"
@@ -794,33 +800,78 @@ async def test_removing_an_image_takes_its_bytes_with_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_file_with_no_text_is_refused_not_decoded() -> None:
-    """Silently decoding a PDF used to *succeed* — a page of replacement characters.
+async def test_a_file_with_no_text_is_read_as_an_escaped_rendering() -> None:
+    """**A binary file is not refused; it is shown, bounded, for what it is.**
 
-    What a reader got was indistinguishable from a file that is genuinely full of
-    gibberish, so the refusal names what the file is and where its bytes are.
+    A PDF's header stays readable and its bytes become `\\xNN` escapes, so the
+    model sees `%PDF` and stops.  Refusing here would deny it the same look the
+    dump readers give an arbitrary tool result.
     """
     binary = data_dir() / "scan.pdf"
     binary.write_bytes(b"%PDF-1.7\n\x00\x01\x02\xff\xfe binary\n")
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(binary)])
-        with pytest.raises(ToolError) as refused:
-            await ask(client, "file_read", path="documents/scan.pdf")
+        read = await payload(
+            client, "file_read", path="documents/scan.pdf", mode="char"
+        )
 
-    said = str(refused.value)
-    assert "is not text" in said
-    assert "application/pdf" in said
-    assert str(bag() / "documents" / "scan.pdf") in said
+    assert "%PDF-1.7" in read["text"]
+    assert r"\x00\x01\x02" in read["text"], "the bytes are escapes, not NULs"
+    assert read["chars"] == len(read["text"])
 
 
 @pytest.mark.asyncio
-async def test_text_in_another_encoding_is_read_and_the_encoding_named() -> None:
+async def test_a_file_past_two_megabytes_is_read_in_a_window() -> None:
+    """**No read cap**: both readers stream, so a large file is a window too.
+
+    `file_read` counts the file once without holding it, then seeks the window —
+    a line page or a character slice.  The answer is the same shape as a small
+    file's; only the time to reach the window grows with its offset.
+    """
+    source = data_dir() / "huge.txt"
+    source.write_bytes(("x" * 79 + "\n").encode() * 40_000 + b"the last line\n")
+    size = source.stat().st_size
+
+    async with Client(cabinet()) as client:
+        saved = await payload(client, "file_save", paths=[str(source)])
+        key = saved["saved"][0]["key"]
+        by_line = await payload(client, "file_read", path=key)
+        by_char = await payload(client, "file_read", path=key, mode="char", limit=100)
+
+    assert by_line["lines"] == 40_001
+    assert by_line["next"] > 1
+    assert by_char["text"] == "x" * 79 + "\n" + "x" * 20, "characters, newline and all"
+    assert by_char["chars"] == size, "the total is counted without holding the file"
+    assert by_char["next"] == 100
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_inside_a_binary_file_is_still_findable() -> None:
+    """**The reason a binary is not refused**: it may carry a sentence."""
+    source = data_dir() / "blob.bin"
+    source.write_bytes(b"\x00\x01\x02 the secret sentence \xff\xfe\n")
+
+    async with Client(cabinet()) as client:
+        saved = await payload(client, "file_save", paths=[str(source)])
+        found = await payload(
+            client,
+            "file_grep",
+            path=saved["saved"][0]["key"],
+            pattern="secret sentence",
+        )
+
+    assert found["matched"] == 1
+    assert found["matches"][0]["line"] == 1
+    assert "the secret sentence" in found["matches"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_text_in_another_encoding_is_read() -> None:
     """A `.txt` from cmd is GBK, and refusing it would refuse text that exists.
 
-    The one outcome still worth refusing is a *silent* wrong decode, so the
-    encoding is named beside the text and UTF-8 — the cabinet's own — is returned
-    with no such key at all.
+    `decode`'s own unit test names the encoding; this one asserts the reader
+    hands back the decoded text rather than a page of replacement characters.
     """
     gbk = data_dir() / "gbk.txt"
     gbk.write_bytes("中文记录\n".encode("gb18030"))
@@ -829,10 +880,13 @@ async def test_text_in_another_encoding_is_read_and_the_encoding_named() -> None
 
     async with Client(cabinet()) as client:
         await ask(client, "file_save", paths=[str(gbk), str(utf8)])
-        decoded = await payload(client, "file_read", path="documents/gbk.txt")
-        plain = await payload(client, "file_read", path="documents/utf8.txt")
+        decoded = await payload(
+            client, "file_read", path="documents/gbk.txt", mode="char"
+        )
+        plain = await payload(
+            client, "file_read", path="documents/utf8.txt", mode="char"
+        )
 
-    assert decoded["encoding"] == "gb18030"
     assert "中文记录" in decoded["text"]
     assert plain["text"] == "plain\n"
 
@@ -848,7 +902,70 @@ async def test_a_binary_sniff_beats_a_wrong_guess() -> None:
         answer = await payload(client, "file_read", path="documents/utf16.txt")
 
     assert "记录" in answer["text"]
-    assert answer["encoding"] == "utf-16"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_file_is_read_in_windows_like_a_dump() -> None:
+    """**The same window over a file that `dump_read` gives a dump.**
+
+    The file on disk stays whole; the answer is bounded by `tool_result.tokens`
+    and `next` names the line the following window starts at.
+    """
+    source = data_dir() / "long.txt"
+    source.write_text(
+        "\n".join(f"line {number} of a saved file" for number in range(1, 4001)),
+        encoding="utf-8",
+    )
+
+    async with Client(cabinet()) as client:
+        await ask(client, "file_save", paths=[str(source)])
+        first = await payload(client, "file_read", path="documents/long.txt")
+        assert first["next"] > 1, first
+        second = await payload(
+            client, "file_read", path="documents/long.txt", offset=first["next"]
+        )
+
+    assert first["lines"] == 4000
+    assert first["text"].splitlines()[0].endswith("line 1 of a saved file")
+    assert f"line {first['next']} of a saved file" in second["text"]
+    assert "line 1 of a saved file" not in second["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_file_is_searched_like_a_dump() -> None:
+    """**The same search over a file that `dump_grep` gives a dump.**"""
+    source = data_dir() / "grep.txt"
+    source.write_text(
+        "\n".join(
+            f"line {number} of a saved file" + (" MARKER" if number % 100 == 0 else "")
+            for number in range(1, 301)
+        ),
+        encoding="utf-8",
+    )
+
+    async with Client(cabinet()) as client:
+        await ask(client, "file_save", paths=[str(source)])
+        found = await payload(
+            client, "file_grep", path="documents/grep.txt", pattern="marker"
+        )
+        some = await payload(
+            client, "file_grep", path="documents/grep.txt", pattern="line", limit=5
+        )
+        by_char = await payload(
+            client,
+            "file_read",
+            path="documents/grep.txt",
+            mode="char",
+            offset=found["matches"][0]["char"],
+            limit=6,
+        )
+
+    assert found["matched"] == 3
+    assert found["matches"][0]["line"] == 100
+    assert by_char["text"] == "MARKER", "the character address is the match"
+    assert some["matched"] == 300
+    assert [match["line"] for match in some["matches"]] == [1, 2, 3, 4, 5]
+    assert some["next"] == 6
 
 
 @pytest.mark.asyncio
@@ -1328,13 +1445,17 @@ def test_a_category_says_what_a_file_is_only_when_it_knows() -> None:
     assert category_for("a.zzz") == "other"
 
 
-def test_decoding_refuses_a_file_that_is_not_text() -> None:
-    """The encoding comes back by name, which is what the JSON answer labels it with."""
-    assert decode(b"plain ascii\n") == ("plain ascii\n", ""), "utf-8 is unannounced"
-    assert decode(b"\x00\x01\x02")[0] == ""
-    assert decode(b"\x00\x01\x02")[1] == "binary"
-    assert decode("记录\n".encode("utf-16"))[0].strip() == "记录"
-    assert decode("记录\n".encode("utf-16"))[1] == "utf-16"
+def test_the_head_decides_the_encoding_or_renders_the_bytes() -> None:
+    """The sniff names an encoding; a file with no text is shown as its bytes.
+
+    The same sniff decides how a loaded and a streamed reader see the file, so
+    the two cannot disagree about what its text is.
+    """
+    assert _head_encoding(b"plain ascii\n") == "utf-8"
+    assert _head_encoding(b"\x00\x01\x02") == "binary"
+    assert _binary_text(b"\x00\x01\x02") == r"\x00\x01\x02"
+    assert _head_encoding("记录\n".encode("utf-16")) == "utf-16"
+    assert _head_encoding("记录\n".encode("gb18030")) == "gb18030"
 
 
 @pytest.mark.asyncio
@@ -1700,14 +1821,15 @@ async def test_a_search_caps_the_shortlist_it_hands_to_sql(
     assert len(answer["results"]) == 2, "the shortlist, not the corpus"
 
 
-# --- the dump, and the one reader that has to stay inside the budget ----------
+# --- the dump, and the two readers that have to stay inside the budget --------
 #
 #  A dump is the kind no tool of this plugin writes: the harness saves a tool
 #  output that was too large for the conversation, keeps the whole of it, and
-#  writes a marked selection into the conversation instead.  `dump_read` is how
-#  a model gets the part the selection did not carry — and the property these
-#  tests are about is that its answers cannot out-run the selection, because a
-#  reader that could would be feeding the thing that shortens results.
+#  writes a marked head into the conversation instead.  `dump_read` and
+#  `dump_grep` are how a model gets the part the head did not carry — and the
+#  property these tests are about is that their answers cannot out-run the head,
+#  because a reader that could would be feeding the thing that truncates
+#  results.
 
 
 def dump_body(lines: int = 4000, *, every: int = 0) -> str:
@@ -1733,17 +1855,32 @@ async def save_dump(call: str, body: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dump_save_answers_the_files_size_and_a_relative_path() -> None:
+    """**The two things a marker needs, without counting the text.**
+
+    The size is the mirror file's, one `stat`; the path is relative to the
+    data directory, so the marker survives moving the home.
+    """
+    async with Client(cabinet()) as client:
+        answer = await payload(client, "dump_save", call="call_save", output="hello")
+
+    assert answer["path"] == "agents/jack/cabinet/dumps/call_save.md"
+    assert answer["size"] == (data_dir() / answer["path"]).stat().st_size
+    assert "chars" not in answer
+
+
+@pytest.mark.asyncio
 async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     """**The property the arrangement rests on**, and not a nicety.
 
     A reader of ours handing back more than `tool_result.tokens` would be one
-    system at both ends of a loop: the harness shortens a result, the model
-    reads it back, and the shortening fires again on our own tool's answer.  So
-    the bound is on the whole answer — header included, which is why the budget
-    is checked here rather than the lines alone — and it holds at whatever
-    number the config states.
+    system at both ends of a loop: the harness truncates a result, the model
+    reads it back, and the truncation fires again on our own tool's answer.  So
+    the bound is on the whole answer — envelope included, which is why the
+    budget is checked here rather than the lines alone.
     """
-    await save_dump("call_big", dump_body())
+    body = dump_body()
+    await save_dump("call_big", body)
     tight = replace(load(), tool_result=ToolResultSettings(tokens=120))
 
     async with Client(build_server(tight, embedder=StubEmbedder())) as client:
@@ -1755,6 +1892,8 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     assert shown[0].endswith("line 1 of a tool output"), (
         "it starts where it was asked to"
     )
+    assert window["lines"] == 4000
+    assert window["chars"] == len(body)
     assert window["next"] == len(shown) + 1, "the next window starts where this stopped"
 
 
@@ -1777,6 +1916,92 @@ async def test_a_window_says_where_the_next_one_starts_and_it_is_there() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_dump_with_no_useful_lines_is_read_by_character() -> None:
+    """**The mode a file that is not organized in lines is read in.**
+
+    A minified document or one long record has one line, far larger than the
+    window.  Character mode reads a contiguous slice and answers the offset the
+    next one starts at.
+    """
+    body = "0123456789" * 6000
+    await save_dump("call_one_line", body)
+
+    async with Client(cabinet()) as client:
+        first = await payload(
+            client, "dump_read", call="call_one_line", mode="char", limit=100
+        )
+        second = await payload(
+            client,
+            "dump_read",
+            call="call_one_line",
+            mode="char",
+            offset=first["next"],
+            limit=100,
+        )
+        tail = await payload(
+            client, "dump_read", call="call_one_line", mode="char", offset=-10
+        )
+
+    assert "lines" not in first, "char mode does not scan the file for a count"
+    assert first["chars"] == len(body)
+    assert first["text"] == body[:100], "zero is the first character"
+    assert first["next"] == 100
+    assert second["text"] == body[100:200]
+    assert tail["text"] == body[-10:]
+    assert "next" not in tail, "the last window has nowhere further to read"
+
+
+@pytest.mark.asyncio
+async def test_a_line_too_large_for_the_window_names_char_mode() -> None:
+    """The line reader refuses the one output it cannot show, and says which
+    reader can — with the character offset and the file the bytes are in."""
+    await save_dump("call_one", "x" * 60000)
+
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "dump_read", call="call_one")
+
+    assert "longer than" in str(refused.value)
+    assert 'mode="char"' in str(refused.value)
+    assert "offset=0" in str(refused.value), "the line starts at character zero"
+    assert "dumps" in str(refused.value), "and the refusal names where the bytes are"
+
+
+@pytest.mark.asyncio
+async def test_a_grep_match_answers_both_addresses() -> None:
+    """A match names its line and its character, so either reader can follow."""
+    body = "alpha\nbeta marker\ngamma"
+    await save_dump("call_both", body)
+
+    async with Client(cabinet()) as client:
+        found = await payload(client, "dump_grep", call="call_both", pattern="marker")
+        by_char = await payload(
+            client,
+            "dump_read",
+            call="call_both",
+            mode="char",
+            offset=found["matches"][0]["char"],
+            limit=6,
+        )
+        by_line = await payload(
+            client,
+            "dump_read",
+            call="call_both",
+            offset=found["matches"][0]["line"],
+            limit=1,
+        )
+
+    assert found["matched"] == 1
+    assert found["matches"][0] == {
+        "line": 2,
+        "char": body.index("marker"),
+        "text": "beta marker",
+    }
+    assert by_char["text"] == "marker"
+    assert by_line["text"].endswith("beta marker")
+
+
+@pytest.mark.asyncio
 async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -> None:
     """A literal, case-insensitive match, and a count that is not just the page.
 
@@ -1788,21 +2013,86 @@ async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -
 
     async with Client(cabinet()) as client:
         all_of_them = await payload(
-            client, "dump_read", call="call_grep", pattern="marker"
+            client, "dump_grep", call="call_grep", pattern="marker"
         )
-        some = await payload(client, "dump_read", call="call_grep", pattern="line")
+        some = await payload(client, "dump_grep", call="call_grep", pattern="line")
         none = await payload(
-            client, "dump_read", call="call_grep", pattern="nothing here"
+            client, "dump_grep", call="call_grep", pattern="nothing here"
         )
 
     assert all_of_them["matched"] == 30, "the count is of the output, not the window"
-    assert "line 100 of a tool output MARKER" in all_of_them["text"]
+    assert all_of_them["matches"][0]["text"].endswith(
+        "line 100 of a tool output MARKER"
+    )
     assert "next" not in all_of_them, (
         "every match fitted, so there is nowhere to read on"
     )
     assert some["matched"] == 3000, "a page of matches says how many there are"
     assert some["next"] > 1
-    assert none["matched"] == 0 and none["text"] == "", "a pattern that found nothing"
+    assert none["matched"] == 0 and none["matches"] == [], (
+        "a pattern that found nothing"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_grep_page_names_the_line_the_next_one_starts_at() -> None:
+    """A match answer pages by match, and `next` resolves to the next match."""
+    await save_dump("call_page_matches", dump_body(300))
+
+    async with Client(cabinet()) as client:
+        first = await payload(
+            client, "dump_grep", call="call_page_matches", pattern="line", limit=5
+        )
+        second = await payload(
+            client,
+            "dump_grep",
+            call="call_page_matches",
+            pattern="line",
+            offset=first["next"],
+            limit=5,
+        )
+
+    assert first["matched"] == 300
+    assert [match["line"] for match in first["matches"]] == [1, 2, 3, 4, 5]
+    assert first["next"] == 6
+    assert [match["line"] for match in second["matches"]] == [6, 7, 8, 9, 10]
+
+
+@pytest.mark.asyncio
+async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> None:
+    """A match's line can be longer than the whole window.
+
+    The two addresses are what let the model read it in character mode, so they
+    stay; the text is cut and the match says so.
+    """
+    body = "start " + "x" * 60000
+    await save_dump("call_long_match", body)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_long_match", pattern="start"
+        )
+
+    match = found["matches"][0]
+    assert found["matched"] == 1
+    assert match["line"] == 1 and match["char"] == 0
+    assert match["cut"] is True
+    assert 0 < len(match["text"]) < len(body)
+    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+
+
+@pytest.mark.asyncio
+async def test_a_huge_pattern_is_not_quoted_back() -> None:
+    """Nothing the caller wrote is echoed, so its length costs nothing."""
+    await save_dump("call_pattern", dump_body(100))
+
+    async with Client(cabinet()) as client:
+        answer = await ask(
+            client, "dump_grep", call="call_pattern", pattern="z" * 100_000
+        )
+
+    assert json.loads(answer)["matched"] == 0
+    assert estimate_text_tokens(answer) <= load().tool_result.tokens
 
 
 @pytest.mark.asyncio
@@ -1810,23 +2100,35 @@ async def test_a_dump_that_is_not_there_is_said_rather_than_guessed() -> None:
     async with Client(cabinet()) as client:
         with pytest.raises(ToolError, match="no saved output"):
             await ask(client, "dump_read", call="call_never")
+        with pytest.raises(ToolError, match="no saved output"):
+            await ask(client, "dump_grep", call="call_never", pattern="anything")
 
 
 @pytest.mark.asyncio
-async def test_a_line_too_large_for_the_window_names_the_file_instead() -> None:
-    """The one output a window cannot show, and the way out of it is a path.
-
-    Nothing is truncated to make it fit: the answer says the file, which is
-    where the bytes are, and the operator's own reader can page it.
-    """
-    await save_dump("call_one", "x" * 60000)
+async def test_a_dump_and_a_file_are_read_and_searched_the_same_way() -> None:
+    """**One implementation, two kinds.**  The body's source is the only
+    difference: given the same text, a dump reader and a file reader answer the
+    same window and the same matches."""
+    body = dump_body(500, every=50)
+    await save_dump("call_same", body)
+    source = data_dir() / "same.txt"
+    # Bytes, not `write_text`: the platform's newline translation would make
+    # the saved file's text a different text from the dump's body.
+    source.write_bytes(body.encode("utf-8"))
 
     async with Client(cabinet()) as client:
-        with pytest.raises(ToolError) as refused:
-            await ask(client, "dump_read", call="call_one")
+        await ask(client, "file_save", paths=[str(source)])
+        dump_read = await payload(client, "dump_read", call="call_same")
+        file_read = await payload(client, "file_read", path="documents/same.txt")
+        dump_grep = await payload(
+            client, "dump_grep", call="call_same", pattern="marker"
+        )
+        file_grep = await payload(
+            client, "file_grep", path="documents/same.txt", pattern="marker"
+        )
 
-    assert "does not fit" in str(refused.value)
-    assert "dumps" in str(refused.value), "and the refusal names where the bytes are"
+    assert file_read == dump_read
+    assert file_grep == dump_grep
 
 
 @pytest.mark.asyncio

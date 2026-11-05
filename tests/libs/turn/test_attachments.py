@@ -42,6 +42,26 @@ def test_a_local_file_becomes_a_data_url_naming_its_type(tmp_path) -> None:
     assert base64.b64decode(pairs[0][1].split(",", 1)[1]) == PNG
 
 
+def test_a_relative_path_is_resolved_against_the_agents_home(tmp_path) -> None:
+    """**The path a tool prints is relative to where the tool runs.**
+
+    A model's `attach_image` takes a path from an output it read; that path is
+    relative to the data directory, not to this daemon's working directory.  The
+    source travels back exactly as it was named, so the model's history says
+    what it attached.
+    """
+    pictures = tmp_path / "agents" / "jack" / "pictures"
+    pictures.mkdir(parents=True)
+    image(pictures)
+    source = "agents/jack/pictures/shot.png"
+
+    pairs, refusals = attachments.resolve([source], base=tmp_path)
+
+    assert refusals == []
+    assert pairs[0][0] == source
+    assert base64.b64decode(pairs[0][1].split(",", 1)[1]) == PNG
+
+
 def test_a_url_and_a_data_uri_are_passed_through_untouched(tmp_path) -> None:
     """**Nothing here fetches.**  A provider does, on its own side.
 

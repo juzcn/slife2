@@ -374,8 +374,9 @@ def build_server(
         # several times what an English 20000 is, and a transcript is the one
         # answer here whose length is the recording's rather than the caller's.
         # An answer over `tool_result.tokens` is one the harness would have to
-        # shorten again, which is our own reader feeding our own shortening
-        # (`slife2.plugins.cabinet.server.dump_read` bounds itself the same way).
+        # shorten again, which is our own reader feeding our own truncation
+        # (the cabinet's `dump_read` and `dump_grep` bound themselves the same
+        # way).
         return {
             "text": clip_to_tokens(page, config.tool_result.tokens),
             "total": len(text),

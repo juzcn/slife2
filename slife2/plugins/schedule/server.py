@@ -169,8 +169,8 @@ RUNS_MAX = 200
 #: where a run row is one per fire and the ledger never stops growing.  A task listing
 #: is therefore a page rather than a wall for the same reason the run listing
 #: is — a model that has scheduled for a year is a model whose `schedule_list`
-#: would otherwise be shortened by the harness and read back through `dump_read`
-#: (`tool_result.tokens`).
+#: would otherwise be truncated by the harness and read back through `dump_read`
+#: or `dump_grep` (`tool_result.tokens`).
 TASKS_LIMIT = 50
 TASKS_MAX = 200
 

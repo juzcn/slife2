@@ -679,7 +679,7 @@ async def test_an_interruption_in_the_fit_keeps_the_result_it_had() -> None:
     """
     started = asyncio.Event()
 
-    async def fit(_call, _text, _messages) -> str:
+    async def fit(_call, _text) -> str:
         started.set()
         await asyncio.Event().wait()  # cancelled by the turn, never returns
         return "never chosen"

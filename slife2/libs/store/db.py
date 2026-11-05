@@ -957,10 +957,10 @@ class TurnStore:
         search over a moving corpus all answer differently the second time), and
         deciding *which* part of an output to keep is the tool designer's
         judgement rather than the store's.  What a model is *shown* is bounded
-        where text enters a context instead — the harness's window over a
-        result, and the cabinet's `dump_read` over what it was windowed out of.
-        That bound is a number about tokens rather than a guess about content,
-        and it is one a model can read past.
+        where text enters a context instead — the harness's truncation of a
+        result, and the cabinet's `dump_read`/`dump_grep` over what it was cut
+        from.  That bound is a number about tokens rather than a guess about
+        content, and it is one a model can read past.
 
         The document is passed through `storable` first, for the reason given
         there: the one thing this method may not do is drop a turn because of

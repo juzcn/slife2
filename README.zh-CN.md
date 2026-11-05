@@ -480,7 +480,7 @@ tool_load:
              turn_read]                                # 且永不被逐出
 
 tool_result:
-  tokens: 8000               # 每个结果的预算；最小 128
+  tokens: 8000               # 每个结果的预算；最小 512
 
 mcp:
   arxiv:
@@ -590,7 +590,7 @@ catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变
 人的消息，`skill_use` 交出 playbook 文本。列表回答
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`；`total` 说明是否还有下一页。
 拒绝或未命中会抛出 `ToolError`，harness 将其报告为带原因的工具失败。任何回答都不应
-超过 `tool_result.tokens`；无法限界的输出会存成 dump（见[文件柜](#文件柜)）。
+超过 `tool_result.tokens`；超过预算的输出会存成 dump（见[文件柜](#文件柜)）。
 
 #### 工具调用选项
 
@@ -719,7 +719,7 @@ corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件�
 |---|---|---|
 | `note` | 用户选定的主题 | 在该主题下创建笔记。 |
 | `diary` | 日期 | 创建当天的条目；一天就是一篇文档。 |
-| `file` | 柜内路径 | `file_save` 复制本地文件或抓取 `http(s)` URL 进来；`file_read` 和 `file_remove` 读与删除。 |
+| `file` | 柜内路径 | `file_save` 复制本地文件或抓取 `http(s)` URL 进来；`file_read` 和 `file_grep` 读取与搜索，`file_remove` 删除。 |
 | `report` | 标题 | 在该标题下创建报告。 |
 | `dump` | 产生输出的工具调用 | 由 harness 写入；同一调用的第二次写入即替换。 |
 | `image` | 内容摘要 | 由 harness 写入；字节在 `pictures/`；同一摘要只有一行。 |
@@ -727,10 +727,20 @@ corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件�
 替换是整篇文档而不是补丁：笔记的 tags 和报告的 period 以 update 传入的为准，省略即清空。
 
 dump 是对对话而言过大的工具输出。输出完整存储，以工具调用 id 为键，对话携带的是在
-`tool_result.tokens` 内从输出自己的行中选出的片段；不做任何改写。模型用 `dump_read`
-读回任意部分：`pattern` 按字面匹配行，`context` 带上邻近行，`offset` 从某行读起
-（负数从末尾数），`limit` 少读几行。dump 不参与搜索：对话里的 `[DUMP:…]` marker 给出
-call id，`dump_read` 是读者。
+`tool_result.tokens` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
+路径（agent 自己的工具就在这个目录下运行，数据目录迁移后仍然有效）；不做任何改写，
+也不数行或字符——大小直接来自镜像文件的 `stat`，不需要再扫一遍内容。模型用
+`dump_read` 读回任意部分：`mode="line"` 按行读，`offset` 从 1 开始、负数从末尾数；
+`mode="char"` 按字符读，`offset` 从 0 开始、负数从末尾数；`limit` 限制行数或字符数，
+`0` 表示装满预算。`dump_grep` 在单行内按字面、忽略大小写查找，同时回答行号和字符
+offset，两种读取方式都能从命中处继续。dump 不参与搜索：对话里的 `[DUMP:…]` marker
+给出 call id，这两个读取工具就是回去的路。
+
+保存的文件用**同一套读取器**：`file_read` 用同样的 `mode`、`offset`、`limit` 读文件的
+解码文本，`file_grep` 用同样的 `pattern`、`offset`、`limit` 搜索并回答同样的行号和
+字符 offset。文件本身不会被截断；窗口只是回答的预算，`next` 是下一次读取的起点。
+PDF、图片或压缩包没有文本，按字节日志显示为有界的转义渲染，模型看到它是什么就会停；
+其他编码的文本先解码再开窗。
 
 图片完整存放在 `pictures/`，以内容摘要为键，轮次行携带 `[Image:…]` 引用而不是像素。
 `image_source` 解析引用，`attach_image` 是模型再次看到图片的方式；`http(s)` 图片由
@@ -739,8 +749,9 @@ provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 ke
 每个文本 kind——笔记、日记、报告或 dump——写两份：文件柜索引中的一行，以及
 `agents/<agent>/cabinet/` 下的 Markdown 文件（`notes/`、`diary/`、`reports/`、
 `dumps/`），可以脱离 slife2 打开、编辑或删除。保存文件的字节在文件柜下，不被索引，
-也没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。`file_read` 返回文件
-文本，遇到 PDF、图片或压缩包时说明它是什么并拒绝。
+也没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。`file_read` 和
+`file_grep` 按行或按字符读写保存文件的解码文本；PDF、图片或压缩包按其字节的转义
+渲染来显示。
 
 `cabinet_search` 像 `tool_search` 一样接受 `keywords` 和 `sentences`。
 `cabinet_summarize` 为文档写描述；为文件写描述会重新嵌入它，而 dump 和图片不写描述，

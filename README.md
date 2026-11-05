@@ -528,7 +528,7 @@ tool_load:
              turn_read]                                # and never evicted
 
 tool_result:
-  tokens: 8000               # per-result budget; minimum 128
+  tokens: 8000               # per-result budget; minimum 512
 
 mcp:
   arxiv:
@@ -658,7 +658,7 @@ thing itself: `_check_new_input` returns a person's message verbatim, and
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`; `total` says whether
 another page exists. A refusal or a miss raises a `ToolError`, which the harness
 reports as a failed call with the reason. No answer is intended to exceed
-`tool_result.tokens`; an output that cannot be bounded is stored as a dump (see
+`tool_result.tokens`; an output that would exceed it is stored as a dump (see
 [Cabinet](#cabinet)).
 
 #### Tool call options
@@ -811,7 +811,7 @@ subject for a note, a date for a diary day, and a title for a report.
 |---|---|---|
 | `note` | A subject chosen by the user | Creates the note under that subject. |
 | `diary` | A date | Creates that day's entry; one day is one document. |
-| `file` | Its path inside the cabinet | `file_save` copies a local file or fetches an `http(s)` URL in; `file_read` and `file_remove` read and delete it. |
+| `file` | Its path inside the cabinet | `file_save` copies a local file or fetches an `http(s)` URL in; `file_read` and `file_grep` read and search it, and `file_remove` deletes it. |
 | `report` | A title | Creates the report under that title. |
 | `dump` | The tool call that produced the output | Written by the harness; a second write of one call replaces it. |
 | `image` | Its content digest | Written by the harness; bytes in `pictures/`; one digest is one row. |
@@ -820,12 +820,29 @@ A replacement is the whole document, not a patch: a note's tags and a report's
 period are what the update passes, and an omitted one is cleared.
 
 A dump is a tool output too large for the conversation. The output is stored
-whole, keyed by the tool call id, and the conversation carries a selection of the
-output's own lines within `tool_result.tokens`; nothing is paraphrased. The model
-reads any part back with `dump_read`: `pattern` finds lines literally, `context`
-adds their neighbours, `offset` reads from a line (negative from the end), and
-`limit` reads fewer lines. A dump is not searched: the `[DUMP:…]` marker names
-the call id, and `dump_read` is the reader.
+whole, keyed by the tool call id, and the conversation carries its head within
+`tool_result.tokens` — a marker with the file's size and its path relative to
+the data directory (where the agent's own tools run, so it survives moving the
+home). Nothing is paraphrased, and nothing is counted: the size is the mirror
+file's `stat`, not a pass over the text. The model reads any part back with
+`dump_read` by line (`offset` is 1-based, negative from the end) or by
+character (`offset` is 0-based, negative from the end); `limit` caps lines or
+characters, and `0` shows as many as fit. `dump_grep` finds a literal, case-insensitive pattern within one
+line and answers both the line number and the character offset, so either
+reader can continue from a match. A dump is not searched: the `[DUMP:…]` marker
+names the call id, and the two readers are how it is reached.
+
+A saved file is read and searched with the **same readers**: `file_read` takes
+the same `mode`, `offset` and `limit` over the file's decoded text, and
+`file_grep` takes the same `pattern`, `offset` and `limit` and answers the same
+line and character addresses. Both stream: `file_grep` reads the file line by
+line, and `file_read` makes one counting pass for the totals and a second that
+seeks the window (lines are skipped; characters are decoded forward to the
+offset). Memory is the window, not the file. The file itself is never truncated;
+a window is the answer's bound, and `next` is how the following one is asked
+for. A PDF, image, or archive has no text: it is
+shown as a bounded escaped rendering of its bytes, so the model sees what it is
+and stops. Text in another encoding is decoded before it is windowed.
 
 An image is stored whole under `pictures/`, keyed by its content digest, and the
 turn row carries an `[Image:…]` reference instead of the pixels. `image_source`
@@ -838,8 +855,9 @@ in the cabinet index and a Markdown file under `agents/<agent>/cabinet/`
 (`notes/`, `diary/`, `reports/`, `dumps/`), which can be opened, edited, or
 deleted without slife2. A saved file's bytes live under the cabinet and are not
 indexed, and it has no Markdown mirror; an image is the same shape under
-`pictures/`. `file_read` returns a file's text and refuses a PDF, image, or
-archive by saying what it is.
+`pictures/`. `file_read` and `file_grep` read a saved file's decoded text by
+line or character; a PDF, image, or archive is shown as an escaped rendering of
+its bytes.
 
 `cabinet_search` accepts `keywords` and `sentences` like `tool_search`.
 `cabinet_summarize` writes a description for a document; writing one for a file

@@ -726,13 +726,15 @@ async def _save_dump(agent: str, call: str, body: str) -> None:
     await store.write(DUMP, call, body=body, embedder=embedder)
 
 
-async def _read(client: Client, agent: str, **arguments: Any) -> dict[str, Any]:
-    """One `dump_read`, on behalf of a conversation, as the model reads it.
+async def _read(
+    client: Client, agent: str, tool: str = "dump_read", **arguments: Any
+) -> dict[str, Any]:
+    """One dump reader, on behalf of a conversation, as the model reads it.
 
     The answer is an object (`cabinet.server`), and `data` is how a tool's JSON
     reaches this side of the hop.
     """
-    result = await client.call_tool("dump_read", arguments, meta=client_meta(agent))
+    result = await client.call_tool(tool, arguments, meta=client_meta(agent))
     answer = getattr(result, "data", None)
     assert isinstance(answer, dict), answer
     return answer
@@ -748,9 +750,9 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
     crosses a socket, and the window is the number in the config file every
     child read.
 
-    What is under test is a loop that must not exist. The harness shortens an
+    What is under test is a loop that must not exist. The harness truncates an
     output too large for a conversation; a reader that could hand back more than
-    the window would have its *own* answer shortened next, which is this
+    the window would have its *own* answer truncated next, which is this
     system's machinery feeding itself. So every answer is measured here, from
     the model's side of the hop, with the same estimator the harness spends —
     including the answers built out of what the caller asked for, which is the
@@ -770,21 +772,33 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
         offset = first.get("next")
         assert isinstance(offset, int), first
         second = await _read(client, "e2e", call="call_e2e", offset=offset)
-        found = await _read(client, "e2e", call="call_e2e", pattern="line 39")
-        huge = await _read(client, "e2e", call="call_e2e", pattern="z" * 100_000)
+        found = await _read(
+            client, "e2e", tool="dump_grep", call="call_e2e", pattern="line 39"
+        )
+        huge = await _read(
+            client, "e2e", tool="dump_grep", call="call_e2e", pattern="z" * 100_000
+        )
+        chars = await _read(
+            client, "e2e", call="call_e2e", mode="char", offset=0, limit=40
+        )
 
-    for answer in (first, second, found, huge):
+    for answer in (first, second, found, huge, chars):
         assert estimate_text_tokens(json.dumps(answer)) <= budget, str(answer)[:300]
 
     # A window, and the address of the next one: the numbers in it are lines of
     # the output rather than of the page it was shown.
     assert "line 1 of a tool output" in first["text"]
-    assert first["total"] >= lines, "the whole output is counted, not the window"
+    assert first["lines"] >= lines, "the whole output is counted, not the window"
     assert f"line {offset} of a tool output" in second["text"]
-    # Finding is the same reader, and it counts the whole output rather than the
-    # window it fitted.
-    assert "line 39 of a tool output" in found["text"]
-    assert found["matched"], "and says how many lines the pattern is on"
+    assert chars["text"] == "line 1 of a tool output\nline 2 of a tool", (
+        "character mode is the same file from character zero"
+    )
+    # Finding counts the whole output rather than the window it fitted, and
+    # every match carries both addresses.
+    assert found["matched"] and found["matches"][0]["text"].endswith(
+        "line 39 of a tool output"
+    )
+    assert isinstance(found["matches"][0]["char"], int)
     # **The path where a window is easiest to lose**: an argument that is not a
     # pattern at all is answered with rather than echoed.  Nothing the caller
     # wrote is quoted back any more, so a 100,000-character pattern is simply a
@@ -794,6 +808,7 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
     # And the whole of it is a file, which is what the marker will promise.
     dumps = data_dir() / "agents" / "e2e" / "cabinet" / "dumps"
     assert dumps.is_dir() and list(dumps.iterdir()), _files(data_dir())
-    # The file is the cabinet's; the answer is the window's.  A model cannot
-    # open a path, and `dump_read` is the only reader it has.
+    # The file is the cabinet's; the answer is the window's.  The model reads it
+    # through `dump_read`/`dump_grep` by the call id, and the path in the marker
+    # — relative to the data directory — is what the agent's own tools open.
     assert "where" not in first, first

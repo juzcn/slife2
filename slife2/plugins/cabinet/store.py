@@ -13,27 +13,28 @@ What is kept is the *design* that made those things one directory, and what is
 dropped is the machinery slife2 does without:
 
 **A dump is the harness's, and it is here because it is text.**  A result too
-large for the conversation is shortened for the model and kept whole for
+large for the conversation is truncated for the model and kept whole for
 everybody else — and *nothing decides which part of it mattered*, because that
 is the tool designer's judgement and not the harness's.  So the whole of it is
-stored, and the shortened copy is a selection of lines the model made with the
-budget in hand.  Bytes belong on disk, but a tool's output is text, and text
-belongs where the cabinet's other text is.  What that does not make it is a
-document: the address a model has for it is the `[DUMP:{…}]` marker in the
-transcript, which names the call id `dump_read` takes, and ranking machine
-output against a person's notes is the dilution SDD §8.3 warns about.  So the
-row is written by the harness, keyed by the call, and **not indexed**.
+stored, and the conversation carries a fixed head of it within the budget.
+Bytes belong on disk, but a tool's output is text, and text belongs where the
+cabinet's other text is.  What that does not make it is a document: the address
+a model has for it is the `[DUMP:{…}]` marker in the transcript, which names
+the call id `dump_read` and `dump_grep` take, and ranking machine output
+against a person's notes is the dilution SDD §8.3 warns about.  So the row is
+written by the harness, keyed by the call, and **not indexed**.
 
-**And this kind's reader is bounded, like every tool of ours that hands text to
-a model.**  What the harness writes into the transcript is a selection of lines
-with this dump named beside it, so a model that wants a part it did not get
-reads the row back with `dump_read` — a tool that returns **at most the budget's
-worth of the original**, saying how much there is and where the next window
-starts.  The reader's cap and the harness's budget are **one number**, and that
-is the whole of what makes the arrangement closed: a reader that could hand back
-more than the budget would be a tool of ours feeding the harness's own
-shortening, which is a loop with this system's machinery at both ends.  The
-bound is a property of the tool rather than a hope about how a model uses it.
+**And this kind's readers are bounded, like every tool of ours that hands text
+to a model.**  What the harness writes into the transcript is the head of the
+dump with the dump named beside it, so a model that wants a part it did not get
+reads the row back with `dump_read` or finds it with `dump_grep` — tools that
+return **at most the budget's worth of the original**, saying how much there is
+and where the next window starts.  The readers' cap and the harness's budget
+are **one number**, and that is the whole of what makes the arrangement closed:
+a reader that could hand back more than the budget would be a tool of ours
+feeding the harness's own truncation, which is a loop with this system's
+machinery at both ends.  The bound is a property of the tool rather than a hope
+about how a model uses it.
 
 **An image is the same shape with a different reader.**  A picture a turn
 carried is kept whole because the turn log is text; the conversation keeps an
@@ -48,8 +49,8 @@ sides already carry: the turn's own messages hold it on the tool message, and
 this row is keyed by it, so the association with the turn is an identity rather
 than a column — nothing to write at save time, nothing to keep in step, and
 nothing that has to exist before the turn is saved (which a turn id would not).
-A second write under one key replaces, because it is the same call re-shortened
-and not a second fact about anything.
+A second write under one key replaces, because it is the same call truncated
+again and not a second fact about anything.
 
 **One table, and the kinds are a column.**  A note, a day, a saved file, a
 report, a dump and an image are six *values* of `kind` in `cabinet_doc`, with
@@ -171,9 +172,9 @@ FILE = "file"
 REPORT = "report"
 #: A tool's output, kept whole because nothing here may decide what part of it
 #: mattered.  The only kind **no tool of this plugin writes**: the harness dumps
-#: it (`slife2.libs.harness`) and writes a marked selection into the
-#: conversation, and `dump_read` is how a model reads back the part it did not
-#: get — a bounded answer, for the reason the module docstring gives.
+#: it (`slife2.libs.harness`) and writes a marked head into the conversation,
+#: and `dump_read`/`dump_grep` are how a model gets the part it did not get — a
+#: bounded answer, for the reason the module docstring gives.
 DUMP = "dump"
 #: An image attached to a turn, kept whole because the turn log is text.
 #: **The second bytes-backed kind**, and the one whose reader is not a text
@@ -247,7 +248,7 @@ SPECS: dict[str, Spec] = {
     # body, and the moment the report arrived is the one that does not move.
     REPORT: Spec(time="created_at", day=False, mirror="reports", searchable=True),
     # A dump's key is one call, and a second write under it is that call
-    # shortened again rather than a second fact about anything — which is why
+    # truncated again rather than a second fact about anything — which is why
     # the harness's write is an upsert (`UPSERT`) and not a document's create.
     # Its time axis is when the output arrived — the only moment this row has,
     # since nobody wrote it.
@@ -291,8 +292,8 @@ _KIND_HINT = f"kind must be one of: {', '.join(KINDS)}"
 #: answer; the address is named instead.
 CORPUS_KIND_HINT = (
     f"kind must be one of: {', '.join(DOCUMENT_KINDS)} — a dump is read by "
-    "the call id in its `[DUMP:…]` marker with `dump_read`, and an image by "
-    "its `[Image:…]` key with `attach_image`"
+    "the call id in its `[DUMP:…]` marker with `dump_read` or `dump_grep`, "
+    "and an image by its `[Image:…]` key with `attach_image`"
 )
 
 #: How a write treats the key it is given.  The first two are a document's own

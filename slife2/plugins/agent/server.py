@@ -84,7 +84,6 @@ from collections.abc import (
     Awaitable,
     Callable,
     Coroutine,
-    Sequence,
 )
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -98,7 +97,6 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
-from slife2.clients.gateway import flatten
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
     FUNC_TOOL_UNLOAD,
@@ -136,6 +134,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import (
     agent_dir,
+    home,
     in_home,
     known_homes,
     subagent_dirs,
@@ -220,11 +219,11 @@ CONFIG_KEY = "agent"
 #: what keeps "queued" from meaning "eventually dropped".
 MAX_QUEUED = 32
 
-#: How a conversation's results get fitted into it: the backend the turn is
-#: running on and whose conversation it is, in return for the callback the loop
-#: asks.  A *builder* rather than the callback, because half of what the callback
-#: needs — the backend — is decided inside `make_loop`.
-Compressor = Callable[[LLMBackend, ClientId], Compress]
+#: How a conversation's results get fitted into it: whose conversation it is,
+#: in return for the callback the loop asks.  A *builder* rather than the
+#: callback, because the dump is written into that conversation's cabinet and
+#: the key is what names which one.
+Compressor = Callable[[ClientId], Compress]
 
 #: The call the subagent network answers for a member that no longer exists —
 #: `slife2.plugins.a2a.server`'s tool of that name, and **spelled here too**: a
@@ -274,151 +273,6 @@ SUBAGENT_PROMPT = "subagent.j2"
 #: than in an argument, so the two are built from different places and only one
 #: of them is a key.
 ConversationKey = tuple[str, str, str]
-
-
-async def _asked(
-    backend: LLMBackend,
-    call: ToolCall,
-    text: str,
-    messages: Sequence[Message],
-    *,
-    window: int,
-) -> dumps.Decision | dumps.Rejected:
-    """One discriminator call.  **A reply is what comes back.**
-
-    `REJECTED` is a reply this build cannot read, which is an ordinary thing for
-    a model to produce and the one failure this mechanism is designed around.  A
-    call that *did not complete* is not that, and is not caught: see below.
-    """
-    instruction = dumps.instruction(
-        tool=call.name,
-        body=text,
-        budget=window,
-        conversation=_conversation(messages),
-        user_input=_current_input(messages),
-    )
-    # No tools, and no observer: this is one question and one answer, and it runs
-    # on the backend the turn already has — the conversation's own model, called
-    # the way the conversation is called.  **A call that does not complete is not
-    # caught here**: a model server that has stopped answering is a system that
-    # has come apart, and the turn it is serving is about to fail on its next
-    # request anyway — so absorbing it would buy a worse trace, not a turn.
-    stream = backend.stream([Message(role="user", content=instruction)], [])
-    # **Drained, though nothing here displays a chunk**, and that is what puts a
-    # clock on this call.  The stall watchdog lives in the drain
-    # (`slife2.clients.model.MCPBackend._drain`) and is armed by *iterating* the
-    # chunks, so awaiting `result` alone waits on a connection with no deadline
-    # of any kind: `open_backend` passes no timeout — the watchdog is the bound,
-    # for the reason the loop gets away with it — and a provider that took the
-    # call and then went quiet would hang this step for ever with the
-    # conversation's lock held.  The same silence fails a turn in the loop in
-    # `timeouts.work.stall` seconds.  The chunks are discarded because this is
-    # one question and one answer: `read_reply` reads the result, and a step of
-    # the discriminator's own is not something the window draws.
-    async for _ in stream.chunks:
-        pass
-    reply = (await stream.result).text
-    return dumps.read_reply(reply)
-
-
-async def _first_page(client: Client, call: str, client_id: ClientId) -> str:
-    """The designed fallback: the reader's own first window over the same output.
-
-    **The same function a model would have called**, which is the whole point of
-    it: a conversation whose discriminator could not answer gets what a
-    conversation whose model asked for the beginning would have got — the same
-    numbers, the same mark on the same lines, and the same sentence about where
-    the rest is.  A second renderer here would be a second set of addresses for
-    one output, and the one a model copied out of the conversation would reach
-    different text.
-
-    **A read that fails is left to fail the turn**, and this is deliberately a
-    bare call rather than a wrapped one.  The row was written a moment ago by
-    this same process, so a window that cannot be read back is not a case to
-    design for — it is the cabinet having stopped answering, which the register
-    (SDD Appendix C) puts on the side of the steps that must succeed.  Catching
-    it would put an empty tool result into the conversation, the hidden fallback
-    `compress_for` forbids one paragraph up ("nothing else here falls back"),
-    and would mask exactly the failure this step is here to report.
-    """
-    answer = await client.call_tool(
-        "dump_read",
-        {"call": call, "offset": 1},
-        meta=client_meta(*client_id),
-        timeout=_T.timeouts.work.hub,
-    )
-    return flatten(answer.content)
-
-
-def _text_of(message: Message) -> str:
-    """The words in one message, whether it is plain or carries parts.
-
-    A user message with an attachment is a list of content parts (`Message`
-    documents the shape), and its text is a `{"type": "text"}` part.  A
-    `str`-only read would make the newest user message invisible to
-    `_current_input`, which would then answer with the previous turn's words.
-    """
-    if isinstance(message.content, str):
-        return message.content
-    if isinstance(message.content, list):
-        return "\n".join(
-            part["text"]
-            for part in message.content
-            if isinstance(part, dict)
-            and isinstance(part.get("text"), str)
-            and part["text"]
-        )
-    return ""
-
-
-def _conversation(messages: Sequence[Message]) -> str:
-    """The conversation in hand, as the discriminator's template says it has.
-
-    **A transcript rather than the message list**, because the list cannot be
-    sent: compression runs before the result is appended, so its last message is
-    an assistant turn whose tool calls have no results yet — the one history
-    state every provider rejects.  Rendering the turns into the instruction gives
-    the model the condition without inventing tool results to satisfy a wire
-    format.
-    """
-    lines: list[str] = []
-    for message in messages:
-        text = _text_of(message)
-        if message.tool_calls:
-            called = ", ".join(
-                f"{call.name}({json.dumps(call.arguments, ensure_ascii=False)})"
-                for call in message.tool_calls
-            )
-            text = f"{text}\n[called {called}]".strip()
-        if not text.strip():
-            continue
-        label = {
-            "user": "User",
-            "assistant": "Assistant",
-            "tool": "Tool result",
-            "system": "System",
-        }.get(message.role, message.role.capitalize())
-        lines.append(f"{label}: {text}")
-    return "\n\n".join(lines)
-
-
-def _current_input(messages: Sequence[Message]) -> str:
-    """The input this turn is answering: the newest user message, as words.
-
-    Read off the list rather than threaded down, because the loop appends the
-    user's message itself before it calls anything — so the newest `user` in the
-    list *is* the current input, and a message that cut into the middle of the
-    turn is the current input too, which is the honest answer to a question asked
-    while the turn was running.
-
-    **The newest user message ends the search even when it has no `str` text.**
-    A message carrying an image is a list of parts; skipping it in favour of the
-    previous turn's plain message answers a question nobody asked in this turn.
-    """
-    for message in reversed(messages):
-        if message.role == "user":
-            return _text_of(message)
-    return ""
 
 
 #: The harness tool a message that arrived mid-turn is delivered under — the
@@ -1173,13 +1027,13 @@ def build_server(
     async def cabinet() -> Client:
         """The client for the cabinet, opened on first use.
 
-        **A direct peer and not a hub route.**  The four cabinet tools this
-        process needs sit across the audience line — `dump_save`, `image_save`
-        and `image_source` are the harness's and carry no mark, `dump_read` is
-        the model's and does — and the hub holds rows only for what the model may
-        see, so the harness reaches the plugin itself, exactly as
-        `slife2-context` reaches a model backend.  All four travel over this one
-        client.
+        **A direct peer and not a hub route.**  The three cabinet tools this
+        process needs are the harness's and carry no mark — `dump_save`,
+        `image_save` and `image_source` — and the hub holds rows only for what
+        the model may see, so the harness reaches the plugin itself, exactly as
+        `slife2-context` reaches a model backend.  All three travel over this
+        one client.  The model's own cabinet readers, `dump_read` and
+        `dump_grep`, are marked and reach it through the hub.
         """
         nonlocal cabinet_conn
         if cabinet_conn is not None:
@@ -1218,7 +1072,10 @@ def build_server(
             if source in seen:
                 continue
             seen.add(source)
-            encoded, refused = attachments.resolve([source])
+            # A model's path is relative to its data directory — the working
+            # directory its own tools run in — so a path a tool printed is one
+            # `attach_image` can open.
+            encoded, refused = attachments.resolve([source], base=home())
             if encoded:
                 pairs.extend(encoded)
             else:
@@ -1326,84 +1183,51 @@ def build_server(
                 # straight through it and leave the connection open.
                 await asyncio.shield(close_server(peer))
 
-    def compress_for(backend: LLMBackend, client_id: ClientId) -> Compress:
+    def compress_for(client_id: ClientId) -> Compress:
         """How one conversation's tool results are fitted into it.
 
-        **The second discriminator, and the shape of the first** (SDD §5.2.4):
-        one model call, given the result, the conversation in hand and the
-        current input, answering with **line numbers rather than text** — so the
-        harness cuts the original, and what enters the conversation is the tool's
-        own words or it is nothing.
+        **A fixed rule, not a model call** (SDD §5.2.4).  Under
+        `tool_result.tokens` the result goes in as it came.  Over it the whole
+        output is saved as a dump — a file, keyed by the call — and the
+        conversation carries the head of it and the address: the `[DUMP:…]`
+        marker, the size of the file, and the readers that open it.
 
-        **One fallback, for the one step whose failure is expected.**  A model is
-        asked for a decision and can answer badly or about something else, so an
-        unusable reply is an ordinary event with a designed answer: the reader's
-        own first window, which is what a model that had asked for the beginning
-        would have got.  Nothing else here falls back — keeping the output whole,
-        writing it, reading a window back are steps that must succeed, and a
-        fallback for one of them would be a hidden bug rather than a design: a
-        conversation carrying an output nobody can read back has given up the
-        bound *and* broken the address, and it would look like success.
-
-        The model is the conversation's own, through the backend its turn is
-        already using: a selection is judged *under* the conversation, and the
-        model that will read it is the one that knows what it is doing.
+        **Saving is the one step that must succeed.**  The marker promises a
+        file; a conversation carrying a marker whose file is not there would be
+        a bound with no way back, and it would look like success.  So a cabinet
+        that cannot answer fails the turn.  There is no fallback: nothing here
+        guesses what went wrong.
         """
 
-        async def compress(
-            call: ToolCall, text: str, messages: Sequence[Message]
-        ) -> str:
+        async def compress(call: ToolCall, text: str) -> str:
             window = current().tool_result.tokens
             if estimate_text_tokens(text) <= window:
                 return text
-            # **The question comes first, and the dump is written once.**
-            # `mime` is what the cabinet's `dump_read` refuses to open a row by
-            # (`slife2/plugins/cabinet/server.py`, the `not startswith("text/")`
-            # arm), and the one party that can say an output has no lines in it
-            # is the model being asked here: a payload is a `str` either way, so
-            # nothing else in this process — this server, the loop, the tool that
-            # produced it — knows the difference.  Writing the row before the
-            # answer would therefore leave it claiming to be readable, and the
-            # `binary` window says in the conversation that `dump_read` will not
-            # open it — a promise the same turn's row would then break.  The row
-            # is written under one key, so a second write to correct it is a
-            # second write to keep in step; asking first is what keeps it one.
-            decision = await _asked(backend, call, text, messages, window=window)
             client = await cabinet()
-            await client.call_tool(
+            answer = await client.call_tool(
                 "dump_save",
-                {
-                    "call": call.id,
-                    "output": text,
-                    "tool": call.name,
-                    # `NOT_TEXT` rather than a media type, and empty rather than
-                    # a guess: the store's own answer for a row nobody has a type
-                    # for is `""`, and what the model says when it *is* not text
-                    # is the word this module already uses for that judgement.
-                    "mime": (
-                        dumps.NOT_TEXT
-                        if not isinstance(decision, dumps.Rejected) and decision.binary
-                        else ""
-                    ),
-                },
+                {"call": call.id, "output": text, "tool": call.name},
                 meta=client_meta(*client_id),
                 timeout=_T.timeouts.work.hub,
             )
-            if isinstance(decision, dumps.Rejected):
-                logger.info("compact_discriminator_unparsed call=%s", call.id)
-                return await _first_page(client, call.id, client_id)
-            lines = dumps.lines_of(text)
+            payload = tool_payload(answer)
+            where = payload.get("path")
+            size = payload.get("size")
+            if (
+                not isinstance(where, str)
+                or not where
+                or not isinstance(size, int)
+                or isinstance(size, bool)
+                or size < 0
+            ):
+                # The row was written, but the answer that names its file is
+                # not this build's shape — a daemon from another build, which
+                # is a harness failure and not a tool the model can correct.
+                raise unreadable(
+                    "the cabinet", "return the dump's path and size", payload
+                )
             return dumps.window(
-                call=call.id,
-                lines=lines,
-                kept=dumps.cut(lines, decision, window),
-                # Whether the model *chose* nothing, which is an answer, as
-                # against choosing lines too long to fit, which is not — the two
-                # are told apart because they read differently to the model that
-                # gets one.
-                chosen=bool(decision.lines),
-                binary=decision.binary,
-                budget=window,
+                call=call.id, text=text, where=where, size=size, budget=window
             )
 
         return compress
@@ -1647,11 +1471,11 @@ def build_server(
             # call's result back to — see `hand_back`, which is the other half
             # of that.
             deliver=deliver,
-            # Built here rather than handed in, because half of what it needs is
-            # decided in this function: the backend the turn runs on.  None when
-            # the caller did not ask for one, and a result then goes in as it
-            # came — see `AgentLoop._fit`.
-            compress=None if compressor is None else compressor(active, client_id),
+            # Built here rather than handed in, because the conversation's key
+            # is what names the cabinet the dump goes into.  None when the
+            # caller did not ask for one, and a result then goes in as it came —
+            # see `AgentLoop._fit`.
+            compress=None if compressor is None else compressor(client_id),
         )
 
     async def loop_for(
@@ -3133,9 +2957,10 @@ def build_server(
         the cabinet resolves it.
 
         Args:
-            sources: Absolute paths on this machine, `http(s)` URLs that serve
-                image bytes, `data:` URIs, or a cabinet key from an `[Image:…]`
-                reference — as many as you need in one call.
+            sources: Paths on this machine — absolute, or relative to your data
+                directory — `http(s)` URLs that serve image bytes, `data:` URIs,
+                or a cabinet key from an `[Image:…]` reference — as many as you
+                need in one call.
 
         Returns:
             `attached` — the sources the model can now see, named exactly as

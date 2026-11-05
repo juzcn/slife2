@@ -30,8 +30,8 @@ cabinet manages, so a search ranks them against each other rather than against
 their own kind — a rank only means something inside the corpus that produced it,
 and one index per kind would be one corpus per kind (SDD §8.3).  A dump and an
 image are a turn's attachments: the turn's marker is their address
-(`[DUMP:…]` → `dump_read`, `[Image:…]` → `attach_image`), so they are stored
-here and are not indexed.  What differs per kind is what a *document* is, and
+(`[DUMP:…]` → `dump_read`/`dump_grep`, `[Image:…]` → `attach_image`), so they
+are stored here and are not indexed.  What differs per kind is what a *document* is, and
 that is `SPECS` in the store: its key, its time axis, where its markdown goes,
 and whether it is in the corpus.
 
@@ -44,8 +44,9 @@ writes, because they are one operation.
 
 **The bytes of a saved file live on disk and never in the index.**  `file_save`
 copies them into the cabinet (never moving, never deleting what it copied from);
-`file_read` returns a file's *text* or refuses with what it is instead, and the
-path to the bytes is what every other tool takes.
+`file_read` windows the decoded *text* — a binary file's escaped rendering —
+`file_grep` searches the same text, and the path to the bytes is what every
+other tool takes.
 
 **A file comes from a local path or an `http(s)` URL.**  A local file is copied,
 never moved; a URL is fetched whole into the cabinet, bounded by
@@ -66,9 +67,10 @@ is its address, so there is no index entry for it.
 
 What this cut does **not** do, each named rather than half-built:
 
-* **There is no `grep` leg.**  The cabinet has two search legs; the third is
-  deferred in SDD §14.2 by name, and the cabinet inherits the deferral rather
-  than inventing a second regex engine.
+* **There is no corpus-wide `grep` leg.**  The cabinet's search ranks notes,
+  days, files and reports by words and meaning; `dump_grep` finds text in one
+  saved output by a literal match, which is a reader's address rather than a
+  second search engine (SDD §14.2).
 * **There is no schedule half.**  The cabinet owns no scheduled-task tables and
   no tools over them; there is no scheduler here, so a report is keyed by its
   **title** instead of by a task, and a second write under one title is a
@@ -83,6 +85,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import hashlib
 import ipaddress
 import json
@@ -92,9 +95,10 @@ import os
 import re
 import shutil
 import urllib.parse
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import date as _date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx2
 from fastmcp import Context, FastMCP
@@ -104,10 +108,11 @@ from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers import timeouts as _T
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
+from slife2.libs.host.paths import home
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import client_reader, house_server, serve_plugin
 from slife2.libs.store.index import Embedder
-from slife2.libs.turn.tokens import estimate_lines_tokens, estimate_text_tokens
+from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import (
     CORPUS_KIND_HINT,
     DIARY,
@@ -143,18 +148,13 @@ INSTRUCTIONS = (
     "update replaces the whole document, and remove deletes it — "
     "`note_write`/`note_read`/`note_update`/`note_remove`, and the same with "
     "`diary_` and `report_` in place of `note_`. `file_save` copies a local "
-    "file or fetches an `http(s)` URL into the cabinet. A tool output the "
-    "harness kept whole is read with `dump_read` by the call id in its "
-    "`[DUMP:…]` marker; an image a turn carried comes back with `attach_image` "
+    "file or fetches an `http(s)` URL into the cabinet; `file_read` and "
+    "`file_grep` read and search it in the same line-or-character units. A "
+    "tool output the harness kept whole is read with `dump_read` by the call "
+    "id in its `[DUMP:…]` marker, in line or character units, and searched "
+    "with `dump_grep`; an image a turn carried comes back with `attach_image` "
     "from its `[Image:…]` key."
 )
-
-#: The most of a file `file_read` will read.  A cap rather than a preference: a
-#: tool that returns a gigabyte of text to a model has spent a context window to
-#: say "this is not a document".  A URL is bounded at the fetch instead
-#: (`MAX_FETCH_BYTES`); this is what `file_read` will print back from what was
-#: saved.
-MAX_READ_BYTES = 2 * 1024 * 1024
 
 #: How much of a file is sniffed for the two things that settle its encoding
 #: before anything is decoded: a BOM, and a NUL byte.
@@ -275,8 +275,8 @@ def unique_path(directory: Path, name: str) -> Path:
 
 #: The most a URL may bring into the cabinet, in bytes.  A cap rather than a
 #: preference: a server that streams for ever would spend the operator's disk
-#: and this process's memory, and a saved file is a file rather than the text
-#: `MAX_READ_BYTES` bounds.
+#: and this process's memory, and a saved file is a file rather than the window
+#: a reader hands back.
 MAX_FETCH_BYTES = 50 * 1024 * 1024
 
 #: How many redirects one fetch follows.  Every hop passes `_checked_url`, so
@@ -440,42 +440,57 @@ def _download_name(url: str, mime: str) -> str:
     return f"{stem[:80] or 'download'}{suffix}"
 
 
-def decode(data: bytes) -> tuple[str, str]:
-    """A file's bytes as text, and the encoding they were read as.
+#: A byte as a reader sees it in a file that is not text: printable ASCII and
+#: tab/newline/carriage-return survive, every other byte becomes `\xNN`.  The
+#: mapping is one entry per byte, so a sentence inside a binary is still
+#: findable by `file_grep`, and the rest is visibly not text.
+_BINARY_CHARS = {
+    byte: chr(byte)
+    if (byte in (9, 10, 13) or 0x20 <= byte <= 0x7E)
+    else f"\\x{byte:02x}"
+    for byte in range(256)
+}
+
+
+def _binary_text(data: bytes) -> str:
+    """A non-text file as bytes a reader can search and read.
+
+    `latin-1` maps each byte to one character without guessing an encoding, and
+    `translate` turns the non-printable ones into `\\xNN`.  The result is not a
+    decode of anything — it is the bytes, shown.
+    """
+    return data.decode("latin-1").translate(_BINARY_CHARS)
+
+
+def _head_encoding(head: bytes) -> str:
+    """The encoding a file's first block says it is, or `"binary"`.
 
     **"No text" is not the same question as "is it UTF-8"**, and reading it as
     one refuses text that plainly exists — a `.txt` written by cmd is GBK, and
     one redirected by PowerShell is UTF-16LE.  So the order is: a BOM settles it
     before anything else (UTF-16LE's BOM cannot be mistaken for a PDF, and UTF-8
-    with a BOM is still UTF-8); then a NUL in the first block is the tell that a
-    file has no text to return at all — a PDF, an image, an archive; then UTF-8
-    strict; and only then the guess, which is *announced*, because the one
-    outcome still worth refusing is a **silent** wrong decode.
+    with a BOM is still UTF-8); then a NUL is the tell that the bytes are not
+    text — a PDF, an image, an archive; then UTF-8 and GB18030 are tried with an
+    incremental decoder, so a character cut at the read boundary is not mistaken
+    for a decode failure.
 
-    Returns `(text, encoding)` — the name empty for UTF-8, which is the cabinet's
-    own encoding and the web's, and otherwise the encoding the bytes were read
-    as, or `"binary"` for a file that has no text to return at all.  A name
-    rather than the sentence it used to be, because the answer is JSON: what a
-    caller does with it is a fact on the payload, not a line of prose.
+    **One sniff for both readers**: `decode` hands it the whole file's head and
+    `_file_encoding` hands it the file's own first block, so a file is read as
+    the same text whether it is loaded or streamed.
     """
-    head = data[:SNIFF_BYTES]
     if head.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return data.decode("utf-16"), "utf-16"
-        except UnicodeDecodeError:
-            pass
+        return "utf-16"
     if head.startswith(b"\xef\xbb\xbf"):
-        return data.decode("utf-8-sig"), ""
+        return "utf-8-sig"
     if b"\x00" in head:
-        return "", "binary"
-    try:
-        return data.decode("utf-8"), ""
-    except UnicodeDecodeError:
-        pass
-    try:
-        return data.decode("gb18030"), "gb18030"
-    except UnicodeDecodeError:
-        return "", "binary"
+        return "binary"
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            codecs.getincrementaldecoder(encoding)().decode(head, final=False)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    return "binary"
 
 
 def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP:
@@ -534,8 +549,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     # remove, plus a page; a saved file answers the same read and remove by its
     # own names because its text comes from disk, and `file_save` copies bytes
     # in rather than writing text.  The two attachments a turn leaves here are
-    # read by address instead: a dump by `dump_read`, an image by
-    # `image_source`.  What differs between the kinds is the key, the sentence
+    # read by address instead: a dump by `dump_read` or `dump_grep`, an image
+    # by `image_source`.  What differs between the kinds is the key, the sentence
     # a refusal answers with, and — for a report — the period; those are
     # arguments.  What must *not* differ, and did while each kind had its own
     # copy, is everything a copy gets wrong quietly: the `""` that means "no
@@ -549,7 +564,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     # like every other refusal here.  A write's `None` is the store saying the
     # key was already there; an update's is the row not being there.  The
     # answers that need the *store* after the fetch (`file_read` resolves a
-    # path, `dump_read` reads a window) keep their own body and say so by
+    # path, the dump readers read a window) keep their own body and say so by
     # asking `cabinet` directly.
 
     async def page_of(
@@ -588,6 +603,36 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         if row is None:
             raise ToolError(said)
         return row
+
+    async def dump_body(ctx: Context, call: str) -> tuple[str, str]:
+        """One dump's text, and a path the agent can open.
+
+        A row that is not there is the tool's miss, worded once here because
+        both readers say the same thing about it.
+        """
+        opened = await cabinet(ctx)
+        row = await missing_row(
+            ctx, DUMP, call, f"there is no saved output for the call {call!r}."
+        )
+        mirror = str(row.get("mirror") or "")
+        where = _accessible_path(opened.root / mirror) if mirror else ""
+        return str(row.get("body") or ""), where
+
+    async def file_target(ctx: Context, path: str) -> Path:
+        """The saved file a path names, resolved and checked.
+
+        One definition for both file readers: the row must exist, the path must
+        stay inside the cabinet, and the bytes must still be on disk.
+        """
+        opened = await cabinet(ctx)
+        await missing_row(ctx, FILE, path, f"there is no saved file at {path!r}.")
+        try:
+            target = resolve(opened.root, path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not target.is_file():
+            raise ToolError(f"{path!r} is recorded but is not on disk any more.")
+        return target
 
     async def remove_of(ctx: Context, kind: str, key: str, said: str) -> None:
         """Delete one row of one kind, or raise this tool's miss."""
@@ -1000,46 +1045,139 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         return {"kind": FILE, "key": path, "removed": True}
 
     @mcp.tool(name="file_read", meta=FOR_THE_MODEL)
-    async def file_read(ctx: Context, path: str) -> dict[str, Any]:
-        """Read a saved file's text.
+    async def file_read(
+        ctx: Context,
+        path: str,
+        mode: Literal["line", "char"] = "line",
+        offset: int | None = None,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Read a saved file's text by line or by character.
 
-        A PDF, an image or an archive has no text: the call is refused with what
-        the file is, how big, and where its bytes are. Text in another encoding
-        reaches you decoded, with the encoding named beside it.
+        A line-organized file is read by line number; a file with no useful
+        lines — minified JSON, one long record — is read by character offset. A
+        PDF, an image or an archive has no text: its bytes are shown as an
+        escaped rendering, so you can see what it is. Text in another encoding
+        reaches you decoded.
 
         Args:
             path: The saved file's path inside the cabinet.
+            mode: `"line"` reads lines; `"char"` reads characters.
+            offset: The first line (1-based, negative from the end) or the
+                first character (0-based, negative from the end). The first
+                line or character when omitted.
+            limit: The most lines or characters to show. `0` shows as many as
+                fit.
 
         Returns:
-            The file's `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `size`, `mime` and `source`, its text under `text`, and `encoding`
-            when that is not UTF-8.
+            `chars`, how many characters the whole text has; `lines`, how many
+            lines it has (line mode only — that mode already splits it);
+            `text`, the window, each line prefixed with its own number in line
+            mode; and `next`, the offset the following window starts at — in
+            the same units as `offset` — absent when this window reaches the
+            end.
         """
-        opened = await cabinet(ctx)
-        row = await missing_row(ctx, FILE, path, f"there is no saved file at {path!r}.")
-        try:
-            target = resolve(opened.root, path)
-        except ValueError as exc:
-            raise ToolError(str(exc)) from exc
-        if not target.is_file():
-            raise ToolError(f"{path!r} is recorded but is not on disk any more.")
-        size = target.stat().st_size
-        if size > MAX_READ_BYTES:
-            raise ToolError(
-                f"{path} is {size} bytes, past the {MAX_READ_BYTES}-byte cap — "
-                f"read it with a tool that takes a path."
+        target = await file_target(ctx, path)
+        where = _accessible_path(target)
+        wanted = _read_mode(mode)
+        encoding = _file_encoding(target)
+        total_lines, total_chars = _file_totals(target, encoding)
+        if not total_lines:
+            page: dict[str, Any] = {"chars": 0, "text": ""}
+            if wanted == "line":
+                page["lines"] = 0
+            return page
+        limit = max(limit, 0)
+        budget = config.tool_result.tokens
+        if wanted == "line":
+            start = _line_start(1 if offset is None else offset, total_lines)
+            lines = (
+                (number, line_start, text)
+                for number, line_start, text, _ending, _following in _file_lines(
+                    target, encoding
+                )
             )
-        data = await off_loop(target.read_bytes)
-        text, encoding = decode(data)
-        if encoding == "binary":
-            raise ToolError(
-                f"{path} is not text ({row['mime'] or 'unknown type'}, {size} "
-                f"bytes) — its bytes are at {target}."
+            return _line_fill(
+                lines,
+                total_lines=total_lines,
+                total_chars=total_chars,
+                start=start,
+                limit=limit,
+                budget=budget,
+                where=where,
             )
-        read = _document(row, text=text)
-        if encoding:
-            read["encoding"] = encoding
-        return read
+        start = _char_start(0 if offset is None else offset, total_chars)
+        # The window's size in characters is not known until it is measured;
+        # gather a generous multiple of the budget (a token is at least one
+        # character, and four covers the priciest BPE splits) and let
+        # `_char_window` cut it back to what fits.
+        room = budget * 4 + 1024
+        if limit:
+            room = min(room, limit)
+        chunk = _file_char_text(target, encoding, start, room)
+        return _char_window(
+            chunk,
+            index=0,
+            base=start,
+            total_chars=total_chars,
+            limit=limit,
+            budget=budget,
+            where=where,
+        )
+
+    @mcp.tool(name="file_grep", meta=FOR_THE_MODEL)
+    async def file_grep(
+        ctx: Context,
+        path: str,
+        pattern: str,
+        offset: int = 1,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Find text in a saved file.
+
+        The pattern is matched literally and ignoring case within one line;
+        every match answers with both addresses — the line and the character
+        offset — so either read mode can continue from it.
+
+        Args:
+            path: The saved file's path inside the cabinet.
+            pattern: The text to find.
+            offset: The first line to search, 1-based; negative counts from the
+                end.
+            limit: The most matches to show. `0` shows as many as fit.
+
+        Returns:
+            `lines` and `chars`, how many lines and characters the whole text
+            has; `matched`, how many lines hold the pattern at or after
+            `offset`; `matches`, each with `line`, `char` (the 0-based character
+            offset the match starts at) and `text` (the line; `cut` is true when
+            only the beginning of a very long line fits); and `next`, the line
+            of the next match when not all of them are shown.
+        """
+        target = await file_target(ctx, path)
+        wanted = _grep_pattern(pattern)
+        encoding = _file_encoding(target)
+        total_lines, total_chars = _file_totals(target, encoding)
+        if not total_lines:
+            return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
+        start = _line_start(offset, total_lines)
+        hits = _grep_hits(
+            (
+                (number, line_start, text)
+                for number, line_start, text, _ending, _following in _file_lines(
+                    target, encoding
+                )
+            ),
+            wanted,
+            start,
+        )
+        return _grep_answer(
+            hits,
+            total_lines=total_lines,
+            total_chars=total_chars,
+            limit=limit,
+            budget=config.tool_result.tokens,
+        )
 
     @mcp.tool(name="file_list", meta=FOR_THE_MODEL)
     async def file_list(
@@ -1231,66 +1369,84 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     async def dump_read(
         ctx: Context,
         call: str,
-        offset: int = 1,
+        mode: Literal["line", "char"] = "line",
+        offset: int | None = None,
         limit: int = 0,
-        pattern: str = "",
-        context: int = 0,
     ) -> dict[str, Any]:
-        """Read a tool output that was saved whole, by finding — not by scrolling.
+        """Read a saved tool output by line or by character.
 
-        A result too large for the conversation is shortened for you and kept
-        whole here; the marker standing in for it names the call. This is the way
-        back to the part the shortening did not carry, and it is a *searching*
-        reader: name what you are looking for and how much of what surrounds it,
-        or name the line you already know and read from there. The lines are
-        numbered, a matched line is marked `:` and the lines around it `-`, and
-        the numbers are the ones the marker beside the result shows.
+        A tool output too large for the conversation is saved as a file, and
+        the `[DUMP:…]` marker beside the result names the tool call it belongs
+        to. This reads any part of it. A line-organized file is read by line
+        number; a file with no useful lines — minified JSON, one long record —
+        is read by character offset.
 
         Args:
             call: The tool call id, from the marker in the conversation.
-            offset: The first line to read; `1` is the first and `-1` the last.
-            limit: The most lines to show. `0` shows as many as fit.
-            pattern: Show the lines containing this text, matched literally and
-                ignoring case.
-            context: With a pattern, how many lines either side of a match to
-                show with it.
+            mode: `"line"` reads lines; `"char"` reads characters.
+            offset: The first line (1-based, negative from the end) or the
+                first character (0-based, negative from the end). The first
+                line or character when omitted.
+            limit: The most lines or characters to show. `0` shows as many as
+                fit.
 
         Returns:
-            `total`, how many lines the output has; `text`, the window, each line
-            prefixed with its own number; `next`, the `offset` of the window
-            after this one — absent when there is nothing further to read of what
-            you asked for; and `matched`, how many lines at or after `offset`
-            hold `pattern`, which is there only when you gave one, and is `0`
-            with an empty window when nothing matched.
+            `chars`, how many characters the whole output has; `lines`, how
+            many lines it has (line mode only — that mode already splits it);
+            `text`, the window, each line prefixed with its own number in line
+            mode; and `next`, the offset the following window starts at — in
+            the same units as `offset` — absent when this window reaches the
+            end.
         """
-        opened = await cabinet(ctx)
-        budget = config.tool_result.tokens
-        row = await missing_row(
-            ctx, DUMP, call, f"there is no saved output for the call {call!r}."
-        )
-        mirror = str(row.get("mirror") or "")
-        where = str(opened.root / mirror) if mirror else ""
-        mime = str(row.get("mime") or "")
-        if mime and not mime.startswith("text/"):
-            # **A dump that is not text is dumped and not read.**  Nothing here
-            # decides that a payload is not text: the judgement is made where the
-            # result arrived, and the harness writes it down as the row's mime.
-            # Sniffing for it here would be this module deciding what a tool
-            # returned, which is the one thing the arrangement keeps out of the
-            # harness's hands — and there are no lines of a picture to find
-            # anyway.
-            raise ToolError(
-                f"the output of {call!r} is not text ({mime}), so there are no "
-                f"lines to read — its bytes are at {where}."
-            )
-        return _window_of(
-            str(row.get("body") or ""),
+        body, where = await dump_body(ctx, call)
+        return _read_page(
+            body,
             where=where,
+            mode=mode,
             offset=offset,
             limit=limit,
-            pattern=pattern,
-            context=context,
-            budget=budget,
+            budget=config.tool_result.tokens,
+        )
+
+    @mcp.tool(name="dump_grep", meta=FOR_THE_MODEL)
+    async def dump_grep(
+        ctx: Context,
+        call: str,
+        pattern: str,
+        offset: int = 1,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Find text in a saved tool output.
+
+        A tool output too large for the conversation is saved as a file, and
+        the `[DUMP:…]` marker beside the result names the tool call it belongs
+        to. This finds what a model is looking for in the part the conversation
+        did not carry. The pattern is matched literally and ignoring case
+        within one line; every match answers with both addresses — the line and
+        the character offset — so either read mode can continue from it.
+
+        Args:
+            call: The tool call id, from the marker in the conversation.
+            pattern: The text to find.
+            offset: The first line to search, 1-based; negative counts from the
+                end.
+            limit: The most matches to show. `0` shows as many as fit.
+
+        Returns:
+            `lines` and `chars`, how many lines and characters the whole output
+            has; `matched`, how many lines hold the pattern at or after
+            `offset`; `matches`, each with `line`, `char` (the 0-based character
+            offset the match starts at) and `text` (the line; `cut` is true when
+            only the beginning of a very long line fits); and `next`, the line
+            of the next match when not all of them are shown.
+        """
+        body, _ = await dump_body(ctx, call)
+        return _grep_page(
+            body,
+            pattern,
+            offset=offset,
+            limit=limit,
+            budget=config.tool_result.tokens,
         )
 
     @mcp.tool(name="dump_save")
@@ -1299,7 +1455,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         call: str,
         output: str,
         tool: str = "",
-        mime: str = "",
     ) -> dict[str, Any]:
         """Keep one tool output whole, keyed by the call it came from.
 
@@ -1308,17 +1463,17 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         audience mark — which keeps it out of the hub's catalogue, and therefore
         out of the model's list and out of `tool_search`.  The harness reaches
         this server **directly**, as a peer, exactly as `slife2-context` reaches a
-        model backend; the model's own route back in is `dump_read`, which *is*
-        marked and therefore *is* in the catalogue.
+        model backend; the model's own routes back in are `dump_read` and
+        `dump_grep`, which *are* marked and therefore *are* in the catalogue.
 
         A second call under one key replaces, because the key is one call: a
         re-run writes the same output twice rather than two facts.
 
         **The row is not in the cabinet's corpus.**  Its address is the call id
-        in the turn's `[DUMP:…]` marker, and `dump_read` is the reader, so no
-        keyword entry and no vector are written: a search is not how a dump is
-        found, and machine output ranked against a person's notes is the
-        dilution the store's docstring names.
+        in the turn's `[DUMP:…]` marker, and `dump_read`/`dump_grep` are the
+        readers, so no keyword entry and no vector are written: a search is not
+        how a dump is found, and machine output ranked against a person's notes
+        is the dilution the store's docstring names.
 
         Answers with a payload and **refuses by raising**, because its caller is
         the harness and not a model: an answer it cannot read has to be
@@ -1329,7 +1484,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 identifier the conversation and this row both carry.
             output: The whole of what the tool returned.
             tool: The tool's name, so a listing says what produced this.
-            mime: What the output is, when it is known not to be text.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -1339,12 +1493,21 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             body=output,
             title=tool,
             source=tool,
-            mime=mime,
             embedder=await embedding.get(),
         )
         assert row is not None, "an upsert always writes"
-        logger.info("dump_save call=%s tool=%s chars=%d", call, tool, len(output))
-        return {"kept": call, "mirror": str(row["mirror"]), "chars": len(output)}
+        written = opened.root / str(row["mirror"])
+        # **The size is the file's, not the string's.**  One `stat` is O(1) and
+        # is the number a reader sees; encoding the output again to count its
+        # bytes would copy every byte of a file that is already on disk.
+        size = written.stat().st_size
+        logger.info("dump_save call=%s tool=%s bytes=%d", call, tool, size)
+        return {
+            "kept": call,
+            "mirror": str(row["mirror"]),
+            "path": _accessible_path(written),
+            "size": size,
+        }
 
     # ── Images ───────────────────────────────────────────────────────────
     #
@@ -1528,8 +1691,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         that nothing was close.
 
         A dump and an image are not searched. A dump is read with `dump_read`
-        by the call id its `[DUMP:…]` marker names, and an image comes back with
-        `attach_image` from its `[Image:…]` key.
+        or searched with `dump_grep` by the call id its `[DUMP:…]` marker names,
+        and an image comes back with `attach_image` from its `[Image:…]` key.
 
         Args:
             keywords: Words to look for — a path like `files/docs/spec.pdf`
@@ -1583,8 +1746,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         summary is what a search by meaning reads instead.
 
         A dump and an image are not described: they are not found by a search.
-        A dump is read with `dump_read` and an image is attached with
-        `attach_image`, both by the address the turn carries.
+        A dump is read with `dump_read` or `dump_grep`, and an image is
+        attached with `attach_image`, both by the address the turn carries.
 
         Args:
             kind: `note`, `diary`, `file` or `report`.
@@ -1615,132 +1778,574 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     return mcp
 
 
-def _window_of(
+def _text_lines(body: str) -> tuple[list[str], list[int]]:
+    """A text's lines, and the character offset each one starts at.
+
+    The pieces are split **with** their line endings, so the offsets count the
+    characters the file actually has: a CRLF or a Unicode line separator is part
+    of the distance to the next line rather than a character dropped and guessed
+    at.  The lines themselves are the text without the ending, which is what a
+    reader is shown and what a pattern is matched against.
+    """
+    pieces = body.splitlines(keepends=True)
+    lines: list[str] = []
+    starts: list[int] = []
+    at = 0
+    for piece in pieces:
+        starts.append(at)
+        broken = piece.splitlines()
+        lines.append(broken[0] if broken else "")
+        at += len(piece)
+    return lines, starts
+
+
+def _line_start(offset: int, total: int) -> int:
+    """A 1-based line address, negative counting from the end; always a line.
+
+    A negative number is where a log's own summary is, and a reader asking for
+    the tail of something it has never read does not know how long it is.
+    """
+    start = offset if offset > 0 else total + offset + 1
+    if start < 1 or start > total:
+        raise ToolError(
+            f"{offset} is not a line of this text: it has {total}, and 1 to "
+            f"{total} (or -1 to -{total}) are the addresses."
+        )
+    return start
+
+
+def _char_start(offset: int, total: int) -> int:
+    """A 0-based character address, negative counting from the end.
+
+    Zero is the first character, because a character address is an index into
+    the file: the count of characters shown is exactly the offset the next read
+    starts at, which is the arithmetic the truncation marker hands over.
+    """
+    start = offset if offset >= 0 else total + offset
+    if start < 0 or start >= total:
+        raise ToolError(
+            f"{offset} is not a character of this text: it has {total}, and "
+            f"0 to {total - 1} (or -1 to -{total}) are the offsets."
+        )
+    return start
+
+
+def _read_mode(mode: str) -> str:
+    """The reader's mode, or the refusal an unknown one earns."""
+    wanted = (mode or "line").strip().lower()
+    if wanted not in ("line", "char"):
+        raise ToolError(
+            f"mode must be 'line' or 'char'; got {mode!r}. Use line mode for a "
+            f"file organized in lines, char mode for one that is not."
+        )
+    return wanted
+
+
+def _read_page(
+    body: str,
+    *,
+    where: str,
+    mode: str,
+    offset: int | None,
+    limit: int,
+    budget: int,
+) -> dict[str, Any]:
+    """A window of one text, by line or by character.
+
+    **The dump side of the shared readers.**  A dump's body is already in
+    memory; `_line_page` and `_char_page` are the same page builders a streamed
+    file uses, so the two readers cannot cut a window two ways.  An empty text
+    answers an empty window rather than a refusal.
+    """
+    wanted = _read_mode(mode)
+    limit = max(limit, 0)
+    if not body:
+        page: dict[str, Any] = {"chars": 0, "text": ""}
+        if wanted == "line":
+            page["lines"] = 0
+        return page
+    if wanted == "line":
+        lines, starts = _text_lines(body)
+        return _line_page(
+            lines,
+            starts,
+            where=where,
+            total_chars=len(body),
+            offset=1 if offset is None else offset,
+            limit=limit,
+            budget=budget,
+        )
+    # **No line scan here.**  This is the mode for a text without useful lines;
+    # splitting the whole text to report a line count is a scan this mode does
+    # not need.
+    return _char_page(
+        body,
+        where=where,
+        offset=0 if offset is None else offset,
+        limit=limit,
+        budget=budget,
+    )
+
+
+def _line_fill(
+    lines: Iterable[tuple[int, int, str]],
+    *,
+    total_lines: int,
+    total_chars: int,
+    start: int,
+    limit: int,
+    budget: int,
+    where: str,
+) -> dict[str, Any]:
+    """Fill a line page from a stream, **never larger than `budget` tokens**.
+
+    The bound is on the whole answer, envelope included: a reader that handed
+    back more than the budget would be a tool of ours feeding the harness's own
+    truncation, which is one system at both ends of a loop.  The page is filled
+    from a line source — an in-memory list for a dump, a file read line by line
+    for a saved file — and only the page is held.
+
+    **A line longer than the window is not truncated here.**  Line mode is for
+    a text organized in lines; a single line too large for the whole window is
+    the case char mode exists for, and the refusal names the character offset
+    and the file rather than pretending the line ended.
+    """
+    kept: list[tuple[int, str]] = []
+    next_line: int | None = None
+    first_offset = 0
+    for number, offset, text in lines:
+        if number < start:
+            continue
+        if number == start:
+            first_offset = offset
+        if limit and len(kept) >= limit:
+            next_line = number
+            break
+        kept.append((number, text))
+        following = number + 1 if number < total_lines else None
+        if (
+            estimate_text_tokens(
+                _wire(_line_payload(kept, total_lines, total_chars, following))
+            )
+            > budget
+        ):
+            kept.pop()
+            next_line = number
+            break
+        next_line = following
+    if not kept:
+        raise ToolError(
+            f"line {start} is longer than a {budget}-token window on its own — "
+            f'read it with mode="char", offset={first_offset} '
+            f"(the file is at {_where(where)})."
+        )
+    return _line_payload(kept, total_lines, total_chars, next_line)
+
+
+def _line_page(
+    lines: Sequence[str],
+    starts: Sequence[int],
+    *,
+    where: str,
+    total_chars: int,
+    offset: int,
+    limit: int,
+    budget: int,
+) -> dict[str, Any]:
+    """The dump side of `_line_fill`: a body already in memory."""
+    total = len(lines)
+    start = _line_start(offset, total)
+    source = (
+        (number, starts[number - 1], lines[number - 1])
+        for number in range(start, total + 1)
+    )
+    return _line_fill(
+        source,
+        total_lines=total,
+        total_chars=total_chars,
+        start=start,
+        limit=limit,
+        budget=budget,
+        where=where,
+    )
+
+
+def _line_payload(
+    kept: Sequence[tuple[int, str]],
+    total: int,
+    total_chars: int,
+    following: int | None,
+) -> dict[str, Any]:
+    """Lines as a model reads them: the original numbers, and where to read on.
+
+    The number is the output's line number and not the window's, so the line a
+    model copies out of the conversation reaches the same text a later read
+    does.  `chars` is carried even though this is a line answer because it is
+    what lets the model choose character mode without another call.
+    """
+    width = len(str(kept[-1][0]))
+    text = "\n".join(f"{number:>{width}}  {line}" for number, line in kept)
+    page: dict[str, Any] = {"lines": total, "chars": total_chars, "text": text}
+    if following is not None:
+        page["next"] = following
+    return page
+
+
+def _char_window(
+    text: str,
+    *,
+    index: int,
+    base: int,
+    total_chars: int,
+    limit: int,
+    budget: int,
+    where: str,
+) -> dict[str, Any]:
+    """Fit a character window of *text* starting at *index*, within *budget*.
+
+    `base` is the absolute offset of `text[0]` in the text a model addresses:
+    `0` for a whole dump body, and the file offset of a gathered chunk for a
+    saved file.  So `next` is always an address in the original, not in the
+    chunk.  **The window is filled against the budget, and no line is
+    scanned** — this is the mode for text without useful lines.
+    """
+    room = len(text) - index
+    if limit:
+        room = min(room, limit)
+
+    def page_of(count: int) -> dict[str, Any]:
+        piece = text[index : index + count]
+        page: dict[str, Any] = {"chars": total_chars, "text": piece}
+        if base + index + count < total_chars:
+            page["next"] = base + index + count
+        return page
+
+    low, high = 0, room
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_text_tokens(_wire(page_of(middle))) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    count = low
+    page = page_of(count)
+    while count > 0 and estimate_text_tokens(_wire(page)) > budget:
+        count -= max(count // 16, 1)
+        page = page_of(count)
+    if count == 0:
+        raise ToolError(
+            f"a {budget}-token window cannot hold a character of this text — "
+            f"raise `tool_result.tokens`; the file is at {_where(where)}."
+        )
+    return page
+
+
+def _char_page(
     body: str,
     *,
     where: str,
     offset: int,
     limit: int,
-    pattern: str,
-    context: int,
     budget: int,
 ) -> dict[str, Any]:
-    """A window of a dump, read by *finding*: never larger than `budget` tokens.
+    """The dump side of `_char_window`: a body already in memory."""
+    total = len(body)
+    start = _char_start(offset, total)
+    return _char_window(
+        body,
+        index=start,
+        base=0,
+        total_chars=total,
+        limit=limit,
+        budget=budget,
+        where=where,
+    )
 
-    **Finding and reading are one gesture here, because neither half answers on
-    its own.**  A match without its neighbours is a line torn out of a stack
-    trace, and a window without a match is a page a model reads to the end to
-    learn nothing.  So `pattern` chooses the lines and `context` brings their
-    neighbours with them, marked so that the two are told apart at a glance, and
-    two neighbourhoods that meet are **merged** — one block, which is what a
-    reader sees, rather than two that overlap and spend the window twice.
 
-    **The bound is on the whole answer, the envelope included**, and that is the
-    property the arrangement rests on rather than a nicety: a reader that could
-    hand back more than the budget would be a tool of ours feeding the harness's
-    own shortening, which is one system at both ends of a loop.  So the window
-    is filled line by line against the budget — measured by the one estimator,
-    `slife2.libs.turn.tokens` — and then the *payload* is measured and trimmed
-    from its end until it fits, because `total` and the count of what matched
-    are part of what a model is handed.  What did not fit is named rather than
-    lost: how many lines there are, how many matched, and the offset the next
-    window starts at.
+def _grep_pattern(pattern: str) -> str:
+    """The folded pattern, or the refusal an empty one earns."""
+    if not pattern:
+        raise ToolError("pattern must be the text to find; give a word or a phrase.")
+    return pattern.casefold()
 
-    **Nothing the caller wrote is quoted back**, which is why there is no
-    clipping left to do here: the old reader put `pattern` into a sentence about
-    it, so a megabyte of pattern was a megabyte of answer and only a
-    `clip_to_tokens` at the exit kept it inside the budget.  The payload names
-    none of it — a model knows what it asked for — and what is left is bounded
-    by the window it was just fitted to.
 
-    **The budget is the config's** (`tool_result.tokens`) and not a number of
-    this module's, because the harness spends the same one shortening a result
-    for the conversation: a reader free to differ from the shortening is the
-    loop again, one config edit away.
+def _grep_hits(
+    lines: Iterable[tuple[int, int, str]], wanted: str, start: int
+) -> Iterator[tuple[int, int, str]]:
+    """Every match in *lines* at or after line *start*, with both addresses.
 
-    **The pattern is text, not an expression.**  A regex over a 240,000-line
-    output is a program whose runtime nobody bounds, running in a server every
-    agent shares — and the code-reading tools that take a regex take it because
-    their engines cannot backtrack, which Python's can.  A literal substring,
-    ignoring case, is also what the common case wants: a symbol, a path, a
-    spelling remembered approximately (SDD §14.2's own three examples for the
-    grep leg).
-
-    **The numbers are the ones the harness's shortening shows a model**, on
-    purpose: a line named in a discriminator's reply and a line read back here
-    have to be one address, and two renderings that disagreed would be two
-    addresses for one line.
+    **The matching is the same for a dump and a file.**  It reads a line source,
+    not a body: an in-memory dump feeds a range over `_text_lines`, and a file
+    feeds lines as they are read from disk.  The folded index can be larger than
+    the line's when casefolding expands a character (`ß` -> `ss`); clamping keeps
+    the address inside the line whose text it belongs to.
     """
-    lines = body.splitlines()
+    for number, offset, line in lines:
+        if number < start:
+            continue
+        found = line.casefold().find(wanted)
+        if found >= 0:
+            yield number, offset + min(found, len(line)), line
+
+
+def _grep_payload(
+    total_lines: int,
+    total_chars: int,
+    matched: int,
+    shown: Sequence[dict[str, Any]],
+    first_unshown: int | None,
+) -> dict[str, Any]:
+    """One grep answer, before it is measured."""
+    page: dict[str, Any] = {
+        "lines": total_lines,
+        "chars": total_chars,
+        "matched": matched,
+        "matches": list(shown),
+    }
+    if first_unshown is not None:
+        page["next"] = first_unshown
+    return page
+
+
+def _grep_finalize(
+    shown: list[dict[str, Any]],
+    first_unshown: int | None,
+    matched: int,
+    *,
+    total_lines: int,
+    total_chars: int,
+    budget: int,
+) -> dict[str, Any]:
+    """Trim a page until it fits, keeping the address of what it sheds.
+
+    **A page that still goes over after the scan is trimmed from its end**, and
+    the line it sheds becomes `next` — so a model that asked for too much gets
+    the start of what it asked for and an address for the rest, never an answer
+    over the budget.  A single match too large for the window keeps its two
+    addresses and loses text, marked `cut`.
+    """
+    while True:
+        page = _grep_payload(total_lines, total_chars, matched, shown, first_unshown)
+        if estimate_text_tokens(_wire(page)) <= budget:
+            return page
+        if len(shown) > 1:
+            dropped = shown.pop()
+            first_unshown = dropped["line"]
+            continue
+        if len(shown) == 1:
+            match = shown[0]
+            if not match.get("cut"):
+                match["cut"] = True
+                match["text"] = _fit_match_text(page, match["text"], budget)
+                continue
+            first_unshown = match["line"]
+            shown.clear()
+            continue
+        raise ToolError(
+            f"a {budget}-token window cannot hold this answer — raise "
+            f"`tool_result.tokens`."
+        )
+
+
+def _grep_answer(
+    hits: Iterable[tuple[int, int, str]],
+    *,
+    total_lines: int,
+    total_chars: int,
+    limit: int,
+    budget: int,
+) -> dict[str, Any]:
+    """The page over *hits*, never larger than *budget*.
+
+    **The one page builder behind both greps.**  The hits may come from a dump
+    already in memory or from a file read line by line; the scan stops showing
+    once the page is full and keeps counting, so `matched` is a fact about the
+    whole text and the memory held is the page, not the file.
+    """
+    limit = max(limit, 0)
+    shown: list[dict[str, Any]] = []
+    first_unshown: int | None = None
+    matched = 0
+    full = False
+    for number, at, line in hits:
+        matched += 1
+        if full or (limit and len(shown) >= limit):
+            if first_unshown is None:
+                first_unshown = number
+            continue
+        shown.append({"line": number, "char": at, "text": line})
+        if (
+            estimate_text_tokens(
+                _wire(_grep_payload(total_lines, total_chars, matched, shown, None))
+            )
+            > budget
+        ):
+            if len(shown) == 1:
+                # Keep the only address there is; the finalizer cuts its text.
+                full = True
+            else:
+                shown.pop()
+                first_unshown = number
+                full = True
+    return _grep_finalize(
+        shown,
+        first_unshown,
+        matched,
+        total_lines=total_lines,
+        total_chars=total_chars,
+        budget=budget,
+    )
+
+
+def _grep_page(
+    body: str, pattern: str, *, offset: int, limit: int, budget: int
+) -> dict[str, Any]:
+    """The dump side of the shared grep: a body already in memory."""
+    wanted = _grep_pattern(pattern)
+    lines, starts = _text_lines(body)
     total = len(lines)
     if not total:
-        raise ToolError("this output was saved empty, so there is nothing to read.")
-    # **A negative `offset` counts from the end**, which is where a log's and a
-    # command's own summary is: a model asking for the tail of something it has
-    # never read does not know how long it is, and every reader it has used
-    # before takes `-1` for the last line.
-    start = offset if offset > 0 else total + offset + 1
-    if start < 1 or start > total:
-        raise ToolError(
-            f"{offset} is not a line of this output: it has {total}, and 1 to "
-            f"{total} (or -1 to -{total}) are the addresses."
-        )
-
-    wanted = pattern.casefold()
-    hits = (
-        [n for n in range(start, total + 1) if wanted in lines[n - 1].casefold()]
-        if wanted
-        else []
+        return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
+    start = _line_start(offset, total)
+    hits = _grep_hits(
+        (
+            (number, starts[number - 1], lines[number - 1])
+            for number in range(1, total + 1)
+        ),
+        wanted,
+        start,
     )
-    # **The count is a fact about the whole output, so it is taken in its own
-    # pass.**  The window stops as soon as it is full, and a count that stopped
-    # with it would report "385 of 502" — a number about the budget dressed up
-    # as a number about the output, which is exactly what a model reads to
-    # decide whether to narrow the pattern or read on.
-    matched = len(hits)
-    # **No match is not an empty window.**  A pattern that found nothing
-    # returned no *lines*, and answering that with an empty window and no count
-    # would read as "there is nothing here", which is a different and false
-    # claim — so the count is what says so, and it is what sends a model to
-    # fewer or different words rather than to a file problem it does not have.
-    if wanted and not matched:
-        return {"total": total, "text": "", "matched": 0}
-    runs = _runs(hits, max(context, 0), total) if wanted else [(start, total)]
+    return _grep_answer(
+        hits,
+        total_lines=total,
+        total_chars=len(body),
+        limit=limit,
+        budget=budget,
+    )
 
-    kept: list[tuple[int, str]] = []
-    full = False
-    for first, last in runs:
-        for number in range(first, last + 1):
-            if limit and len(kept) >= limit:
-                full = True
-                break
-            kept.append((number, lines[number - 1]))
-            if estimate_lines_tokens(kept) > budget:
-                kept.pop()
-                full = True
-                break
-        if full:
+
+def _file_encoding(target: Path) -> str:
+    """The decoder a saved file's bytes were written in, or `"binary"`.
+
+    The same `_head_encoding` a loaded read uses, over the file's own first
+    block: one answer about what the file's text is, for both readers.
+    """
+    with target.open("rb") as handle:
+        return _head_encoding(handle.read(SNIFF_BYTES))
+
+
+def _file_lines(
+    target: Path, encoding: str
+) -> Iterator[tuple[int, int, str, str, int]]:
+    """A file's lines, streamed: `(number, start, text, ending, following)`.
+
+    `text` is the line without its ending, `ending` is the line's own ending as
+    a reader sees it (`\\n`, `\\r\\n` or `\\r`), `start` is its first character's
+    offset in the text a reader sees, and `following` is the offset after the
+    ending.  **Nothing holds the whole file**: one line is read, yielded, and
+    dropped.
+    """
+    number = 0
+    start = 0
+    if encoding == "binary":
+        with target.open("rb") as handle:
+            for raw in handle:
+                number += 1
+                if raw.endswith(b"\r\n"):
+                    content, raw_ending = raw[:-2], b"\r\n"
+                elif raw.endswith((b"\n", b"\r")):
+                    content, raw_ending = raw[:-1], raw[-1:]
+                else:
+                    content, raw_ending = raw, b""
+                text = _binary_text(content)
+                ending = _binary_text(raw_ending)
+                following = start + len(text) + len(ending)
+                yield number, start, text, ending, following
+                start = following
+        return
+    with target.open(
+        "r", encoding=encoding, errors="backslashreplace", newline=""
+    ) as handle:
+        for raw in handle:
+            number += 1
+            if raw.endswith("\r\n"):
+                content, ending = raw[:-2], "\r\n"
+            elif raw.endswith(("\n", "\r")):
+                content, ending = raw[:-1], raw[-1:]
+            else:
+                content, ending = raw, ""
+            following = start + len(content) + len(ending)
+            yield number, start, content, ending, following
+            start = following
+
+
+def _file_totals(target: Path, encoding: str) -> tuple[int, int]:
+    """How many lines and characters a streamed file has."""
+    total_lines = 0
+    total_chars = 0
+    for number, _start, _text, _ending, following in _file_lines(target, encoding):
+        total_lines = number
+        total_chars = following
+    return total_lines, total_chars
+
+
+def _file_char_text(target: Path, encoding: str, start: int, want: int) -> str:
+    """At most *want* characters of a file's text, from character *start*.
+
+    **Streamed, not sliced from the whole file**: only the lines needed to
+    reach the window are decoded, and only the window is kept.  The offset is a
+    character address, so reaching it means decoding from the start; the memory
+    is the window, the time is where the window is.
+    """
+    pieces: list[str] = []
+    got = 0
+    for _number, line_start, text, ending, following in _file_lines(target, encoding):
+        if following <= start:
+            continue
+        unit = text + ending
+        local = max(start - line_start, 0)
+        take = want - got
+        if take <= 0:
             break
+        piece = unit[local : local + take]
+        if piece:
+            pieces.append(piece)
+            got += len(piece)
+        if got >= want:
+            break
+    return "".join(pieces)
 
-    while kept:
-        window = _render_window(
-            kept,
-            total=total,
-            matched=matched,
-            hits=set(hits),
-            pattern=pattern,
+
+def _fit_match_text(page: dict[str, Any], line: str, budget: int) -> str:
+    """As much of a very long matched line as fits, with the rest of the page.
+
+    The match keeps its two addresses and loses only text; `cut` is already on
+    the match, so a reader can tell a shortened line from one that ended there.
+    """
+    match = dict(page["matches"][-1])
+
+    def with_text(text: str) -> dict[str, Any]:
+        candidate = dict(page)
+        candidate["matches"] = [*page["matches"][:-1], {**match, "text": text}]
+        return candidate
+
+    low, high = 0, len(line)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_text_tokens(_wire(with_text(line[:middle]))) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    text = line[:low]
+    while low > 0 and estimate_text_tokens(_wire(with_text(text))) > budget:
+        low -= max(low // 16, 1)
+        text = line[:low]
+    if estimate_text_tokens(_wire(with_text(text))) > budget:
+        raise ToolError(
+            f"this line is longer than a {budget}-token window even as an "
+            f"address; raise `tool_result.tokens`."
         )
-        if estimate_text_tokens(_wire(window)) <= budget:
-            return window
-        kept.pop()
-    # The one output a window cannot show, and it is a fact about the *budget*
-    # rather than about the output: nothing here truncates a line to make it
-    # fit, so a line longer than the whole window is named as such with the file
-    # it is in, which is where the operator's own reader can page it.
-    raise ToolError(
-        f"a line from {start} does not fit a {budget}-token window on its own — "
-        f"the whole output is at {_where(where)}."
-    )
+    return text
 
 
 def _where(where: str) -> str:
@@ -1753,6 +2358,28 @@ def _where(where: str) -> str:
     return where or "the cabinet"
 
 
+def _accessible_path(path: Path) -> str:
+    """A path the agent can open: **relative to its data directory**.
+
+    **Relative, because the marker outlives the directory's location.**  A
+    dump's marker is written into the turn and carried by every later request;
+    an absolute path recorded today names a directory that may have moved when
+    the home is migrated.  The agent's own tools run in the home — the tool
+    servers are started there — so `agents/<agent>/cabinet/dumps/<call>.md` is
+    an address they resolve, and it survives the move.
+
+    The path is absolute when it is outside the home, because then no relative
+    spelling means anything.  Forward slashes because Windows accepts them and
+    a backslash in JSON is escaped to `\\\\`, which spends tokens on the escape
+    and reads as a different path to a model.
+    """
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(home().resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
 def _wire(payload: dict[str, Any]) -> str:
     """A payload as the text a model is handed, for measuring it against the budget.
 
@@ -1763,72 +2390,6 @@ def _wire(payload: dict[str, Any]) -> str:
     the model reads.
     """
     return json.dumps(payload, ensure_ascii=True, default=str)
-
-
-def _runs(hits: list[int], context: int, total: int) -> list[tuple[int, int]]:
-    """The hits with their neighbours, as disjoint inclusive runs.
-
-    Merged rather than one run per hit, because the neighbours of two hits a
-    line apart *are* one block of text: showing the same line twice spends the
-    window on saying it twice, and a reader that saw one line under two
-    addresses would have two addresses for one line.
-    """
-    runs: list[list[int]] = []
-    for number in hits:
-        first, last = max(number - context, 1), min(number + context, total)
-        if runs and first <= runs[-1][1] + 1:
-            runs[-1][1] = max(runs[-1][1], last)
-        else:
-            runs.append([first, last])
-    return [(first, last) for first, last in runs]
-
-
-def _render_window(
-    kept: list[tuple[int, str]],
-    *,
-    total: int,
-    matched: int,
-    hits: set[int],
-    pattern: str,
-) -> dict[str, Any]:
-    """A window as the payload a model reads: numbered lines, and where they sit.
-
-    **A matching line and its neighbours are told apart by one character**,
-    `12: the error` against `11- the line before it`, which is the convention
-    every grep has and therefore the one a model reads without being told.  With
-    no pattern there is nothing to tell apart and the column is left blank.
-
-    The keys are the ways a window can be partial, and a reader that could not
-    tell them apart would not know whether to read on, page, or narrow the
-    pattern — `total` says how long the output is, `next` where this window
-    stops, and `matched` how many lines hold the pattern.  **The window itself is
-    one `text`**, numbered, and not a list of line objects: a number is the
-    address both halves of this arrangement use, and JSON around each line would
-    spend a third of a small budget saying `{"n":` again.
-    """
-    first, last = kept[0][0], kept[-1][0]
-    width = len(str(last))
-    if pattern:
-        text = "\n".join(
-            f"{number:>{width}}{':' if number in hits else '-'} {line}"
-            for number, line in kept
-        )
-    else:
-        text = "\n".join(f"{number:>{width}}  {line}" for number, line in kept)
-    window: dict[str, Any] = {
-        "total": total,
-        "text": text,
-    }
-    # What is still to come, of what was asked for: with a pattern that is the
-    # next match rather than the next line, so a reader is not sent to a window
-    # that can only answer "none of them".
-    if pattern:
-        window["matched"] = matched
-        if sum(1 for number in hits if first <= number <= last) < matched:
-            window["next"] = last + 1
-    elif last < total:
-        window["next"] = last + 1
-    return window
 
 
 def _document(row: dict[str, Any], *, text: str | None = None) -> dict[str, Any]:
