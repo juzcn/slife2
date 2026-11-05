@@ -512,6 +512,221 @@ echo "cloudflared version $INSTALLED (built now)"
     assert current("2026.9.0") == 1
 
 
+def test_fetch_turns_a_stalled_connection_into_a_retry(tmp_path: Path) -> None:
+    """**A silent connection must become a timeout, not a wait.**
+
+    curl has no default timeout for a transfer that stops moving: it waits on
+    the kernel's retransmits — minutes — and `--retry` never sees an error to
+    retry.  The speed limit turns the silence into exit 28, which the retry
+    handles; both live in the wrapper so every download gets them.  This is
+    the shape of the first WSL install, where the uv tarball arrived 3.8 KB
+    and then stopped while the stage printed dots for five minutes.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    log = tmp_path / "curl.log"
+    _write_executable(
+        stub_bin / "curl",
+        """\
+#!/bin/sh
+printf '%s\\n' "$*" >> "$CURL_LOG"
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf 'downloaded\\n' > "$out"
+""",
+    )
+    text = SHELL.read_text(encoding="utf-8")
+    functions = []
+    for name in ("curl_retry", "fetch"):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} is missing from install.sh"
+        functions.append(match.group(0))
+    function_file = tmp_path / "function.sh"
+    function_file.write_text("\n".join(functions) + "\n", encoding="utf-8")
+    out = tmp_path / "out.bin"
+
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            '. "$FUNCTION_FILE"; fetch "$OUT" "https://example.test/x" --progress-bar',
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "FUNCTION_FILE": str(function_file),
+            "CURL_LOG": str(log),
+            "OUT": str(out),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert out.read_text(encoding="utf-8") == "downloaded\n"
+    called = log.read_text(encoding="utf-8")
+    for option in (
+        "--retry 5",
+        "--connect-timeout 15",
+        "--speed-limit 10240",
+        "--speed-time 30",
+    ):
+        assert option in called, called
+    assert "https://example.test/x" in called
+
+
+def test_ensure_uv_wraps_the_official_installers_curl(tmp_path: Path) -> None:
+    """**The third-party installer's curl is the one that stalled.**
+
+    `ensure_uv` delegates to astral's script, whose download has no retry and
+    no stall detection.  A wrapper first on that command's PATH supplies the
+    options without copying the installer's version and platform logic; the
+    installer's inner `sh` resolves `curl` again, so it sees the wrapper too.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    log = tmp_path / "curl.log"
+    _write_executable(
+        stub_bin / "curl",
+        """\
+#!/bin/sh
+printf '%s\\n' "$*" >> "$CURL_LOG"
+cat <<'EOF'
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\\nexit 0\\n' > "$HOME/.local/bin/uv"
+chmod +x "$HOME/.local/bin/uv"
+EOF
+""",
+    )
+    text = SHELL.read_text(encoding="utf-8")
+    match = re.search(r"^ensure_uv\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL)
+    assert match, "ensure_uv is missing from install.sh"
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+say() { :; }
+refresh_path() {
+    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+    export PATH
+}
+record_owned() { :; }
+die() { printf 'error: %s\\n' "$*" >&2; exit 2; }
+stage() { local message=$1; shift; "$@"; }
+. "$FUNCTION_FILE"
+ensure_uv
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{stub_bin}:/usr/bin:/bin",
+            "FUNCTION_FILE": str(function_file),
+            "CURL_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (home / ".local" / "bin" / "uv").is_file()
+    called = log.read_text(encoding="utf-8")
+    for option in (
+        "--retry 5",
+        "--connect-timeout 15",
+        "--speed-limit 10240",
+        "--speed-time 30",
+    ):
+        assert option in called, called
+
+
+def test_ensure_shell_path_reaches_the_users_next_shell(tmp_path: Path) -> None:
+    """**`uv tool update-shell` skips the shell it exists for.**
+
+    It treats the tool directory as handled when it is on this process's PATH,
+    and `refresh_path` always put it there: a fresh install wrote nothing, so
+    the next terminal could not resolve `slife2` or `credstore`.  The env file
+    and its source line are the ones astral's installer writes; the function
+    is idempotent, so a reinstall adds no second line.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
+    text = SHELL.read_text(encoding="utf-8")
+    match = re.search(
+        r"^ensure_shell_path\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL
+    )
+    assert match, "ensure_shell_path is missing from install.sh"
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(match.group(0) + "\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("# bashrc\n", encoding="utf-8")
+    (home / ".zshrc").write_text("# zshrc\n", encoding="utf-8")
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+. "$FUNCTION_FILE"
+ensure_shell_path
+ensure_shell_path
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(home), "FUNCTION_FILE": str(function_file)},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    env_file = home / ".local" / "bin" / "env"
+    assert env_file.is_file()
+    assert env_file.stat().st_mode & 0o111, "the env file is executable"
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in env_file.read_text(
+        encoding="utf-8"
+    )
+    for rc in (home / ".bashrc", home / ".zshrc"):
+        lines = rc.read_text(encoding="utf-8").splitlines()
+        assert lines.count('. "$HOME/.local/bin/env"') == 1, lines
+
+
+def test_both_installers_detect_a_stalled_download() -> None:
+    """The shell and the PowerShell downloaders carry the same options."""
+    for path in (SHELL, POWERSHELL):
+        text = path.read_text(encoding="utf-8")
+        assert "--retry 5" in text, path.name
+        assert "--connect-timeout 15" in text, path.name
+        assert "--speed-limit 10240" in text, path.name
+        assert "--speed-time 30" in text, path.name
+
+
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
     # The helper writes UTF-8 on every platform (a `cli:` hint may be any
     # language); `text=True` alone would decode it with the Windows code page.

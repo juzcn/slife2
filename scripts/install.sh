@@ -112,12 +112,54 @@ refresh_path() {
     export PATH
 }
 
+# **`uv tool update-shell` cannot see a shell that has not been updated.**  It
+# treats the tool directory as already handled when it is on this process's
+# PATH — and `refresh_path` put it there — so it writes nothing, and the next
+# terminal cannot resolve `slife2` or `credstore`.  The env file and the source
+# line are the ones astral's installer writes, made here as well so a fresh
+# install does not depend on that installer having run.
+ensure_shell_path() {
+    local env_file="$HOME/.local/bin/env" rc
+    mkdir -p "$HOME/.local/bin" || return 1
+    if [ ! -f "$env_file" ]; then
+        printf '%s\n' \
+            '#!/bin/sh' \
+            '# add uv to PATH' \
+            'case ":${PATH}:" in' \
+            '    *:"$HOME/.local/bin":*) ;;' \
+            '    *) export PATH="$HOME/.local/bin:$PATH" ;;' \
+            'esac' > "$env_file" || return 1
+        chmod +x "$env_file" || return 1
+    fi
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$rc" ] || continue
+        grep -qF '. "$HOME/.local/bin/env"' "$rc" && continue
+        printf '\n. "$HOME/.local/bin/env"\n' >> "$rc" || return 1
+    done
+}
+
 hash_file() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$1" | cut -d' ' -f1
     fi
+}
+
+# **A connection that opens and then goes quiet is not a slow download.**  curl
+# has no timeout for a transfer that stops moving: it waits on the kernel's
+# retransmits — minutes — and `--retry` never sees an error to retry.  The
+# speed limit turns the silence into a timeout the retry handles, and the
+# connect timeout covers a handshake that is never answered.
+curl_retry() {  # curl option...
+    curl -f --retry 5 --retry-delay 1 --retry-connrefused \
+        --connect-timeout 15 --speed-limit 10240 --speed-time 30 "$@"
+}
+
+fetch() {  # output url [curl option...]
+    local out=$1 url=$2
+    shift 2
+    curl_retry -L -o "$out" "$@" "$url"
 }
 
 broker_listening() {
@@ -156,8 +198,24 @@ ensure_uv() {
         return 0
     fi
     say "  installing uv"
-    stage "installing uv" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' \
-        || die "uv could not be installed"
+    # **The official installer's curl has no stall detection either.**  A
+    # download that goes silent keeps the stage's dots moving for minutes while
+    # nothing arrives; `--retry` never sees an error.  A wrapper first on this
+    # command's PATH gives that curl the options it is missing, without copying
+    # the installer's version and platform logic.
+    local shim real_curl saved_path rc
+    shim=$(mktemp -d) || die "temporary directory failed"
+    real_curl=$(command -v curl) || die "curl is missing"
+    printf '#!/bin/sh\nexec "%s" --retry 5 --retry-delay 1 --retry-connrefused --connect-timeout 15 --speed-limit 10240 --speed-time 30 "$@"\n' \
+        "$real_curl" > "$shim/curl"
+    chmod +x "$shim/curl"
+    saved_path=$PATH
+    PATH="$shim:$PATH"
+    stage "installing uv" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+    rc=$?
+    PATH=$saved_path
+    rm -rf "$shim"
+    [ "$rc" -eq 0 ] || die "uv could not be installed"
     record_owned local "$HOME/.local/bin/uv" uv
     refresh_path
     command -v uv >/dev/null 2>&1 || die "uv is not on PATH"
@@ -204,8 +262,8 @@ download_source() {
     mkdir -p "$SOURCE"
     archive="$WORK_DIR/source.tar.gz"
     say "  downloading slife2"
-    curl -fL --progress-bar -o "$archive" "https://github.com/juzcn/slife2/archive/refs/heads/main.tar.gz" \
-        || curl -fL --progress-bar -o "$archive" "https://gitee.com/juzcn/slife2/repository/archive/main.tar.gz" \
+    fetch "$archive" "https://github.com/juzcn/slife2/archive/refs/heads/main.tar.gz" --progress-bar \
+        || fetch "$archive" "https://gitee.com/juzcn/slife2/repository/archive/main.tar.gz" --progress-bar \
         || die "slife2 could not be downloaded"
     say "  extracting slife2"
     tar -xzf "$archive" -C "$SOURCE" --strip-components=1 || die "slife2 could not be extracted"
@@ -285,7 +343,7 @@ install_node() {
         Darwin/arm64) os=darwin; arch=arm64 ;;
         *) return 1 ;;
     esac
-    sums=$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt) || return 1
+    sums=$(curl_retry -sSL --max-time 60 https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt) || return 1
     line=$(printf '%s\n' "$sums" | grep "node-v[0-9.]*-$os-$arch.tar.gz" | head -1)
     [ -n "$line" ] || return 1
     file=$(printf '%s' "$line" | awk '{print $2}')
@@ -293,7 +351,7 @@ install_node() {
     version=$(printf '%s' "$file" | sed -n 's/.*node-\(v[0-9.]*\)-.*/\1/p')
     tmp=$(mktemp -d) || return 1
     say "  downloading node $version"
-    curl -fL --progress-bar -o "$tmp/node.tgz" "https://nodejs.org/dist/latest-v22.x/$file" \
+    fetch "$tmp/node.tgz" "https://nodejs.org/dist/latest-v22.x/$file" --progress-bar \
         || { rm -rf "$tmp"; return 1; }
     [ "$(hash_file "$tmp/node.tgz")" = "$sha" ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$HOME/.local/lib/nodejs"
@@ -311,7 +369,7 @@ cloudflared_current() {
     local installed latest
     installed=$("$HOME/.local/bin/cloudflared" --version 2>/dev/null | awk '{print $3}')
     [ -n "$installed" ] || return 1
-    latest=$(curl -fsSIL -o /dev/null -w '%{url_effective}' \
+    latest=$(curl_retry -sSIL -o /dev/null -w '%{url_effective}' --max-time 30 \
         "https://github.com/cloudflare/cloudflared/releases/latest" 2>/dev/null \
         | sed -n 's|.*/tag/||p')
     [ -n "$latest" ] && [ "$latest" = "$installed" ]
@@ -333,8 +391,9 @@ install_cloudflared() {
     # the old process finishes on the old file and the next start reads the new
     # one.
     tmp=$(mktemp "$HOME/.local/bin/.cloudflared.XXXXXX") || return 1
-    curl -fL --progress-bar -o "$tmp" \
+    fetch "$tmp" \
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" \
+        --progress-bar \
         || { rm -f "$tmp"; return 1; }
     chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$HOME/.local/bin/cloudflared" || { rm -f "$tmp"; return 1; }
@@ -591,6 +650,7 @@ do_install() {
     require_homebrew
     step 1/4 uv
     ensure_uv
+    ensure_shell_path || fail "the shell PATH could not be updated"
     step 2/4 "Python 3.13"
     ensure_python
     step 3/4 slife2

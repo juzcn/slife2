@@ -256,17 +256,43 @@ function Get-RemoteFile([string]$Url, [string]$Path) {
     # curl.exe draws a progress bar and is much faster than PS 5.1's
     # Invoke-WebRequest on a large response; fall back to IWR (which also
     # draws progress) when curl.exe is absent.
+    #
+    # **A connection that opens and then goes quiet is not a slow download.**
+    # curl waits on the kernel's retransmits for minutes; the speed limit turns
+    # the silence into a timeout --retry handles, and the connect timeout
+    # covers a handshake that is never answered.
     if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -fL --progress-bar -o $Path $Url
+        & curl.exe -fL --progress-bar --retry 5 --retry-delay 1 --retry-connrefused `
+            --connect-timeout 15 --speed-limit 10240 --speed-time 30 -o $Path $Url
         if ($LASTEXITCODE -eq 0) { return $true }
     }
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop
-        return $true
+    # **Windows PowerShell 5.1's Invoke-WebRequest has no
+    # -MaximumRetryCount** (that is PowerShell 7's), so the retry is a loop.
+    # -TimeoutSec matters: a response that stops arriving must become a
+    # failure, not a wait.
+    foreach ($attempt in 1..5) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop -TimeoutSec 100
+            return $true
+        }
+        catch {
+            Start-Sleep -Seconds 1
+        }
     }
-    catch {
-        return $false
+    return $false
+}
+
+function Get-RemoteText([string]$Url) {
+    # The same retry, for a response read into memory rather than written out.
+    foreach ($attempt in 1..5) {
+        try {
+            return (Invoke-WebRequest -Uri $Url -UseBasicParsing -ErrorAction Stop -TimeoutSec 60).Content
+        }
+        catch {
+            Start-Sleep -Seconds 1
+        }
     }
+    return $null
 }
 
 function Test-BrokerListening {
@@ -301,9 +327,10 @@ function Ensure-Uv {
         return
     }
     Say '  installing uv'
+    $installer = Get-RemoteText 'https://astral.sh/uv/install.ps1'
+    if (-not $installer) { Die 'uv could not be installed' }
     try {
-        $installer = Invoke-WebRequest -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing -ErrorAction Stop
-        Invoke-Expression $installer.Content
+        Invoke-Expression $installer
     }
     catch { Die "uv could not be installed: $($_.Exception.Message)" }
     Add-UserPath (Join-Path $env:USERPROFILE '.local\bin')
@@ -462,12 +489,11 @@ function Get-NodeLts {
         'x86' { 'x86' }
         default { 'x64' }
     }
-    try {
-        $sums = (Invoke-WebRequest -Uri 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' -UseBasicParsing -ErrorAction Stop).Content
-    }
-    catch {
+    $sums = Get-RemoteText 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt'
+    if (-not $sums) {
         if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return $null }
-        $sums = (& curl.exe -fsSL 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt') -join "`n"
+        $sums = (& curl.exe -fsSL --retry 5 --retry-delay 1 --retry-connrefused `
+            --connect-timeout 15 --max-time 60 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt') -join "`n"
     }
     $line = ($sums -split "`n") | Where-Object { $_ -match "node-v[0-9.]+-win-$arch\.zip" } | Select-Object -First 1
     if (-not $line) { return $null }
