@@ -51,6 +51,26 @@ def _commands(text: str) -> list[str]:
     ]
 
 
+def _bash() -> str | None:
+    """The shell, avoiding Git for Windows' login wrapper.
+
+    Git ships two `bash.exe`s: `bin\\bash.exe` starts a login shell, and its
+    `/etc/profile` puts Git's own directories — where `curl.exe` lives — ahead
+    of the PATH a test passed, so a stub `curl` could never be found.  The
+    shell itself is `usr\\bin\\bash.exe` and leaves PATH alone.  Everywhere else
+    `which` already names the shell.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        return None
+    wrapper = Path(bash)
+    if sys.platform == "win32" and wrapper.parent.name.lower() == "bin":
+        real = wrapper.parent.parent / "usr" / "bin" / wrapper.name
+        if real.is_file():
+            return str(real)
+    return bash
+
+
 def test_installer_files_exist() -> None:
     for path in (SHELL, POWERSHELL, BATCH, HELPER):
         assert path.is_file(), path
@@ -58,7 +78,7 @@ def test_installer_files_exist() -> None:
 
 
 def test_shell_syntax() -> None:
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     # **The script goes in on stdin, as bytes.**  On Windows `bash` may be
@@ -102,7 +122,7 @@ def test_uninstall_keeps_a_failed_entry_and_drains_the_rest(tmp_path: Path) -> N
     failed, the local node removal that followed succeeded but was re-appended
     to the state file — and the file could never drain.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     state = tmp_path / "state.tsv"
@@ -142,7 +162,7 @@ def test_uninstall_keeps_a_local_component_that_could_not_be_removed(
     state file while the component was still there, and no later run could find
     it again.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     state = tmp_path / "state.tsv"
@@ -252,7 +272,7 @@ def test_mosquitto_install_downloads_the_libraries_it_links(tmp_path: Path) -> N
     """
     if sys.platform != "linux":
         pytest.skip("the apt-based installer is Linux-only")
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
 
@@ -392,7 +412,7 @@ def test_cloudflared_upgrade_replaces_a_running_binary(tmp_path: Path) -> None:
     """
     if sys.platform != "linux":
         pytest.skip("ETXTBSY is the Linux behaviour this pins")
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
 
@@ -476,7 +496,7 @@ def test_cloudflared_upgrade_is_skipped_when_the_version_matches(
     """
     if sys.platform != "linux":
         pytest.skip("the installer's cloudflared path is POSIX-only")
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
 
@@ -537,7 +557,7 @@ def test_fetch_turns_a_stalled_connection_into_a_retry(tmp_path: Path) -> None:
     the shape of the first WSL install, where the uv tarball arrived 3.8 KB
     and then stopped while the stage printed dots for five minutes.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
@@ -605,7 +625,7 @@ def test_ensure_uv_wraps_the_official_installers_curl(tmp_path: Path) -> None:
     options without copying the installer's version and platform logic; the
     installer's inner `sh` resolves `curl` again, so it sees the wrapper too.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
@@ -684,7 +704,7 @@ def test_ensure_shell_path_reaches_the_users_next_shell(tmp_path: Path) -> None:
     and its source line are the ones astral's installer writes; the function
     is idempotent, so a reinstall adds no second line.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
@@ -721,7 +741,10 @@ ensure_shell_path
     assert result.returncode == 0, result.stdout + result.stderr
     env_file = home / ".local" / "bin" / "env"
     assert env_file.is_file()
-    assert env_file.stat().st_mode & 0o111, "the env file is executable"
+    if sys.platform != "win32":
+        # Windows has no POSIX mode bits: `stat` reports 0o666, and Git Bash
+        # treats a shebang script as executable whether or not `chmod` ran.
+        assert env_file.stat().st_mode & 0o111, "the env file is executable"
     assert 'export PATH="$HOME/.local/bin:$PATH"' in env_file.read_text(
         encoding="utf-8"
     )
@@ -739,7 +762,7 @@ def test_the_installer_names_the_file_a_stale_terminal_must_source(
     stays unresolved there even though a new terminal works.  The last lines
     name the file to source, and only when the installing shell was stale.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
@@ -788,9 +811,17 @@ print_next
         assert result.returncode == 0, result.stdout + result.stderr
         return result.stdout
 
+    # Git Bash converts HOME to its own spelling (`/c/...`), so the expected
+    # line is built from the shell's view rather than from the Python path.
+    shell_home = subprocess.run(
+        [bash, "-c", 'printf "%s" "$HOME"'],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(home)},
+    ).stdout
     stale = run("0")
     assert "  run:     slife2" in stale
-    assert f"source {home}/.bashrc" in stale, stale
+    assert f"source {shell_home}/.bashrc" in stale, stale
     assert "started before the install" in stale
     fresh = run("1")
     assert "started before the install" not in fresh
@@ -988,7 +1019,7 @@ def test_the_shell_installer_falls_back_for_a_uv_without_default(
     is allowed to fail quietly, so the installer must still put Python 3.13 in
     place rather than dying on a flag it does not know.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
@@ -1059,7 +1090,7 @@ def test_the_shell_installer_leaves_an_installed_python_alone(tmp_path: Path) ->
     behind, ~110 MB each.  A 3.13 that is already there is the requirement, so
     the step says so and starts no install.
     """
-    bash = shutil.which("bash")
+    bash = _bash()
     if bash is None:
         pytest.skip("bash is not available")
     if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
