@@ -26,6 +26,11 @@ DRY_RUN=0
 FAILED=0
 REQ_FILE=""
 PROGRAM_HINTS=""
+# **The parent shell's PATH cannot be changed from here.**  A terminal that
+# started before the install keeps the PATH it was given, so the last lines
+# have to name the file that adds it — but only when that is the case.
+PATH_READY=1
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH_READY=0 ;; esac
 
 say() { printf '%s\n' "$*"; }
 step() { printf '[%s] %s\n' "$1" "$2"; }
@@ -110,6 +115,14 @@ refresh_path() {
         [ -n "$bin" ] && case ":$PATH:" in *":$bin:"*) ;; *) PATH="$bin:$PATH" ;; esac
     fi
     export PATH
+}
+
+# The file a person sources to pick up `~/.local/bin` in the shell they are in.
+shell_rc() {
+    case "${SHELL:-}" in
+        */zsh) printf '%s' "$HOME/.zshrc" ;;
+        *) printf '%s' "$HOME/.bashrc" ;;
+    esac
 }
 
 # **`uv tool update-shell` cannot see a shell that has not been updated.**  It
@@ -638,6 +651,9 @@ print_next() {
         say "  run:     uv run slife2"
     else
         say "  run:     slife2"
+        if [ "$PATH_READY" -eq 0 ]; then
+            say "  shell:   source $(shell_rc)   (this terminal started before the install)"
+        fi
     fi
     say "  data:    $HOME_DIR"
     say "  config:  $HOME_DIR/slife2.yaml"

@@ -113,6 +113,9 @@ environment, and installs the external programs the current configuration
 requires. Data and configuration live in `~/.slife2`; binaries and libraries in
 `~/.local` (`%LOCALAPPDATA%\slife2` on Windows). Running it again upgrades.
 
+An already-open shell keeps the `PATH` it started with; the installer's last
+lines print the `source` line to run, or open a new terminal.
+
 Python 3.13 is installed only when the machine has none; `uv python upgrade 3.13`
 moves it to a newer patch. The installer seeds the bundled `skills/` and `jobs/`
 into the data directory, **overwriting files of the same name**; a skill or job

@@ -717,6 +717,72 @@ ensure_shell_path
         assert lines.count('. "$HOME/.local/bin/env"') == 1, lines
 
 
+def test_the_installer_names_the_file_a_stale_terminal_must_source(
+    tmp_path: Path,
+) -> None:
+    """**The parent shell's PATH cannot be changed by a child process.**
+
+    A terminal that started before the install keeps its PATH, so `slife2`
+    stays unresolved there even though a new terminal works.  The last lines
+    name the file to source, and only when the installing shell was stale.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available")
+    if sys.platform == "win32" and "system32" in Path(bash).as_posix().lower():
+        pytest.skip("WSL's bash cannot read the Windows paths this harness passes")
+    text = SHELL.read_text(encoding="utf-8")
+    functions = []
+    for name in ("shell_rc", "print_next"):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} is missing from install.sh"
+        functions.append(match.group(0))
+    function_file = tmp_path / "function.sh"
+    function_file.write_text("\n".join(functions) + "\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+say() { printf '%s\\n' "$*"; }
+print_program_hints() { :; }
+print_credentials() { :; }
+FAILED=0
+PY=/bin/false
+MODE=tool
+HOME_DIR=/tmp/home
+PATH_READY=$READY
+SHELL=/bin/bash
+. "$FUNCTION_FILE"
+print_next
+""",
+        encoding="utf-8",
+    )
+
+    def run(ready: str) -> str:
+        result = subprocess.run(
+            [bash, str(harness)],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "FUNCTION_FILE": str(function_file),
+                "READY": ready,
+                "HOME": str(home),
+            },
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout
+
+    stale = run("0")
+    assert "  run:     slife2" in stale
+    assert f"source {home}/.bashrc" in stale, stale
+    assert "started before the install" in stale
+    fresh = run("1")
+    assert "started before the install" not in fresh
+
+
 def test_both_installers_detect_a_stalled_download() -> None:
     """The shell and the PowerShell downloaders carry the same options."""
     for path in (SHELL, POWERSHELL):
@@ -725,6 +791,14 @@ def test_both_installers_detect_a_stalled_download() -> None:
         assert "--connect-timeout 15" in text, path.name
         assert "--speed-limit 10240" in text, path.name
         assert "--speed-time 30" in text, path.name
+
+
+def test_both_installers_name_a_terminal_that_predates_them() -> None:
+    """The installer cannot change the shell that invoked it; both say so."""
+    for path in (SHELL, POWERSHELL):
+        assert "started before the install" in path.read_text(encoding="utf-8"), (
+            path.name
+        )
 
 
 def _requirements(home: Path) -> subprocess.CompletedProcess[str]:

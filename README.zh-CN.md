@@ -107,6 +107,9 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 数据和配置在 `~/.slife2`；二进制和库在 `~/.local`（Windows 为
 `%LOCALAPPDATA%\slife2`）。再次运行即升级。
 
+已打开的终端不会自动获得新的 `PATH`；安装器最后会打印需要执行的 `source` 行，
+或者直接开一个新终端。
+
 只有机器上没有 Python 3.13 时才会安装它；`uv python upgrade 3.13` 可升级到更新的
 补丁版本。安装器会把随附的 `skills/` 和 `jobs/` 放入数据目录，**同名文件会被覆盖**；
 用其他名字添加的 skill 或 job 不受影响。`AGENTS.md` 和 `slife2.yaml` **永不覆盖**：

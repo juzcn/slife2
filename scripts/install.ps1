@@ -25,6 +25,10 @@ $script:Action = 'install'
 $script:DryRun = $false
 $script:Failed = $false
 $script:ProgramHints = @()
+# **The parent shell's PATH cannot be changed from here.**  A terminal that
+# started before the install keeps the PATH it was given, so the last lines
+# have to say so — but only when that is the case.
+$script:PathReady = ($env:Path.Split(';') -contains (Join-Path $env:USERPROFILE '.local\bin'))
 
 function Say([string]$Message) { Write-Host $Message }
 function Step([string]$Number, [string]$Message) { Write-Host ""; Write-Host "[$Number] $Message" }
@@ -693,6 +697,9 @@ function Show-Next {
     }
     else {
         Say '  run:     slife2'
+        if (-not $script:PathReady) {
+            Say '  shell:   open a new terminal   (this one started before the install)'
+        }
     }
     Say "  data:    $($script:HomeDir)"
     Say "  config:  $(Join-Path $script:HomeDir 'slife2.yaml')"
