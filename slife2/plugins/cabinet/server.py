@@ -604,19 +604,30 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             raise ToolError(said)
         return row
 
-    async def dump_body(ctx: Context, call: str) -> tuple[str, str]:
-        """One dump's text, and a path the agent can open.
+    async def dump_target(ctx: Context, call: str) -> Path:
+        """The file a dump's call id names.
 
-        A row that is not there is the tool's miss, worded once here because
-        both readers say the same thing about it.
+        **A dump's text is in its file, not in SQLite.**  The row is the
+        address — the call id and the mirror path — and the file is the one
+        copy of the output.  So this resolves the mirror and checks that it is
+        still there, and the readers stream it like any other text file.
         """
         opened = await cabinet(ctx)
         row = await missing_row(
             ctx, DUMP, call, f"there is no saved output for the call {call!r}."
         )
         mirror = str(row.get("mirror") or "")
-        where = _accessible_path(opened.root / mirror) if mirror else ""
-        return str(row.get("body") or ""), where
+        if not mirror:
+            raise ToolError(f"the output for the call {call!r} has no file to read.")
+        try:
+            target = resolve(opened.root, mirror)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not target.is_file():
+            raise ToolError(
+                f"the output for the call {call!r} is recorded but its file is gone."
+            )
+        return target
 
     async def file_target(ctx: Context, path: str) -> Path:
         """The saved file a path names, resolved and checked.
@@ -1078,51 +1089,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             end.
         """
         target = await file_target(ctx, path)
-        where = _accessible_path(target)
-        wanted = _read_mode(mode)
-        encoding = _file_encoding(target)
-        total_lines, total_chars = _file_totals(target, encoding)
-        if not total_lines:
-            page: dict[str, Any] = {"chars": 0, "text": ""}
-            if wanted == "line":
-                page["lines"] = 0
-            return page
-        limit = max(limit, 0)
-        budget = config.tool_result.tokens
-        if wanted == "line":
-            start = _line_start(1 if offset is None else offset, total_lines)
-            lines = (
-                (number, line_start, text)
-                for number, line_start, text, _ending, _following in _file_lines(
-                    target, encoding
-                )
-            )
-            return _line_fill(
-                lines,
-                total_lines=total_lines,
-                total_chars=total_chars,
-                start=start,
-                limit=limit,
-                budget=budget,
-                where=where,
-            )
-        start = _char_start(0 if offset is None else offset, total_chars)
-        # The window's size in characters is not known until it is measured;
-        # gather a generous multiple of the budget (a token is at least one
-        # character, and four covers the priciest BPE splits) and let
-        # `_char_window` cut it back to what fits.
-        room = budget * 4 + 1024
-        if limit:
-            room = min(room, limit)
-        chunk = _file_char_text(target, encoding, start, room)
-        return _char_window(
-            chunk,
-            index=0,
-            base=start,
-            total_chars=total_chars,
+        return _stream_read(
+            target,
+            where=_accessible_path(target),
+            mode=mode,
+            offset=offset,
             limit=limit,
-            budget=budget,
-            where=where,
+            budget=config.tool_result.tokens,
         )
 
     @mcp.tool(name="file_grep", meta=FOR_THE_MODEL)
@@ -1155,26 +1128,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             of the next match when not all of them are shown.
         """
         target = await file_target(ctx, path)
-        wanted = _grep_pattern(pattern)
-        encoding = _file_encoding(target)
-        total_lines, total_chars = _file_totals(target, encoding)
-        if not total_lines:
-            return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
-        start = _line_start(offset, total_lines)
-        hits = _grep_hits(
-            (
-                (number, line_start, text)
-                for number, line_start, text, _ending, _following in _file_lines(
-                    target, encoding
-                )
-            ),
-            wanted,
-            start,
-        )
-        return _grep_answer(
-            hits,
-            total_lines=total_lines,
-            total_chars=total_chars,
+        return _stream_grep(
+            target,
+            pattern,
+            offset=offset,
             limit=limit,
             budget=config.tool_result.tokens,
         )
@@ -1398,10 +1355,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             the same units as `offset` — absent when this window reaches the
             end.
         """
-        body, where = await dump_body(ctx, call)
-        return _read_page(
-            body,
-            where=where,
+        target = await dump_target(ctx, call)
+        return _stream_read(
+            target,
+            where=_accessible_path(target),
             mode=mode,
             offset=offset,
             limit=limit,
@@ -1440,9 +1397,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             only the beginning of a very long line fits); and `next`, the line
             of the next match when not all of them are shown.
         """
-        body, _ = await dump_body(ctx, call)
-        return _grep_page(
-            body,
+        target = await dump_target(ctx, call)
+        return _stream_grep(
+            target,
             pattern,
             offset=offset,
             limit=limit,
@@ -1468,6 +1425,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         A second call under one key replaces, because the key is one call: a
         re-run writes the same output twice rather than two facts.
+
+        **The text is the mirror file; the row holds no body.**  A dump can be
+        a gigabyte of output, and keeping the same bytes in SQLite as well
+        would be the duplication this arrangement exists to avoid.
 
         **The row is not in the cabinet's corpus.**  Its address is the call id
         in the turn's `[DUMP:…]` marker, and `dump_read`/`dump_grep` are the
@@ -1778,27 +1739,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     return mcp
 
 
-def _text_lines(body: str) -> tuple[list[str], list[int]]:
-    """A text's lines, and the character offset each one starts at.
-
-    The pieces are split **with** their line endings, so the offsets count the
-    characters the file actually has: a CRLF or a Unicode line separator is part
-    of the distance to the next line rather than a character dropped and guessed
-    at.  The lines themselves are the text without the ending, which is what a
-    reader is shown and what a pattern is matched against.
-    """
-    pieces = body.splitlines(keepends=True)
-    lines: list[str] = []
-    starts: list[int] = []
-    at = 0
-    for piece in pieces:
-        starts.append(at)
-        broken = piece.splitlines()
-        lines.append(broken[0] if broken else "")
-        at += len(piece)
-    return lines, starts
-
-
 def _line_start(offset: int, total: int) -> int:
     """A 1-based line address, negative counting from the end; always a line.
 
@@ -1839,52 +1779,6 @@ def _read_mode(mode: str) -> str:
             f"file organized in lines, char mode for one that is not."
         )
     return wanted
-
-
-def _read_page(
-    body: str,
-    *,
-    where: str,
-    mode: str,
-    offset: int | None,
-    limit: int,
-    budget: int,
-) -> dict[str, Any]:
-    """A window of one text, by line or by character.
-
-    **The dump side of the shared readers.**  A dump's body is already in
-    memory; `_line_page` and `_char_page` are the same page builders a streamed
-    file uses, so the two readers cannot cut a window two ways.  An empty text
-    answers an empty window rather than a refusal.
-    """
-    wanted = _read_mode(mode)
-    limit = max(limit, 0)
-    if not body:
-        page: dict[str, Any] = {"chars": 0, "text": ""}
-        if wanted == "line":
-            page["lines"] = 0
-        return page
-    if wanted == "line":
-        lines, starts = _text_lines(body)
-        return _line_page(
-            lines,
-            starts,
-            where=where,
-            total_chars=len(body),
-            offset=1 if offset is None else offset,
-            limit=limit,
-            budget=budget,
-        )
-    # **No line scan here.**  This is the mode for a text without useful lines;
-    # splitting the whole text to report a line count is a scan this mode does
-    # not need.
-    return _char_page(
-        body,
-        where=where,
-        offset=0 if offset is None else offset,
-        limit=limit,
-        budget=budget,
-    )
 
 
 def _line_fill(
@@ -1940,34 +1834,6 @@ def _line_fill(
             f"(the file is at {_where(where)})."
         )
     return _line_payload(kept, total_lines, total_chars, next_line)
-
-
-def _line_page(
-    lines: Sequence[str],
-    starts: Sequence[int],
-    *,
-    where: str,
-    total_chars: int,
-    offset: int,
-    limit: int,
-    budget: int,
-) -> dict[str, Any]:
-    """The dump side of `_line_fill`: a body already in memory."""
-    total = len(lines)
-    start = _line_start(offset, total)
-    source = (
-        (number, starts[number - 1], lines[number - 1])
-        for number in range(start, total + 1)
-    )
-    return _line_fill(
-        source,
-        total_lines=total,
-        total_chars=total_chars,
-        start=start,
-        limit=limit,
-        budget=budget,
-        where=where,
-    )
 
 
 def _line_payload(
@@ -2040,28 +1906,6 @@ def _char_window(
     return page
 
 
-def _char_page(
-    body: str,
-    *,
-    where: str,
-    offset: int,
-    limit: int,
-    budget: int,
-) -> dict[str, Any]:
-    """The dump side of `_char_window`: a body already in memory."""
-    total = len(body)
-    start = _char_start(offset, total)
-    return _char_window(
-        body,
-        index=start,
-        base=0,
-        total_chars=total,
-        limit=limit,
-        budget=budget,
-        where=where,
-    )
-
-
 def _grep_pattern(pattern: str) -> str:
     """The folded pattern, or the refusal an empty one earns."""
     if not pattern:
@@ -2075,8 +1919,8 @@ def _grep_hits(
     """Every match in *lines* at or after line *start*, with both addresses.
 
     **The matching is the same for a dump and a file.**  It reads a line source,
-    not a body: an in-memory dump feeds a range over `_text_lines`, and a file
-    feeds lines as they are read from disk.  The folded index can be larger than
+    not a body: both readers feed lines as they are read from the file.  The
+    folded index can be larger than
     the line's when casefolding expands a character (`ß` -> `ss`); clamping keeps
     the address inside the line whose text it belongs to.
     """
@@ -2197,33 +2041,6 @@ def _grep_answer(
     )
 
 
-def _grep_page(
-    body: str, pattern: str, *, offset: int, limit: int, budget: int
-) -> dict[str, Any]:
-    """The dump side of the shared grep: a body already in memory."""
-    wanted = _grep_pattern(pattern)
-    lines, starts = _text_lines(body)
-    total = len(lines)
-    if not total:
-        return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
-    start = _line_start(offset, total)
-    hits = _grep_hits(
-        (
-            (number, starts[number - 1], lines[number - 1])
-            for number in range(1, total + 1)
-        ),
-        wanted,
-        start,
-    )
-    return _grep_answer(
-        hits,
-        total_lines=total,
-        total_chars=len(body),
-        limit=limit,
-        budget=budget,
-    )
-
-
 def _file_encoding(target: Path) -> str:
     """The decoder a saved file's bytes were written in, or `"binary"`.
 
@@ -2314,6 +2131,106 @@ def _file_char_text(target: Path, encoding: str, start: int, want: int) -> str:
         if got >= want:
             break
     return "".join(pieces)
+
+
+def _stream_read(
+    target: Path,
+    *,
+    where: str,
+    mode: str,
+    offset: int | None,
+    limit: int,
+    budget: int,
+) -> dict[str, Any]:
+    """A window of a file's text, streamed: one count, then the window.
+
+    **The one reader behind `dump_read` and `file_read`.**  The two differ only
+    in how they find the file — a dump's call id or a saved file's cabinet path
+    — and not at all in how the window is cut or how the file is read.
+    """
+    wanted = _read_mode(mode)
+    encoding = _file_encoding(target)
+    total_lines, total_chars = _file_totals(target, encoding)
+    if not total_lines:
+        page: dict[str, Any] = {"chars": 0, "text": ""}
+        if wanted == "line":
+            page["lines"] = 0
+        return page
+    limit = max(limit, 0)
+    if wanted == "line":
+        start = _line_start(1 if offset is None else offset, total_lines)
+        lines = (
+            (number, line_start, text)
+            for number, line_start, text, _ending, _following in _file_lines(
+                target, encoding
+            )
+        )
+        return _line_fill(
+            lines,
+            total_lines=total_lines,
+            total_chars=total_chars,
+            start=start,
+            limit=limit,
+            budget=budget,
+            where=where,
+        )
+    start = _char_start(0 if offset is None else offset, total_chars)
+    # The window's size in characters is not known until it is measured;
+    # gather a generous multiple of the budget (a token is at least one
+    # character, and four covers the priciest BPE splits) and let
+    # `_char_window` cut it back to what fits.
+    room = budget * 4 + 1024
+    if limit:
+        room = min(room, limit)
+    chunk = _file_char_text(target, encoding, start, room)
+    return _char_window(
+        chunk,
+        index=0,
+        base=start,
+        total_chars=total_chars,
+        limit=limit,
+        budget=budget,
+        where=where,
+    )
+
+
+def _stream_grep(
+    target: Path,
+    pattern: str,
+    *,
+    offset: int,
+    limit: int,
+    budget: int,
+) -> dict[str, Any]:
+    """The shared grep over a file, streamed: count, then page the hits.
+
+    **The one search behind `dump_grep` and `file_grep`**, just as `_stream_read`
+    is the one reader: a dump is a file in the cabinet too, so both scan the
+    same way and hold only the page.
+    """
+    wanted = _grep_pattern(pattern)
+    encoding = _file_encoding(target)
+    total_lines, total_chars = _file_totals(target, encoding)
+    if not total_lines:
+        return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
+    start = _line_start(offset, total_lines)
+    hits = _grep_hits(
+        (
+            (number, line_start, text)
+            for number, line_start, text, _ending, _following in _file_lines(
+                target, encoding
+            )
+        ),
+        wanted,
+        start,
+    )
+    return _grep_answer(
+        hits,
+        total_lines=total_lines,
+        total_chars=total_chars,
+        limit=limit,
+        budget=budget,
+    )
 
 
 def _fit_match_text(page: dict[str, Any], line: str, budget: int) -> str:

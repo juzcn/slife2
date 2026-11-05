@@ -75,8 +75,8 @@ def cabinet_stub(
             "kept": call,
             "mirror": f"dumps/{call}.md",
             "path": path or f"agents/jack/cabinet/dumps/{call}.md",
-            # The mirror is the output plus its trailing newline.
-            "size": len(output.encode("utf-8")) + 1,
+            # The mirror is the output exactly.
+            "size": len(output.encode("utf-8")),
         }
 
     return server
@@ -203,7 +203,7 @@ async def test_a_result_past_the_window_becomes_a_head_and_a_file(
     started = window.index("[DUMP:") + len("[DUMP:")
     ended = window.index("]", started)
     marker = json.loads(window[started:ended])
-    assert marker == {"call": "c1", "bytes": len(HUGE) + 1, "file": where}, (
+    assert marker == {"call": "c1", "bytes": len(HUGE), "file": where}, (
         "the marker carries the call, the file's size and its path — no counts"
     )
 

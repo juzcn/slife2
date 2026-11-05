@@ -820,11 +820,13 @@ A replacement is the whole document, not a patch: a note's tags and a report's
 period are what the update passes, and an omitted one is cleared.
 
 A dump is a tool output too large for the conversation. The output is stored
-whole, keyed by the tool call id, and the conversation carries its head within
-`tool_result.tokens` — a marker with the file's size and its path relative to
-the data directory (where the agent's own tools run, so it survives moving the
-home). Nothing is paraphrased, and nothing is counted: the size is the mirror
-file's `stat`, not a pass over the text. The model reads any part back with
+whole **in its file**, keyed by the tool call id; the cabinet row is the
+address and holds no copy of the text, so a large output is never stored twice.
+The conversation carries its head within `tool_result.tokens` — a marker with
+the file's size and its path relative to the data directory (where the agent's
+own tools run, so it survives moving the home). Nothing is paraphrased, and
+nothing is counted: the size is the mirror file's `stat`, not a pass over the
+text. The model reads any part back with
 `dump_read` by line (`offset` is 1-based, negative from the end) or by
 character (`offset` is 0-based, negative from the end); `limit` caps lines or
 characters, and `0` shows as many as fit. `dump_grep` finds a literal, case-insensitive pattern within one
@@ -850,12 +852,12 @@ resolves the reference and `attach_image` is how the model sees the picture
 again; an `http(s)` image is fetched by the provider, not here. An image is not
 searched either: the `[Image:…]` key is its address.
 
-Every text row — a note, diary entry, report, or dump — is written twice: a row
-in the cabinet index and a Markdown file under `agents/<agent>/cabinet/`
-(`notes/`, `diary/`, `reports/`, `dumps/`), which can be opened, edited, or
-deleted without slife2. A saved file's bytes live under the cabinet and are not
-indexed, and it has no Markdown mirror; an image is the same shape under
-`pictures/`. `file_read` and `file_grep` read a saved file's decoded text by
+A note, diary entry, and report are written twice: a row in the cabinet index
+and a Markdown file under `agents/<agent>/cabinet/` (`notes/`, `diary/`,
+`reports/`), which can be opened, edited, or deleted without slife2. A dump's
+text lives only in its file under `dumps/`; its row is the address. A saved
+file's bytes live under the cabinet and are not indexed, and it has no Markdown
+mirror; an image is the same shape under `pictures/`. `file_read` and `file_grep` read a saved file's decoded text by
 line or character; a PDF, image, or archive is shown as an escaped rendering of
 its bytes.
 

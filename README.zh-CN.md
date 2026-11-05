@@ -726,7 +726,8 @@ corpus——`cabinet_search` 排序的对象；dump 和图片是 turn 的附件�
 
 替换是整篇文档而不是补丁：笔记的 tags 和报告的 period 以 update 传入的为准，省略即清空。
 
-dump 是对对话而言过大的工具输出。输出完整存储，以工具调用 id 为键，对话携带的是在
+dump 是对对话而言过大的工具输出。输出完整存储在**它的文件**里，以工具调用 id 为键；
+文件柜里的行只是地址，不保存正文，所以大输出不会在 SQLite 里再存一份。对话携带的是在
 `tool_result.tokens` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
 路径（agent 自己的工具就在这个目录下运行，数据目录迁移后仍然有效）；不做任何改写，
 也不数行或字符——大小直接来自镜像文件的 `stat`，不需要再扫一遍内容。模型用
@@ -746,9 +747,9 @@ PDF、图片或压缩包没有文本，按字节日志显示为有界的转义�
 `image_source` 解析引用，`attach_image` 是模型再次看到图片的方式；`http(s)` 图片由
 provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 key 就是它的地址。
 
-每个文本 kind——笔记、日记、报告或 dump——写两份：文件柜索引中的一行，以及
-`agents/<agent>/cabinet/` 下的 Markdown 文件（`notes/`、`diary/`、`reports/`、
-`dumps/`），可以脱离 slife2 打开、编辑或删除。保存文件的字节在文件柜下，不被索引，
+笔记、日记和报告写两份：文件柜索引中的一行，以及 `agents/<agent>/cabinet/` 下的
+Markdown 文件（`notes/`、`diary/`、`reports/`），可以脱离 slife2 打开、编辑或删除。
+dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下，不被索引，
 也没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。`file_read` 和
 `file_grep` 按行或按字符读写保存文件的解码文本；PDF、图片或压缩包按其字节的转义
 渲染来显示。

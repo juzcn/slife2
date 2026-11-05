@@ -1526,21 +1526,22 @@ site.
 
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
-with `image_save`. Neither write produces an index entry; the row is stored for
-its text or bytes and the turn's marker is the address. `dump_read` and
-`dump_grep` are the ways back for a dump. For an image it is `attach_image`: the
-turn's `[Image:{…}]` reference names the key, `image_source` resolves it to a
-`data:` URL (or the source URL), and the tool attaches it. An `http(s)` image is
-never fetched here; the row keeps the URL and the provider fetches it.
+with `image_save`. Neither write produces an index entry; the turn's marker is
+the address. **A dump's text is its file, and its row holds no body** — one copy,
+whether the output is a kilobyte or a gigabyte. `dump_read` and `dump_grep` are
+the ways back for a dump. For an image it is `attach_image`: the turn's
+`[Image:{…}]` reference names the key, `image_source` resolves it to a `data:`
+URL (or the source URL), and the tool attaches it. An `http(s)` image is never
+fetched here; the row keeps the URL and the provider fetches it.
 
 `dump_read` reads by line or by character. `mode="line"` takes a 1-based
 `offset`, negative from the end; `mode="char"` takes a 0-based character
 `offset`, negative from the end. `limit` caps lines or characters, and `0`
 shows as many as fit. Line mode numbers the lines it returns; character mode
 returns the raw slice, which is the way to read a file that is not organized in
-lines. Line mode answers with the line count (it splits the file to page it);
-every answer carries the character count, which is O(1). `next` is where the
-following window starts in the mode's own units.
+lines. Both counts come from one streaming counting pass; line mode uses the
+same pass to page. `next` is where the following window starts in the mode's
+own units.
 
 `dump_grep` matches a literal pattern within one line, ignoring case. Nothing
 the caller wrote is quoted back. Every match answers its line number and the

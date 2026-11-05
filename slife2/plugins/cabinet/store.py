@@ -16,18 +16,19 @@ dropped is the machinery slife2 does without:
 large for the conversation is truncated for the model and kept whole for
 everybody else — and *nothing decides which part of it mattered*, because that
 is the tool designer's judgement and not the harness's.  So the whole of it is
-stored, and the conversation carries a fixed head of it within the budget.
-Bytes belong on disk, but a tool's output is text, and text belongs where the
-cabinet's other text is.  What that does not make it is a document: the address
-a model has for it is the `[DUMP:{…}]` marker in the transcript, which names
-the call id `dump_read` and `dump_grep` take, and ranking machine output
-against a person's notes is the dilution SDD §8.3 warns about.  So the row is
-written by the harness, keyed by the call, and **not indexed**.
+stored **as one file**, and the conversation carries a fixed head of it within
+the budget.  The row is its address and nothing more: a dump's body column is
+empty, because the text is already on disk and a second copy in SQLite would be
+the same bytes twice.  What that does not make it is a document: the address a
+model has for it is the `[DUMP:{…}]` marker in the transcript, which names the
+call id `dump_read` and `dump_grep` take, and ranking machine output against a
+person's notes is the dilution SDD §8.3 warns about.  So the row is written by
+the harness, keyed by the call, and **not indexed**.
 
 **And this kind's readers are bounded, like every tool of ours that hands text
 to a model.**  What the harness writes into the transcript is the head of the
 dump with the dump named beside it, so a model that wants a part it did not get
-reads the row back with `dump_read` or finds it with `dump_grep` — tools that
+reads the file back with `dump_read` or finds it with `dump_grep` — tools that
 return **at most the budget's worth of the original**, saying how much there is
 and where the next window starts.  The readers' cap and the harness's budget
 are **one number**, and that is the whole of what makes the arrangement closed:
@@ -170,11 +171,13 @@ NOTE = "note"
 DIARY = "diary"
 FILE = "file"
 REPORT = "report"
-#: A tool's output, kept whole because nothing here may decide what part of it
-#: mattered.  The only kind **no tool of this plugin writes**: the harness dumps
-#: it (`slife2.libs.harness`) and writes a marked head into the conversation,
-#: and `dump_read`/`dump_grep` are how a model gets the part it did not get — a
-#: bounded answer, for the reason the module docstring gives.
+#: A tool's output, kept whole as a file because nothing here may decide what
+#: part of it mattered.  The row carries the address (the call id and the mirror
+#: path), not the text; the file is the one copy.  The only kind **no tool of
+#: this plugin writes**: the harness dumps it (`slife2.libs.harness`) and writes
+#: a marked head into the conversation, and `dump_read`/`dump_grep` are how a
+#: model gets the part it did not get — a bounded answer, for the reason the
+#: module docstring gives.
 DUMP = "dump"
 #: An image attached to a turn, kept whole because the turn log is text.
 #: **The second bytes-backed kind**, and the one whose reader is not a text
@@ -253,10 +256,11 @@ SPECS: dict[str, Spec] = {
     # Its time axis is when the output arrived — the only moment this row has,
     # since nobody wrote it.
     #
-    # **Mirrored like a note, unlike a file.**  The kind whose `mirror` is empty
-    # is the one whose bytes are the document; a dump's content *is* text, and
-    # the mirror is the whole of it in one file on disk.  What that costs is a
-    # second copy of the text, in a directory nothing searches.
+    # **The mirror is the document.**  Unlike a note, where the row is what a
+    # search reads and the mirror is for a person, a dump's text lives only in
+    # its file: the row holds no body, so a gigabyte of output is not stored
+    # twice.  The mirror is written in the same call as the row and is the
+    # address `dump_read`/`dump_grep` stream.
     #
     # **Not in the corpus.**  Its address is the call id in the turn's
     # `[DUMP:{…}]` marker, and `dump_read` is the reader, so there is nothing
@@ -529,7 +533,10 @@ def _write_mirror(root: Path, relative: str, text: str) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with _MIRROR_LOCK:
         try:
-            tmp.write_text(text, encoding="utf-8")
+            # **The text as it is**, not a platform translation of it: a dump's
+            # mirror is the one copy of its output, and a reader's line and
+            # character addresses have to be the output's own.
+            tmp.write_text(text, encoding="utf-8", newline="")
             os.replace(tmp, path)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -1076,7 +1083,9 @@ class CabinetStore:
         embed raises having stored nothing, which is what the plugin's
         `file_save` relies on when it takes back the bytes it copied.  A dump
         or an image is not in the corpus: its row is written with no keyword
-        entry and no vector, because the turn's marker is its address.
+        entry and no vector, because the turn's marker is its address.  **A
+        dump's row is written without its body** — the mirror below is the one
+        copy of the text — so the row is an address rather than a second copy.
         """
         if mode not in (CREATE, REPLACE, UPSERT):
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
@@ -1094,6 +1103,11 @@ class CabinetStore:
         if mode == REPLACE and existing is None:
             return None
         row: dict[str, Any] = dict(existing) if existing is not None else {}
+        # **A dump's text lives only in its file.**  The row is the address —
+        # the call id and the mirror path — so its body column stays empty and
+        # SQLite never holds a second copy of an output that may be huge.  The
+        # mirror below is written from the argument, not from the row.
+        stored = "" if kind == DUMP else body
         if mode == REPLACE:
             # **A replacement is the document the caller describes**, so the
             # fields it owns are the caller's — an empty tag is a tag cleared,
@@ -1101,7 +1115,7 @@ class CabinetStore:
             # `annotate`'s, the created stamp is when the report arrived, and a
             # saved file's bytes and a dump's source still describe this row.
             row.update(
-                body=body,
+                body=stored,
                 tags=tags,
                 period_start=period_start,
                 period_end=period_end,
@@ -1109,7 +1123,7 @@ class CabinetStore:
             row["title"] = row.get("title") or title or key
         else:
             row.update(
-                body=body,
+                body=stored,
                 title=title or row.get("title") or key,
                 tags=tags or row.get("tags") or "",
                 summary=summary or row.get("summary") or "",
@@ -1936,10 +1950,14 @@ def _mirror_text(kind: str, row: Mapping[str, Any], body: str) -> str:
     """What is written to one kind's markdown.
 
     A note and a report carry their title as a heading; a diary has none,
-    because its file *is* a day and the day is its name.  A dump is raw —
-    nothing here wrote it, so there is no title of its own to put above it.
+    because its file *is* a day and the day is its name.  A dump is **the body
+    itself, with no byte added** — it is the one copy of the output, and the
+    reader's addresses count its characters; a trailing newline would be a
+    character no tool wrote.
     """
-    if kind in (DIARY, DUMP):
+    if kind == DUMP:
+        return body
+    if kind == DIARY:
         return f"{body}\n"
     return f"# {row.get('title') or row.get('key')}\n\n{body}\n"
 
