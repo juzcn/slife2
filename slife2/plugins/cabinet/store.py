@@ -900,7 +900,7 @@ class CabinetStore:
         remaining = await asyncio.to_thread(self._unembedded_count)
         return remaining, done
 
-    def _unembedded(self, limit: int) -> list[sqlite3.Row]:
+    def _unembedded(self, limit: int) -> list[dict[str, Any]]:
         """One batch of vectorized documents the pass has not tried yet.
 
         The selection `embed_missing` walks, blocking and therefore on a worker
@@ -1443,7 +1443,7 @@ class CabinetStore:
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
-        clauses, values = self._window(spec, since, until)
+        clauses, values = self._window(spec.time, spec.day, since, until)
         if category:
             # **Escaped, or the filter is not the query it says it is.**  A
             # category is a folder name and `LIKE` reads two of the characters a
@@ -1481,9 +1481,14 @@ class CabinetStore:
         }
 
     def _window(
-        self, spec: Spec, since: str | None, until: str | None
+        self, axis: str, day: bool, since: str | None, until: str | None
     ) -> tuple[list[str], list[Any]]:
-        """A since/until window on **this kind's** time axis.
+        """A since/until window on **one kind's** time axis.
+
+        `axis` is the column and `day` whether it holds days rather than
+        instants; a browse that names no kind passes the `updated_at` axis the
+        corpus kinds share, so this takes the axis rather than the whole spec —
+        the rest of a spec is not a window's business.
 
         Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
         because both of its callers have one; a cabinet's kinds use their own
@@ -1506,22 +1511,22 @@ class CabinetStore:
         values: list[Any] = []
         if since:
             bound = normalize_bound(since, role="since")
-            if spec.day:
-                clauses.append(f"{spec.time} >= ?")
+            if day:
+                clauses.append(f"{axis} >= ?")
                 values.append(bound[:10])
             else:
                 # By instant, not by offset string — see `time_window`.
-                clauses.append(f"julianday({spec.time}) >= julianday(?)")
+                clauses.append(f"julianday({axis}) >= julianday(?)")
                 values.append(instant_bound(bound))
         if until:
             bound = normalize_bound(until, role="until")
-            if spec.day:
-                day = date.fromisoformat(bound[:10])
-                bound = (day + timedelta(days=1) if "T" in bound else day).isoformat()
-                clauses.append(f"{spec.time} < ?")
+            if day:
+                last = date.fromisoformat(bound[:10])
+                bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
+                clauses.append(f"{axis} < ?")
                 values.append(bound)
             else:
-                clauses.append(f"julianday({spec.time}) <= julianday(?)")
+                clauses.append(f"julianday({axis}) <= julianday(?)")
                 values.append(instant_bound(bound))
         return clauses, values
 
@@ -1594,17 +1599,10 @@ class CabinetStore:
             clauses.append(f"d.kind IN ({_marks(DOCUMENT_KINDS)})")
             values.extend(DOCUMENT_KINDS)
         if since or until:
-            spec = (
-                SPECS[kind]
-                if kind
-                else Spec(
-                    time="updated_at",
-                    day=False,
-                    mirror="",
-                    searchable=True,
-                )
+            axis, day = (
+                (SPECS[kind].time, SPECS[kind].day) if kind else ("updated_at", False)
             )
-            window, bounds = self._window(spec, since, until)
+            window, bounds = self._window(axis, day, since, until)
             clauses.extend(window)
             values.extend(bounds)
         where = filter_clause(clauses)
@@ -1786,24 +1784,28 @@ class CabinetStore:
         clauses: list[str],
         values: list[Any],
         limit: int,
-    ) -> list[sqlite3.Row]:
-        """The fused order, as rows — **in that order**, and filtered.
+    ) -> list[dict[str, Any]]:
+        """The fused order, as mappings — **in that order**, and filtered.
 
         `slife2.libs.store.index.rows_in_order`, which is where the ordering, the re-applied
         filters and the cap on the bound list are argued; this store's own part
         is the table's name and the `d` it is aliased to, because the filters it
-        passes are written against that alias.
+        passes are written against that alias.  The rows are converted here
+        because everything that reads one in this module takes a mapping.
         """
-        return rows_in_order(
-            connection,
-            ordered,
-            select="SELECT d.* FROM cabinet_doc d",
-            column="d.id",
-            key="id",
-            clauses=clauses,
-            values=values,
-            limit=limit,
-        )
+        return [
+            dict(row)
+            for row in rows_in_order(
+                connection,
+                ordered,
+                select="SELECT d.* FROM cabinet_doc d",
+                column="d.id",
+                key="id",
+                clauses=clauses,
+                values=values,
+                limit=limit,
+            )
+        ]
 
     def _matched_in_line(self, expression: str, page: list[int]) -> set[int]:
         """Which of the page's rows hold the caller's words in what is printed.
