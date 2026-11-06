@@ -26,6 +26,10 @@ DRY_RUN=0
 FAILED=0
 REQ_FILE=""
 PROGRAM_HINTS=""
+# Set when this build refuses the home's own configuration and the requirements
+# came from the shipped one instead; the last lines then say which merge is
+# owed, because slife2 does not start until it is made.
+CONFIG_REFUSED=0
 # **The parent shell's PATH cannot be changed from here.**  A terminal that
 # started before the install keeps the PATH it was given, so the last lines
 # have to name the file that adds it — but only when that is the case.
@@ -342,9 +346,21 @@ seed_config() {
 }
 
 requirements() {
+    local status
     REQ_FILE=$(mktemp) || die "temporary file failed"
-    "$PY" "$HELPER" require --home "$HOME_DIR" > "$REQ_FILE" \
-        || die "the configuration could not be read"
+    "$PY" "$HELPER" require --home "$HOME_DIR" > "$REQ_FILE"
+    status=$?
+    # 3 is the helper's "the home's file was refused; these are the shipped
+    # configuration's requirements".  The install finishes; the merge is said
+    # at the end.
+    case $status in
+        0) ;;
+        3) CONFIG_REFUSED=1 ;;
+        *)
+            rm -f "$REQ_FILE"
+            die "the configuration could not be read"
+            ;;
+    esac
 }
 
 install_node() {
@@ -657,6 +673,9 @@ print_next() {
     fi
     say "  data:    $HOME_DIR"
     say "  config:  $HOME_DIR/slife2.yaml"
+    if [ "$CONFIG_REFUSED" -eq 1 ]; then
+        say "  merge:   $HOME_DIR/slife2-default.yaml into slife2.yaml, then run this installer again"
+    fi
     print_program_hints
     print_credentials
 }

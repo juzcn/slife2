@@ -785,6 +785,7 @@ say() { printf '%s\\n' "$*"; }
 print_program_hints() { :; }
 print_credentials() { :; }
 FAILED=0
+CONFIG_REFUSED=0
 PY=/bin/false
 MODE=tool
 HOME_DIR=/tmp/home
@@ -987,6 +988,52 @@ def _powershell_function(text: str, name: str) -> str:
     )
     assert match, f"{name} is missing from install.ps1"
     return match.group(0)
+
+
+def test_the_powershell_installer_finishes_when_the_home_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Exit 3 is the helper's "the shipped requirements, a merge owed".
+
+    The install continues, and the last lines carry the merge; any other
+    nonzero still stops it.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    stub = tmp_path / "refuse.cmd"
+    stub.write_text("@echo off\r\nexit /b 3\r\n", encoding="utf-8")
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(POWERSHELL.read_text(encoding="utf-8"), "Get-Requirements")
+        + "\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Die([string]$Message) { throw [System.Exception]::new($Message) }\n"
+        "$script:ConfigRefused = $false\n"
+        f"$script:Py = '{stub}'\n"
+        "$script:Helper = 'ignored'\n"
+        "$script:HomeDir = 'ignored'\n"
+        f". '{function_file}'\n"
+        "$null = Get-Requirements\n"
+        'Write-Output "REFUSED=$script:ConfigRefused"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "REFUSED=True" in result.stdout, result.stdout + result.stderr
 
 
 def _ensure_python_function(path: Path) -> str:
@@ -1584,11 +1631,48 @@ def test_requirements_refuse_a_home_with_no_config(tmp_path: Path) -> None:
     assert "no slife2.yaml" in result.stderr
 
 
-def test_requirements_refuse_a_malformed_config(tmp_path: Path) -> None:
+def test_requirements_finish_an_install_over_a_malformed_config(
+    tmp_path: Path,
+) -> None:
+    """**A home this build cannot load does not stop the upgrade.**
+
+    The shipped configuration is what the release itself runs on, so its
+    programs are installed; the exit status and the merge line say the install
+    is done but slife2 starts only after the home's file is fixed.
+    """
     (tmp_path / "slife2.yaml").write_text("foo: [unclosed\n", encoding="utf-8")
     result = _requirements(tmp_path)
-    assert result.returncode == 2
+
+    assert result.returncode == 3
     assert "cannot read" in result.stderr
+    assert f"{tmp_path / 'slife2.yaml'} was refused" in result.stderr
+    assert f"Merge {tmp_path / 'slife2-default.yaml'}" in result.stderr
+    assert any(line.startswith("uv\t") for line in result.stdout.splitlines())
+
+
+def test_requirements_install_the_shipped_config_when_a_key_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The upgrade that removed `context.floor` must not leave a half install.
+
+    The home is the shipped file with the removed key still in it: the release
+    refuses the key, and the installer installs what the shipped file needs
+    while naming the merge that makes slife2 start.
+    """
+    shipped = (ROOT / "slife2.yaml").read_text(encoding="utf-8")
+    assert "  ceiling: 0.8\n" in shipped
+    (tmp_path / "slife2.yaml").write_text(
+        shipped.replace("  ceiling: 0.8\n", "  ceiling: 0.8\n  floor: 0.2\n", 1),
+        encoding="utf-8",
+    )
+
+    result = _requirements(tmp_path)
+
+    assert result.returncode == 3
+    assert "context.floor is gone" in result.stderr
+    assert f"{tmp_path / 'slife2.yaml'} was refused" in result.stderr
+    assert f"Merge {tmp_path / 'slife2-default.yaml'}" in result.stderr
+    assert any(line.startswith("uv\t") for line in result.stdout.splitlines())
 
 
 def _seed(source: Path, home: Path, *extra: str) -> subprocess.CompletedProcess[str]:

@@ -515,7 +515,9 @@ from the home at that moment, so an edit reaches the next conversation. A home
 without one is refused where the prompt is rendered, naming the file. The
 installer seeds it under the configuration's rule: a live file is never
 overwritten, and a changed shipped copy is written beside it as
-`AGENTS-default.md`.
+`AGENTS-default.md`. The same rule lets an upgrade finish when this build
+refuses the live `slife2.yaml`: the installer takes the requirements from the
+shipped file, names the merge, and the start stays refused until it is made.
 
 `libs/host/configfile.py` is the single writer for edits made by plugins. It
 performs a document edit under a cross-process lock, preserves comments, and

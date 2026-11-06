@@ -25,6 +25,10 @@ $script:Action = 'install'
 $script:DryRun = $false
 $script:Failed = $false
 $script:ProgramHints = @()
+# Set when this build refuses the home's own configuration and the requirements
+# came from the shipped one instead; the last lines then say which merge is
+# owed, because slife2 does not start until it is made.
+$script:ConfigRefused = $false
 # **The parent shell's PATH cannot be changed from here.**  A terminal that
 # started before the install keeps the PATH it was given, so the last lines
 # have to say so — but only when that is the case.
@@ -452,7 +456,11 @@ function Seed-Config {
 
 function Get-Requirements {
     $lines = & $script:Py $script:Helper require --home $script:HomeDir
-    if ($LASTEXITCODE -ne 0) { Die 'the configuration could not be read' }
+    # 3 is the helper's "the home's file was refused; these are the shipped
+    # configuration's requirements".  The install finishes; the merge is said
+    # at the end.
+    if ($LASTEXITCODE -eq 3) { $script:ConfigRefused = $true }
+    elseif ($LASTEXITCODE -ne 0) { Die 'the configuration could not be read' }
     $requirements = @()
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -703,6 +711,9 @@ function Show-Next {
     }
     Say "  data:    $($script:HomeDir)"
     Say "  config:  $(Join-Path $script:HomeDir 'slife2.yaml')"
+    if ($script:ConfigRefused) {
+        Say "  merge:   $(Join-Path $script:HomeDir 'slife2-default.yaml') into slife2.yaml, then run this installer again"
+    }
     Show-ProgramHints
     Show-Credentials
 }

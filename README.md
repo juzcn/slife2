@@ -121,7 +121,10 @@ moves it to a newer patch. The installer seeds the bundled `skills/` and `jobs/`
 into the data directory, **overwriting files of the same name**; a skill or job
 you added under another name stays untouched. `AGENTS.md` and `slife2.yaml` are
 **never overwritten**: a changed shipped copy is written beside them as
-`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge.
+`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge. If
+this version refuses your `slife2.yaml` — a key it no longer takes — the install
+still finishes from the shipped configuration and names the merge; slife2 starts
+once you have made it.
 
 From a source checkout, run the installer there:
 
