@@ -1489,11 +1489,10 @@ class ContextSettings:
     #: Both are **fractions of the model's own context window**, so both are
     #: meaningful only where the model's config declares one.  The ceiling
     #: measures a kept context; the floor is what a recall may spend when nothing
-    #: was kept.  **Keep the floor small**: what a recall adds joins the context
-    #: and is re-sent on every later turn, so on a 1M window 0.2 is a 200k-token
-    #: haystack per turn — three recalls took a live conversation to 63%.
+    #: was kept — one recall's increment, never a budget on the conversation
+    #: itself, which is the ceiling's.
     ceiling: float = 0.8
-    floor: float = 0.05
+    floor: float = 0.2
     #: Most turns one recall may select.  A cap rather than a preference, for the
     #: reason `MAX_PAGE` is one: the count is what is left to bound a context by
     #: when the model's window is undeclared.

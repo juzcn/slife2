@@ -516,7 +516,7 @@ subagent:
 
 context:
   ceiling: 0.8               # fraction of the model's window
-  floor: 0.05                # per-recall share; what it adds stays in context
+  floor: 0.2                 # one recall's increment, up to the ceiling
   recall_limit: 40
   min_similarity: 0.52       # above the embedding model's noise floor
   timeout: 20.0              # seconds for the discriminator call

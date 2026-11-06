@@ -139,11 +139,11 @@ embeddings:
   active_model: siliconflow
 
 context:
-  # `ceiling` and `floor` are fractions of the model's context window.  A recall
-  # joins the live context and is re-sent every later turn, so keep `floor`
-  # small: on a 1M window 0.2 is 200k tokens per recall.
+  # `ceiling` and `floor` are fractions of the model's context window: the
+  # ceiling is the total a recall tops the context up to, the floor is one
+  # recall's increment.
   ceiling: 0.8
-  floor: 0.05
+  floor: 0.2
   recall_limit: 40
   # Gates measured similarity only; a keyword hit is exempt.  Calibrate it above
   # the embedding model's noise floor — bge-m3 scores unrelated text near 0.5.

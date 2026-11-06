@@ -468,7 +468,7 @@ subagent:
 
 context:
   ceiling: 0.8               # 占模型窗口的比例
-  floor: 0.05                # 每次召回可占的比例；召回的内容会留在上下文
+  floor: 0.2                 # 单次召回的增量，最高到 ceiling
   recall_limit: 40
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   timeout: 20.0              # 判别调用的秒数
