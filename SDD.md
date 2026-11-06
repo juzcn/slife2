@@ -945,7 +945,9 @@ Rules:
   names a `rerank_model`; `recall_limit` bounds the pool, and
   `rerank_min_score` is the ranker's own floor. It is a precision stage, not
   a retriever: a missing or failing reranker keeps the fused order, and a
-  period recall — which has no question — keeps its time order.
+  period recall — which has no question — keeps its time order. The catalogue
+  and cabinet searches keep their own page order; their rerank is deferred
+  (§14.2).
 - **The live-context list's order is authoritative.** Reads replay it as written
   and never re-sort or re-slice it; a selection is not always contiguous.
 - **`send_message` answers with every key present**, including `refused` where
@@ -2516,6 +2518,7 @@ The following are not implemented in this version:
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
 | A corpus-wide `grep` search leg | `dump_grep` is a bounded literal reader for one dump; a system-wide regex leg is a larger change. | Partial spellings and symbols in the corpus rely on the two existing legs. |
+| A cross-encoder rerank for the catalogue and cabinet searches | The context recall is the one whose bad candidate persists into every later turn; both searches are one-shot reads the model can repeat, and their pages order words-first on purpose. | Both use RRF and keep that page order; the cross-encoder (`rerank_model`) is wired to the context recall only. |
 | A policy that forces approval | The model-driven `_approve` exists; a named list does not. | `skill_set` and `mcp_set` rely on model judgment. |
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
 | A bound on tool-call arguments | Arguments are the model's own words; shortening them is a different problem. | A model can write an unbounded argument into the conversation. |
