@@ -1162,6 +1162,13 @@ def build_server(
             elif terms(prompt):
                 sentences = [*sentences, prompt]
 
+        # The policy is the caller's home's, like the window and the model:
+        # this daemon serves every home, and `context:` is a section of the
+        # caller's `slife2.yaml` (`current`).  Read from the config this process
+        # started on, an edit would reach the window and not the numbers sized
+        # against it, and a second home would be graded by the first home's
+        # floor.
+        policy = current().context
         window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
         # the headroom *below*.  Summed here and not by the store: the store
@@ -1170,8 +1177,8 @@ def build_server(
         base_cost = sum((await off_loop(_cost_of, store, base)).values())
         if window:
             budget = min(
-                int(window * config.context.floor),
-                int(window * config.context.ceiling) - base_cost,
+                int(window * policy.floor),
+                int(window * policy.ceiling) - base_cost,
             )
         else:
             # No declared window: no token cap, and the count cap is what is
@@ -1189,7 +1196,7 @@ def build_server(
             since=since,
             until=until,
             anchor=anchor,
-            limit=config.context.recall_limit,
+            limit=policy.recall_limit,
             # The keep-list is what is *in hand*, so it is also what a recall
             # must not spend its places on: the union would collapse a turn in
             # both, and the slot, the distance and the budget would be gone.
@@ -1197,8 +1204,8 @@ def build_server(
             # is exactly why the recall is the half that looks elsewhere.
             exclude=base,
         )
-        gated = decisions.gate(ranked, config.context.min_similarity)
-        order = [turn_id for turn_id, _ in gated][: config.context.recall_limit]
+        gated = decisions.gate(ranked, policy.min_similarity)
+        order = [turn_id for turn_id, _ in gated][: policy.recall_limit]
         if not order:
             return []
         costs = await off_loop(_cost_of, store, order)

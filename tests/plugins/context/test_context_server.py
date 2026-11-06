@@ -748,6 +748,32 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 
 
 @pytest.mark.asyncio
+async def test_the_recall_policy_comes_from_the_callers_home() -> None:
+    """The gate and the place count are the caller's `context:`, not the daemon's.
+
+    The same shared process serves every home, and the numbers are sized against
+    the window and the model the caller's own config names — so they have to be
+    read from the caller's file too.  A daemon started on one home's
+    `recall_limit` must not spend it on another home's recall.
+    """
+    mine, callers = default_config(), default_config()
+    mine = replace(mine, context=replace(mine.context, recall_limit=1))
+    callers = replace(callers, context=replace(callers.context, recall_limit=2))
+    server = build_server(
+        mine,
+        embedder=EMBEDDER,
+        source=lambda: callers,
+        ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+    )
+
+    async with Client(server) as client:
+        await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
+        answer = await _rebuild(client, "")
+
+    assert answer.data["recalled"] == 2, "the caller's two places were spent"
+
+
+@pytest.mark.asyncio
 async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     """The common case, and the one that keeps a costly call from being free.
 
