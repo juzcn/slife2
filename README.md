@@ -109,7 +109,7 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 ```
 
 The command downloads the latest `main`, installs slife2 into an isolated
-environment, and installs the external programs the current configuration
+environment, and installs the external programs the **shipped** configuration
 requires. Data and configuration live in `~/.slife2`; binaries and libraries in
 `~/.local` (`%LOCALAPPDATA%\slife2` on Windows). Running it again upgrades.
 
@@ -121,10 +121,9 @@ moves it to a newer patch. The installer seeds the bundled `skills/` and `jobs/`
 into the data directory, **overwriting files of the same name**; a skill or job
 you added under another name stays untouched. `AGENTS.md` and `slife2.yaml` are
 **never overwritten**: a changed shipped copy is written beside them as
-`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge. If
-this version refuses your `slife2.yaml` — a key it no longer takes — the install
-still finishes from the shipped configuration and names the merge; slife2 starts
-once you have made it.
+`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge. What
+the installer installs is read from the **shipped** `slife2.yaml`, never your
+home's file: an upgrade does not wait for that merge.
 
 From a source checkout, run the installer there:
 

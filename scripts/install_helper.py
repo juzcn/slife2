@@ -6,17 +6,17 @@ has, and copies the bundled `skills/` and
 `jobs/` into the home **overwriting files of the same name** — the content
 update, and deliberately not the versioned-backup dance the old installer did:
 the bundle is the authority, and a person who edits a seeded file edits their
-copy.  `require` reads the *effective* configuration with the
-project's own loader and prints every external program it names, with the place
-that names it — and, for a `cli:` entry, the line that installs it.  A home the
-loader refuses falls back to the shipped configuration and says which merge is
-owed, so an upgrade still installs what the release needs.  The installer maps
-those names to packages and installs them; nothing here installs anything.
-`secrets` reads the same configuration for the credentials it cannot resolve, so
-the installer can say which `credstore set` commands would make it work.
+copy.  `require` reads the *shipped* configuration with the project's own loader
+and prints every external program it names, with the place that names it — and,
+for a `cli:` entry, the line that installs it.  The home's `slife2.yaml` is the
+server's file and may lag a release; it is never the installer's source of
+requirements.  The installer maps those names to packages and installs them;
+nothing here installs anything.  `secrets` reads the home's configuration for
+the credentials it cannot resolve, so the installer can say which
+`credstore set` commands would make it work.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
-    python install_helper.py require --home <dir>
+    python install_helper.py require --source <repo> --home <dir>
     python install_helper.py secrets --home <dir>
 
 `seed` is stdlib-only and can run on any Python 3.  `require` and `secrets`
@@ -27,7 +27,6 @@ import slife2, so they run with the project virtualenv's interpreter after
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shlex
 import shutil
@@ -38,11 +37,6 @@ CONFIG_NAME = "slife2.yaml"
 #: The reference copy written when the live configuration already exists.  A
 #: name slife2 never reads: `find_config_path` looks for `slife2.yaml` only.
 REFERENCE_NAME = "slife2-default.yaml"
-
-#: `require`'s exit status when the home's own configuration was refused and the
-#: requirements are the shipped configuration's.  The install can finish; a
-#: merge is still owed before slife2 starts.
-EXIT_HOME_REFUSED = 3
 
 #: The model's guide to its tools, seeded beside the configuration.  The name
 #: is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
@@ -328,20 +322,17 @@ def secrets(home: Path) -> int:
     return 0
 
 
-def require(home: Path) -> int:
+def require(source: Path, home: Path) -> int:
     """Print `<executable><TAB><origin>[<TAB><install>]` for every program.
 
-    **The effective configuration, not a copy of the shipped one.**  The home
-    is set before the import so the project's own `load()` resolves the same
-    `slife2.yaml` the server would; a checkout therefore yields the checkout's
-    configuration, and an installed home yields its own.
-
-    **A refused home does not stop the install.**  A new release may refuse a
-    key the home still names — an upgrade must not leave the machine half
-    installed because the file is one edit away.  The shipped `slife2.yaml`
-    beside this helper is what the release itself runs on, so its programs are
-    installed, the refusal is printed with the merge to make, and the exit
-    status is `EXIT_HOME_REFUSED`; slife2 starts after the merge, not before.
+    **The shipped configuration, not the home's.**  The installer installs what
+    the release it is placing needs, so it reads the `slife2.yaml` in *source* —
+    the same file `seed` places.  The home's file belongs to the server: it may
+    still be the last release's, and a change to it is compared and merged by
+    hand.  Reading it here made an upgrade depend on that merge — and, when the
+    new build refused an old key, stopped installing anything at all.  The home
+    is still where `skills/` comes from: the bundled ones are seeded there, and
+    a person's own skill is installed with them.
 
     **The third column is the `cli:` entry's `install:` line**, and only when
     every origin naming the program is a `cli:` entry.  Those entries are the
@@ -351,35 +342,13 @@ def require(home: Path) -> int:
     required — a hint beside it would read as permission to leave it missing —
     so the third column is left off as soon as one such origin is present.
     """
-    live = home / CONFIG_NAME
-    os.environ["SLIFE2_DATA_DIR"] = str(home)
-
     from slife2.libs.host.config import ConfigError, load
 
-    refused = False
     try:
-        config = load()
+        config = load(source / CONFIG_NAME)
     except ConfigError as exc:
         _warn(str(exc))
-        shipped = Path(__file__).resolve().parent.parent / CONFIG_NAME
-        if not live.is_file() or not shipped.is_file():
-            return 2
-        if shipped.resolve() == live.resolve():
-            # A checkout's home is its own source: the file that was refused is
-            # the shipped one, and there is nothing to fall back to.
-            return 2
-        os.environ["SLIFE2_DATA_DIR"] = str(shipped.parent)
-        try:
-            config = load()
-        except ConfigError as shipped_exc:
-            _warn(str(shipped_exc))
-            return 2
-        _warn(
-            f"{live} was refused; installing what the shipped {CONFIG_NAME} "
-            f"requires.  Merge {home / REFERENCE_NAME} into {live}, then run "
-            "the installer again."
-        )
-        refused = True
+        return 2
 
     needed: dict[str, set[str]] = {}
     hints: dict[str, str] = {}
@@ -424,6 +393,8 @@ def require(home: Path) -> int:
             hint=entry.install,
         )
 
+    # The home's skills, not the source's: the seeded bundle is there, and so
+    # is any skill the person wrote.
     skills = home / "skills"
     if skills.is_dir():
         from slife2.plugins.skills.playbooks import scan
@@ -444,7 +415,7 @@ def require(home: Path) -> int:
         if hint and all(origin.startswith("cli:") for origin in origins):
             line += f"\t{hint}"
         print(line)
-    return EXIT_HOME_REFUSED if refused else 0
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -469,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
     seed_parser.add_argument("--dry-run", action="store_true")
 
     require_parser = commands.add_parser("require", help="list configured programs")
+    require_parser.add_argument("--source", required=True)
     require_parser.add_argument("--home", required=True)
 
     secrets_parser = commands.add_parser(
@@ -480,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "seed":
         return seed(Path(args.source), Path(args.home), args.dry_run)
     if args.command == "require":
-        return require(Path(args.home))
+        return require(Path(args.source), Path(args.home))
     return secrets(Path(args.home))
 
 

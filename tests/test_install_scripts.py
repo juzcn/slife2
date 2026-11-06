@@ -785,7 +785,6 @@ say() { printf '%s\\n' "$*"; }
 print_program_hints() { :; }
 print_credentials() { :; }
 FAILED=0
-CONFIG_REFUSED=0
 PY=/bin/false
 MODE=tool
 HOME_DIR=/tmp/home
@@ -846,11 +845,26 @@ def test_both_installers_name_a_terminal_that_predates_them() -> None:
         )
 
 
-def _requirements(home: Path) -> subprocess.CompletedProcess[str]:
+def _requirements(
+    source: Path, home: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run `require`; *source* holds the shipped config, *home* the skills.
+
+    The two are one directory in a checkout and separate for an installed home;
+    a test that does not build a home gets the source as both.
+    """
     # The helper writes UTF-8 on every platform (a `cli:` hint may be any
     # language); `text=True` alone would decode it with the Windows code page.
     return subprocess.run(
-        [sys.executable, str(HELPER), "require", "--home", str(home)],
+        [
+            sys.executable,
+            str(HELPER),
+            "require",
+            "--source",
+            str(source),
+            "--home",
+            str(home if home is not None else source),
+        ],
         capture_output=True,
         encoding="utf-8",
         cwd=ROOT,
@@ -990,13 +1004,12 @@ def _powershell_function(text: str, name: str) -> str:
     return match.group(0)
 
 
-def test_the_powershell_installer_finishes_when_the_home_is_refused(
-    tmp_path: Path,
-) -> None:
-    """Exit 3 is the helper's "the shipped requirements, a merge owed".
+def test_cloudflared_makes_its_tools_directory(tmp_path: Path) -> None:
+    """**curl writes the file, not the directory.**
 
-    The install continues, and the last lines carry the merge; any other
-    nonzero still stops it.
+    On a machine that has never had a `~/.local` install,
+    `%LOCALAPPDATA%\\slife2\\tools` does not exist, and curl exits 23 without
+    creating it — the install then reports cloudflared missing.
     """
     if sys.platform != "win32":
         pytest.skip("the installer's PowerShell host is Windows")
@@ -1004,25 +1017,35 @@ def test_the_powershell_installer_finishes_when_the_home_is_refused(
     if powershell is None:
         pytest.skip("Windows PowerShell is not available")
 
-    stub = tmp_path / "refuse.cmd"
-    stub.write_text("@echo off\r\nexit /b 3\r\n", encoding="utf-8")
+    local = tmp_path / "LocalAppData"
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
     function_file = tmp_path / "function.ps1"
     function_file.write_text(
-        _powershell_function(POWERSHELL.read_text(encoding="utf-8"), "Get-Requirements")
+        _powershell_function(
+            POWERSHELL.read_text(encoding="utf-8"), "Ensure-Cloudflared"
+        )
         + "\n",
         encoding="utf-8",
     )
     harness = tmp_path / "harness.ps1"
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
-        "function Die([string]$Message) { throw [System.Exception]::new($Message) }\n"
-        "$script:ConfigRefused = $false\n"
-        f"$script:Py = '{stub}'\n"
-        "$script:Helper = 'ignored'\n"
-        "$script:HomeDir = 'ignored'\n"
+        "function Say([string]$Message) { }\n"
+        "function Fail([string]$Message) { throw $Message }\n"
+        "function Add-UserPath([string]$Path) { }\n"
+        "function Update-ProcessPath { }\n"
+        "function Add-Owned([string]$Manager, [string]$Package, [string]$Tool) { }\n"
+        "function Get-RemoteFile([string]$Url, [string]$Path) {\n"
+        "    [IO.File]::WriteAllBytes($Path, [Text.Encoding]::ASCII.GetBytes('stub'))\n"
+        "    return $true\n"
+        "}\n"
+        f"$env:LOCALAPPDATA = '{local}'\n"
+        f"$env:PATH = '{stub_bin}'\n"
         f". '{function_file}'\n"
-        "$null = Get-Requirements\n"
-        'Write-Output "REFUSED=$script:ConfigRefused"\n',
+        "Ensure-Cloudflared\n"
+        'Write-Output ("TARGET=" + (Test-Path '
+        f"(Join-Path $env:LOCALAPPDATA 'slife2\\tools\\cloudflared.exe')))\n",
         encoding="utf-8",
     )
 
@@ -1033,7 +1056,7 @@ def test_the_powershell_installer_finishes_when_the_home_is_refused(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "REFUSED=True" in result.stdout, result.stdout + result.stderr
+    assert "TARGET=True" in result.stdout, result.stdout + result.stderr
 
 
 def _ensure_python_function(path: Path) -> str:
@@ -1623,56 +1646,53 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
     assert not any("OPTIONAL_KEY" in line or "SSH_BINARY" in line for line in lines)
 
 
-def test_requirements_refuse_a_home_with_no_config(tmp_path: Path) -> None:
-    """A home without its file is not a home, and the installer says so."""
+def test_requirements_refuse_a_source_with_no_shipped_config(
+    tmp_path: Path,
+) -> None:
+    """A release without its own `slife2.yaml` is incomplete, and this says so."""
     result = _requirements(tmp_path)
 
     assert result.returncode == 2
-    assert "no slife2.yaml" in result.stderr
+    assert "config file not found" in result.stderr
 
 
-def test_requirements_finish_an_install_over_a_malformed_config(
-    tmp_path: Path,
-) -> None:
-    """**A home this build cannot load does not stop the upgrade.**
-
-    The shipped configuration is what the release itself runs on, so its
-    programs are installed; the exit status and the merge line say the install
-    is done but slife2 starts only after the home's file is fixed.
-    """
+def test_requirements_refuse_a_malformed_shipped_config(tmp_path: Path) -> None:
     (tmp_path / "slife2.yaml").write_text("foo: [unclosed\n", encoding="utf-8")
     result = _requirements(tmp_path)
 
-    assert result.returncode == 3
+    assert result.returncode == 2
     assert "cannot read" in result.stderr
-    assert f"{tmp_path / 'slife2.yaml'} was refused" in result.stderr
-    assert f"Merge {tmp_path / 'slife2-default.yaml'}" in result.stderr
-    assert any(line.startswith("uv\t") for line in result.stdout.splitlines())
 
 
-def test_requirements_install_the_shipped_config_when_a_key_is_refused(
-    tmp_path: Path,
-) -> None:
-    """The upgrade that removed `context.floor` must not leave a half install.
+def test_requirements_never_read_the_homes_stale_config(tmp_path: Path) -> None:
+    """**The installer's requirements are the shipped release's, not the home's.**
 
-    The home is the shipped file with the removed key still in it: the release
-    refuses the key, and the installer installs what the shipped file needs
-    while naming the merge that makes slife2 start.
+    The home's `slife2.yaml` is the server's file and may lag a release — here
+    it is one the new build refuses.  An upgrade still installs what the source
+    it is placing names, so the install cannot be stuck on a pending merge.
     """
-    shipped = (ROOT / "slife2.yaml").read_text(encoding="utf-8")
-    assert "  ceiling: 0.8\n" in shipped
-    (tmp_path / "slife2.yaml").write_text(
-        shipped.replace("  ceiling: 0.8\n", "  ceiling: 0.8\n  floor: 0.2\n", 1),
-        encoding="utf-8",
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "slife2.yaml").write_text("context:\n  floor: 0.2\n", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "slife2.yaml").write_text(
+        REQUIRED + "cli:\n  hunt:\n    command: shipped-tool\n", encoding="utf-8"
     )
 
-    result = _requirements(tmp_path)
+    result = _requirements(source, home)
 
-    assert result.returncode == 3
-    assert "context.floor is gone" in result.stderr
-    assert f"{tmp_path / 'slife2.yaml'} was refused" in result.stderr
-    assert f"Merge {tmp_path / 'slife2-default.yaml'}" in result.stderr
-    assert any(line.startswith("uv\t") for line in result.stdout.splitlines())
+    assert result.returncode == 0, result.stderr
+    assert "shipped-tool\tcli:hunt" in result.stdout
+    assert "context.floor" not in result.stderr
+
+
+def test_both_installers_take_requirements_from_the_shipped_source() -> None:
+    """The helper's `--source` is the source dir both installers already know."""
+    for path in (SHELL, POWERSHELL):
+        text = path.read_text(encoding="utf-8")
+        assert "require --source" in text, path.name
+        assert "require --home" not in text, path.name
 
 
 def _seed(source: Path, home: Path, *extra: str) -> subprocess.CompletedProcess[str]:
