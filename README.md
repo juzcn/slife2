@@ -857,7 +857,9 @@ searched either: the `[Image:…]` key is its address.
 A note, diary entry, and report live **once**, as a file under
 `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`); the row is the
 address and metadata, and the file's whole text is what the meaning leg embeds.
-A dump's text lives only in its file under `dumps/`; its row is the address. A
+Every answer about a document carries `path` — the file relative to the data
+directory, so the model can hand it to its own tools (`pandoc`, `rg`). A dump's
+text lives only in its file under `dumps/`; its row is the address. A
 saved file's bytes live under the cabinet; its title, path, and summary are
 keyword text, and it has no Markdown mirror; an image is the same shape under
 `pictures/`. `file_read` and `file_grep` read a saved file's decoded text by

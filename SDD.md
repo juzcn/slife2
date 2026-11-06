@@ -1513,7 +1513,11 @@ note, diary, report, dump — the text is written to its file in the same
 operation as its row, and **there is no body column**: the row is metadata and
 the address, not a second copy. The file holds the text exactly as the caller
 gave it; a note's subject, a day's date and a report's title are the row's and
-are never prepended to it. A file and an image have no mirror, because
+are never prepended to it. **Every answer about a document carries `path`** —
+the file relative to the data directory, where the agent's own tools run — so a
+model can hand the same file to `pandoc`, `rg` or a shell; the internal `mirror`
+and `file_path` stay out of the answer, and the readers carry `path` too. A
+file and an image have no mirror, because
 their bytes are the document. The path is stored rather than derived, so a
 change to the naming rule orphans nothing that already exists. Every
 caller-supplied path is resolved against the cabinet root and refused if it

@@ -125,6 +125,7 @@ from slife2.plugins.cabinet.store import (
     REPORT,
     UPSERT,
     CabinetStore,
+    accessible_path,
     discard_file,
     facts,
     index_path,
@@ -152,9 +153,11 @@ INSTRUCTIONS = (
     "`file_read` and `file_grep` read and search it in the same "
     "line-or-character units, `file_remove` deletes it, and `file_list` pages "
     "it. `cabinet_search` ranks all four kinds by words and by meaning, and "
-    "`cabinet_summarize` describes one so it can be found. A tool output the "
-    "harness kept whole is read with `dump_read` by the call id in its "
-    "`[DUMP:…]` marker, in line or character units, and searched with "
+    "`cabinet_summarize` describes one so it can be found. Every answer about "
+    "a document carries `path`, the file relative to your working directory, "
+    "so you can hand it to a tool of your own (`pandoc`, `rg`, …). A tool "
+    "output the harness kept whole is read with `dump_read` by the call id in "
+    "its `[DUMP:…]` marker, in line or character units, and searched with "
     "`dump_grep`; an image a turn carried comes back with `attach_image` from "
     "its `[Image:…]` key."
 )
@@ -695,8 +698,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags: Comma-separated words to file it under.
 
         Returns:
-            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`
-            and `summary`.
+            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`,
+            `summary` and `path`, the file an agent's own tools can open.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -730,8 +733,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags: Comma-separated words to file it under. Empty clears them.
 
         Returns:
-            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`
-            and `summary`.
+            The note as it is stored — `kind`, `key`, `title`, `time`, `tags`,
+            `summary` and `path`, the file an agent's own tools can open.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -770,9 +773,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             subject: The note's subject.
 
         Returns:
-            The note's `kind`, `key`, `title`, `time`, `tags` and `summary`,
-            and its whole file text under `text`; the subject is the key, not
-            part of the text.
+            The note's `kind`, `key`, `title`, `time`, `tags`, `summary` and
+            `path` — the file an agent's own tools can open — and its whole
+            file text under `text`; the subject is the key, not part of the
+            text.
         """
         row = await missing_row(
             ctx, NOTE, subject, f"there is no note about {subject!r}."
@@ -797,9 +801,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset: How many notes to skip — that is how you page back.
 
         Returns:
-            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `excerpt` per note — and `total`, how many notes match the filters,
-            so `offset + len(entries) < total` says whether more remain.
+            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
+            `path` and `excerpt` per note — and `total`, how many notes match
+            the filters, so `offset + len(entries) < total` says whether more
+            remain.
         """
         return await page_of(
             ctx, NOTE, since=since, until=until, limit=limit, offset=offset
@@ -825,7 +830,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The day as it is stored — `kind`, `key`, `title`, `time` (the day
-            itself), `tags` and `summary`.
+            itself), `tags`, `summary` and `path`, the file an agent's own
+            tools can open.
         """
         opened = await cabinet(ctx)
         day = _diary_key(date)
@@ -852,9 +858,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             date: The day, `YYYY-MM-DD`.
 
         Returns:
-            The day's `kind`, `key`, `title`, `time`, `tags` and `summary`, and
-            its whole file text under `text`; the date is the key, not part of
-            the text.
+            The day's `kind`, `key`, `title`, `time`, `tags`, `summary` and
+            `path` — the file an agent's own tools can open — and its whole
+            file text under `text`; the date is the key, not part of the text.
         """
         row = await missing_row(
             ctx, DIARY, date, f"there is no diary entry for {date}."
@@ -879,7 +885,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The day as it is stored — `kind`, `key`, `title`, `time` (the day
-            itself), `tags` and `summary`.
+            itself), `tags`, `summary` and `path`, the file an agent's own
+            tools can open.
         """
         opened = await cabinet(ctx)
         day = _diary_key(date)
@@ -931,9 +938,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             `entries` — `kind`, `key` (the day), `title`, `time`, `tags`,
-            `summary` and `excerpt` per day — and `total`, how many days match
-            the filters, so `offset + len(entries) < total` says whether more
-            remain.
+            `summary`, `path` and `excerpt` per day — and `total`, how many
+            days match the filters, so `offset + len(entries) < total` says
+            whether more remain.
         """
         return await page_of(
             ctx, DIARY, since=since, until=until, limit=limit, offset=offset
@@ -969,7 +976,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 and so on. Empty picks one from the extension.
 
         Returns:
-            `saved` — one row per file, with the fields a listing shows, so the
+            `saved` — one row per file, with the fields a listing shows
+            (including `path`, the file an agent's own tools can open), so the
             `key` is the path each file was stored under. A file already there
             under that name is stored beside it rather than over it, which is
             why the key is worth reading.
@@ -1116,14 +1124,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             `chars`, how many characters the whole text has; `lines`, how many
             lines it has (line mode only — that mode already splits it);
             `text`, the window, each line prefixed with its own number in line
-            mode; and `next`, the offset the following window starts at — in
-            the same units as `offset` — absent when this window reaches the
-            end.
+            mode; `path`, the file relative to the data directory, so an
+            agent's own tools can open it; and `next`, the offset the following
+            window starts at — in the same units as `offset` — absent when this
+            window reaches the end.
         """
         target = await file_target(ctx, path)
         return _stream_read(
             target,
-            where=_accessible_path(target),
+            where=accessible_path(target),
             mode=mode,
             offset=offset,
             limit=limit,
@@ -1156,13 +1165,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             has; `matched`, how many lines hold the pattern at or after
             `offset`; `matches`, each with `line`, `char` (the 0-based character
             offset the match starts at) and `text` (the line; `cut` is true when
-            only the beginning of a very long line fits); and `next`, the line
-            of the next match when not all of them are shown.
+            only the beginning of a very long line fits); `path`, the file
+            relative to the data directory; and `next`, the line of the next
+            match when not all of them are shown.
         """
         target = await file_target(ctx, path)
         return _stream_grep(
             target,
             pattern,
+            where=accessible_path(target),
             offset=offset,
             limit=limit,
             budget=config.tool_result.tokens,
@@ -1188,9 +1199,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             `entries` — `kind`, `key` (the path inside the cabinet), `title`,
-            `time`, `tags`, `summary`, `size`, `mime`, `source` and `excerpt`
-            per file — and `total`, how many files match the filters, so
-            `offset + len(entries) < total` says whether more remain.
+            `time`, `tags`, `summary`, `size`, `mime`, `source`, `path` and
+            `excerpt` per file — and `total`, how many files match the filters,
+            so `offset + len(entries) < total` says whether more remain.
         """
         return await page_of(
             ctx,
@@ -1228,8 +1239,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The title as it is stored — `kind`, `key`, `title`, `time`, `tags`,
-            `summary`, `period_start` and `period_end`.  `time` is when the
-            report was first written.
+            `summary`, `period_start`, `period_end` and `path`, the file an
+            agent's own tools can open.  `time` is when the report was first
+            written.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -1258,9 +1270,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The report's `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `period_start` and `period_end`, and its whole file text under
-            `text`; the title is the key, not part of the text.  `time` is when
-            the report was first written.
+            `period_start`, `period_end` and `path` — the file an agent's own
+            tools can open — and its whole file text under `text`; the title is
+            the key, not part of the text.  `time` is when the report was first
+            written.
         """
         row = await missing_row(
             ctx, REPORT, title, f"there is no report called {title!r}."
@@ -1293,7 +1306,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         Returns:
             The title as it is stored — `kind`, `key`, `title`, `time`, `tags`,
-            `summary`, `period_start` and `period_end`.
+            `summary`, `period_start`, `period_end` and `path`, the file an
+            agent's own tools can open.
         """
         opened = await cabinet(ctx)
         row = await opened.write(
@@ -1346,10 +1360,10 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset: How many reports to skip — that is how you page back.
 
         Returns:
-            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `excerpt` per report — and `total`, how many reports match the
-            filters, so `offset + len(entries) < total` says whether more
-            remain.
+            `entries` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
+            `path` and `excerpt` per report — and `total`, how many reports
+            match the filters, so `offset + len(entries) < total` says whether
+            more remain.
         """
         return await page_of(
             ctx, REPORT, since=since, until=until, limit=limit, offset=offset
@@ -1386,14 +1400,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             `chars`, how many characters the whole output has; `lines`, how
             many lines it has (line mode only — that mode already splits it);
             `text`, the window, each line prefixed with its own number in line
-            mode; and `next`, the offset the following window starts at — in
-            the same units as `offset` — absent when this window reaches the
-            end.
+            mode; `path`, the file relative to the data directory, so an
+            agent's own tools can open it; and `next`, the offset the following
+            window starts at — in the same units as `offset` — absent when this
+            window reaches the end.
         """
         target = await dump_target(ctx, call)
         return _stream_read(
             target,
-            where=_accessible_path(target),
+            where=accessible_path(target),
             mode=mode,
             offset=offset,
             limit=limit,
@@ -1429,13 +1444,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             has; `matched`, how many lines hold the pattern at or after
             `offset`; `matches`, each with `line`, `char` (the 0-based character
             offset the match starts at) and `text` (the line; `cut` is true when
-            only the beginning of a very long line fits); and `next`, the line
-            of the next match when not all of them are shown.
+            only the beginning of a very long line fits); `path`, the file
+            relative to the data directory; and `next`, the line of the next
+            match when not all of them are shown.
         """
         target = await dump_target(ctx, call)
         return _stream_grep(
             target,
             pattern,
+            where=accessible_path(target),
             offset=offset,
             limit=limit,
             budget=config.tool_result.tokens,
@@ -1501,7 +1518,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         return {
             "kept": call,
             "mirror": str(row["mirror"]),
-            "path": _accessible_path(written),
+            "path": accessible_path(written),
             "size": size,
         }
 
@@ -1708,11 +1725,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many hits this page may hold.
 
         Returns:
-            `results` — `kind`, `key`, `title`, `time`, `tags`, `summary` and
-            `excerpt` per hit, with `similarity` where meaning ranked it and
-            `matched_in` (`line`, or `rest` for elsewhere in the document)
-            where your words were found — and `browsed`, true when neither was
-            given and the page is simply newest first.
+            `results` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
+            `path` and `excerpt` per hit, with `similarity` where meaning ranked
+            it and `matched_in` (`line`, or `rest` for elsewhere in the
+            document) where your words were found — and `browsed`, true when
+            neither was given and the page is simply newest first.
         """
         opened = await cabinet(ctx)
         try:
@@ -1756,7 +1773,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             tags: Comma-separated words to file it under.
 
         Returns:
-            The document's own fields.
+            The document's own fields, including `path`, the file an agent's
+            own tools can open.
         """
         opened = await cabinet(ctx)
         wanted = kind.strip()
@@ -1856,7 +1874,7 @@ def _line_fill(
         following = number + 1 if number < total_lines else None
         if (
             estimate_text_tokens(
-                _wire(_line_payload(kept, total_lines, total_chars, following))
+                _wire(_line_payload(kept, total_lines, total_chars, following, where))
             )
             > budget
         ):
@@ -1870,7 +1888,7 @@ def _line_fill(
             f'read it with mode="char", offset={first_offset} '
             f"(the file is at {_where(where)})."
         )
-    return _line_payload(kept, total_lines, total_chars, next_line)
+    return _line_payload(kept, total_lines, total_chars, next_line, where)
 
 
 def _line_payload(
@@ -1878,17 +1896,25 @@ def _line_payload(
     total: int,
     total_chars: int,
     following: int | None,
+    where: str,
 ) -> dict[str, Any]:
     """Lines as a model reads them: the original numbers, and where to read on.
 
     The number is the output's line number and not the window's, so the line a
     model copies out of the conversation reaches the same text a later read
     does.  `chars` is carried even though this is a line answer because it is
-    what lets the model choose character mode without another call.
+    what lets the model choose character mode without another call.  `path` is
+    the file itself, relative to the data directory, so the model can hand the
+    document to a tool of its own instead of paging it.
     """
     width = len(str(kept[-1][0]))
     text = "\n".join(f"{number:>{width}}  {line}" for number, line in kept)
-    page: dict[str, Any] = {"lines": total, "chars": total_chars, "text": text}
+    page: dict[str, Any] = {
+        "lines": total,
+        "chars": total_chars,
+        "text": text,
+        "path": where,
+    }
     if following is not None:
         page["next"] = following
     return page
@@ -1918,7 +1944,11 @@ def _char_window(
 
     def page_of(count: int) -> dict[str, Any]:
         piece = text[index : index + count]
-        page: dict[str, Any] = {"chars": total_chars, "text": piece}
+        page: dict[str, Any] = {
+            "chars": total_chars,
+            "text": piece,
+            "path": where,
+        }
         if base + index + count < total_chars:
             page["next"] = base + index + count
         return page
@@ -1975,6 +2005,7 @@ def _grep_payload(
     matched: int,
     shown: Sequence[dict[str, Any]],
     first_unshown: int | None,
+    where: str,
 ) -> dict[str, Any]:
     """One grep answer, before it is measured."""
     page: dict[str, Any] = {
@@ -1982,6 +2013,7 @@ def _grep_payload(
         "chars": total_chars,
         "matched": matched,
         "matches": list(shown),
+        "path": where,
     }
     if first_unshown is not None:
         page["next"] = first_unshown
@@ -1996,6 +2028,7 @@ def _grep_finalize(
     total_lines: int,
     total_chars: int,
     budget: int,
+    where: str,
 ) -> dict[str, Any]:
     """Trim a page until it fits, keeping the address of what it sheds.
 
@@ -2006,7 +2039,9 @@ def _grep_finalize(
     addresses and loses text, marked `cut`.
     """
     while True:
-        page = _grep_payload(total_lines, total_chars, matched, shown, first_unshown)
+        page = _grep_payload(
+            total_lines, total_chars, matched, shown, first_unshown, where
+        )
         if estimate_text_tokens(_wire(page)) <= budget:
             return page
         if len(shown) > 1:
@@ -2035,6 +2070,7 @@ def _grep_answer(
     total_chars: int,
     limit: int,
     budget: int,
+    where: str,
 ) -> dict[str, Any]:
     """The page over *hits*, never larger than *budget*.
 
@@ -2057,7 +2093,9 @@ def _grep_answer(
         shown.append({"line": number, "char": at, "text": line})
         if (
             estimate_text_tokens(
-                _wire(_grep_payload(total_lines, total_chars, matched, shown, None))
+                _wire(
+                    _grep_payload(total_lines, total_chars, matched, shown, None, where)
+                )
             )
             > budget
         ):
@@ -2075,6 +2113,7 @@ def _grep_answer(
         total_lines=total_lines,
         total_chars=total_chars,
         budget=budget,
+        where=where,
     )
 
 
@@ -2189,7 +2228,7 @@ def _stream_read(
     encoding = _file_encoding(target)
     total_lines, total_chars = _file_totals(target, encoding)
     if not total_lines:
-        page: dict[str, Any] = {"chars": 0, "text": ""}
+        page: dict[str, Any] = {"chars": 0, "text": "", "path": where}
         if wanted == "line":
             page["lines"] = 0
         return page
@@ -2235,6 +2274,7 @@ def _stream_grep(
     target: Path,
     pattern: str,
     *,
+    where: str,
     offset: int,
     limit: int,
     budget: int,
@@ -2249,7 +2289,13 @@ def _stream_grep(
     encoding = _file_encoding(target)
     total_lines, total_chars = _file_totals(target, encoding)
     if not total_lines:
-        return {"lines": 0, "chars": 0, "matched": 0, "matches": []}
+        return {
+            "lines": 0,
+            "chars": 0,
+            "matched": 0,
+            "matches": [],
+            "path": where,
+        }
     start = _line_start(offset, total_lines)
     hits = _grep_hits(
         (
@@ -2267,6 +2313,7 @@ def _stream_grep(
         total_chars=total_chars,
         limit=limit,
         budget=budget,
+        where=where,
     )
 
 
@@ -2310,28 +2357,6 @@ def _where(where: str) -> str:
     dump, because that is the directory they live in.
     """
     return where or "the cabinet"
-
-
-def _accessible_path(path: Path) -> str:
-    """A path the agent can open: **relative to its data directory**.
-
-    **Relative, because the marker outlives the directory's location.**  A
-    dump's marker is written into the turn and carried by every later request;
-    an absolute path recorded today names a directory that may have moved when
-    the home is migrated.  The agent's own tools run in the home — the tool
-    servers are started there — so `agents/<agent>/cabinet/dumps/<call>.md` is
-    an address they resolve, and it survives the move.
-
-    The path is absolute when it is outside the home, because then no relative
-    spelling means anything.  Forward slashes because Windows accepts them and
-    a backslash in JSON is escaped to `\\\\`, which spends tokens on the escape
-    and reads as a different path to a model.
-    """
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(home().resolve()).as_posix()
-    except ValueError:
-        return resolved.as_posix()
 
 
 def _wire(payload: dict[str, Any]) -> str:

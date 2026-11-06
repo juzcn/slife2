@@ -271,12 +271,15 @@ async def test_a_note_is_created_then_replaced_by_an_update() -> None:
     assert wrote["time"], "the write answers the row it stored, stamp and all"
     assert "mirror" not in wrote, "the file's path is the cabinet's, not the model's"
     assert replaced["tags"] == "", "a replacement is the document, not a patch"
+    assert replaced["path"] == wrote["path"], "an update names the same file"
     # The path is the stem's to decide (`mirror_stem`), and that rule has a test
     # of its own: what this one is about is that the file was rewritten, not
     # what it is called.
     written = bag() / "notes" / f"{cabinet_store.mirror_stem('Python')}.md"
     assert written.read_text(encoding="utf-8") == "second"
     assert read["text"] == "second"
+    assert read["path"] == wrote["path"] == written.relative_to(data_dir()).as_posix()
+    assert (data_dir() / read["path"]).is_file(), "an agent's own tools can open it"
     assert "first" not in json.dumps(read), "the older body is gone"
 
 
@@ -475,6 +478,7 @@ async def test_a_report_is_one_document_under_one_title() -> None:
             period_end="2026-10-18",
         )
         read = await payload(client, "report_read", title="weekly")
+        assert (data_dir() / wrote["path"]).is_file(), "the write names its file"
         listed = await payload(client, "report_list")
         cleared = await payload(
             client, "report_update", title="weekly", content="week one and two"
@@ -484,6 +488,7 @@ async def test_a_report_is_one_document_under_one_title() -> None:
             await ask(client, "report_read", title="weekly")
 
     assert wrote["time"] == replaced["time"], "a replacement does not move a report"
+    assert replaced["path"] == wrote["path"], "an update names the same file"
     assert read["text"] == "week one and two"
     assert keys(listed["entries"]) == ["weekly"]
     assert read["period_start"] == "2026-10-05"
@@ -555,9 +560,13 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
         "time",
         "tags",
         "summary",
+        "path",
         "excerpt",
     }, "the row itself, and not its body"
     assert first["entries"][0]["excerpt"] == "body 2"
+    assert (data_dir() / first["entries"][0]["path"]).is_file(), (
+        "the path is the agent's: its own tools open the same file"
+    )
 
 
 # --- files: bytes on disk, never in the index ---------------------------------
@@ -576,12 +585,16 @@ async def test_a_saved_file_is_copied_never_moved() -> None:
         read = await payload(
             client, "file_read", path="documents/report.txt", mode="char"
         )
+        kept = data_dir() / saved["saved"][0]["path"]
+        assert kept.is_file(), "an agent's own tools can open the saved copy"
         removed = await payload(client, "file_remove", path="documents/report.txt")
         listed = await payload(client, "file_list")
 
     assert keys(saved["saved"]) == ["documents/report.txt"]
     assert saved["saved"][0]["size"] == len(b"the contents\n")
+    assert saved["saved"][0]["path"] == "agents/jack/cabinet/documents/report.txt"
     assert read["text"] == "the contents\n"
+    assert read["path"] == saved["saved"][0]["path"], "the reader names the same file"
     assert read["chars"] == len("the contents\n")
     assert source.read_bytes() == b"the contents\n", "the original stays"
     assert removed == {"kind": FILE, "key": "documents/report.txt", "removed": True}
@@ -1095,6 +1108,9 @@ async def test_the_two_legs_answer_different_questions() -> None:
 
     assert keys(by_words["results"]) == ["alpha"]
     assert by_words["results"][0]["matched_in"] == "line"
+    assert (data_dir() / by_words["results"][0]["path"]).is_file(), (
+        "a search hit carries the file an agent's own tools can open"
+    )
     assert by_words["results"][0]["similarity"] == 1.0, (
         "the words are a sentence when they are all there is"
     )
@@ -1360,6 +1376,7 @@ async def test_a_file_summary_is_keyword_text_and_never_a_vector() -> None:
         by_meaning = await payload(client, "cabinet_search", sentences=[OTHER])
 
     assert written["summary"] == f"about {OTHER}"
+    assert written["path"] == "agents/jack/cabinet/documents/spec.txt"
     assert [row["key"] for row in by_words["results"]] == ["documents/spec.txt"]
     assert "similarity" not in by_words["results"][0], "a file has no vector"
     assert by_meaning["results"] == [], "the meaning leg does not cover files"
@@ -1879,6 +1896,7 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     )
     assert window["lines"] == 4000
     assert window["chars"] == len(body)
+    assert window["path"] == "agents/jack/cabinet/dumps/call_big.md"
     assert window["next"] == len(shown) + 1, "the next window starts where this stopped"
 
 
@@ -2112,8 +2130,15 @@ async def test_a_dump_and_a_file_are_read_and_searched_the_same_way() -> None:
             client, "file_grep", path="documents/same.txt", pattern="marker"
         )
 
+    file_path = file_read.pop("path")
+    dump_path = dump_read.pop("path")
+    file_grep.pop("path")
+    dump_grep.pop("path")
     assert file_read == dump_read
     assert file_grep == dump_grep
+    assert file_path == "agents/jack/cabinet/documents/same.txt"
+    assert dump_path == "agents/jack/cabinet/dumps/call_same.md"
+    assert (data_dir() / file_path).is_file() and (data_dir() / dump_path).is_file()
 
 
 @pytest.mark.asyncio

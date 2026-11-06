@@ -136,7 +136,7 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import normalize_bound
-from slife2.libs.host.paths import work_dir
+from slife2.libs.host.paths import home, work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -581,6 +581,42 @@ def resolve(root: Path, relative: str) -> Path:
     if candidate != root.resolve() and root.resolve() not in candidate.parents:
         raise ValueError(f"{relative!r} is not inside the cabinet")
     return candidate
+
+
+def accessible_path(path: Path) -> str:
+    """A path the agent can open: **relative to its data directory**.
+
+    **Relative, because the marker outlives the directory's location.**  A
+    dump's marker is written into the turn and carried by every later request;
+    an absolute path recorded today names a directory that may have moved when
+    the home is migrated.  The agent's own tools run in the home — the tool
+    servers are started there — so `agents/<agent>/cabinet/dumps/<call>.md` is
+    an address they resolve, and it survives the move.
+
+    The path is absolute when it is outside the home, because then no relative
+    spelling means anything.  Forward slashes because Windows accepts them and
+    a backslash in JSON is escaped to `\\\\`, which spends tokens on the escape
+    and reads as a different path to a model.
+    """
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(home().resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def document_path(root: Path, row: Mapping[str, Any]) -> str:
+    """The path an agent opens for one document, or `""` when it has no file.
+
+    **The agent's path, not the cabinet's internal one.**  A note, a day, a
+    report and a dump are their mirror; a saved file and a stored image are
+    their `file_path`; an `http(s)` image has no bytes here and answers `""`.
+    The result is relative to the data directory (`accessible_path`), so a
+    shell, `pandoc` or `rg` running where the agent's own tools run can open
+    the same document the cabinet tools read.
+    """
+    relative = str(row.get("mirror") or row.get("file_path") or "")
+    return accessible_path(root / relative) if relative else ""
 
 
 # ── The schema ──────────────────────────────────────────────────────────────
@@ -1199,7 +1235,7 @@ class CabinetStore:
             # file written before the row would leave a document nothing can
             # find, which is the worse of the two failures.)
             _write_mirror(self.root, str(row["mirror"]), body)
-        return row
+        return self._with_path(row)
 
     def _store(
         self, connection: sqlite3.Connection, row: Mapping[str, Any], mode: str
@@ -1367,7 +1403,7 @@ class CabinetStore:
                 ),
             )
             self._index(connection, row)
-        return row
+        return self._with_path(row)
 
     # ── Reading ─────────────────────────────────────────────────────────
 
@@ -1377,7 +1413,7 @@ class CabinetStore:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
-        return dict(found) if found is not None else None
+        return self._with_path(found) if found is not None else None
 
     def body_of(self, row: Mapping[str, Any]) -> str:
         """One document's text: its file.
@@ -1394,6 +1430,18 @@ class CabinetStore:
         """A row with `body` filled in, for the index passes."""
         found = dict(row)
         found["body"] = self.body_of(found)
+        return found
+
+    def _with_path(self, row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:
+        """A row with `path` filled in: where the agent's own tools can open it.
+
+        The agent-relative path is derived here rather than by every answer,
+        for the reason `facts` gives: one spelling of it, and a row fetched by
+        any read carries it already.  A `sqlite3.Row` is converted because the
+        path is read through a mapping, not a column.
+        """
+        found = dict(row)
+        found["path"] = document_path(self.root, found)
         return found
 
     def _with_excerpt(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1478,7 +1526,9 @@ class CabinetStore:
             "total": total,
             "limit": limit,
             "offset": max(0, offset),
-            "entries": [choice_row(self._with_excerpt(row)) for row in rows],
+            "entries": [
+                choice_row(self._with_excerpt(self._with_path(row))) for row in rows
+            ],
         }
 
     def _window(
@@ -1616,7 +1666,9 @@ class CabinetStore:
                     (*values, limit),
                 ).fetchall()
             return {
-                "results": [_found(self._with_excerpt(row)) for row in rows],
+                "results": [
+                    _found(self._with_excerpt(self._with_path(row))) for row in rows
+                ],
                 "browsed": True,
             }
 
@@ -1646,7 +1698,7 @@ class CabinetStore:
         return {
             "results": [
                 _found(
-                    self._with_excerpt(row),
+                    self._with_excerpt(self._with_path(row)),
                     meaning.get(int(row["id"])),
                     matched_in=(
                         None
@@ -1851,7 +1903,9 @@ class CabinetStore:
                 [
                     (
                         int(row["id"]),
-                        textindex.normalize(line_text(self._with_excerpt(row))),
+                        textindex.normalize(
+                            line_text(self._with_excerpt(self._with_path(row)))
+                        ),
                     )
                     for row in rows
                 ],
@@ -1941,10 +1995,12 @@ def facts(row: Mapping[str, Any]) -> dict[str, Any]:
     one whose axis column is empty, answers with whichever moment it does carry
     rather than with no time at all.
 
-    **`mirror` is not here, and it is the row's rather than the model's.**  The
-    path is how a person finds the Markdown file on disk; a model reads the
-    document through these tools and can do nothing with the path, so carrying
-    it would spend a field of every answer on a fact its work never uses.
+    **`path` is here, and `mirror` is not.**  The mirror is the cabinet's own
+    spelling (`notes/<stem>.md`); the model's is the same file relative to its
+    data directory (`agents/<agent>/cabinet/notes/<stem>.md`), where its own
+    tools run.  That is deliberate: the cabinet's readers are primitive, and a
+    path lets the model hand the document to `pandoc`, `rg` or any other tool
+    it has.  A row with no file of its own — an `http(s)` image — answers `""`.
     """
     kind = str(row.get("kind") or "")
     spec = SPECS.get(kind)
@@ -1956,6 +2012,7 @@ def facts(row: Mapping[str, Any]) -> dict[str, Any]:
         "time": ordered or str(row.get("updated_at") or row.get("created_at") or ""),
         "tags": str(row.get("tags") or ""),
         "summary": str(row.get("summary") or ""),
+        "path": str(row.get("path") or ""),
     }
     for column in _EXTRA_COLUMNS.get(kind, ()):
         found[column] = (
