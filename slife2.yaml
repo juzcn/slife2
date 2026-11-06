@@ -139,12 +139,15 @@ embeddings:
   active_model: siliconflow
 
 context:
-  # `ceiling` and `floor` are fractions of the model's context window.
+  # `ceiling` and `floor` are fractions of the model's context window.  A recall
+  # joins the live context and is re-sent every later turn, so keep `floor`
+  # small: on a 1M window 0.2 is 200k tokens per recall.
   ceiling: 0.8
-  floor: 0.2
+  floor: 0.05
   recall_limit: 40
-  # Gates measured similarity only; a keyword hit is exempt.
-  min_similarity: 0.45
+  # Gates measured similarity only; a keyword hit is exempt.  Calibrate it above
+  # the embedding model's noise floor — bge-m3 scores unrelated text near 0.5.
+  min_similarity: 0.52
   # Seconds for the discriminator call; past it the turn uses its current
   # context.
   timeout: 20.0

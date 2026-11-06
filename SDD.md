@@ -969,6 +969,12 @@ The context parameters are in `context:`:
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
 
+**Both numeric bounds are relative to the model, not to the design.** `floor` is
+a share of a window that may be 1M tokens, and what a recall adds stays in the
+context for every later turn; `min_similarity` is a cosine floor whose scale
+belongs to the embedding model (bge-m3 scores unrelated same-domain text near
+0.5). The shipped 0.05 and 0.52 are calibrated that way.
+
 A missing store fails the turn, like any missing plugin. A discriminator
 timeout, provider error, or unreadable answer does not. There is no switch to
 turn the decision off: an append-only context is bounded by nothing.

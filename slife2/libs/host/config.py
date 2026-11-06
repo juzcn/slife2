@@ -1489,9 +1489,11 @@ class ContextSettings:
     #: Both are **fractions of the model's own context window**, so both are
     #: meaningful only where the model's config declares one.  The ceiling
     #: measures a kept context; the floor is what a recall may spend when nothing
-    #: was kept.
+    #: was kept.  **Keep the floor small**: what a recall adds joins the context
+    #: and is re-sent on every later turn, so on a 1M window 0.2 is a 200k-token
+    #: haystack per turn — three recalls took a live conversation to 63%.
     ceiling: float = 0.8
-    floor: float = 0.2
+    floor: float = 0.05
     #: Most turns one recall may select.  A cap rather than a preference, for the
     #: reason `MAX_PAGE` is one: the count is what is left to bound a context by
     #: when the model's window is undeclared.
@@ -1499,7 +1501,11 @@ class ContextSettings:
     #: The similarity a *measured* candidate must reach to be recalled.  The
     #: keyword leg is exempt: it has no similarity to measure, and an exact match
     #: is a stronger signal than a cosine neighbourhood.
-    min_similarity: float = 0.45
+    #:
+    #: **A cosine floor belongs to the embedding model, not to the design.**
+    #: bge-m3 scores unrelated same-domain text near 0.5 on the project's own
+    #: turn log, so 0.45 gates nothing and 0.52 is above that noise floor.
+    min_similarity: float = 0.52
     #: How long the discriminator call may take before the turn runs on the
     #: context it already has.  Generous for a remote model, because the answer is
     #: optional by design: a slow one only makes the turn late.
