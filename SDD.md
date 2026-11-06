@@ -963,16 +963,17 @@ The context parameters are in `context:`:
 
 | Key | Meaning |
 |---|---|
-| `ceiling` | Fraction of the model's window a kept context is measured against. |
-| `floor` | Fraction a recall may spend when nothing was kept. |
+| `ceiling` | Fraction of the model's window the live context is topped up to; a recall spends what the kept turns leave below it. |
 | `recall_limit` | Maximum number of turns one recall may select. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
 
-**The floor is one recall's increment; the ceiling is the total it tops the
-context up to.** `min_similarity` is a cosine floor whose scale belongs to the
-embedding model (bge-m3 scores unrelated same-domain text near 0.5), so it is
-calibrated per home: the shipped 0.52 sits above that noise floor.
+**One budget, and it is the ceiling's.** The kept turns are estimated first;
+a recall may spend what they leave below `ceiling`, so keeping less leaves it
+more and a kept context at the ceiling leaves it nothing. There is no separate
+per-recall fraction. `min_similarity` is a cosine floor whose scale belongs to
+the embedding model (bge-m3 scores unrelated same-domain text near 0.5), so it
+is calibrated per home: the shipped 0.52 sits above that noise floor.
 
 A missing store fails the turn, like any missing plugin. A discriminator
 timeout, provider error, or unreadable answer does not. There is no switch to

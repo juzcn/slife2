@@ -515,8 +515,7 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # fraction of the model's window
-  floor: 0.2                 # one recall's increment, up to the ceiling
+  ceiling: 0.8               # total the kept + recalled context is topped to
   recall_limit: 40
   min_similarity: 0.52       # above the embedding model's noise floor
   timeout: 20.0              # seconds for the discriminator call

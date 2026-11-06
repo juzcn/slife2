@@ -467,8 +467,7 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # 占模型窗口的比例
-  floor: 0.2                 # 单次召回的增量，最高到 ceiling
+  ceiling: 0.8               # keep + 召回合计顶到的总量上限
   recall_limit: 40
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   timeout: 20.0              # 判别调用的秒数

@@ -1087,11 +1087,11 @@ def build_server(
         depends on a model's window and on what the decision kept — neither of
         which the store knows.
 
-        **The budget is headroom below the *ceiling*, and the ceiling is the
-        bound a kept context is measured against.**  Subtracting the *floor*
-        instead would grant no headroom at all: the floor is what a recall may
-        spend when nothing was kept, so a live context sits at or above it for
-        most of a session.
+        **One budget, and it is the ceiling's.**  The kept turns are estimated
+        first, and the recall may spend what they leave below
+        `ceiling × window` — no second fraction of its own.  Keeping less
+        leaves the recall more; a kept context at the ceiling leaves it
+        nothing, so the two halves cannot overfill the window by construction.
 
         **What was kept is excluded from what is recalled.**  The two halves are
         joined by id, so a turn in both is one turn; the recall would have spent
@@ -1167,7 +1167,7 @@ def build_server(
         # caller's `slife2.yaml` (`current`).  Read from the config this process
         # started on, an edit would reach the window and not the numbers sized
         # against it, and a second home would be graded by the first home's
-        # floor.
+        # ceiling.
         policy = current().context
         window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
@@ -1176,10 +1176,11 @@ def build_server(
         # selection the caller made.
         base_cost = sum((await off_loop(_cost_of, store, base)).values())
         if window:
-            budget = min(
-                int(window * policy.floor),
-                int(window * policy.ceiling) - base_cost,
-            )
+            # One budget, the ceiling's: what the kept turns leave below it.
+            # A kept context at the ceiling leaves the recall nothing, and one
+            # already over it is a negative budget — both answered by the
+            # `budget <= 0` exit below rather than by a recall that overfills.
+            budget = int(window * policy.ceiling) - base_cost
         else:
             # No declared window: no token cap, and the count cap is what is
             # left.  Better a context bounded by count than one sized against a

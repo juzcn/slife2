@@ -538,6 +538,25 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
             load(write(tmp_path, text))
 
 
+def test_a_per_recall_floor_is_refused_rather_than_ignored(tmp_path) -> None:
+    """The ceiling is the one budget the keep and the recall share.
+
+    A file still naming `context.floor:` used to cap a recall at a fraction of
+    its own; loading it with the key silently dropped would move the recall to
+    the whole headroom with nothing said, so the key is refused — and the
+    ceiling, the one number that remains, is still bounded.
+    """
+    with pytest.raises(ConfigError, match="context.floor"):
+        load(write(tmp_path, "context:\n  floor: 0.2\n"))
+
+    for ceiling in ("0", "1.5"):
+        with pytest.raises(ConfigError, match="context.ceiling"):
+            load(write(tmp_path, f"context:\n  ceiling: {ceiling}\n"))
+
+    kept = load(write(tmp_path, "context:\n  ceiling: 0.6\n"))
+    assert kept.context.ceiling == 0.6
+
+
 def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     """A reader and the shortening it must not out-run share one setting.
 

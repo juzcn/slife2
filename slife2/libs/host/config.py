@@ -1486,13 +1486,13 @@ class ContextSettings:
     section is how a setting comes to mean two things.
     """
 
-    #: Both are **fractions of the model's own context window**, so both are
-    #: meaningful only where the model's config declares one.  The ceiling
-    #: measures a kept context; the floor is what a recall may spend when nothing
-    #: was kept — one recall's increment, never a budget on the conversation
-    #: itself, which is the ceiling's.
+    #: The fraction of the model's own context window the live context is topped
+    #: up to, and therefore the **one total budget the keep and the recall
+    #: share**: the kept turns are estimated first, and a recall may spend what
+    #: they leave below it.  Keeping less leaves the recall more; a context at
+    #: the ceiling leaves it nothing.  There is no separate per-recall floor —
+    #: one would give the two halves two budgets for one window.
     ceiling: float = 0.8
-    floor: float = 0.2
     #: Most turns one recall may select.  A cap rather than a preference, for the
     #: reason `MAX_PAGE` is one: the count is what is left to bound a context by
     #: when the model's window is undeclared.
@@ -3227,24 +3227,29 @@ def _media_model(raw: Any, where: str) -> MediaModelSettings:
 def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     """The `context:` section, defaulted and bounded.
 
-    **Ceiling above floor, and both within (0, 1].**  The pair is a window's
-    ends, so a ceiling below the floor is a selection with a negative budget —
-    which would recall nothing, forever, without anything saying why — and a
-    fraction above one is a budget larger than the window it is a fraction of.
-    An absent section is the default, as everywhere else; an *explicit* zero is
-    refused rather than read as absent, which is `_int_or`'s rule one type over.
+    **The ceiling is a fraction of the window, within (0, 1].**  A fraction above
+    one is a budget larger than the window it is a fraction of.  An absent
+    section is the default, as everywhere else; an *explicit* zero is refused
+    rather than read as absent, which is `_int_or`'s rule one type over.
+
+    **`floor:` is refused rather than ignored.**  A recall now spends what the
+    kept turns leave below the ceiling, so a file still naming a per-recall floor
+    would load with the key silently dropped — the one failure a config change
+    must not have.
     """
     if raw is None:
         return base
     section = _mapping(raw, "context")
-    ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
-    floor = _optional_float(section.get("floor"), "context.floor")
-    ceiling = base.ceiling if ceiling is None else ceiling
-    floor = base.floor if floor is None else floor
-    if not 0 < floor < ceiling <= 1:
+    if section.get("floor") is not None:
         raise ConfigError(
-            f"context: floor={floor} and ceiling={ceiling} are not a window "
-            f"(0 < floor < ceiling <= 1)"
+            "context.floor is gone: a recall spends what the kept turns leave "
+            "below context.ceiling, not a fraction of its own — remove the key"
+        )
+    ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
+    ceiling = base.ceiling if ceiling is None else ceiling
+    if not 0 < ceiling <= 1:
+        raise ConfigError(
+            f"context.ceiling: {ceiling} is not a window fraction (0 < ceiling <= 1)"
         )
     limit = _int_or(
         section.get("recall_limit"), base.recall_limit, "context.recall_limit"
@@ -3271,7 +3276,6 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         )
     return ContextSettings(
         ceiling=ceiling,
-        floor=floor,
         recall_limit=limit,
         min_similarity=base.min_similarity if similarity is None else similarity,
         timeout=base.timeout if timeout is None else timeout,

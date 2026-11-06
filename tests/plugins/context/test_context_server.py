@@ -773,6 +773,75 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
     assert answer.data["recalled"] == 2, "the caller's two places were spent"
 
 
+def _config_with_window(window: int):
+    """`default_config()` with the shipped model's window set for a budget test."""
+    config = default_config()
+    provider = config.providers["deepseek"]
+    shipped = provider.models["deepseek-flash"]
+    return replace(
+        config,
+        providers={
+            "deepseek": replace(
+                provider,
+                models={"deepseek-flash": replace(shipped, context_window=window)},
+            )
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_recall_budget_is_the_headroom_below_the_ceiling() -> None:
+    """**The ceiling is the one total the keep and the recall share.**
+
+    The kept turns are estimated first and the recall spends what they leave
+    below it.  There is no per-recall fraction of its own: a candidate the
+    headroom can hold is recalled even when it is larger than any fixed share
+    would have allowed.
+    """
+    config = _config_with_window(1000)
+    # The kept turn leaves ~780 of the 800-token ceiling; the candidate is
+    # ~300 tokens, so it fits the headroom and would not fit a 0.2 share (200).
+    candidate = "trump " + "word " * 250
+
+    async with Client(
+        build_server(
+            config,
+            embedder=EMBEDDER,
+            ask=Replies('{"recall": {"query": "trump"}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("trump " + "word " * 10, "1"), (candidate, "2"))
+        answer = await _rebuild(client, "")
+
+    assert answer.data["recalled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
+    """A kept context at the ceiling is the whole budget; a recall may not top it up.
+
+    The kept turn alone exceeds the ceiling, so the budget is negative and the
+    recall is abandoned rather than overfilling the window — which is the one
+    thing the old per-recall fraction could not guarantee.
+    """
+    config = _config_with_window(1000)
+    kept = "trump " + "word " * 1200
+    candidate = "trump " + "word " * 250
+
+    async with Client(
+        build_server(
+            config,
+            embedder=EMBEDDER,
+            ask=Replies('{"recall": {"query": "trump"}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", (kept, "1"), (candidate, "2"))
+        answer = await _rebuild(client, "")
+
+    assert answer.data["changed"] is False
+    assert answer.data["recalled"] == 0
+
+
 @pytest.mark.asyncio
 async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     """The common case, and the one that keeps a costly call from being free.
