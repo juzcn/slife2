@@ -55,17 +55,45 @@ class _FakeOpenAI:
         return SimpleNamespace(data=self.listing)
 
 
-def _client(model: str, fake: _FakeOpenAI) -> EmbeddingClient:
+def _client(
+    model: str, fake: _FakeOpenAI, *, rerank_model: str = ""
+) -> EmbeddingClient:
     client = EmbeddingClient(
         EmbeddingProviderSettings(
             name="test",
             base_url="http://example.invalid/v1",
             model=model,
             api_key_ref="k",
+            rerank_model=rerank_model,
         )
     )
     client._client = fake
     return client
+
+
+class _FakeResponse:
+    """Enough of an `httpx2.Response` for the rerank call."""
+
+    def __init__(self, payload: Any) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> Any:
+        return self.payload
+
+
+@dataclass
+class _FakeHTTP:
+    """Enough of `httpx2.AsyncClient` for the rerank call."""
+
+    payload: Any
+    requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+    async def post(self, url: str, json: dict[str, Any]) -> _FakeResponse:
+        self.requests.append((url, json))
+        return _FakeResponse(self.payload)
 
 
 # --- the width, three ways ----------------------------------------------------
@@ -210,6 +238,67 @@ async def test_a_key_that_did_not_resolve_is_named() -> None:
         await client.embed(["x"])
 
 
+# --- the cross-encoder -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rerank_posts_the_model_query_and_documents() -> None:
+    client = _client(
+        "BAAI/bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    )
+    http = _FakeHTTP(
+        {
+            "results": [
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.2},
+            ]
+        }
+    )
+    client._http = http
+
+    scored = await client.rerank("the query", ["first", "second"], top_n=2)
+
+    assert scored == [(1, 0.9), (0, 0.2)]
+    url, body = http.requests[0]
+    assert url == "http://example.invalid/v1/rerank"
+    assert body == {
+        "model": "BAAI/bge-reranker-v2-m3",
+        "query": "the query",
+        "documents": ["first", "second"],
+        "return_documents": False,
+        "top_n": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rerank_without_a_rerank_model_is_refused() -> None:
+    """A capability the config did not choose is named, not guessed."""
+    with pytest.raises(RuntimeError, match="rerank_model"):
+        await _client("bge-m3", _FakeOpenAI()).rerank("q", ["a"])
+
+
+@pytest.mark.asyncio
+async def test_a_rerank_index_out_of_range_is_refused() -> None:
+    """An index is how a score maps back to a document; a wrong one is silent."""
+    client = _client(
+        "BAAI/bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    )
+    client._http = _FakeHTTP({"results": [{"index": 9, "relevance_score": 0.5}]})
+    with pytest.raises(RuntimeError, match="document 9"):
+        await client.rerank("q", ["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_describe_reports_the_rerank_model() -> None:
+    described = await _client(
+        "bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    ).describe()
+    assert described["rerank_model"] == "BAAI/bge-reranker-v2-m3"
+
+    none = await _client("bge-m3", _FakeOpenAI()).describe()
+    assert none["rerank_model"] == "", "no reranker is a capability answer"
+
+
 # --- the server, over the transport the db uses ------------------------------
 
 
@@ -240,6 +329,7 @@ async def test_the_two_tools_are_not_offered_to_the_model() -> None:
 
     assert offered["embed"] is False
     assert offered["describe"] is False
+    assert offered["rerank"] is False
     assert offered["turn_list"] is True, "the marker did not survive the transport"
 
 
@@ -261,6 +351,22 @@ async def test_describe_answers_over_the_wire() -> None:
     # fixture's listing says 4096 — so `> 0` passed for every rung of it,
     # including the ones that would be wrong.
     assert described["max_chars"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_rerank_answers_over_the_wire() -> None:
+    client = _client(
+        "BAAI/bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    )
+    client._http = _FakeHTTP({"results": [{"index": 0, "relevance_score": 0.7}]})
+    server = build_server(default_config(), client=client)
+
+    async with Client(server) as wire:
+        answer = tool_payload(
+            await wire.call_tool("rerank", {"query": "q", "documents": ["a"]})
+        )
+
+    assert answer["results"] == [{"index": 0, "relevance_score": 0.7}]
 
 
 # --- the index identity the client half records -------------------------------

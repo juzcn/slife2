@@ -46,6 +46,34 @@ CONTEXT_LOGGER = "slife2.plugins.context.server"
 #: being up.
 EMBEDDER = StubEmbedder()
 
+
+class RerankingEmbedder(StubEmbedder):
+    """The stub embedder with a cross-encoder that scores by one marker.
+
+    The document a reranked turn carries is its exchange (`_rerank_text`), so
+    a turn whose text says "high" scores 1.0 and every other candidate 0.1.
+    `fail` is the optional stage failing, which must be the same answer as a
+    provider that serves no reranker: keep the fused order.
+    """
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__()
+        self.fail = fail
+        self.asked: list[tuple[str, list[str]]] = []
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]]:
+        self.asked.append((query, list(documents)))
+        if self.fail:
+            raise RuntimeError("the reranker is down")
+        scored = [
+            (index, 1.0 if "high" in document else 0.1)
+            for index, document in enumerate(documents)
+        ]
+        return sorted(scored, key=lambda pair: -pair[1])
+
+
 SYSTEM = {"role": "system", "content": "You are jack."}
 
 
@@ -840,6 +868,60 @@ async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
 
     assert answer.data["changed"] is False
     assert answer.data["recalled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_below_the_rerank_floor_is_not_recalled() -> None:
+    """The cross-encoder is the last precision stage: what it rejects stays out.
+
+    RRF brings both `trump` turns to the shortlist; the reranker reads the
+    question beside each exchange and scores one above the floor and one below.
+    """
+    base = default_config()
+    config = replace(
+        base,
+        context=replace(base.context, rerank_min_score=0.5),
+    )
+    reranker = RerankingEmbedder()
+
+    async with Client(
+        build_server(
+            config,
+            embedder=reranker,
+            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
+        # Nothing in hand, so the selection is exactly what the reranker keeps.
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert answer.data["recalled"] == 1
+    assert answer.data["turn_ids"] == [1]
+    assert reranker.asked, "the cross-encoder was asked"
+    assert "trump" in reranker.asked[0][0], "the question, not the conversation"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_reranker_keeps_the_fused_order() -> None:
+    """An optional precision stage that is down is not a failed recall."""
+    base = default_config()
+    config = replace(
+        base,
+        context=replace(base.context, rerank_min_score=0.5),
+    )
+    reranker = RerankingEmbedder(fail=True)
+
+    async with Client(
+        build_server(
+            config,
+            embedder=reranker,
+            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert answer.data["recalled"] == 2, "the fused order stands"
 
 
 @pytest.mark.asyncio

@@ -557,6 +557,41 @@ def test_a_per_recall_floor_is_refused_rather_than_ignored(tmp_path) -> None:
     assert kept.context.ceiling == 0.6
 
 
+def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:
+    """The selectivity, weight and rerank numbers are one policy, one section."""
+    path = write(
+        tmp_path,
+        "context:\n  keyword_weight: 2.0\n  rerank_min_score: 0.3\n",
+    )
+    context = load(path).context
+    assert context.keyword_weight == 2.0
+    assert context.rerank_min_score == 0.3
+
+    for text, expected in [
+        ("context:\n  keyword_weight: -1\n", "context.keyword_weight"),
+        ("context:\n  rerank_min_score: 2\n", "context.rerank_min_score"),
+    ]:
+        with pytest.raises(ConfigError, match=expected):
+            load(write(tmp_path, text))
+
+
+def test_an_embedding_provider_may_name_a_rerank_model(tmp_path) -> None:
+    """A capability, not a switch: no `rerank_model` is a provider with none."""
+    path = write(
+        tmp_path,
+        "embeddings:\n"
+        "  providers:\n"
+        "    sf:\n"
+        "      base_url: https://example.invalid/v1\n"
+        "      model: BAAI/bge-m3\n"
+        "      api_key: k\n"
+        "      rerank_model: BAAI/bge-reranker-v2-m3\n",
+    )
+    assert load(path).embeddings.active_provider().rerank_model == (
+        "BAAI/bge-reranker-v2-m3"
+    )
+
+
 def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     """A reader and the shortening it must not out-run share one setting.
 

@@ -791,7 +791,9 @@ def _exclusion_clause(excluded: set[int]) -> tuple[list[str], list[int]]:
 
 
 def _fuse_questions(
-    keyword: Sequence[int], questions: Sequence[Sequence[int]]
+    keyword: Sequence[int],
+    questions: Sequence[Sequence[int]],
+    keyword_weight: float = 1.0,
 ) -> list[int]:
     """Fuse the words into each question, then keep each turn's best question.
 
@@ -802,6 +804,10 @@ def _fuse_questions(
     once, at the score of its best question, so another question can only add a
     turn or raise one — the same rule the measured similarity follows.
 
+    `keyword_weight` is weighted RRF's one knob on this leg: the meaning leg is
+    always 1.0, and a sparse leg that over-recalls is turned down rather than
+    removed (`slife2.libs.store.index.fuse_ranked`).
+
     Ties fall to the newer turn, the order `fuse_ranked` uses.  The words are one
     list and the same for every question; an empty keyword leg is a question
     with one leg, not an error.
@@ -809,7 +815,8 @@ def _fuse_questions(
     best: dict[int, float] = {}
     for question in questions:
         for turn_id, score in fuse_ranked(
-            {"keyword": list(keyword), "sentence": list(question)}
+            {"keyword": list(keyword), "sentence": list(question)},
+            weights={"keyword": keyword_weight},
         ):
             if score > best.get(turn_id, 0.0):
                 best[turn_id] = score
@@ -1329,6 +1336,7 @@ class TurnStore:
         anchor: str | None = None,
         limit: int = 20,
         exclude: Sequence[int] = (),
+        keyword_weight: float = 1.0,
     ) -> list[tuple[int, float | None]]:
         """Turns a rebuild may add, best first — the *ranking*, and no policy.
 
@@ -1357,7 +1365,8 @@ class TurnStore:
         evidence about that sentence; a turn several sentences found keeps the
         best score rather than a sum, the same max the measured similarity
         follows.  That is the catalogue's per-question fusion applied to a
-        ranking a budget can spend.
+        ranking a budget can spend.  `keyword_weight` is weighted RRF's lever on
+        the sparse leg (`_fuse_questions`).
 
         **What is returned is ranked pairs, not a selection.**  The count, the
         similarity floor and the token budget are the *caller's* — they depend on
@@ -1446,6 +1455,7 @@ class TurnStore:
             for turn_id in _fuse_questions(
                 keyword,
                 [[turn_id for turn_id, _ in found] for found in lists],
+                keyword_weight=keyword_weight,
             )
             if turn_id not in excluded
         ][:MAX_SQL_VARS]

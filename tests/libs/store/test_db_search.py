@@ -579,6 +579,13 @@ def test_one_leg_alone_still_answers() -> None:
     assert fuse_ranked({"keyword": [], "semantic": []}) == []
 
 
+def test_a_weight_of_zero_leaves_a_leg_out() -> None:
+    """Weighted RRF's off switch is the same arithmetic as its turning down."""
+    assert fuse_ranked({"keyword": [1], "semantic": []}, weights={"keyword": 0.0}) == []
+    fused = fuse_ranked({"keyword": [1], "semantic": [2]}, weights={"keyword": 0.0})
+    assert [turn_id for turn_id, _ in fused] == [2]
+
+
 def test_a_tie_falls_to_the_newer_turn() -> None:
     """Deliberately arbitrary, and deliberately stable: both legs agreeing on
     the same order is how ties actually arise."""

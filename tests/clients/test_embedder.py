@@ -60,3 +60,56 @@ async def test_a_second_read_error_reaches_the_caller() -> None:
     with pytest.raises(httpx2.ReadError):
         await embedder.embed(["a"])
     assert client.calls == 2
+
+
+class _RerankClient:
+    """An embeddings server that answers `rerank` with one canned payload."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+        self.calls = 0
+
+    async def call_tool(
+        self, name: str, arguments: dict, *, timeout: float | None = None
+    ) -> SimpleNamespace:
+        self.calls += 1
+        return SimpleNamespace(data=self.data)
+
+
+@pytest.mark.asyncio
+async def test_rerank_answers_none_when_the_endpoint_has_no_cross_encoder() -> None:
+    """A capability, not a failure: the caller keeps its fused order."""
+    client = _RerankClient({"results": []})
+    embedder = RemoteEmbedder(client, DESCRIBED)
+
+    assert await embedder.rerank("q", ["a"]) is None
+    assert client.calls == 0, "nothing was asked of an endpoint with no reranker"
+
+
+@pytest.mark.asyncio
+async def test_rerank_maps_indices_back_and_sorts() -> None:
+    client = _RerankClient(
+        {
+            "results": [
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.2},
+            ]
+        }
+    )
+    embedder = RemoteEmbedder(
+        client, {**DESCRIBED, "rerank_model": "BAAI/bge-reranker-v2-m3"}
+    )
+
+    assert await embedder.rerank("q", ["a", "b"]) == [(1, 0.9), (0, 0.2)]
+
+
+@pytest.mark.asyncio
+async def test_a_rerank_index_that_was_not_sent_is_refused() -> None:
+    """A score mapped onto the wrong document is a silent mismatch."""
+    client = _RerankClient({"results": [{"index": 9, "relevance_score": 0.5}]})
+    embedder = RemoteEmbedder(
+        client, {**DESCRIBED, "rerank_model": "BAAI/bge-reranker-v2-m3"}
+    )
+
+    with pytest.raises(RuntimeError, match="document 9"):
+        await embedder.rerank("q", ["a", "b"])

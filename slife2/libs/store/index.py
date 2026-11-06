@@ -58,7 +58,7 @@ import array
 import math
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -944,7 +944,11 @@ def meanings_by_cosine(
 RRF_K = 60
 
 
-def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, float]]:
+def fuse_ranked(
+    legs: dict[str, list[int]],
+    k: int = RRF_K,
+    weights: Mapping[str, float] | None = None,
+) -> list[tuple[int, float]]:
     """Reciprocal rank fusion of named ranked lists of turn ids.
 
     Rank and not score, because the two legs do not share a scale: `bm25` is
@@ -952,14 +956,23 @@ def fuse_ranked(legs: dict[str, list[int]], k: int = RRF_K) -> list[tuple[int, f
     depends on the model.  Normalizing one onto the other is the part that
     breaks; a rank is comparable by construction.
 
+    `weights` is weighted RRF — the standard lever when one leg is more
+    trustworthy than the other.  A leg absent from the mapping weighs 1.0, and
+    a weight of zero leaves the leg out without changing the call's shape.
+    Start equal and move one only against a labelled set; an unmeasured weight
+    is a belief about a corpus rather than a fact about it.
+
     Ties fall to the newer turn, which is the order the browse is in — a tie is
     a real possibility when both legs put the same turns in the same order, and
     an arbitrary but stable answer beats an unstable one.
     """
     scores: dict[int, float] = {}
-    for ranked in legs.values():
+    for name, ranked in legs.items():
+        weight = 1.0 if weights is None else weights.get(name, 1.0)
+        if weight <= 0:
+            continue
         for rank, turn_id in enumerate(ranked, start=1):
-            scores[turn_id] = scores.get(turn_id, 0.0) + 1.0 / (k + rank)
+            scores[turn_id] = scores.get(turn_id, 0.0) + weight / (k + rank)
     return sorted(scores.items(), key=lambda pair: (-pair[1], -pair[0]))
 
 

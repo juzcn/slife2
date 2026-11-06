@@ -69,6 +69,9 @@ class RemoteEmbedder:
         self._identity = "|".join(str(described[field]) for field in fields)
         self._dimension = int(described.get("dimension") or 0)
         self._max_chars = int(described.get("max_chars") or 0)
+        #: Empty means the endpoint serves no cross-encoder; the recall then
+        #: keeps its fused order and says nothing failed.
+        self._rerank_model = str(described.get("rerank_model") or "")
         if not self._dimension or not self._max_chars:
             raise RuntimeError(
                 f"the embeddings server described itself without a width or an "
@@ -86,6 +89,10 @@ class RemoteEmbedder:
     @property
     def max_chars(self) -> int:
         return self._max_chars
+
+    @property
+    def rerank_model(self) -> str:
+        return self._rerank_model
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """One request to the far side, with the shape of the answer checked.
@@ -122,6 +129,66 @@ class RemoteEmbedder:
                 f"{len(texts)} texts"
             )
         return [[float(value) for value in vector] for vector in vectors]
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]] | None:
+        """One cross-encoder call, or `None` when the endpoint serves none.
+
+        **`None` is a capability answer, not a failure.**  A provider with no
+        `rerank_model` is a config that chose an endpoint with no reranker; the
+        caller keeps its fused order and does not report a failure nobody can
+        fix.  An *answer* that is malformed is different, and fails: an index
+        out of range would map one candidate's score onto another, silently.
+
+        The indices point into this call's `documents`, which is why the caller
+        keeps its own list and does not re-sort before mapping back.
+        """
+        if not self._rerank_model:
+            return None
+        args: dict[str, Any] = {"query": query, "documents": documents}
+        if top_n is not None:
+            args["top_n"] = top_n
+        try:
+            payload = tool_payload(
+                await self._client.call_tool(
+                    "rerank", args, timeout=_T.timeouts.transport.rerank
+                )
+            )
+        except (httpx2.ReadError, httpx2.RemoteProtocolError):
+            payload = tool_payload(
+                await self._client.call_tool(
+                    "rerank", args, timeout=_T.timeouts.transport.rerank
+                )
+            )
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError(
+                f"the embeddings server answered no rerank results ({payload!r})"
+            )
+        found: list[tuple[int, float]] = []
+        for entry in results:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"the embeddings server answered a rerank result that is "
+                    f"not an object ({entry!r})"
+                )
+            index = entry.get("index")
+            score = entry.get("relevance_score")
+            if not isinstance(index, int) or isinstance(index, bool):
+                raise RuntimeError(
+                    f"the embeddings server answered a rerank index {index!r}"
+                )
+            if not 0 <= index < len(documents):
+                raise RuntimeError(
+                    f"the embeddings server named document {index} for {len(documents)}"
+                )
+            if not isinstance(score, (int, float)) or isinstance(score, bool):
+                raise RuntimeError(
+                    f"the embeddings server answered a rerank score {score!r}"
+                )
+            found.append((index, float(score)))
+        return sorted(found, key=lambda pair: -pair[1])
 
 
 class EmbedderConnection:
@@ -167,6 +234,21 @@ class EmbedderConnection:
                 )
             assert self._embedder is not None
             return self._embedder
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]] | None:
+        """The reranker this provider has, or `None` when it has none.
+
+        The injected test embedder is asked the same way: a double that can
+        rerank answers, and one that cannot is a provider without a
+        cross-encoder rather than an error.
+        """
+        embedder = await self.get()
+        method = getattr(embedder, "rerank", None)
+        if method is None:
+            return None
+        return await method(query, documents, top_n)
 
     async def close(self) -> None:
         if self._client is not None:

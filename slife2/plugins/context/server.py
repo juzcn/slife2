@@ -68,6 +68,7 @@ from slife2.libs.host.config import (
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     Config,
+    ContextSettings,
     for_the_call,
     load_cached,
 )
@@ -82,7 +83,13 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     unreadable,
 )
-from slife2.libs.store.db import StaleSchema, TurnStore, store_for
+from slife2.libs.store.db import (
+    StaleSchema,
+    TurnStore,
+    assistant_message,
+    store_for,
+    user_message,
+)
 from slife2.libs.store.index import Embedder, page_limit
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
@@ -97,6 +104,33 @@ SERVER_NAME = CONTEXT_SERVER_NAME
 #: This server's key in the config's `servers:` table, and the name the agent
 #: server connects to it by.
 CONFIG_KEY = "context"
+
+#: How much of a candidate a cross-encoder reads.  The turn's own exchange is
+#: what relevance is judged on; a tool result would swamp it (results are
+#: 56–99% of a turn's text) and the reranker's own context is shorter than a
+#: long turn anyway.  The cut is bounded here rather than left to the endpoint:
+#: the whole pool is one call, and a pool of long turns is slow and
+#: rate-limited even when the model is free.
+RERANK_DOC_CHARS = 2000
+
+
+def _rerank_text(messages: list[dict[str, Any]]) -> str:
+    """The exchange a cross-encoder judges: what was asked and what was answered.
+
+    **Not the whole row.**  The vector leg reads the turn's reasoning because
+    reasoning is the model's statement of what it is doing; a reranker is
+    judging *relevance to a question*, and the question and the answer are the
+    signal.  Tool results are 56–99% of a turn's text and would swamp the pair;
+    they are what `turn_read` and the keyword leg are for.
+
+    The clip is a bound, not a summary: the whole candidate pool is one call,
+    and a pool of long turns is slow and rate-limited even when the model is
+    free.  The endpoint would truncate too; doing it here is what makes the
+    cost the caller's to see.
+    """
+    parts = [user_message(messages), assistant_message(messages)]
+    return "\n\n".join(part for part in parts if part)[:RERANK_DOC_CHARS]
+
 
 INSTRUCTIONS = (
     "One conversation's memory, addressed by `(agent, subagent)`. Call "
@@ -1204,16 +1238,81 @@ def build_server(
             # The model's keep is the more accurate half of its decision, which
             # is exactly why the recall is the half that looks elsewhere.
             exclude=base,
+            keyword_weight=policy.keyword_weight,
         )
         gated = decisions.gate(ranked, policy.min_similarity)
         order = [turn_id for turn_id, _ in gated][: policy.recall_limit]
         if not order:
             return []
+        # The cross-encoder sees the question, not the whole decision: the
+        # sentences are the subject the model wrote (and already carry the
+        # person's input when it was read as one), and a keyword-only decision
+        # has the query words as its subject.  A period-only recall has no
+        # question, so it keeps its time order (`fit_window`).
+        ask = " ".join(sentences).strip() or query.strip()
+        if ask:
+            order = await _rerank_into(store, order, ask, policy)
+            if not order:
+                return []
         costs = await off_loop(_cost_of, store, order)
         if not window:
             return sorted(order)
         fit = decisions.fit_budget if (query or sentences) else decisions.fit_window
         return fit(order, costs, budget)
+
+    async def _rerank_into(
+        store: TurnStore, order: list[int], ask: str, policy: ContextSettings
+    ) -> list[int]:
+        """Reorder the fused candidates with the provider's cross-encoder.
+
+        **A precision stage, not a retriever.**  RRF builds the pool — the
+        whole of it, which `recall_limit` bounds — and the cross-encoder reads
+        the question beside each candidate's exchange and decides the order.
+        **It sees every candidate, so a hit the two legs ranked low is still
+        judged**: a term that is merely common does not make its one match
+        unimportant, and nothing here cuts a candidate before the ranker can
+        speak for it.
+
+        **An unavailable or failing reranker is not a failed recall.**  The
+        provider may serve no cross-encoder (`rerank_model` empty), the call may
+        time out, or the answer may be malformed; all three keep the fused
+        order and log why, in the same spirit as a discriminator that could not
+        answer.  What is *not* kept is a candidate the reranker scored below
+        `rerank_min_score` — that is the stage doing its job.  A threshold that
+        rejects the whole pool ends the recall: an empty answer is the ranker's
+        verdict, not a reason to fall back to the unjudged order.
+        """
+        if not ask or not order:
+            return order
+        rows = await off_loop(store.turns_by_ids, order)
+        if not rows:
+            return order
+        ids = [int(record.turn_id) for record in rows]
+        documents = [_rerank_text(record.messages) for record in rows]
+        try:
+            scored = await embedding.rerank(ask, documents, top_n=len(documents))
+        except Exception as exc:  # noqa: BLE001 — an optional stage's failure
+            logger.info("recall_rerank_failed reason=%s", type(exc).__name__)
+            logger.debug("the rerank call raised", exc_info=True)
+            return order
+        if scored is None:
+            # No `rerank_model` on this endpoint: a capability answer, not a
+            # failure, and nothing to log per turn.
+            return order
+        if not scored:
+            logger.info("recall_rerank_empty")
+            return order
+        kept: list[int] = []
+        for index, score in scored:
+            if 0 <= index < len(ids) and score >= policy.rerank_min_score:
+                turn_id = ids[index]
+                if turn_id not in kept:
+                    kept.append(turn_id)
+        logger.info("recall_reranked candidates=%d kept=%d", len(ids), len(kept))
+        if not kept:
+            logger.info("recall_reranked_nothing")
+            return []
+        return kept
 
     def _cost_of(store: TurnStore, turn_ids: list[int]) -> dict[int, int]:
         """What each of those turns is estimated to cost, for the budget.

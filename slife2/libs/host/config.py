@@ -1316,6 +1316,12 @@ class EmbeddingProviderSettings:
     base_url: str
     model: str
     api_key_ref: str = ""
+    #: The cross-encoder this endpoint also serves for the recall's rerank
+    #: stage, or `""` for an endpoint that has none.  **A capability, not a
+    #: switch**: the provider says what it can do, and the recall uses it when
+    #: it is there.  The endpoint is the same `base_url` (`POST /rerank`), so a
+    #: provider that speaks only `/embeddings` simply leaves it out.
+    rerank_model: str = ""
 
     @property
     def api_key(self) -> str:
@@ -1505,6 +1511,18 @@ class ContextSettings:
     #: bge-m3 scores unrelated same-domain text near 0.5 on the project's own
     #: turn log, so 0.45 gates nothing and 0.52 is above that noise floor.
     min_similarity: float = 0.52
+    #: Weighted RRF's weight on the keyword leg; the meaning leg is always 1.0.
+    #: Start equal and lower it only against a labelled set — a weight is a
+    #: belief about the corpus until it is measured.  `0` leaves the leg out.
+    #: The *order* the recall runs on is the reranker's when one is configured;
+    #: this only shapes the pool it sees.
+    keyword_weight: float = 1.0
+    #: The cross-encoder score a candidate must reach to stay in the selection,
+    #: in 0–1.  `0.0` keeps whatever the reranker returned (it still reorders).
+    #: The scale belongs to the reranker, so calibrate it like `min_similarity`
+    #: rather than copying a number from another model.  Every candidate in the
+    #: pool (`recall_limit`) is reranked, so a hit RRF put low is still judged.
+    rerank_min_score: float = 0.0
     #: How long the discriminator call may take before the turn runs on the
     #: context it already has.  Generous for a remote model, because the answer is
     #: optional by design: a slow one only makes the turn late.
@@ -3274,10 +3292,24 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         raise ConfigError(
             f"context.min_similarity: {similarity} is not a similarity (0-1)"
         )
+    weight = _optional_float(section.get("keyword_weight"), "context.keyword_weight")
+    if weight is not None and weight < 0:
+        raise ConfigError(f"context.keyword_weight: {weight} is negative")
+    rerank_floor = _optional_float(
+        section.get("rerank_min_score"), "context.rerank_min_score"
+    )
+    if rerank_floor is not None and not 0 <= rerank_floor <= 1:
+        raise ConfigError(
+            f"context.rerank_min_score: {rerank_floor} is not a score (0-1)"
+        )
     return ContextSettings(
         ceiling=ceiling,
         recall_limit=limit,
         min_similarity=base.min_similarity if similarity is None else similarity,
+        keyword_weight=base.keyword_weight if weight is None else weight,
+        rerank_min_score=(
+            base.rerank_min_score if rerank_floor is None else rerank_floor
+        ),
         timeout=base.timeout if timeout is None else timeout,
     )
 
@@ -3354,11 +3386,13 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
             f"`model` on /embeddings"
         )
     key = str(raw.get("api_key") or "")
+    rerank_model = str(raw.get("rerank_model") or "")
     return EmbeddingProviderSettings(
         name=name,
         base_url=base_url,
         model=model,
         api_key_ref=key,
+        rerank_model=rerank_model,
     )
 
 

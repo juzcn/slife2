@@ -177,6 +177,10 @@ class Transport:
     #: One embedding request, and the same one through the API server.
     embed: float = 60.0
     embed_api: float = 30.0
+    #: One cross-encoder rerank request.  A single synchronous scoring pass over
+    #: the candidates, so it is shorter than an embedding batch and longer than
+    #: a chat stream's first byte.
+    rerank: float = 30.0
     #: One request to the WeChat backend.
     wechat_request: float = 120.0
     #: Handing a message to a window: it returns when the words are down the

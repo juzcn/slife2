@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import httpx2
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -87,6 +88,9 @@ class EmbeddingClient:
     def __init__(self, provider: EmbeddingProviderSettings) -> None:
         self.provider = provider
         self._client: Any = None
+        #: The HTTP client for `/rerank`, created on first use.  Injectable so a
+        #: test can answer the call without a socket.
+        self._http: Any = None
 
     @property
     def _known(self) -> tuple[int, int] | None:
@@ -131,6 +135,9 @@ class EmbeddingClient:
             "base_url": self.provider.base_url,
             "dimension": dimension,
             "max_chars": max_tokens * _CHARS_PER_TOKEN,
+            # Empty is a capability answer: this endpoint serves no reranker,
+            # and a recall that reads it simply keeps the fused order.
+            "rerank_model": self.provider.rerank_model,
         }
 
     async def _input_limit_of(self) -> int:
@@ -307,6 +314,102 @@ class EmbeddingClient:
             model=self.provider.model, input=texts
         )
 
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]]:
+        """Score every document against the query, best first.
+
+        **A Cohere-compatible `/rerank` call**, which is what SiliconFlow,
+        Cohere, Jina and the other cross-encoder endpoints publish: the query
+        once, the documents as a list, and one relevance score per document in
+        the answer.  The scores are already normalized to 0–1 by the endpoint,
+        so the caller's floor is comparable within one model and not across
+        models — the same caveat `min_similarity` carries.
+
+        **No chunking and no `return_documents`.**  The caller clips each
+        document to the exchange it wants judged (`slife2.plugins.context.server`),
+        and the text it already holds need not come back.  A provider that
+        serves no reranker is refused here rather than at the caller: the
+        capability is `rerank_model`, and an empty one means the config chose an
+        endpoint that has none.
+        """
+        model = self.provider.rerank_model
+        if not model:
+            raise RuntimeError(
+                f"{SERVER_NAME}: provider {self.provider.name!r} has no "
+                f"`rerank_model`, so there is no cross-encoder to ask"
+            )
+        if not documents:
+            return []
+        key = unresolved_key(SERVER_NAME, self.provider.name, self.provider)
+        client = self._http
+        if client is None:
+            client = httpx2.AsyncClient(
+                timeout=httpx2.Timeout(_T.timeouts.transport.rerank),
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            self._http = client
+        body: dict[str, Any] = {
+            "model": model,
+            "query": query,
+            "documents": documents,
+            "return_documents": False,
+        }
+        if top_n is not None:
+            body["top_n"] = top_n
+        response = await client.post(
+            self.provider.base_url.rstrip("/") + "/rerank", json=body
+        )
+        response.raise_for_status()
+        return _rerank_answer(response.json(), len(documents))
+
+
+def _rerank_answer(payload: Any, count: int) -> list[tuple[int, float]]:
+    """The endpoint's answer, shape-checked and ordered best first.
+
+    **A short answer is not a document that scored nothing.**  The caller maps
+    an index back to the candidate it sent, so an index out of range would
+    silently attribute one turn's score to another; a missing `results` would
+    read as "the reranker rejected everything".  Both are protocol failures on
+    the far side, and this is the hop that names them.
+    """
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        raise RuntimeError(
+            f"{SERVER_NAME}: the rerank endpoint answered no `results` list "
+            f"({payload!r})"
+        )
+    found: list[tuple[int, float]] = []
+    seen: set[int] = set()
+    for entry in results:
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"{SERVER_NAME}: a rerank result is not an object ({entry!r})"
+            )
+        index = entry.get("index")
+        score = entry.get("relevance_score")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < count
+        ):
+            raise RuntimeError(
+                f"{SERVER_NAME}: the rerank endpoint named document {index!r} "
+                f"for {count} documents"
+            )
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            raise RuntimeError(
+                f"{SERVER_NAME}: the rerank endpoint returned a non-numeric "
+                f"score {score!r}"
+            )
+        if index in seen:
+            raise RuntimeError(
+                f"{SERVER_NAME}: the rerank endpoint scored document {index} twice"
+            )
+        seen.add(index)
+        found.append((index, float(score)))
+    return sorted(found, key=lambda pair: -pair[1])
+
 
 def provider_refusal(exc: Any) -> str:
     """One sentence for a provider that refused the call.
@@ -353,9 +456,11 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
     mcp: FastMCP = house_server(
         SERVER_NAME,
         instructions=(
-            "Embeddings for the system's vector indexes. `describe` reports "
-            "the width and input limit of the configured model; `embed` turns "
-            "text into vectors. Neither is offered to the model."
+            "Embeddings and reranking for the system's indexes. `describe` "
+            "reports the width, input limit and rerank model of the configured "
+            "provider; `embed` turns text into vectors; `rerank` scores "
+            "candidates against a query when the provider names a rerank model. "
+            "None of the three is offered to the model."
         ),
     )
 
@@ -388,6 +493,33 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
             return {"vectors": await embedder.embed(texts)}
         except APIStatusError as exc:
             raise ToolError(provider_refusal(exc)) from exc
+
+    @mcp.tool
+    async def rerank(
+        query: str, documents: list[str], top_n: int | None = None
+    ) -> dict[str, Any]:
+        """Score documents against a query with the provider's cross-encoder.
+
+        One relevance score per document, normalized 0–1 by the provider and
+        ordered best first. The caller maps `index` back to the document it
+        sent; an endpoint with no `rerank_model` refuses rather than guessing.
+
+        Args:
+            query: What the documents should be relevant to.
+            documents: The candidates, in the caller's order.
+            top_n: How many results to keep, when the endpoint supports it.
+        """
+        try:
+            scored = await embedder.rerank(query, documents, top_n)
+        except httpx2.HTTPError as exc:
+            raise ToolError(f"the rerank provider refused the call ({exc})") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {
+            "results": [
+                {"index": index, "relevance_score": score} for index, score in scored
+            ]
+        }
 
     return mcp
 

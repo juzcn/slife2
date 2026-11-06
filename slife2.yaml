@@ -135,6 +135,10 @@ embeddings:
       base_url: https://api.siliconflow.cn/v1
       model: BAAI/bge-m3
       api_key: ${SILICONFLOW_API_KEY}
+      # The cross-encoder for the recall's rerank stage, on the same endpoint
+      # (`POST /rerank`).  Leave it out on an endpoint that serves none; the
+      # recall then keeps its fused order.
+      rerank_model: BAAI/bge-reranker-v2-m3
   # The provider in use, by id. Omit to use the first.
   active_model: siliconflow
 
@@ -146,6 +150,12 @@ context:
   # Gates measured similarity only; a keyword hit is exempt.  Calibrate it above
   # the embedding model's noise floor — bge-m3 scores unrelated text near 0.5.
   min_similarity: 0.52
+  # Weighted RRF's weight on the keyword leg (the meaning leg is 1.0).  Start
+  # equal; lower it only against a labelled set.  0 leaves the leg out.
+  keyword_weight: 1.0
+  # The cross-encoder reranks the whole pool (recall_limit) and this is the
+  # score it must reach to stay, 0-1; 0.0 keeps everything it returned.
+  rerank_min_score: 0.0
   # Seconds for the discriminator call; past it the turn uses its current
   # context.
   timeout: 20.0

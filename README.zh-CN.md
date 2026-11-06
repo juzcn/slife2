@@ -421,7 +421,7 @@ system prompt 中；修改后下一个对话即可读到。安装器按配置的
 | `agent:` | 迭代上限和 system-prompt 模板。 |
 | `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
 | `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
-| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider。 |
+| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
 | `context:` | 上下文决策的限额。 |
 | `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
 | `tool_result:` | 单个工具结果的 token 预算。 |
@@ -470,6 +470,8 @@ context:
   ceiling: 0.8               # keep + 召回合计顶到的总量上限
   recall_limit: 40
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
+  keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
+  rerank_min_score: 0.0      # cross-encoder 的分数下限，0-1；0 表示全保留
   timeout: 20.0              # 判别调用的秒数
 
 tool_load:

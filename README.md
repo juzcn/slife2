@@ -464,7 +464,7 @@ is a `${VAR}` or `keyring:` reference resolved at runtime.
 | `agent:` | The iteration cap and the system-prompt template. |
 | `agent-task:` | `max_running`, the number of background tasks per agent. |
 | `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
-| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes. |
+| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes, each with an optional `rerank_model` for the recall's rerank stage. |
 | `context:` | Limits for the context decision. |
 | `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
 | `tool_result:` | Token budget for a single tool result. |
@@ -518,6 +518,8 @@ context:
   ceiling: 0.8               # total the kept + recalled context is topped to
   recall_limit: 40
   min_similarity: 0.52       # above the embedding model's noise floor
+  keyword_weight: 1.0        # weighted RRF; the meaning leg is always 1.0
+  rerank_min_score: 0.0      # its score floor, 0-1; 0 keeps all it returned
   timeout: 20.0              # seconds for the discriminator call
 
 tool_load:
