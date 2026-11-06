@@ -1159,11 +1159,11 @@ async def test_a_name_that_has_never_run_shows_nothing() -> None:
         assert shown(app) == ""
 
 
-def context_of(kept: int, recalled: int):
+def context_of(kept: int, recalled: int, rerank: str = ""):
     """A scripted client whose turn reports the discriminator's answer first."""
 
     def respond(prompt: str, on_event):
-        on_event(ContextChosen(kept=kept, recalled=recalled))
+        on_event(ContextChosen(kept=kept, recalled=recalled, rerank=rerank))
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
@@ -1210,6 +1210,24 @@ async def test_the_context_note_is_spelled_the_way_the_restored_one_is() -> None
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         assert "[kept 1 turn, recalled 0]" in shown(app)
+
+
+async def test_a_reranker_that_cannot_be_used_is_reported_once_per_change() -> None:
+    """A provider with no cross-encoder is news once, not a line per turn.
+
+    The status rides every `ContextChosen`; a view that drew each one would put
+    the same sentence before every turn.  The note is the change, so the first
+    turn says it and the second — same status — does not.
+    """
+    app = window(FakeAgentClient(context_of(2, 1, rerank="unavailable")))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        first = shown(app)
+        await submit(pilot, "again")
+        second = shown(app)
+
+    assert "rerank off — the recall keeps its fused order" in first
+    assert second.count("rerank off") == 1, "the same status is not news twice"
 
 
 async def test_the_restored_history_says_how_much_came_back() -> None:

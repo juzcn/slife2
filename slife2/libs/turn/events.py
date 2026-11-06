@@ -65,6 +65,11 @@ class ContextChosen:
 
     kept: int
     recalled: int
+    #: Why the recall could not use its cross-encoder, or `""` when it did (or
+    #: when no recall was asked).  `"unavailable"`, `"failed"` and `"empty"`
+    #: are the context server's words; the display turns them into its own
+    #: sentence and shows one per change, not one per turn.
+    rerank: str = ""
 
 
 @dataclass(frozen=True)
@@ -282,8 +287,10 @@ def encode(event: TurnEvent) -> str:
     payload: dict[str, Any] = {}
 
     match event:
-        case ContextChosen(kept=kept, recalled=recalled):
+        case ContextChosen(kept=kept, recalled=recalled, rerank=rerank):
             payload = {"t": "context", "kept": kept, "recalled": recalled}
+            if rerank:
+                payload["r"] = rerank
         case ToolsCounted(total=total, loaded=loaded):
             # Two integers per model call; short keys like every other, because
             # the volume this convention is for is per token and this is not,
@@ -424,9 +431,16 @@ def decode(message: str) -> TurnEvent | None:
     # somebody else's message that happens to share our key space.
     match payload.get("t"):
         case "context" if _counts_ok(payload, "kept", "recalled"):
+            rerank = payload.get("r", "")
+            if not isinstance(rerank, str):
+                # A status this build cannot read is a shape it does not know,
+                # not a status of nothing (`events.py` says why a value that
+                # cannot be read is not an absent one).
+                return None
             return ContextChosen(
                 kept=int(payload.get("kept") or 0),
                 recalled=int(payload.get("recalled") or 0),
+                rerank=rerank,
             )
         case "tools" if isinstance(payload.get("n"), int) and not isinstance(
             payload.get("n"), bool

@@ -65,6 +65,21 @@ def kept(kept: int, recalled: int) -> str:
     return t("kept", turns=as_turns(kept), recalled=recalled)
 
 
+#: The context server's rerank statuses and the sentence each one owes the
+#: person.  An unknown status is a newer server's word and falls back to the
+#: generic failure rather than showing a translation key.
+_RERANK = {
+    "unavailable": "rerank_unavailable",
+    "failed": "rerank_failed",
+    "empty": "rerank_empty",
+}
+
+
+def rerank(status: str) -> str:
+    """A recall whose cross-encoder could not be used, and what that cost."""
+    return t(_RERANK.get(status, "rerank_failed"))
+
+
 def interrupted() -> str:
     """A turn the person stopped."""
     return t("interrupted")

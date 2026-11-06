@@ -690,7 +690,9 @@ def build_server(
         return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
 
     def _in_hand(
-        messages: Sequence[dict[str, Any]], turn_ids: Sequence[int]
+        messages: Sequence[dict[str, Any]],
+        turn_ids: Sequence[int],
+        rerank: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
@@ -716,6 +718,11 @@ def build_server(
         `kept` is what the caller in hand, `recalled` none of it — and the two
         together are what `rebuild` always reports, so a reader of the answer never
         has to know which of the five ways it was reached to read the counts.
+
+        `rerank` is the stage's report when a recall *did* run and the
+        selection still equals what is in hand.  The exits that never asked
+        for a recall leave it empty; they did not lose a reranker, they never
+        needed one.
         """
         return {
             "messages": list(messages),
@@ -723,6 +730,7 @@ def build_server(
             "changed": False,
             "kept": len(turn_ids),
             "recalled": 0,
+            "rerank": rerank,
         }
 
     async def _adopt_stored(
@@ -983,9 +991,12 @@ def build_server(
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
-            built from), `changed` (whether anything moved) and `recalled` (how
+            built from), `changed` (whether anything moved), `recalled` (how
             many of the selected turns came from the turn log rather than from
-            in hand).
+            in hand), and `rerank` — `""` when the cross-encoder ran or no
+            question was asked, otherwise `"unavailable"`, `"failed"` or
+            `"empty"`: the recall kept its fused order and the caller shows
+            that rather than swallowing it.
         """
         store = await store_of(agent, subagent)
         decision = await _discriminate(agent, subagent, model, messages, prompt)
@@ -1028,8 +1039,11 @@ def build_server(
             logger.info("recall_kept_ids_unknown ids=%s", unknown)
 
         recalled: list[int] = []
+        rerank = ""
         if decision.recall is not None:
-            recalled = await _recall_into(store, decision.recall, base, model, prompt)
+            recalled, rerank = await _recall_into(
+                store, decision.recall, base, model, prompt
+            )
 
         target = decisions.union(base, recalled)
         if target == sorted(in_hand):
@@ -1037,7 +1051,7 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids)
+            return _in_hand(messages, turn_ids, rerank=rerank)
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
@@ -1046,7 +1060,7 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids)
+            return _in_hand(messages, turn_ids, rerank=rerank)
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -1105,6 +1119,10 @@ def build_server(
             # two add to `len(target)`, which is what the turn runs on.
             "kept": len(base),
             "recalled": len(set(recalled) - set(base)),
+            # The precision stage's report — empty when it ran or no question
+            # was asked.  A recall that kept the fused order is a fact the
+            # caller shows, not one it silently absorbs.
+            "rerank": rerank,
         }
 
     async def _recall_into(
@@ -1113,8 +1131,15 @@ def build_server(
         base: list[int],
         model: str,
         prompt: str,
-    ) -> list[int]:
-        """Run one recall condition and fit its answer into the window.
+    ) -> tuple[list[int], str]:
+        """Run one recall condition, fit it, and report the rerank stage.
+
+        The second half of the answer is the stage's status — `""` when it ran
+        or no question was asked, `"unavailable"` when the provider serves no
+        cross-encoder, `"failed"` when the call raised or could not be mapped
+        back, and `"empty"` when it answered with no scores.  The caller shows
+        it: a recall that kept its fused order is a fact the person watching is
+        owed, not a fallback to swallow.
 
         The three caps are the caller's and not the store's, and the reason is
         the split of duties: the store ranks, the policy caps, and the policy
@@ -1167,7 +1192,7 @@ def build_server(
             # rebuild cannot do its job: keep the context it had.
             if not sentences:
                 logger.info("recall_query_has_no_term")
-                return []
+                return [], ""
             logger.info("recall_query_dropped")
             query = ""
         since = condition.get("since") or None
@@ -1222,7 +1247,7 @@ def build_server(
             budget = 0
         if window and budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
-            return []
+            return [], ""
 
         ranked = await store.recall(
             query=query,
@@ -1243,26 +1268,28 @@ def build_server(
         gated = decisions.gate(ranked, policy.min_similarity)
         order = [turn_id for turn_id, _ in gated][: policy.recall_limit]
         if not order:
-            return []
+            return [], ""
         # The cross-encoder sees the question, not the whole decision: the
         # sentences are the subject the model wrote (and already carry the
         # person's input when it was read as one), and a keyword-only decision
         # has the query words as its subject.  A period-only recall has no
-        # question, so it keeps its time order (`fit_window`).
+        # question, so it keeps its time order (`fit_window`) and never asks a
+        # ranker to order a period by relevance.
         ask = " ".join(sentences).strip() or query.strip()
+        rerank = ""
         if ask:
-            order = await _rerank_into(store, order, ask, policy)
+            order, rerank = await _rerank_into(store, order, ask, policy)
             if not order:
-                return []
+                return [], rerank
         costs = await off_loop(_cost_of, store, order)
         if not window:
-            return sorted(order)
+            return sorted(order), rerank
         fit = decisions.fit_budget if (query or sentences) else decisions.fit_window
-        return fit(order, costs, budget)
+        return fit(order, costs, budget), rerank
 
     async def _rerank_into(
         store: TurnStore, order: list[int], ask: str, policy: ContextSettings
-    ) -> list[int]:
+    ) -> tuple[list[int], str]:
         """Reorder the fused candidates with the provider's cross-encoder.
 
         **A precision stage, not a retriever.**  RRF builds the pool — the
@@ -1283,10 +1310,10 @@ def build_server(
         verdict, not a reason to fall back to the unjudged order.
         """
         if not ask or not order:
-            return order
+            return order, ""
         rows = await off_loop(store.turns_by_ids, order)
         if not rows:
-            return order
+            return order, "failed"
         ids = [int(record.turn_id) for record in rows]
         documents = [_rerank_text(record.messages) for record in rows]
         try:
@@ -1294,14 +1321,14 @@ def build_server(
         except Exception as exc:  # noqa: BLE001 — an optional stage's failure
             logger.info("recall_rerank_failed reason=%s", type(exc).__name__)
             logger.debug("the rerank call raised", exc_info=True)
-            return order
+            return order, "failed"
         if scored is None:
             # No `rerank_model` on this endpoint: a capability answer, not a
             # failure, and nothing to log per turn.
-            return order
+            return order, "unavailable"
         if not scored:
             logger.info("recall_rerank_empty")
-            return order
+            return order, "empty"
         kept: list[int] = []
         for index, score in scored:
             if 0 <= index < len(ids) and score >= policy.rerank_min_score:
@@ -1311,8 +1338,8 @@ def build_server(
         logger.info("recall_reranked candidates=%d kept=%d", len(ids), len(kept))
         if not kept:
             logger.info("recall_reranked_nothing")
-            return []
-        return kept
+            return [], ""
+        return kept, ""
 
     def _cost_of(store: TurnStore, turn_ids: list[int]) -> dict[int, int]:
         """What each of those turns is estimated to cost, for the budget.

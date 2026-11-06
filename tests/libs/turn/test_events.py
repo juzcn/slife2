@@ -23,6 +23,15 @@ def test_a_known_line_is_decoded() -> None:
     assert decode(json.dumps({"t": "context", "kept": 2, "recalled": 1})) == (
         ContextChosen(kept=2, recalled=1)
     )
+    assert decode(
+        json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": "unavailable"})
+    ) == ContextChosen(kept=2, recalled=1, rerank="unavailable")
+
+    # A status of another type is a line this build does not know, not one
+    # whose status is empty.
+    assert (
+        decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": 3})) is None
+    )
 
 
 def test_a_count_with_the_wrong_type_drops_the_line_instead_of_raising() -> None:

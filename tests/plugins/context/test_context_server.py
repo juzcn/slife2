@@ -897,6 +897,7 @@ async def test_a_candidate_below_the_rerank_floor_is_not_recalled() -> None:
 
     assert answer.data["recalled"] == 1
     assert answer.data["turn_ids"] == [1]
+    assert answer.data["rerank"] == "", "the ranker ran"
     assert reranker.asked, "the cross-encoder was asked"
     assert "trump" in reranker.asked[0][0], "the question, not the conversation"
 
@@ -922,6 +923,29 @@ async def test_a_failing_reranker_keeps_the_fused_order() -> None:
         answer = await _rebuild(client, "", turn_ids=[])
 
     assert answer.data["recalled"] == 2, "the fused order stands"
+    assert answer.data["rerank"] == "failed", "and the answer says why"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> None:
+    """No `rerank_model` is a capability the caller is told about, not silence.
+
+    A window that did not know would show `[kept …]` and look exactly like one
+    whose ranker ran — the two are different answers to "why is this order
+    this order".
+    """
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("trump one", "1"))
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert answer.data["recalled"] == 1
+    assert answer.data["rerank"] == "unavailable"
 
 
 @pytest.mark.asyncio

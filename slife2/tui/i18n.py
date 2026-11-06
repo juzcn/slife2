@@ -145,6 +145,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "kept {turns}, recalled {recalled}",
         "zh": "保留 {turns}，召回 {recalled}",
     },
+    # A recall that could not use its cross-encoder.  The status is the context
+    # server's (`"unavailable"`, `"failed"`, `"empty"`); the sentence is the
+    # window's, and it says what the person actually lost — the fused order
+    # stands in place of the ranker's.
+    "rerank_unavailable": {
+        "en": "rerank off — the recall keeps its fused order",
+        "zh": "重排不可用 —— 召回保持融合顺序",
+    },
+    "rerank_failed": {
+        "en": "rerank failed — the recall keeps its fused order",
+        "zh": "重排失败 —— 召回保持融合顺序",
+    },
+    "rerank_empty": {
+        "en": "rerank returned nothing — the recall keeps its fused order",
+        "zh": "重排没有返回结果 —— 召回保持融合顺序",
+    },
     # A turn the person stopped.
     "interrupted": {
         "en": "interrupted",

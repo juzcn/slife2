@@ -2194,7 +2194,16 @@ def build_server(
             raise unreadable(
                 "the context store", "report the rebuild's counts", payload
             )
-        return ContextChosen(kept=int(kept), recalled=int(recalled))
+        # The rerank status is display-only: an older context server does not
+        # send it, and a value of the wrong shape must not fail a turn whose
+        # context was decided.  An unrecognised status still reaches the
+        # window, which is where the words for it live.
+        rerank = payload.get("rerank")
+        return ContextChosen(
+            kept=int(kept),
+            recalled=int(recalled),
+            rerank=rerank if isinstance(rerank, str) else "",
+        )
 
     async def forget_context(agent: str, subagent: str) -> None:
         """Clear a conversation's stored live context.

@@ -42,6 +42,9 @@ EVENTS = [
     # The discriminator's answer, which arrives before any of the rest and is
     # the only event a turn has that is about the context rather than the work.
     ContextChosen(kept=12, recalled=3),
+    # The same event with the rerank stage's report — the key is omitted when
+    # empty, so both shapes have to round trip.
+    ContextChosen(kept=12, recalled=3, rerank="unavailable"),
     # The model's list against the catalogue: both halves on one ask, and a
     # second shape from a server that predates the loaded half — the absent
     # key must round trip as unknown rather than as zero.
