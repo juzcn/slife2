@@ -723,8 +723,8 @@ async def test_a_summary_rewrites_the_text_the_turn_is_found_by(tmp_path) -> Non
     assert store.update_summary(1, summary="the quarterly forecast", tags="planning")
     record = store.turn(1)
     assert (record.summary, record.tags) == ("the quarterly forecast", "planning")
-    found = await store.search("forecast", embedder=EMBEDDER)
-    assert [one.turn_id for one in found][0] == 1
+    found = await store.recall(query="forecast", embedder=EMBEDDER)
+    assert [turn_id for turn_id, _ in found][0] == 1
 
     # A call that names only tags keeps the summary it did not mention.
     assert store.update_summary(1, tags="budget")

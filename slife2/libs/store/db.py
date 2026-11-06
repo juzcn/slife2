@@ -109,7 +109,6 @@ from slife2.libs.store.index import (
     page_limit,
     place_vectors,
     rebuild_vector_index,
-    rows_in_order,
     set_index_meta,
     storable,
     time_window,
@@ -1342,7 +1341,7 @@ class TurnStore:
 
         One of the store's three shapes, chosen by what the caller asked for:
 
-        * **a question** — the same hybrid as `search`, windowed, ranked by
+        * **a question** — the two legs fused by rank, windowed, ranked by
           relevance.  `anchor` is not consulted here; relevance decides which end
           the caller spends from, and the caller is where that is logged.
         * **no question, a window or an anchor** — ranked by *time* instead, from
@@ -1697,54 +1696,7 @@ class TurnStore:
     def set_index_meta(connection: sqlite3.Connection, **values: str) -> None:
         set_index_meta(connection, **values)
 
-    # --- finding a turn by what it was about ----------------------------------
-
-    async def search(
-        self,
-        query: str,
-        *,
-        embedder: Embedder,
-        since: str | None = None,
-        until: str | None = None,
-        limit: int = 20,
-    ) -> list[TurnRecord]:
-        """Turns matching `query`, best first — by keyword and by meaning.
-
-        Two legs and one fusion.  The keyword leg is FTS5's `bm25` over the text
-        a turn is found by (`searchable_text`); the semantic leg is a KNN over
-        the vectors of what it was about (`embed_text`).  They are fused by rank
-        because their scores are not on one scale at all — `bm25` is unbounded
-        and depends on the corpus, a cosine distance depends on the model — and
-        a turn both legs found outranks a turn only one did.
-
-        No `total`, deliberately: the two legs rank different numbers of
-        candidates and a fused top-k has no total that means anything.  A page
-        of best-first turns is what this answers.
-
-        Raises:
-            EmptyQuery: If the query holds no term — see `slife2.libs.store.textindex`.
-            InvalidTimeBound: If a bound is in no grammar `slife2.helpers.timeutil`
-                speaks, for the reason `turns` gives.
-        """
-        expression = textindex.match_expression(query)
-        clauses, params = time_window(since, until)
-        limit = page_limit(limit)
-        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
-
-        ranked = {
-            "keyword": await off_loop(
-                self._keyword_hits, expression, over, clauses, params
-            ),
-            # `list(...)` of the mapping, which is in nearest-first order: the
-            # fusion wants a *ranking*, and the similarities the same call
-            # measured are what `recall` gates on.
-            "semantic": list(await self._semantic_hits([query], embedder, over)),
-        }
-        # Capped here and not on the legs: fusing takes the *union* of two lists
-        # that are each already `over` long, and the next query binds one value
-        # per id.  A cap applied to each leg would leave the union at twice it.
-        fused = [turn_id for turn_id, _ in fuse_ranked(ranked)][:MAX_SQL_VARS]
-        return await off_loop(self._records_in_order, fused, clauses, params, limit)
+    # --- the two legs a recall is ranked by -----------------------------------
 
     def _keyword_hits(
         self,
@@ -1813,31 +1765,6 @@ class TurnStore:
             lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
         return lists
 
-    async def _semantic_hits(
-        self, queries: Sequence[str], embedder: Embedder, k: int
-    ) -> dict[int, float]:
-        """Turn ids by vector distance across one or more questions, nearest first.
-
-        **Several questions are several chances, and one must not cost another.**
-        Each sentence is embedded on its own — one `embed` call for the batch,
-        from `_semantic_lists` — and each has its own KNN; a turn keeps its
-        *best* similarity across them.  A second sentence can therefore add a
-        turn or raise a turn's score, never lower one or remove it.  This is the
-        rule the catalogue's `sentences` already state, applied to turns.
-
-        **A mapping, in nearest-first order, and the value is a similarity.**
-        The order is what `search` fuses; the value is what `recall` gates on —
-        and it is a *measured* number, unlike the fused score, which is a
-        function of rank position and carries no magnitude to threshold
-        (`recall`'s docstring is where that distinction is argued).
-        """
-        nearest: dict[int, float] = {}
-        for found in await self._semantic_lists(queries, embedder, k):
-            for turn_id, similarity in found:
-                if similarity > nearest.get(turn_id, float("-inf")):
-                    nearest[turn_id] = similarity
-        return dict(sorted(nearest.items(), key=lambda pair: (-pair[1], pair[0])))
-
     def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.
 
@@ -1862,34 +1789,6 @@ class TurnStore:
         for row in rows:
             nearest.setdefault(int(row["turn_id"]), as_similarity(row["distance"]))
         return list(nearest.items())
-
-    def _records_in_order(
-        self,
-        turn_ids: list[int],
-        clauses: list[str],
-        params: list[str],
-        limit: int,
-    ) -> list[TurnRecord]:
-        """Those turns, in the order they were ranked, windowed and cut.
-
-        One query rather than one per turn, because the order comes from the
-        fusion and the rows come from the table; a window can only remove turns
-        from the answer, never reorder it.  The query itself is `rows_in_order`,
-        which is the same one the catalogue's search makes with its own table's
-        name in it.
-        """
-        with self._connect() as connection:
-            rows = rows_in_order(
-                connection,
-                turn_ids,
-                select="SELECT rowid AS turn_id, * FROM turn",
-                column="rowid",
-                key="turn_id",
-                clauses=clauses,
-                values=params,
-                limit=limit,
-            )
-        return [_row_to_record(row) for row in rows]
 
 
 def _write_vectors(

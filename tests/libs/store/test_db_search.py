@@ -60,8 +60,8 @@ async def _corpus(store: TurnStore, embedder: StubEmbedder) -> None:
         await store.save_turn(messages=messages, embedder=embedder, channel="tui")
 
 
-def _ids(records) -> list[int]:
-    return [record.turn_id for record in records]
+def _ids(ranked) -> list[int]:
+    return [turn_id for turn_id, _ in ranked]
 
 
 # --- what gets indexed --------------------------------------------------------
@@ -341,7 +341,7 @@ async def test_a_two_character_chinese_word_is_found(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    assert 1 in _ids(await store.search("工具", embedder=embedder))
+    assert 1 in _ids(await store.recall(query="工具", embedder=embedder))
 
 
 @pytest.mark.asyncio
@@ -350,8 +350,8 @@ async def test_an_english_word_and_a_number_are_found(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    assert 2 in _ids(await store.search("trump", embedder=embedder))
-    assert 3 in _ids(await store.search("792", embedder=embedder))
+    assert 2 in _ids(await store.recall(query="trump", embedder=embedder))
+    assert 3 in _ids(await store.recall(query="792", embedder=embedder))
 
 
 @pytest.mark.asyncio
@@ -423,7 +423,7 @@ async def test_every_term_has_to_be_present(tmp_path) -> None:
 async def test_a_query_with_no_term_is_refused(tmp_path) -> None:
     store = TurnStore(tmp_path / "jack.turn.db")
     with pytest.raises(EmptyQuery):
-        await store.search("***", embedder=StubEmbedder())
+        await store.recall(query="***", embedder=StubEmbedder())
 
 
 @pytest.mark.asyncio
@@ -432,7 +432,7 @@ async def test_a_bound_in_no_grammar_is_refused(tmp_path) -> None:
     results"."""
     store = TurnStore(tmp_path / "jack.turn.db")
     with pytest.raises(InvalidTimeBound):
-        await store.search("工具", embedder=StubEmbedder(), since="上个月")
+        await store.recall(query="工具", embedder=StubEmbedder(), since="上个月")
 
 
 @pytest.mark.asyncio
@@ -443,8 +443,8 @@ async def test_a_window_narrows_a_search(tmp_path) -> None:
         messages=CORPUS[0], embedder=embedder, created_at="2026-01-01T10:00:00+08:00"
     )
 
-    assert _ids(await store.search("工具", embedder=embedder)) == [1]
-    assert await store.search("工具", embedder=embedder, since="2026-06-01") == []
+    assert _ids(await store.recall(query="工具", embedder=embedder)) == [1]
+    assert await store.recall(query="工具", embedder=embedder, since="2026-06-01") == []
 
 
 # --- the semantic leg ---------------------------------------------------------
@@ -459,7 +459,7 @@ async def test_a_query_no_keyword_can_match_still_returns_turns(tmp_path) -> Non
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    hits = await store.search("计算", embedder=embedder)
+    hits = await store.recall(query="计算", embedder=embedder)
 
     assert hits, "the semantic leg contributed nothing"
     assert store._keyword_hits(textindex.match_expression("计算"), 10, [], []) == []
@@ -471,16 +471,16 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    nearest = await store._semantic_hits(["工具"], embedder, 3)
+    nearest = (await store._semantic_lists(["工具"], embedder, 3))[0]
 
-    # A mapping, in nearest-first order: the *order* is what the fusion reads and
-    # the value is the similarity a recall gates on, so both halves are asserted
-    # — the first turn is the one about this, and the similarities only ever
-    # fall.  (`list(nearest) == [1, *list(nearest)[1:]]` stood here, which is
-    # `nearest[0] == 1` written out at length, and the line below it says that.)
-    assert next(iter(nearest)) == 1
-    assert nearest[1] > 0.0
-    assert list(nearest.values()) == sorted(nearest.values(), reverse=True)
+    # Each question's list is nearest-first: the *order* is what the fusion
+    # reads and the value is the similarity a recall gates on, so both halves
+    # are asserted — the first turn is the one about this, and the similarities
+    # only ever fall.
+    assert nearest[0][0] == 1
+    assert nearest[0][1] > 0.0
+    scores = [score for _, score in nearest]
+    assert scores == sorted(scores, reverse=True)
 
 
 @pytest.mark.asyncio
@@ -502,7 +502,7 @@ async def test_a_turn_with_several_chunks_is_a_hit_once(tmp_path) -> None:
         chunks = connection.execute("SELECT COUNT(*) FROM turn_chunk").fetchone()[0]
     assert chunks > 1
 
-    hits = await store.search("工具", embedder=embedder)
+    hits = await store.recall(query="工具", embedder=embedder)
     assert _ids(hits) == [1]
 
 
