@@ -289,6 +289,33 @@ async def test_a_rerank_index_out_of_range_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_short_rerank_answer_is_refused() -> None:
+    """An unscored document is not one the ranker judged worthless.
+
+    The caller drops what it was not told a score for, so accepting a short
+    list turns a protocol failure into a silent filter.
+    """
+    client = _client(
+        "BAAI/bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    )
+    client._http = _FakeHTTP({"results": [{"index": 0, "relevance_score": 0.5}]})
+
+    with pytest.raises(RuntimeError, match="answered 1 scores for 2 documents"):
+        await client.rerank("q", ["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_a_top_n_answer_is_not_a_short_answer() -> None:
+    """`top_n` is how many the caller asked for; fewer than that is the fault."""
+    client = _client(
+        "BAAI/bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"
+    )
+    client._http = _FakeHTTP({"results": [{"index": 1, "relevance_score": 0.9}]})
+
+    assert await client.rerank("q", ["a", "b"], top_n=1) == [(1, 0.9)]
+
+
+@pytest.mark.asyncio
 async def test_describe_reports_the_rerank_model() -> None:
     described = await _client(
         "bge-m3", _FakeOpenAI(), rerank_model="BAAI/bge-reranker-v2-m3"

@@ -139,7 +139,10 @@ class RemoteEmbedder:
         `rerank_model` is a config that chose an endpoint with no reranker; the
         caller keeps its fused order and does not report a failure nobody can
         fix.  An *answer* that is malformed is different, and fails: an index
-        out of range would map one candidate's score onto another, silently.
+        out of range would map one candidate's score onto another, silently,
+        and a **short** answer would read as "the missing candidates scored
+        nothing" — the caller drops everything it was not told a score for.  A
+        short answer is refused here for the reason `embed` refuses one.
 
         The indices point into this call's `documents`, which is why the caller
         keeps its own list and does not re-sort before mapping back.
@@ -188,6 +191,15 @@ class RemoteEmbedder:
                     f"the embeddings server answered a rerank score {score!r}"
                 )
             found.append((index, float(score)))
+        # The whole list when no `top_n` was named, and only that many when one
+        # was.  More than asked for is not a failure; fewer leaves candidates
+        # the caller would treat as rejected.
+        expected = len(documents) if top_n is None else min(top_n, len(documents))
+        if len({index for index, _ in found}) < expected:
+            raise RuntimeError(
+                f"the embeddings server answered {len(found)} rerank scores "
+                f"for {len(documents)} documents; {expected} were asked for"
+            )
         return sorted(found, key=lambda pair: -pair[1])
 
 

@@ -113,6 +113,18 @@ CONFIG_KEY = "context"
 #: rate-limited even when the model is free.
 RERANK_DOC_CHARS = 2000
 
+#: How much wider than the final selection the pool handed to the cross-encoder
+#: is.  RRF is a cheap first pass over an over-fetched pair of legs; the ranker
+#: is the precise one, and it can only judge what it is given.  A pool exactly
+#: `recall_limit` long would leave the ranker only a reorder of the already
+#: selected set — and the rebuilt list is chronological, so that reorder would
+#: have nowhere to show.  Two is the cost/recall compromise: it reaches the
+#: candidates the legs put just past the selection, without doubling the
+#: cross-encoder's document count again (the legs already over-fetch by four).
+#: `page_limit` caps the pool at `MAX_PAGE` when a home raises `recall_limit`
+#: high.
+RECALL_POOL_MULTIPLE = 2
+
 
 def _rerank_text(messages: list[dict[str, Any]]) -> str:
     """The exchange a cross-encoder judges: what was asked and what was answered.
@@ -123,13 +135,18 @@ def _rerank_text(messages: list[dict[str, Any]]) -> str:
     signal.  Tool results are 56–99% of a turn's text and would swamp the pair;
     they are what `turn_read` and the keyword leg are for.
 
-    The clip is a bound, not a summary: the whole candidate pool is one call,
-    and a pool of long turns is slow and rate-limited even when the model is
-    free.  The endpoint would truncate too; doing it here is what makes the
-    cost the caller's to see.
+    **The two halves keep their own room.**  The clip is a bound, not a summary:
+    the whole pool is one call, and a pool of long turns is slow and
+    rate-limited even when the model is free.  Clipping the *joined* text would
+    let a long question erase the answer, though — the pair is the signal, and
+    half a pair is not — so each half is clipped to its own share.
     """
-    parts = [user_message(messages), assistant_message(messages)]
-    return "\n\n".join(part for part in parts if part)[:RERANK_DOC_CHARS]
+    question, answer = user_message(messages), assistant_message(messages)
+    if question and answer:
+        share = (RERANK_DOC_CHARS - len("\n\n")) // 2
+        return "\n\n".join([question[:share], answer[:share]])
+    only = question or answer
+    return only[:RERANK_DOC_CHARS]
 
 
 INSTRUCTIONS = (
@@ -1141,10 +1158,27 @@ def build_server(
         it: a recall that kept its fused order is a fact the person watching is
         owed, not a fallback to swallow.
 
-        The three caps are the caller's and not the store's, and the reason is
-        the split of duties: the store ranks, the policy caps, and the policy
-        depends on a model's window and on what the decision kept — neither of
-        which the store knows.
+        **The recall is a funnel, and every stage after retrieval has the wider
+        set to choose from.**  The store fuses an over-fetched pair of legs;
+        `min_similarity` drops measured noise; the cross-encoder reorders the
+        survivors and may drop those below `rerank_min_score`; **only then**
+        does `recall_limit` cut the selection, and the kept turns' estimated
+        cost is subtracted from `ceiling × window` before the budget spends what
+        is left.  The count cap is last on purpose: a pool exactly
+        `recall_limit` long would let the cheap RRF order decide membership,
+        leaving the ranker only an order the chronological rebuild then
+        discards.
+
+        **The pool is wider than the selection.**  `recall_limit ×
+        RECALL_POOL_MULTIPLE` candidates go to the ranker, so a turn the legs
+        put just past the selection is still judged.  The multiple is the cost
+        knob: the whole pool is one cross-encoder call, and a slow or
+        rate-limited reranker is paid for before every turn.
+
+        Every cap here is the caller's and not the store's, for the split of
+        duties: the store ranks, the policy caps, and the policy depends on a
+        model's window and on what the decision kept — neither of which the
+        store knows.
 
         **One budget, and it is the ceiling's.**  The kept turns are estimated
         first, and the recall may spend what they leave below
@@ -1249,6 +1283,11 @@ def build_server(
             logger.info("recall_no_headroom base=%d", base_cost)
             return [], ""
 
+        # The pool is the ranker's, not the selection's: `recall_limit` is
+        # applied after the precision stage below.  `page_limit` is the store's
+        # own page bound, so a home that raises `recall_limit` cannot ask for a
+        # pool larger than one query can answer.
+        pool = page_limit(policy.recall_limit * RECALL_POOL_MULTIPLE)
         ranked = await store.recall(
             query=query,
             sentences=sentences,
@@ -1256,7 +1295,7 @@ def build_server(
             since=since,
             until=until,
             anchor=anchor,
-            limit=policy.recall_limit,
+            limit=pool,
             # The keep-list is what is *in hand*, so it is also what a recall
             # must not spend its places on: the union would collapse a turn in
             # both, and the slot, the distance and the budget would be gone.
@@ -1266,21 +1305,30 @@ def build_server(
             keyword_weight=policy.keyword_weight,
         )
         gated = decisions.gate(ranked, policy.min_similarity)
-        order = [turn_id for turn_id, _ in gated][: policy.recall_limit]
+        order = [turn_id for turn_id, _ in gated]
         if not order:
             return [], ""
         # The cross-encoder sees the question, not the whole decision: the
         # sentences are the subject the model wrote (and already carry the
         # person's input when it was read as one), and a keyword-only decision
-        # has the query words as its subject.  A period-only recall has no
-        # question, so it keeps its time order (`fit_window`) and never asks a
-        # ranker to order a period by relevance.
+        # has the query words as its subject.  Several sentences are joined
+        # into one question because that is the one call the endpoint takes;
+        # the retrieval above is what gives each sentence its own chance to
+        # find a turn.  A period-only recall has no question, so it keeps its
+        # time order (`fit_window`) and never asks a ranker to order a period
+        # by relevance.
         ask = " ".join(sentences).strip() or query.strip()
         rerank = ""
         if ask:
             order, rerank = await _rerank_into(store, order, ask, policy)
             if not order:
                 return [], rerank
+        # **The selection cut, after the precision stage.**  This is where
+        # `recall_limit` becomes a count of turns the turn will run on; before
+        # the rerank it would have been a pool width, and the ranker could only
+        # reorder the already-selected set.  A time-ordered pool is cut here
+        # too, from the end its anchor named.
+        order = order[: policy.recall_limit]
         costs = await off_loop(_cost_of, store, order)
         if not window:
             return sorted(order), rerank
@@ -1290,24 +1338,26 @@ def build_server(
     async def _rerank_into(
         store: TurnStore, order: list[int], ask: str, policy: ContextSettings
     ) -> tuple[list[int], str]:
-        """Reorder the fused candidates with the provider's cross-encoder.
+        """Reorder the pool with the provider's cross-encoder.
 
-        **A precision stage, not a retriever.**  RRF builds the pool — the
-        whole of it, which `recall_limit` bounds — and the cross-encoder reads
-        the question beside each candidate's exchange and decides the order.
-        **It sees every candidate, so a hit the two legs ranked low is still
-        judged**: a term that is merely common does not make its one match
-        unimportant, and nothing here cuts a candidate before the ranker can
-        speak for it.
+        **A precision stage over a pool wider than the selection.**  Retrieval
+        hands it `recall_limit × RECALL_POOL_MULTIPLE` candidates, so a turn
+        the two legs ranked past the selection is still judged; the caller
+        applies `recall_limit` after this returns, which is what lets the
+        ranker's order decide *membership* rather than only an order the
+        chronological rebuild would discard.
 
         **An unavailable or failing reranker is not a failed recall.**  The
         provider may serve no cross-encoder (`rerank_model` empty), the call may
         time out, or the answer may be malformed; all three keep the fused
         order and log why, in the same spirit as a discriminator that could not
-        answer.  What is *not* kept is a candidate the reranker scored below
-        `rerank_min_score` — that is the stage doing its job.  A threshold that
-        rejects the whole pool ends the recall: an empty answer is the ranker's
-        verdict, not a reason to fall back to the unjudged order.
+        answer.  A *short* answer is malformed too: it is refused at both hops
+        (`slife2.clients.embedder.RemoteEmbedder`, `slife2.plugins.llm.embeddings_server`)
+        rather than read as "the missing candidates scored nothing".  What is
+        *not* kept is a candidate the reranker scored below `rerank_min_score`
+        — that is the stage doing its job.  A threshold that rejects the whole
+        pool ends the recall: that is the ranker's verdict, not a reason to
+        fall back to the unjudged order.
         """
         if not ask or not order:
             return order, ""

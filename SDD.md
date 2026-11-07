@@ -943,13 +943,16 @@ Rules:
   noise floor. **No term is cut for being common**: a word that appears in
   half the log can still be the one exact string a query is about, and the
   reranker can only judge a candidate it is given.
-- **A cross-encoder reranks the whole pool** when the embeddings provider
-  names a `rerank_model`; `recall_limit` bounds the pool, and
-  `rerank_min_score` is the ranker's own floor. It is a precision stage, not
-  a retriever: a missing or failing reranker keeps the fused order, and a
-  period recall — which has no question — keeps its time order. The catalogue
-  and cabinet searches keep their own page order; their rerank is deferred
-  (§14.2).
+- **A cross-encoder reranks a pool wider than the selection** when the
+  embeddings provider names a `rerank_model`: retrieval hands it
+  `recall_limit × 2` candidates, and `recall_limit` is applied **after** the
+  ranker, so its order decides membership rather than an order the
+  chronological rebuild would discard. `rerank_min_score` is the ranker's own
+  floor. It is a precision stage, not a retriever: a missing or failing
+  reranker keeps the fused order (a short answer is refused, not read as low
+  scores), and a period recall — which has no question — keeps its time order.
+  The catalogue and cabinet searches keep their own page order; their rerank is
+  deferred (§14.2).
 - **The live-context list's order is authoritative.** Reads replay it as written
   and never re-sort or re-slice it; a selection is not always contiguous.
 - **`send_message` answers with every key present**, including `refused` where
@@ -979,10 +982,10 @@ The context parameters are in `context:`:
 | Key | Meaning |
 |---|---|
 | `ceiling` | Fraction of the model's window the live context is topped up to; a recall spends what the kept turns leave below it. |
-| `recall_limit` | Maximum number of turns one recall may select. |
+| `recall_limit` | Maximum number of turns one recall may select; applied after the rerank, which sees `recall_limit × 2` candidates. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
-| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; `0.0` keeps everything it returned. |
+| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.1` drops keyword incidentals, `0.0` keeps everything it returned. |
 | `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
 
 **One budget, and it is the ceiling's.** The kept turns are estimated first;
@@ -990,8 +993,14 @@ a recall may spend what they leave below `ceiling`, so keeping less leaves it
 more and a kept context at the ceiling leaves it nothing. There is no separate
 per-recall fraction. `min_similarity` and `rerank_min_score` are floors whose
 scale belongs to the model in use (bge-m3 scores unrelated same-domain text
-near 0.5), so both are calibrated per home: the shipped 0.52 and 0.0 are those
-calibrations. A provider with no `rerank_model` simply omits the rerank stage.
+near 0.5), so both are calibrated per home: the shipped 0.52 and 0.1 are those
+calibrations. **Both are filters, not ranking rules**: they decide whether a
+candidate stays, and the reranker's order is used only where the count cap and
+the token budget cut. On the live log an unrelated query still passed
+`min_similarity` with three neighbours at 0.52–0.54, and the reranker scored
+them 0.002–0.036 — below the shipped 0.1 — which is the floor doing the work
+the cosine gate could not. A provider with no `rerank_model` simply omits the
+rerank stage.
 
 A missing store fails the turn, like any missing plugin. A discriminator
 timeout, provider error, or unreadable answer does not. There is no switch to

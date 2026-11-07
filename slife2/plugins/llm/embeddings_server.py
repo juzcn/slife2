@@ -361,17 +361,28 @@ class EmbeddingClient:
             self.provider.base_url.rstrip("/") + "/rerank", json=body
         )
         response.raise_for_status()
-        return _rerank_answer(response.json(), len(documents))
+        expected = len(documents) if top_n is None else min(top_n, len(documents))
+        return _rerank_answer(response.json(), len(documents), expected=expected)
 
 
-def _rerank_answer(payload: Any, count: int) -> list[tuple[int, float]]:
+def _rerank_answer(
+    payload: Any, count: int, *, expected: int | None = None
+) -> list[tuple[int, float]]:
     """The endpoint's answer, shape-checked and ordered best first.
 
     **A short answer is not a document that scored nothing.**  The caller maps
     an index back to the candidate it sent, so an index out of range would
     silently attribute one turn's score to another; a missing `results` would
     read as "the reranker rejected everything".  Both are protocol failures on
-    the far side, and this is the hop that names them.
+    the far side, and this is the hop that names them.  **So is a short list**:
+    the candidates it omits are not scored low, they are unscored, and the
+    caller would drop them as if the ranker had judged them worthless.  The
+    `_embed_request` path refuses a short vector answer for the same reason
+    (`slife2.libs.store.index.checked_vectors`).
+
+    `expected` is what `top_n` asked for — the whole list when it named none —
+    and a provider that returns more than that is not a failure; the caller
+    takes what it needs.
     """
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list):
@@ -408,6 +419,11 @@ def _rerank_answer(payload: Any, count: int) -> list[tuple[int, float]]:
             )
         seen.add(index)
         found.append((index, float(score)))
+    if expected is not None and len(seen) < expected:
+        raise RuntimeError(
+            f"{SERVER_NAME}: the rerank endpoint answered {len(seen)} scores "
+            f"for {count} documents; {expected} were asked for"
+        )
     return sorted(found, key=lambda pair: -pair[1])
 
 

@@ -104,6 +104,18 @@ async def test_rerank_maps_indices_back_and_sorts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_short_rerank_answer_is_refused() -> None:
+    """A missing score would read as "the ranker rejected that turn"."""
+    client = _RerankClient({"results": [{"index": 0, "relevance_score": 0.5}]})
+    embedder = RemoteEmbedder(
+        client, {**DESCRIBED, "rerank_model": "BAAI/bge-reranker-v2-m3"}
+    )
+
+    with pytest.raises(RuntimeError, match="answered 1 rerank scores"):
+        await embedder.rerank("q", ["a", "b"])
+
+
+@pytest.mark.asyncio
 async def test_a_rerank_index_that_was_not_sent_is_refused() -> None:
     """A score mapped onto the wrong document is a silent mismatch."""
     client = _RerankClient({"results": [{"index": 9, "relevance_score": 0.5}]})

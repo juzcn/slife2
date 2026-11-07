@@ -74,6 +74,29 @@ class RerankingEmbedder(StubEmbedder):
         return sorted(scored, key=lambda pair: -pair[1])
 
 
+class GradedReranker(StubEmbedder):
+    """A cross-encoder with the two score bands the shipped floor separates.
+
+    The live log's real turns scored 0.69–0.81 and the keyword incidentals
+    0.0007–0.006; `0.8` and `0.05` are those bands, so the default
+    `rerank_min_score` (0.1) keeps one and drops the other.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asked: list[tuple[str, list[str]]] = []
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]]:
+        self.asked.append((query, list(documents)))
+        scored = [
+            (index, 0.8 if "real" in document else 0.05)
+            for index, document in enumerate(documents)
+        ]
+        return sorted(scored, key=lambda pair: -pair[1])
+
+
 SYSTEM = {"role": "system", "content": "You are jack."}
 
 
@@ -924,6 +947,150 @@ async def test_a_failing_reranker_keeps_the_fused_order() -> None:
 
     assert answer.data["recalled"] == 2, "the fused order stands"
     assert answer.data["rerank"] == "failed", "and the answer says why"
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
+    """The default floor is the stage's own filter, not just a build-time knob.
+
+    Both turns contain the query word, so both reach the pool.  The ranker
+    separates the real exchange (0.8) from the incidental one (0.05), and the
+    shipped floor of 0.1 is what turns that separation into a smaller context.
+    A floor of 0.0 — which this test would pass under — would keep both and
+    make the stage a reorderer with no membership effect.
+    """
+    reranker = GradedReranker()
+
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=reranker,
+            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        )
+    ) as client:
+        await _seed(client, "jack", ("trump real", "1"), ("trump noise", "2"))
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert default_config().context.rerank_min_score == 0.1
+    assert answer.data["recalled"] == 1
+    assert answer.data["turn_ids"] == [1]
+    assert answer.data["rerank"] == "", "the ranker ran"
+
+
+@pytest.mark.asyncio
+async def test_the_ranker_sees_a_pool_wider_than_the_selection() -> None:
+    """A turn RRF put past `recall_limit` is still judged, and can be selected.
+
+    The target is deliberately last in the fused order: the other turn repeats
+    the query word twice while the target says it once.  A pool exactly
+    `recall_limit` (1) long would hand the ranker only the first turn; the
+    wider pool (2) gives it the target, and the count cap is applied after its
+    order is known.
+    """
+    base = default_config()
+    config = replace(
+        base,
+        context=replace(base.context, recall_limit=1, rerank_min_score=0.0),
+    )
+    reranker = RerankingEmbedder()
+
+    async with Client(
+        build_server(
+            config,
+            embedder=reranker,
+            ask=Replies('{"context": "clear", "recall": {"query": "trump"}}'),
+        )
+    ) as client:
+        ids = await _seed(
+            client,
+            "jack",
+            ("trump trump", "1"),
+            ("trump high", "2"),
+        )
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert ids == [1, 2]
+    assert len(reranker.asked[0][1]) == 2, "the pool is wider than the one place"
+    assert answer.data["turn_ids"] == [2], "the ranker's first choice is selected"
+    assert answer.data["recalled"] == 1
+    # The premise: the old, selection-sized pool could only have returned turn
+    # 1, so the ranker could not have rescued the target.
+    store = TurnStore(agent_dir("jack") / "turns.db")
+    old = await store.recall(query="trump", embedder=reranker, limit=1)
+    assert [turn_id for turn_id, _ in old] == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_similarity_floor_backfills_from_the_wider_pool() -> None:
+    """A candidate the floor drops must not consume the only recall place.
+
+    Turn 2 is the keyword leg's best — its summary repeats `trump` — but its
+    meaning vector is diluted by the other vocabulary words in its reasoning,
+    so its cosine is below the floor.  Turn 1 is the meaning leg's best.  With
+    a pool of one the floor would empty the recall; the wider pool lets turn 1
+    take the place turn 2 could not use.
+    """
+    base = default_config()
+    config = replace(
+        base,
+        context=replace(base.context, recall_limit=1, min_similarity=0.52),
+    )
+
+    async with Client(
+        build_server(
+            config,
+            embedder=EMBEDDER,
+            ask=Replies('{"context": "clear", "recall": {"query": "trump"}}'),
+        )
+    ) as client:
+        await client.call_tool(
+            "remember",
+            {
+                "agent": "jack",
+                "messages": _exchange("trump", "1"),
+            },
+        )
+        await client.call_tool(
+            "remember",
+            {
+                "agent": "jack",
+                "messages": [
+                    {"role": "user", "content": "trump"},
+                    {
+                        "role": "assistant",
+                        "content": "2",
+                        "thinking": "工具 计算 测试",
+                    },
+                ],
+                # The summary is in the keyword leg's text and not in the
+                # vector's, so it makes turn 2 the keyword winner without
+                # raising the cosine the floor measures.
+                "summary": "trump trump",
+            },
+        )
+        answer = await _rebuild(client, "", turn_ids=[])
+
+    assert answer.data["turn_ids"] == [1]
+    assert answer.data["recalled"] == 1
+    # The premise: the old pool's one place was turn 2, the one the floor drops
+    # — so the recall would have been empty rather than backfilled.
+    store = TurnStore(agent_dir("jack") / "turns.db")
+    old = await store.recall(query="trump", embedder=EMBEDDER, limit=1)
+    assert [turn_id for turn_id, _ in old] == [2]
+
+
+def test_a_long_question_does_not_cut_the_answer_out_of_the_rerank_document() -> None:
+    """The pair is the signal; clipping the join would throw half of it away."""
+    limit = context_server.RERANK_DOC_CHARS
+    text = context_server._rerank_text(
+        [
+            {"role": "user", "content": "q" * (limit * 2)},
+            {"role": "assistant", "content": "the answer"},
+        ]
+    )
+
+    assert "the answer" in text
+    assert len(text) <= limit
 
 
 @pytest.mark.asyncio

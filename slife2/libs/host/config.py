@@ -1499,13 +1499,17 @@ class ContextSettings:
     #: the ceiling leaves it nothing.  There is no separate per-recall floor —
     #: one would give the two halves two budgets for one window.
     ceiling: float = 0.8
-    #: Most turns one recall may select.  A cap rather than a preference, for the
-    #: reason `MAX_PAGE` is one: the count is what is left to bound a context by
-    #: when the model's window is undeclared.
+    #: Most turns one recall may select, applied **after** the reranker — which
+    #: sees this many times the store's pool multiple, so its order decides
+    #: membership rather than only the order of an already-selected set.  A cap
+    #: rather than a preference, for the reason `MAX_PAGE` is one: the count is
+    #: what is left to bound a context by when the model's window is undeclared.
     recall_limit: int = 40
-    #: The similarity a *measured* candidate must reach to be recalled.  The
-    #: keyword leg is exempt: it has no similarity to measure, and an exact match
-    #: is a stronger signal than a cosine neighbourhood.
+    #: The similarity a *measured* candidate must reach to be recalled.  **A
+    #: filter, not an ordering**: a candidate below it is dropped whether or not
+    #: the rest of the ranking would have selected it.  The keyword leg is
+    #: exempt: it has no similarity to measure, and an exact match is a stronger
+    #: signal than a cosine neighbourhood.
     #:
     #: **A cosine floor belongs to the embedding model, not to the design.**
     #: bge-m3 scores unrelated same-domain text near 0.5 on the project's own
@@ -1518,11 +1522,17 @@ class ContextSettings:
     #: this only shapes the pool it sees.
     keyword_weight: float = 1.0
     #: The cross-encoder score a candidate must reach to stay in the selection,
-    #: in 0–1.  `0.0` keeps whatever the reranker returned (it still reorders).
-    #: The scale belongs to the reranker, so calibrate it like `min_similarity`
-    #: rather than copying a number from another model.  Every candidate in the
-    #: pool (`recall_limit`) is reranked, so a hit RRF put low is still judged.
-    rerank_min_score: float = 0.0
+    #: in 0–1.  **A filter, not an ordering**: what the ranker returned below it
+    #: is dropped; its order is used only by the count cut and the token budget.
+    #: `0.0` keeps whatever the reranker returned (it still reorders,
+    #: and the order only matters where the token budget cuts); the shipped
+    #: `0.1` drops the incidentals a keyword leg finds — measured at
+    #: 0.0007–0.006 on this project's log — while keeping the real turns
+    #: (0.69–0.81).  The scale belongs to the reranker, so calibrate it like
+    #: `min_similarity` rather than copying a number from another model.  Every
+    #: candidate in the pool (`recall_limit × RECALL_POOL_MULTIPLE`) is
+    #: reranked, so a hit RRF put low is still judged.
+    rerank_min_score: float = 0.1
     #: How long the discriminator call may take before the turn runs on the
     #: context it already has.  Generous for a remote model, because the answer is
     #: optional by design: a slow one only makes the turn late.

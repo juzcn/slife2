@@ -471,7 +471,7 @@ context:
   recall_limit: 40
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
-  rerank_min_score: 0.0      # cross-encoder 的分数下限，0-1；0 表示全保留
+  rerank_min_score: 0.1      # cross-encoder 的分数下限，0-1；0 表示全保留
   timeout: 20.0              # 判别调用的秒数
 
 tool_load:

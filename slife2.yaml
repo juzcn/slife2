@@ -153,9 +153,11 @@ context:
   # Weighted RRF's weight on the keyword leg (the meaning leg is 1.0).  Start
   # equal; lower it only against a labelled set.  0 leaves the leg out.
   keyword_weight: 1.0
-  # The cross-encoder reranks the whole pool (recall_limit) and this is the
-  # score it must reach to stay, 0-1; 0.0 keeps everything it returned.
-  rerank_min_score: 0.0
+  # The cross-encoder reranks a pool wider than the selection
+  # (recall_limit x 2) and this is the score it must reach to stay, 0-1; 0.0
+  # keeps everything it returned.  The shipped 0.1 sits above the incidental
+  # turns keyword hits score (0.001-0.006) and below the real ones (0.69-0.81).
+  rerank_min_score: 0.1
   # Seconds for the discriminator call; past it the turn uses its current
   # context.
   timeout: 20.0
