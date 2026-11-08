@@ -1125,6 +1125,60 @@ def test_cloudflared_keeps_a_working_copy_when_the_refresh_fails(
     assert "STAGED=0" in result.stdout, result.stdout + result.stderr
 
 
+def test_seed_reports_where_the_shipped_configuration_went(tmp_path: Path) -> None:
+    """**The helper's lines are the install's report.**
+
+    `Invoke-Install` is called as `$code = Invoke-Install`, and an assignment
+    captures everything a function writes to the success stream — a native
+    process's stdout included.  The seed report was therefore invisible on
+    Windows: `slife2-default.yaml` appeared in the home with no message.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "slife2.yaml").write_text("providers: {}\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "slife2.yaml").write_text("providers: {live: true}\n", encoding="utf-8")
+
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(POWERSHELL.read_text(encoding="utf-8"), "Seed-Config")
+        + "\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Say([string]$Message) { Write-Host $Message }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        "$script:Mode = 'tool'\n"
+        f"$script:SourceDir = '{source}'\n"
+        f"$script:HomeDir = '{home}'\n"
+        f"$script:Py = '{sys.executable}'\n"
+        f"$script:Helper = '{ROOT / 'scripts' / 'install_helper.py'}'\n"
+        f". '{function_file}'\n"
+        "$captured = Seed-Config\n"
+        'Write-Output ("CAPTURED=" + @($captured).Count)\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "slife2-default.yaml" in result.stdout, result.stdout + result.stderr
+    assert "CAPTURED=0" in result.stdout, result.stdout + result.stderr
+
+
 def _ensure_python_function(path: Path) -> str:
     name = "Ensure-Python" if path.suffix == ".ps1" else "ensure_python"
     pattern = (

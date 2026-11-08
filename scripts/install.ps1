@@ -445,7 +445,14 @@ function Seed-Config {
         & $script:Py $script:Helper seed --source (Join-Path $script:SourceDir 'slife2.yaml') --home $script:HomeDir | Out-Null
     }
     else {
-        & $script:Py $script:Helper seed --source (Join-Path $script:SourceDir 'slife2.yaml') --home $script:HomeDir
+        # **The helper's lines are the install's report, not a return value.**
+        # `Invoke-Install` is called as `$code = Invoke-Install`, and an
+        # assignment captures everything a function writes to the success
+        # stream — a native process's stdout included.  `Say` writes to the
+        # host, so the person sees where the configuration went (and, on an
+        # upgrade, that the shipped copy landed beside it).
+        & $script:Py $script:Helper seed --source (Join-Path $script:SourceDir 'slife2.yaml') --home $script:HomeDir |
+            ForEach-Object { Say $_ }
     }
     if ($LASTEXITCODE -ne 0) { Die 'the configuration could not be prepared' }
 }
