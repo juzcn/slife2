@@ -4000,6 +4000,46 @@ async def test_removing_something_that_is_not_a_subagent_is_refused(
 
 
 @pytest.mark.asyncio
+async def test_removing_a_subagent_mid_turn_is_refused(
+    context, hub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A removal waits for the turn, then refuses rather than deleting under it.**
+
+    The turn holds the conversation's lock and writes its store on the way out.
+    Deleting the directory while it runs lets that write recreate it — with no
+    `subagent.yaml`, so the name is blocked for `subagent_set` and untouchable
+    for `subagent_remove` for ever.  The wait is short: a turn parked on an
+    approval is one to come back to, not to wait out.
+    """
+    monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
+    backend = FakeBackend(
+        text_turn(
+            "slow",
+            chunks=["s", "l", "o", "w"],
+            delay=0.2,  # timeouts: the value this test is built around, not a budget
+        )
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    await set_subagent(server, "researcher")
+    turn = asyncio.create_task(send(server, "one", subagent="researcher"))
+    for _ in range(200):
+        if backend.calls:
+            break
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(ToolError, match="still running a turn"):
+        await remove_subagent(server, "researcher")
+
+    assert subagent_of(DEFAULT_AGENT, "researcher").exists(), "nothing was deleted"
+    await turn
+    done = await remove_subagent(server, "researcher")
+    assert done.data["removed"] is True
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+
+@pytest.mark.asyncio
 async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> None:
     """What a subagent owns, it owns: its conversation is written, and to itself.
 

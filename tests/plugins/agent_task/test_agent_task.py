@@ -36,7 +36,14 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from fakes import FakeBackend, StubEmbedder, a_home, plugin_transports, text_turn
+from fakes import (
+    FakeBackend,
+    ScriptedTurn,
+    StubEmbedder,
+    a_home,
+    plugin_transports,
+    text_turn,
+)
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -45,6 +52,8 @@ from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
 from slife2.libs.plugin.audience import client_meta, for_the_model
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
+from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.tools import CHECK_NEW_INPUT
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -398,16 +407,52 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     assert DESCRIPTION in opening
     assert "nobody can answer a question" in opening
 
-    # **The hub's own list, unfiltered** — compared against what the hub
-    # advertises rather than against two names, because the claim is that there
-    # is no per-caller tool set here: a task gets what is loaded, exactly as its
-    # agent does, which is what makes starting a task from inside one possible
-    # rather than forbidden.
+    # **The hub's own list, by name** — compared against what the hub
+    # advertises rather than against two names, because there is no per-caller
+    # *tool set* here: a task gets the names its agent does, which is what makes
+    # starting a task from inside one possible rather than forbidden.  The two
+    # that act on a live conversation keep their declarations but are backed by
+    # a refusal (`LIVE_CONVERSATION_TOOLS`).
     from slife2.clients.toolclient import remote_tools
 
     assert {spec.name for spec in built.backend.calls[0][1]} == {
         tool.spec.name for tool in await remote_tools(hub)
     }
+
+
+async def test_a_task_cannot_take_the_live_conversations_cut_in(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """**The identity is shared; the live loop is not.**
+
+    A task runs as the agent, so the agent server cannot tell a task's
+    `_check_new_input` call from the main conversation's.  The task server keeps
+    the hub's declaration but backs it with a refusal: the call must not pop a
+    queued message out of the main loop's inbox and hand it to this task's
+    model — the peer the message was from would be answered by a turn that never
+    saw it, and its line would be marked drawn.
+    """
+    calling = ScriptedTurn(
+        result=StreamChatResult(
+            text="",
+            usage=Usage(),
+            tool_calls=(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),),
+            stop_reason="tool_calls",
+        )
+    )
+    built = build(
+        calling, text_turn("done"), hub=hub, context=store, window=window
+    )
+
+    await start(built)
+    await settle(built)
+
+    results = [
+        str(message.content)
+        for message in built.messages()
+        if getattr(message, "role", "") == "tool"
+    ]
+    assert any("not available in an agent task" in text for text in results), results
 
 
 async def test_the_context_is_rebuilt_exactly_once(

@@ -3804,6 +3804,51 @@ async def test_a_verdict_is_written_into_every_homes_catalogue(
 
 
 @pytest.mark.asyncio
+async def test_a_homes_disabled_switch_is_not_written_into_another_home(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**`enabled: false` is one home's config, not a verdict about the machine.**
+
+    Fanned out, it made a source permanently `disabled` in a home whose own
+    file said the source was on — `set_source_state` never overwrites
+    `disabled`, so only that home's next merge (a re-enable, in the other
+    direction) undid it, and the two homes oscillated on every refresh.  The
+    declaring home records its own switch; every other home keeps its own.
+    """
+    from slife2.plugins.toolhub.server import Catalogue
+
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+
+    async def open_store() -> ToolStore:
+        return ToolStore(catalogue_db(), threshold=100)
+
+    async def embedder() -> Any:
+        return StubEmbedder()
+
+    catalogue = Catalogue(open_store, embedder)
+    rows = [{"name": "serper__search", "description": "Search the web."}]
+    for home in (mine, theirs):
+        with in_home(home):
+            await catalogue.store()
+            await catalogue.merge("serper", "mcp", rows)
+    with in_home(mine):
+        await catalogue.source_state("serper", "disabled", fan_out=False)
+
+    def status(home: Path) -> str:
+        with in_home(home):
+            path = catalogue_db()
+        with sqlite3.connect(path) as connection:
+            row = connection.execute(
+                "SELECT status FROM tool WHERE source_id = ?", ("serper",)
+            ).fetchone()
+        return str(row[0])
+
+    assert status(mine) == "disabled", "the declaring home records its switch"
+    assert status(theirs) == "enabled", "the other home's config said on"
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_tool_says_whether_it_is_a_typo_or_absent() -> None:
     """**The two cases have different next steps**, so one hint cannot serve
     both: a typo is corrected from the suggestion; an absence is a capability

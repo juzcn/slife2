@@ -183,6 +183,7 @@ from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import render_system_prompt
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import (
+    ATTACH_IMAGE,
     CHECK_NEW_INPUT,
     CatalogueAnswer,
     Tool,
@@ -292,12 +293,13 @@ ConversationKey = tuple[str, str, str]
 #: and the string itself lives in `slife2.libs.turn.tools.CHECK_NEW_INPUT`
 #: because the display that rebuilds a transcript reads it too.
 
-#: The tool an image comes in by.  **The model calls it**, which is the whole
-#: mechanism: somebody writes a path in a sentence and the model attaches it.
-#: A harness-side entry for `@path` markers in the text is deliberately absent —
-#: it saves one model call and costs a second entry point into one behaviour, a
-#: marker syntax every user has to be taught, and an argument only the harness
-#: ever omits.  What is kept is the half that carries the feature.
+#: `ATTACH_IMAGE` — the tool an image comes in by — lives in
+#: `slife2.libs.turn.tools` because the agent *task* server also has to know it.
+#: **The model calls it**, which is the whole mechanism: somebody writes a path
+#: in a sentence and the model attaches it.  A harness-side entry for `@path`
+#: markers in the text is deliberately absent — it saves one model call and
+#: costs a second entry point into one behaviour, a marker syntax every user has
+#: to be taught, and an argument only the harness ever omits.
 #:
 #: **An ordinary tool, not a harness tool.**  Nothing this process's machinery
 #: writes refers to it by name — no pair, no prompt — so it is offered to the
@@ -310,7 +312,6 @@ ConversationKey = tuple[str, str, str]
 #: nothing more; what is stored is the text plus a note naming every file
 #: (`slife2.libs.turn.attachments.image_note`), which is also what the repair below leaves
 #: when a provider refuses the picture.
-ATTACH_IMAGE = "attach_image"
 
 #: What that tool answers when there is nothing to hand over — an empty queue, or
 #: a head that carries images and so cannot ride a tool result.  A sentence and
@@ -722,6 +723,14 @@ class Loop:
     #: write the turn's footnote in the same step that claims its id
     #: (`PendingRecord` says why the two cannot be separated).
     record_pending: PendingRecord | None = None
+    #: **Set when this conversation has been removed.**  A message already
+    #: queued on the loop is waiting for the lock; when it gets in, this is what
+    #: tells it the conversation no longer exists.  Without it that turn would
+    #: run and its save would recreate the directory `subagent_remove` had just
+    #: deleted — and the recreated directory has no `subagent.yaml`, so the name
+    #: is blocked for `subagent_set` and untouchable for `subagent_remove` for
+    #: ever.
+    removed: bool = False
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
     #: conversation whose model is later edited out of the config still runs: the
@@ -3740,6 +3749,17 @@ def build_server(
         turn_id: int | None = None
         try:
             async with loop.lock:
+                # **A message queued behind a removal does not run.**  It
+                # appended itself to this loop's inbox before waiting, so the
+                # check has to come after the lock is in hand; the `finally`
+                # below takes the entry out again.  Running it would save a turn
+                # under a subagent whose directory has been deleted, recreating
+                # it without a record.
+                if loop.removed:
+                    raise ToolError(
+                        f"{describe((agent, subagent))} was removed; this message "
+                        f"was not delivered."
+                    )
                 # **The previous turn's record is taken up before this caller is
                 # told anything.**  A message folded into that turn was answered
                 # by it only if its row landed; a refused write is rolled back
@@ -4493,7 +4513,49 @@ def build_server(
         # its way out, and on Windows the asking is not free: opening a store
         # that does not exist *creates* it, and the handle that created it can
         # hold the file against the `rmtree` that follows.
-        loops.pop(client_key(maker, directory.name), None)
+        # **The conversation is stopped before the files are taken.**  A turn
+        # holding the lock is waited for (bounded), a record it detached is
+        # awaited, and the loop is marked removed before it is dropped — so a
+        # message already queued behind the lock cannot run and save a turn into
+        # the directory after the delete, recreating it without a record.
+        key = client_key(maker, directory.name)
+        loop = loops.get(key)
+        if loop is not None:
+            try:
+                async with asyncio.timeout(_T.timeouts.grace.turn):
+                    await loop.lock.acquire()
+            except TimeoutError:
+                raise ToolError(
+                    f"{directory.name!r} is still running a turn; stop it or "
+                    f"wait for it, then remove it again — removing it now would "
+                    f"let that turn write the directory back."
+                ) from None
+            try:
+                if loops.get(key) is not loop:
+                    raise ToolError(
+                        f"{directory.name!r} changed while it was being removed; "
+                        f"try again."
+                    )
+                pending = loop.record_pending
+                if pending is not None:
+                    # **The detached write is not under the lock.**  It is a
+                    # cancelled turn's record already on its way to the context
+                    # store; letting the tree go before it lands recreates the
+                    # directory.  A refused write has nothing more to wait for.
+                    try:
+                        async with asyncio.timeout(_T.timeouts.grace.drain):
+                            await asyncio.shield(pending.written)
+                    except TimeoutError:
+                        raise ToolError(
+                            f"{directory.name!r} is still recording its last "
+                            f"turn; try again in a moment."
+                        ) from None
+                    except Exception:  # noqa: BLE001 — a refused write writes nothing
+                        pass
+                loop.removed = True
+                loops.pop(key, None)
+            finally:
+                loop.lock.release()
         # The retry loop sleeps up to `storage.sqlite_busy` between attempts;
         # on the event loop that stalls every turn, stream and approval in this
         # shared server, so the whole removal runs on a thread.

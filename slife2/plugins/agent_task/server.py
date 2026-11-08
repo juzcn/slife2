@@ -103,9 +103,17 @@ from slife2.libs.plugin.protocol import (
 )
 from slife2.libs.turn.context import context_usage, turn_prompt_note, with_lead
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
-from slife2.libs.turn.messages import Message
+from slife2.libs.turn.messages import Message, ToolSpec
 from slife2.libs.turn.prompt import render_instruction, render_system_prompt
-from slife2.libs.turn.tools import CatalogueAnswer, Tool, ToolRegistry
+from slife2.libs.turn.tools import (
+    ATTACH_IMAGE,
+    CATALOGUE_MISSING,
+    CHECK_NEW_INPUT,
+    CatalogueAnswer,
+    Tool,
+    ToolFailed,
+    ToolRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +122,16 @@ SERVER_NAME = AGENT_TASK_SERVER_NAME
 #: This server's key in the config's `servers:` table, and the name of the
 #: section that holds its one number.
 CONFIG_KEY = "agent-task"
+
+#: **The two tools a task's model must not have.**  They act on a *live*
+#: conversation: `_check_new_input` pops a queued message out of the running
+#: loop's inbox and hands it to whoever called, and `attach_image` injects parts
+#: into that loop's last user message.  A task shares the agent's identity by
+#: design — same context, same store, same tools — but it is not that live loop,
+#: and the shared identity is exactly what makes the two indistinguishable at
+#: the agent server.  So they are withheld here, and a by-name call is answered
+#: "not here" instead of stealing the main conversation's message or image.
+LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
 
 #: The four tools, named once.  They are the whole surface, and the vocabulary
 #: they share is one: `agent_task_cancel` answers with the same `status` field
@@ -482,28 +500,72 @@ def build_server(
         reads the agent's own — which is the same fact as the key being the
         agent's, seen from the tool side.
 
-        **The hub's whole list, unfiltered.**  A loop's capability is not a
-        reason to special-case the catalogue: this loop has no `_async` (see
-        below), so it will never hand the model a task id, but `check_async` and
+        **The hub's whole list, by name.**  A loop's capability is not a reason
+        to special-case the catalogue: this loop has no `_async` (see below), so
+        it will never hand the model a task id, but `check_async` and
         `cancel_async` are model tools like every other and arrive in the list
-        the hub advertises.
+        the hub advertises.  The one exception is the two tools that act on a
+        *live* conversation (`LIVE_CONVERSATION_TOOLS`): their declarations stay
+        — dropping a name a model already knows sends it through
+        `tool_search`/`func_tool_load` for ever — but the function behind each is
+        a refusal, because this loop is not the conversation they mutate.
         """
+
+        def refused(name: str):
+            """The declaration a withheld tool keeps, backed by a refusal."""
+
+            async def run(_arguments: dict[str, Any]) -> str:
+                raise ToolFailed(
+                    f"{name} is not available in an agent task: it acts on the "
+                    f"agent's live conversation, and this task is not that "
+                    f"conversation. Say what you need in your answer instead."
+                )
+
+            return run
+
+        def withheld(name: str) -> Tool:
+            """A stub for a by-name call the hub's list did not carry."""
+            return Tool(
+                spec=ToolSpec(
+                    name=name, description="", parameters={"type": "object"}
+                ),
+                run=refused(name),
+            )
 
         async def catalogue_has(name: str) -> CatalogueAnswer:
             """What the catalogue says about a name outside this request's list."""
+            if name in LIVE_CONVERSATION_TOOLS:
+                # A task has no live conversation for these to act on; the
+                # catalogue has them for the agent, not for this model.
+                return CATALOGUE_MISSING
             return (await tool_lookup(await hub(), name, task.identity)).answer
 
         async def catalogue_acquire(
             name: str, arguments: dict[str, Any]
         ) -> Tool | None:
             """The same name, made runnable when the call fits its current schema."""
+            if name in LIVE_CONVERSATION_TOOLS:
+                # **A by-name call is refused, not acquired.**  The registry
+                # would otherwise fetch the real tool from the hub and run it —
+                # the exact action this whole guard exists to prevent.
+                return withheld(name)
             return await acquire_tool(await hub(), name, arguments, task.identity)
 
-        return ToolRegistry(
-            await remote_tools(await hub(), task.identity),
-            exists=catalogue_has,
-            acquire=catalogue_acquire,
-        )
+        # **The declaration stays, the behaviour goes.**  The hub advertises
+        # these two to every model, and dropping them here would send a model
+        # that knows their names through `tool_search`/`func_tool_load` in a
+        # loop that can never load them.  A stub keeps the list the hub's own —
+        # and makes the call a refusal the model reads, rather than an action on
+        # somebody else's inbox.
+        tools = [
+            (
+                tool
+                if tool.spec.name not in LIVE_CONVERSATION_TOOLS
+                else Tool(spec=tool.spec, run=refused(tool.spec.name))
+            )
+            for tool in await remote_tools(await hub(), task.identity)
+        ]
+        return ToolRegistry(tools, exists=catalogue_has, acquire=catalogue_acquire)
 
     async def model_for(task: AgentTask) -> LLMBackend:
         """A model backend bound to the agent, opened on first use.

@@ -90,9 +90,11 @@ from slife2.plugins.a2a.mesh import (
     _backoff_delay,
     _card_instance,
     _decode_payload,
+    _NotConnected,
     _OutboundSend,
     _presence_status,
     _reply_state,
+    _Route,
     format_presence_line,
     safe_name,
 )
@@ -386,7 +388,7 @@ async def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> N
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     corr = "corr-pruned"
     send = _OutboundSend(TASK, PEER, "session", "{}")
-    mesh._corr_to_task[corr] = (TASK, send.round)
+    mesh._corr_to_task[corr] = _Route(TASK, send.round, send.agent, "task")
     mesh._sends[TASK] = send
     assert get_store().get(TASK) is None, "the state this test is about"
 
@@ -411,6 +413,44 @@ async def test_a_reply_for_a_pruned_task_is_delivered_rather_than_dropped() -> N
     task_id, _result, outcome, agent, kind = done[0]
     assert (task_id, outcome, agent, kind) == (TASK, COMPLETED, PEER, "task")
     assert TASK not in mesh._sends, "and the send is finished either way"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_reply_outliving_both_caches_is_still_delivered() -> None:
+    """**The route outlives the send cache and the record store, and carries
+    the peer with it.**
+
+    The correlation table is sized for every round of every tracked send, so a
+    terminal can arrive after both the 500-send cache and the 500-record store
+    have pruned its task.  The branch used to log and drop it; the agent and
+    kind now ride the route, so the conversation still gets the line and knows
+    whose answer it is.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    corr = "corr-outlived"
+    mesh._corr_to_task[corr] = _Route(TASK, 1, PEER, "task")
+    assert mesh._sends.get(TASK) is None
+    assert get_store().get(TASK) is None
+
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+    mesh._handle_reply(
+        FakeMessage(
+            "a2a/v1/agents/jack",
+            json.dumps(
+                {
+                    "result": {
+                        "statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED"}}
+                    }
+                }
+            ).encode(),
+            corr=corr,
+        )
+    )
+
+    assert done, "the peer's terminal reached nobody"
+    task_id, _result, outcome, agent, kind = done[0]
+    assert (task_id, outcome, agent, kind) == (TASK, COMPLETED, PEER, "task")
 
 
 def test_the_retry_ladder_is_the_profiles_own_numbers() -> None:
@@ -1285,7 +1325,7 @@ async def test_a_first_publish_that_fails_does_not_start_the_ladder(
     """
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     published: list[tuple] = []
-    failures = [RuntimeError("A2A mesh is not connected.")]
+    failures = [_NotConnected("A2A mesh is not connected.")]
 
     async def publish(*args, **kwargs) -> None:
         published.append(args)
@@ -1295,11 +1335,47 @@ async def test_a_first_publish_that_fails_does_not_start_the_ladder(
     monkeypatch.setattr(mesh, "_publish_props", publish)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
 
-    with pytest.raises(RuntimeError, match="not connected"):
+    with pytest.raises(_NotConnected, match="not connected"):
         await mesh.send_message(PEER, "hi")
 
     await asyncio.sleep(0.05)
     assert len(published) == 1, "the failed send was retried in the background"
+
+
+@pytest.mark.asyncio
+async def test_a_publish_that_may_have_left_hands_the_id_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A publish that raised after the client was touched is not "never sent".**
+
+    aiomqtt waits for the packet (and a qos=1 PUBACK), so a timeout or a client
+    error there means the broker may hold the request.  The ladder retries it
+    under the same task id — the peer dedups one id — so the caller gets the id
+    and reports `unverified`, the row stays pending, and the route stays open
+    for the peer's real terminal.  Forgetting the send here would lose that
+    answer and invite a second execution under a new id.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+        if len(published) == 1:
+            raise RuntimeError("PUBACK not received")
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
+    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+
+    task_id = await mesh.send_message(PEER, "hi")
+
+    assert task_id, "an ambiguous first publish still names the task"
+    assert get_store().get(task_id) is not None
+    assert get_store().get(task_id).status == "pending"
+    await asyncio.sleep(0.05)
+    assert len(published) >= 2, "the ladder retried under the same task id"
+    assert mesh._sends.get(task_id) is not None, "the route is still open"
+    await mesh.disconnect()
 
 
 @pytest.mark.asyncio
@@ -1362,7 +1438,10 @@ async def test_a_cancelled_first_publish_keeps_the_route_for_a_late_reply(
 
     ((task_id, send),) = list(mesh._sends.items())
     assert get_store().get(task_id).status == "pending"
-    assert (task_id, send.round) in mesh._corr_to_task.values()
+    assert any(
+        route.task_id == task_id and route.round == send.round
+        for route in mesh._corr_to_task.values()
+    )
     await until(lambda: not send.loops, "the ladder was left waiting")
     await mesh.disconnect()
 
@@ -1540,15 +1619,16 @@ async def test_a_reconnect_does_not_destroy_a_send_still_on_the_ladder(
     # a reconnect must not forget.
     send.delivered = True
     mesh._sends[send.task_id] = send
-    mesh._corr_to_task["corr-over-reconnect"] = (send.task_id, send.round)
+    mesh._corr_to_task["corr-over-reconnect"] = _Route(
+        send.task_id, send.round, send.agent, "task"
+    )
 
     with pytest.raises(RuntimeError, match="holds the name"):
         await mesh.connect()
 
     assert send.task_id in mesh._sends, "the reviving teardown dropped the send"
-    assert mesh._corr_to_task.get("corr-over-reconnect") == (
-        send.task_id,
-        send.round,
+    assert mesh._corr_to_task.get("corr-over-reconnect") == _Route(
+        send.task_id, send.round, send.agent, "task"
     ), "and its reply can no longer route"
 
 

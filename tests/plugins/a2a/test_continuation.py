@@ -26,6 +26,7 @@ from slife2.plugins.a2a.mesh import (
     INPUT_REQUIRED,
     REJECTED,
     A2AMesh,
+    _NotConnected,
 )
 from slife2.plugins.a2a.task_store import TaskStore, get_store
 
@@ -132,7 +133,7 @@ def _error(corr: str, code: int, text: str) -> SimpleNamespace:
 
 def _corr(mesh: A2AMesh, task_id: str, round_no: int) -> str:
     for corr, route in mesh._corr_to_task.items():
-        if route == (task_id, round_no):
+        if route.task_id == task_id and route.round == round_no:
             return corr
     raise AssertionError(f"no correlation for {task_id} round {round_no}")
 
@@ -234,10 +235,13 @@ async def test_a_continuation_that_never_lands_restores_the_pause(
     m._handle_reply(_interrupted(_corr(m, task_id, 1), "简体还是繁体?"))
 
     async def a_link_that_is_down(send: Any, corr: str) -> None:
-        raise RuntimeError("A2A mesh is not connected.")
+        # The real refusal, not a bare RuntimeError: only "the client was never
+        # touched" forgets the send.  A generic publish error is ambiguous and
+        # is retried by the ladder (`_begin_send`).
+        raise _NotConnected("A2A mesh is not connected.")
 
     monkeypatch.setattr(m, "_publish_attempt", a_link_that_is_down)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_NotConnected):
         await m.continue_task("bob", task_id, "简体")
 
     assert get_store().get(task_id).status == "interrupted"

@@ -203,6 +203,13 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 
+#: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT`
+#: because a second party has to know which tools act on a *live* conversation:
+#: the agent task server withholds both from its model (`LIVE_CONVERSATION_TOOLS`
+#: there), and a rename on one side must not leave the other offering a name
+#: that now reaches a different tool.
+ATTACH_IMAGE = "attach_image"
+
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut
 #: short with it (`AgentLoop.run_turn`), and a rebuilt list repairs an orphaned

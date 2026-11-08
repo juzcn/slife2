@@ -857,6 +857,21 @@ def start_lock(url: str, *, timeout: float | None = None) -> Generator[None]:
 
 
 @contextlib.contextmanager
+def record_lock(url: str, *, timeout: float | None = None) -> Generator[None]:
+    """Hold the exclusive right to claim the endpoint's serve record.
+
+    **A second lock, not `start_lock`.**  The launcher holds `start_lock` while
+    it waits for the server it spawned to become ready, and the server itself
+    claims its record at start-up — the same lock would deadlock it against its
+    own launcher.  This one is held only for the check-and-write, which is the
+    window two simultaneous starts raced through: both read "no owner", both
+    wrote, and the loser's cleanup deleted the winner's record.
+    """
+    with exclusive(f"record-{endpoint_key(url)}", timeout=timeout):
+        yield
+
+
+@contextlib.contextmanager
 def _windows_mutex(key: str, timeout: float):
     import ctypes
 

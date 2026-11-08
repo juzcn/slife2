@@ -159,6 +159,10 @@ class Grace:
     drain: float = 5.0
     #: How long one attempt at a lock waits before giving up.
     lock: float = 30.0
+    #: How long `subagent_remove` waits for the target conversation's turn to
+    #: release its lock before refusing.  Short: a turn parked on an approval
+    #: is one to come back to, not to wait out inside a model's tool call.
+    turn: float = 2.0
 
 
 @dataclass

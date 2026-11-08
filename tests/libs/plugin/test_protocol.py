@@ -576,8 +576,9 @@ def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
     )
     write_record(live)
 
-    with pytest.raises(OSError):
-        serve_once()
+    # `RefusingMCP.run` raises, so returning is the proof the newcomer never
+    # tried to bind: a live owner means that process is serving, not this one.
+    serve_once()
 
     assert read_record(URL) == live, "the running server's record is not ours"
 
@@ -673,6 +674,38 @@ def test_the_root_handler_carries_the_shutdown_filter() -> None:
         )
     finally:
         handler.close()
+
+
+def test_the_record_claim_is_one_locked_step() -> None:
+    """The check and the write are serialized by `record_lock`.
+
+    Two instances starting together both read "no owner" and both wrote; the
+    loser then deleted the record it had overwritten.  The lock is the separate
+    one (`record_lock`), because the launcher holds `start_lock` while it waits
+    for this process to become ready.
+    """
+    import threading
+
+    import slife2.libs.host.runtime as runtime
+
+    held = threading.Event()
+    released = threading.Event()
+
+    def holder() -> None:
+        with runtime.record_lock(URL):
+            held.set()
+            released.wait(5)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert held.wait(5)
+        with pytest.raises(TimeoutError):
+            with runtime.record_lock(URL, timeout=0.05):
+                pass
+    finally:
+        released.set()
+        thread.join(5)
 
 
 def test_a_server_that_never_served_takes_its_own_record_back() -> None:

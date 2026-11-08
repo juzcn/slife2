@@ -310,6 +310,24 @@ def _decode_payload(msg) -> dict | None:
         return None
 
 
+@dataclass(frozen=True)
+class _Route:
+    """What one correlation addresses: the task, its round, and who it is with.
+
+    **`agent` and `kind` live on the route because the route outlives both the
+    send cache and the task store's record cap.**  The corr table is sized for
+    every round of every tracked send (four times the send cap), so a terminal
+    can arrive when the send and the row are both gone; without its peer and
+    kind the conversation cannot be told which task the answer is about, and
+    the reply was dropped with only a log line.
+    """
+
+    task_id: str
+    round: int
+    agent: str = ""
+    kind: str = "task"
+
+
 class _OutboundSend:
     """One outbound message being delivered with the requester retry profile."""
 
@@ -1334,7 +1352,7 @@ class A2AMesh:
             # A reply for an unknown/expired send — nothing to route.
             logger.debug("a2a_reply_unknown_corr corr=%s", corr)
             return
-        task_id, round_no = route
+        task_id, round_no = route.task_id, route.round
         send = self._sends.get(task_id)
         if send is not None and send.round != round_no:
             # A late reply from an interrupted round; the continuation that
@@ -1355,7 +1373,7 @@ class A2AMesh:
         # working status update gets, so the raw shape is the discriminator.
         result_obj = data.get("result") if isinstance(data, dict) else None
         if isinstance(result_obj, dict) and isinstance(result_obj.get("message"), dict):
-            self._settle_direct_message(send, task_id, str(content))
+            self._settle_direct_message(send, task_id, str(content), route)
             self._forget_send(task_id)
             return
 
@@ -1383,15 +1401,19 @@ class A2AMesh:
         if kind == REPLY_ERROR:
             result = _error_summary(data, result)
         if state in (INPUT_REQUIRED, AUTH_REQUIRED):
-            self._interrupted(send, task_id, round_no, state, result)
+            self._interrupted(send, task_id, round_no, state, result, route)
             return
-        self._settle_terminal(send, task_id, state, result)
+        self._settle_terminal(send, task_id, state, result, route)
         # Terminal reply → the send is finished; drop its delivery tracking and
         # every routing entry for every round of this task.
         self._forget_send(task_id)
 
     def _settle_direct_message(
-        self, send: _OutboundSend | None, task_id: str, text: str
+        self,
+        send: _OutboundSend | None,
+        task_id: str,
+        text: str,
+        route: _Route | None = None,
     ) -> None:
         """A standalone Message settled a send that expected a task."""
         self._disarm_watchdog(send)
@@ -1412,6 +1434,12 @@ class A2AMesh:
             self.on_task_completion(task_id, text, COMPLETED, send.agent, kind)
         elif record is not None:
             self.on_task_completion(task_id, text, COMPLETED, record.agent_name, "task")
+        elif route is not None and route.agent:
+            # Both caches pruned; the route is what still knows whose answer it
+            # is, and a peer's answer is still an answer.
+            self.on_task_completion(
+                task_id, text, COMPLETED, route.agent, route.kind
+            )
 
     def _settle_terminal(
         self,
@@ -1419,6 +1447,7 @@ class A2AMesh:
         task_id: str,
         state: str,
         result: str,
+        route: _Route | None = None,
     ) -> None:
         self._disarm_watchdog(send)
         record = get_store().get(task_id)
@@ -1450,9 +1479,15 @@ class A2AMesh:
         elif record is not None:
             agent = record.agent_name
             kind = "task"
+        elif route is not None and route.agent:
+            # **Both caches pruned, and the route outlived them.**  The agent and
+            # kind ride the correlation for exactly this: the conversation still
+            # gets the line, addressed by what the route kept.
+            agent, kind = route.agent, route.kind
+            logger.warning(
+                "a2a_reply_without_send_or_record task=%s peer=%s", task_id, agent
+            )
         else:
-            # **Pruned, and a peer's answer is still an answer.**  There is no
-            # row to record against, but the conversation still gets the line.
             logger.warning("a2a_reply_without_record task=%s", task_id)
             return
         self.on_task_completion(task_id, result, state, agent, kind)
@@ -1464,6 +1499,7 @@ class A2AMesh:
         round_no: int,
         state: str,
         question: str,
+        route: _Route | None = None,
     ) -> None:
         """The peer paused the task: keep the send, drop the round's routes."""
         self._disarm_watchdog(send)
@@ -1486,15 +1522,20 @@ class A2AMesh:
             self._forget_round(task_id, round_no)
         else:
             record = get_store().get(task_id)
-            agent = record.agent_name if record is not None else "the peer"
+            if record is not None:
+                agent = record.agent_name
+            elif route is not None and route.agent:
+                agent = route.agent
+            else:
+                agent = "the peer"
         self.on_task_completion(task_id, question, state, agent, "task")
 
     def _forget_round(self, task_id: str, round_no: int) -> None:
         """Drop one round's routes; the send and its context stay."""
         for c in [
             c
-            for c, (tid, r) in self._corr_to_task.items()
-            if tid == task_id and r == round_no
+            for c, route in self._corr_to_task.items()
+            if route.task_id == task_id and route.round == round_no
         ]:
             self._corr_to_task.pop(c, None)
         self._pending.pop((task_id, round_no), None)
@@ -1502,8 +1543,8 @@ class A2AMesh:
     def _forget_rounds_before(self, task_id: str, round_no: int) -> None:
         for c in [
             c
-            for c, (tid, r) in self._corr_to_task.items()
-            if tid == task_id and r < round_no
+            for c, route in self._corr_to_task.items()
+            if route.task_id == task_id and route.round < round_no
         ]:
             self._corr_to_task.pop(c, None)
         for key in [
@@ -1535,7 +1576,12 @@ class A2AMesh:
     async def _get_task(self, send: _OutboundSend, task_id: str, round_no: int) -> None:
         """The profile's follow-up when a stream stalls: ask, do not re-send."""
         correlation = uuid.uuid4().hex
-        self._corr_to_task[correlation] = (task_id, round_no)
+        self._corr_to_task[correlation] = _Route(
+            task_id,
+            round_no,
+            send.agent,
+            "message" if not send.record else "task",
+        )
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, send.session),
             correlation_data=correlation,
@@ -1564,7 +1610,9 @@ class A2AMesh:
         """
         self._disarm_watchdog(self._sends.get(task_id))
         self._sends.pop(task_id, None)
-        for c in [c for c, (tid, _r) in self._corr_to_task.items() if tid == task_id]:
+        for c in [
+            c for c, route in self._corr_to_task.items() if route.task_id == task_id
+        ]:
             self._corr_to_task.pop(c, None)
         for key in [k for k in list(self._pending) if k[0] == task_id]:
             self._pending.pop(key, None)
@@ -1598,7 +1646,12 @@ class A2AMesh:
         # evicted from the capped `_sends` cache, no longer grows the table.
         # The round rides the route: a late terminal from an interrupted round
         # must not settle the continuation that replaced it.
-        self._corr_to_task[corr] = (send.task_id, send.round)
+        self._corr_to_task[corr] = _Route(
+            send.task_id,
+            send.round,
+            send.agent,
+            "message" if not send.record else "task",
+        )
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, send.session),
             correlation_data=corr,
@@ -1869,7 +1922,9 @@ class A2AMesh:
             # the true outcome.
             loop.cancel()
             raise
-        except Exception:  # noqa: BLE001 - the cleanup is the point; the caller sees the cause
+        except _NotConnected:
+            # `_publish_attempt` popped the correlation: the client was never
+            # touched, so no peer can answer on it and the send is forgotten.
             loop.cancel()
             if restore is not None:
                 send.interrupt, send.question = restore
@@ -1884,6 +1939,24 @@ class A2AMesh:
                 if send.record and current is not None and current.status == PENDING:
                     get_store().record_error(send.task_id)
             raise
+        except Exception as exc:  # noqa: BLE001 - ambiguous by construction
+            # **A publish that raised after the client was touched is not
+            # "never left".**  aiomqtt waits for the packet (and a qos=1
+            # PUBACK), so a timeout or a client error there means the broker
+            # may hold the request — and the ladder is safe to retry it under
+            # the same task id, because the peer dedups one id.  So the send,
+            # its route and the row stay; the ladder runs; the caller gets the
+            # id and reports `unverified`, which is the async profile's own
+            # answer.  What must not happen is forgetting the send and failing
+            # the row while the peer may already be working.
+            logger.warning(
+                "a2a_first_publish_unverified task=%s peer=%s err=%s",
+                send.task_id,
+                send.agent,
+                exc,
+            )
+            send.first_landed.set()
+            return
         send.first_landed.set()
 
     async def cancel_task(self, agent: str, task_id: str) -> str:
@@ -1917,9 +1990,13 @@ class A2AMesh:
         # across concurrently in-flight requests on one reply topic, and the
         # original send may still be waiting on its own.
         correlation = uuid.uuid4().hex
-        self._corr_to_task[correlation] = (
+        self._corr_to_task[correlation] = _Route(
             task_id,
             send.round if send is not None else 0,
+            send.agent if send is not None else record.agent_name,
+            # `cancel_task` only reaches a recorded task (`record` was read
+            # above), and the recorded kind is a task.
+            "task",
         )
         props = make_properties(
             response_topic=self._topics.reply(self.agent_name, session),

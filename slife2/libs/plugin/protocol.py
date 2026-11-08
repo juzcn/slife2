@@ -104,6 +104,7 @@ from slife2.libs.host.runtime import (
     clear_record,
     pid_alive,
     read_record,
+    record_lock,
     same_process,
     tcp_listening,
     write_record,
@@ -909,17 +910,14 @@ def serve(
     record that is not its own and refuses rather than talking to a server
     holding somebody else's key.
 
-    **The record is written only for an endpoint nobody live owns, and only the
-    record this process wrote is deleted on the way out.**  The write is before
-    the bind — it has to be, because `mcp.run` binds and then never returns
-    until the server stops — so a second process on a port the shared stack
-    already serves (a hand-started duplicate, which this function's whole design
-    supports) would otherwise replace the *running* server's record with its own
-    on the way in and delete it on the way out: it cannot bind, so it exits, and
-    `slife2 down` then reports "no record; not started by slife2" and leaves the
-    live daemon running.  Both halves are therefore ownership-conditional: a
-    record naming a live process is somebody else's server, and one that is no
-    longer ours to delete is not deleted.
+    **The record is claimed under a lock, and a live owner is left alone.**  The
+    write is before the bind — it has to be, because `mcp.run` binds and then
+    never returns until the server stops — so two instances starting together
+    used to both read "no owner", both write, and the loser delete what it took
+    for its own record: a live daemon with no record `down` could see.  The
+    check and the write are one `record_lock` step now, and a process that finds
+    a live owner does not bind at all; it leaves that record and exits.  The
+    record this process wrote is the only one its `finally` clears.
 
     Two options are pinned explicitly even where they match the default, because
     flipping either is *silent* and a future refactor could do it without
@@ -946,13 +944,22 @@ def serve(
         config=str(config_path) if config_path else "",
         version=__version__,
     )
-    owner = _live_owner(url)
-    if owner is None:
-        write_record(record)
-    else:
-        # Said out loud, because the bind is about to fail and uvicorn's own
-        # error says "address in use" without saying whose: a record naming the
-        # other server is the only place the answer is written down.
+    # **The check and the write are one cross-process step.**  Two instances
+    # starting together both read "no owner" and both wrote; the loser then
+    # failed to bind and its `finally` deleted the winner's record — a live
+    # daemon no `down` could see.  The lock is `record_lock`, not `start_lock`:
+    # the launcher holds that one while it waits for this very process to become
+    # ready.
+    with record_lock(url):
+        owner = _live_owner(url)
+        if owner is None:
+            write_record(record)
+    if owner is not None:
+        # **A live owner is served by that process, so this one does not
+        # bind.**  Said out loud: uvicorn's own "address in use" names no
+        # process, and the record is the only place that answer is written down.
+        # Exiting here also removes the other half of the race — the process
+        # that lost the bind to a peer holding this record must not clear it.
         logger.warning(
             "%s: %s is already serving (recorded for %s, pid %d), so this "
             "instance leaves that record alone",
@@ -961,6 +968,7 @@ def serve(
             owner.name,
             owner.pid,
         )
+        return
     try:
         mcp.run(
             transport="http",

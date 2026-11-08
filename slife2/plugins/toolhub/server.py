@@ -782,7 +782,9 @@ class Catalogue:
         with in_home(key):
             return await self._embedder()
 
-    async def source_state(self, source: str, state: str) -> None:
+    async def source_state(
+        self, source: str, state: str, *, fan_out: bool = True
+    ) -> None:
         """Record the verdict on one source: `enabled`, `error` or `disabled`.
 
         **Written to every open store, and the ambient one first**, exactly as a
@@ -802,9 +804,18 @@ class Catalogue:
         ask itself is for.  The others are the fan-out's, and one whose file will
         not take it keeps the reason for its own `list_tools` rather than
         stopping the rest (`_write`'s rule, and `seed`'s).
+
+        **`disabled` is the exception, and `fan_out=False` is how a caller says
+        it.**  "A server is down" is a fact about the machine; "this entry is
+        switched off" is a fact about one home's `slife2.yaml` — and since the
+        store refuses to overwrite `disabled`, a fan-out made it permanent in
+        homes whose config says the source is on.  The declaring home writes its
+        own verdict; every other home keeps its own.
         """
         here = home_key()
         await off_loop((await self.store()).set_source_state, source, state)
+        if not fan_out:
+            return
         async with self._opening:
             for key, store in list(self._stores.items()):
                 if key == here:
@@ -1629,7 +1640,9 @@ class Upstream:
                 )
                 up, error = False, str(exc)
         if not enabled:
-            await self._catalogue.source_state(name, "disabled")
+            # The switch belongs to the home whose config declared it; the other
+            # homes' rows keep their own state (`Catalogue.source_state`).
+            await self._catalogue.source_state(name, "disabled", fan_out=False)
         elif not up:
             await self._catalogue.source_state(name, "error")
         return DeclaredSource(
