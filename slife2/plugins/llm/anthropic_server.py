@@ -62,6 +62,11 @@ THINKING_BUDGET_SHARE = 0.5
 #: `max_tokens` that cannot hold it leaves no valid budget at all.
 MIN_THINKING_BUDGET = 1024
 
+#: The cache TTL spellings this config takes, and the TTL each sends.
+#: `ephemeral` with no TTL is the API's own default (five minutes), so it is
+#: not listed here.
+_CACHE_TTLS = {"5m": "5m", "1h": "1h"}
+
 
 def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
     """Neutral content — a string or OpenAI content parts — as Anthropic blocks.
@@ -312,6 +317,39 @@ def thinking_parameter(
     return {"type": "enabled", "budget_tokens": budget}
 
 
+def cache_control_parameter(settings: ModelSettings) -> dict[str, Any] | None:
+    """The top-level `cache_control` to send, or None to send none.
+
+    Anthropic's automatic prompt cache: the API marks the last cacheable block
+    in the request and serves that prefix from its cache on the next call.  A
+    conversation here re-sends its history on every turn, so without the field
+    the same prefix is paid for again on each one — the numbers in
+    `server_common`'s usage line are what makes that visible.
+
+    **Opt-in per model.**  A gateway that speaks this wire is not obliged to
+    implement the field, and one that does not answers a request carrying it
+    with a 400.  `ephemeral` asks for the API's default five-minute TTL; `5m`
+    and `1h` say a TTL explicitly; `omit` (or an absent field) sends nothing.
+
+    An unrecognised value is refused, naming it and the spellings this adapter
+    knows — a typo read as "send nothing" would leave the cache off with no
+    word anywhere, the deformation SDD Appendix C names.
+    """
+    match settings.cache_control:
+        case "" | "omit":
+            return None
+        case "ephemeral":
+            return {"type": "ephemeral"}
+        case ttl if ttl in _CACHE_TTLS:
+            return {"type": "ephemeral", "ttl": _CACHE_TTLS[ttl]}
+        case other:
+            raise ValueError(
+                f"{settings.model}: compat.cache_control {other!r} is not a "
+                "spelling this adapter knows — write `ephemeral`, `5m`, `1h` or "
+                "`omit`, or leave the field absent to send nothing."
+            )
+
+
 def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
@@ -362,6 +400,11 @@ def build_request(
         # this endpoint rejects alongside extended thinking — so it is dropped
         # where it is collected rather than sent and refused.
         sampling = {}
+
+    cache_control = cache_control_parameter(settings)
+    if cache_control is not None:
+        request["cache_control"] = cache_control
+
     if sampling:
         request["extra_body"] = sampling
     return request

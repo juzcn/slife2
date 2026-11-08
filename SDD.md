@@ -1141,9 +1141,9 @@ Rules:
 
 The stream assembly is one implementation. A provider difference is
 configuration, not a branch: `thinking`, `reasoning`, `store`, `temperature`,
-`top_p`, `max_tokens`, `stream_usage`, `input` capabilities, and
-`context_window`. Each server sends only what its configuration asked for. A
-value the protocol does not know is refused by name where it is read.
+`top_p`, `max_tokens`, `stream_usage`, `cache_control`, `input` capabilities,
+and `context_window`. Each server sends only what its configuration asked for.
+A value the protocol does not know is refused by name where it is read.
 
 ### 6.4 Provider capability configuration
 
@@ -1156,6 +1156,7 @@ A model entry declares its capabilities in its own configuration row:
 | `reasoning` | Whether the model exposes reasoning. |
 | `compat.thinking` | Provider-specific thinking setting. |
 | `compat.store` | Provider-specific persistence setting. |
+| `compat.cache_control` | Anthropic's top-level automatic prompt cache: `ephemeral`, `5m` or `1h`; absent or `omit` sends nothing. |
 | `max_tokens`, `temperature`, `top_p` | Generation parameters. |
 | `compat.stream_usage` | Whether the provider reports usage in the stream. |
 

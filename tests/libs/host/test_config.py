@@ -371,6 +371,31 @@ providers:
     assert load(path).provider("p").model("m").store is False
 
 
+def test_a_cache_control_setting_reaches_the_anthropic_adapter(tmp_path) -> None:
+    """The switch is carried on the neutral model, like the other compat keys.
+
+    It is opt-in per model because an Anthropic-compatible gateway need not
+    implement the field, so the parser carries the spelling and the adapter
+    decides what to send; an absent value leaves it off.
+    """
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: anthropic-messages
+    base_url: https://example.test
+    models:
+      - model: cached
+        compat: {cache_control: 1h}
+      - model: silent
+""",
+    )
+    provider = load(path).provider("p")
+    assert provider.model("cached").cache_control == "1h"
+    assert provider.model("silent").cache_control == ""
+
+
 def test_a_provider_with_nowhere_to_send_is_refused(tmp_path) -> None:
     """The hole the embedding provider always guarded, closed on the chat side.
 

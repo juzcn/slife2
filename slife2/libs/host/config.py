@@ -1244,6 +1244,15 @@ class ModelSettings:
     #: accept it.  Only the Responses backend reads this; the other two ignore
     #: it.  See `slife2.plugins.llm.openai_responses_server.store_parameter`.
     store: bool | None = None
+    #: `compat.cache_control` — Anthropic's top-level automatic prompt cache:
+    #: `ephemeral` for the API's default 5-minute TTL, `5m`/`1h` to name one.
+    #: Absent or `omit` sends nothing, the rule every other optional field
+    #: follows.  **Opt-in per model** because a gateway that speaks the
+    #: Anthropic wire need not implement the field, and one that does not
+    #: refuses the request with a 400.  Only the Anthropic backend reads it;
+    #: the other two wires have no such parameter.  See
+    #: `slife2.plugins.llm.anthropic_server.cache_control_parameter`.
+    cache_control: str = ""
 
     @property
     def label(self) -> str:
@@ -3825,6 +3834,7 @@ def _model(raw: Any, provider: str) -> ModelSettings:
         thinking=str(compat.get("thinking") or ""),
         stream_usage=str(compat.get("stream_usage") or ""),
         store=store_raw,
+        cache_control=str(compat.get("cache_control") or ""),
     )
 
 

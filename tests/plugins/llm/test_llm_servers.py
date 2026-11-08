@@ -1995,6 +1995,50 @@ def test_anthropic_drops_sampling_when_thinking_is_on() -> None:
     assert "extra_body" not in request, "dropped, not moved to the hatch"
 
 
+def test_anthropic_cache_control_is_opt_in() -> None:
+    """Automatic prefix caching is one top-level field, and only when asked.
+
+    Every call re-sends the conversation, so without the field the same prefix
+    is paid for on every turn.  It stays opt-in because a gateway that speaks
+    this wire need not implement the field, and one that does not answers a
+    request carrying it with a 400.
+    """
+    bare = anthropic_build_request([], [], ModelSettings(model="m"))
+    assert "cache_control" not in bare
+
+    ephemeral = ModelSettings(model="m", cache_control="ephemeral")
+    assert anthropic_build_request([], [], ephemeral)["cache_control"] == {
+        "type": "ephemeral"
+    }
+
+    for ttl in ("5m", "1h"):
+        explicit = ModelSettings(model="m", cache_control=ttl)
+        assert anthropic_build_request([], [], explicit)["cache_control"] == {
+            "type": "ephemeral",
+            "ttl": ttl,
+        }
+
+    omitted = ModelSettings(model="m", cache_control="omit")
+    assert "cache_control" not in anthropic_build_request([], [], omitted)
+
+
+def test_an_unrecognised_cache_control_value_is_refused_not_ignored() -> None:
+    """A typo must not read as "send nothing".
+
+    The field has a closed set of spellings, and an unknown one read as absent
+    would leave the cache off with no word anywhere — the deformation SDD
+    Appendix C names.  The refusal names the value and the spellings this
+    adapter knows.
+    """
+    settings = ModelSettings(model="m", cache_control="ephemerel")
+    with pytest.raises(ValueError) as raised:
+        anthropic_build_request([], [], settings)
+
+    message = str(raised.value)
+    assert "ephemerel" in message, "the value is named"
+    assert "ephemeral" in message and "omit" in message, "and the spellings it knows"
+
+
 def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
     """Every key this module builds is one `messages.create` accepts.
 
@@ -2018,6 +2062,7 @@ def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
         max_tokens=8000,
         reasoning=True,
         thinking="omit",
+        cache_control="1h",
     )
     request = anthropic_build_request(
         [
@@ -2029,7 +2074,9 @@ def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
     )
 
     assert set(request) - accepted == set(), "a key the SDK would refuse"
-    assert {"system", "tools", "extra_body"} <= set(request), "and it is not empty"
+    assert {"system", "tools", "extra_body", "cache_control"} <= set(request), (
+        "and it is not empty"
+    )
 
 
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
