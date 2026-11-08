@@ -359,7 +359,6 @@ rest-api:
     base_url: https://api.github.com
     api_key: ${GITHUB_TOKEN}
     description: GitHub REST API via mcp-openapi-proxy — manage repos, issues, PRs, users, and more.
-    enabled: false
   mcp-registry:
     spec: https://registry.modelcontextprotocol.io/openapi.json
     base_url: https://registry.modelcontextprotocol.io
