@@ -2970,18 +2970,17 @@ def build_server(
 
     @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
     async def attach_image(ctx: Context, sources: list[str]) -> dict[str, Any]:
-        """Add the image parts a vision model reads to the request.
+        """Add image URLs to the LLM call.
 
-        Call this when a message names a picture — a path on this machine, a
-        URL, a `data:` URI — or when the conversation carries an `[Image:…]`
-        reference naming a `key` or `source`; pass that value as a source and
-        the cabinet resolves it.
+        Each source becomes an `image_url` content part on the last user
+        message, so the next LLM call carries the image. Reserved to vision
+        models; any other model is refused.
 
         Args:
-            sources: Paths on this machine — absolute, or relative to your data
-                directory — `http(s)` URLs that serve image bytes, `data:` URIs,
-                or a cabinet key from an `[Image:…]` reference — as many as you
-                need in one call.
+            sources: A local path (absolute, or relative to your data
+                directory), an `http(s)` URL that serves image bytes, a
+                `data:` URI, or the `key` or `source` of an `[Image:…]`
+                reference. Several in one call attach together.
 
         Returns:
             `attached` — the sources the model can now see, named exactly as
