@@ -468,7 +468,7 @@ subagent:
 
 context:
   ceiling: 0.8               # keep + 召回合计顶到的总量上限
-  recall_limit: 40
+  recall_pool_size: 80       # 召回交给 rerank 判定的候选数
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
   rerank_min_score: 0.1      # cross-encoder 的分数下限，0-1；0 表示全保留

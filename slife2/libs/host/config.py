@@ -1499,12 +1499,13 @@ class ContextSettings:
     #: the ceiling leaves it nothing.  There is no separate per-recall floor —
     #: one would give the two halves two budgets for one window.
     ceiling: float = 0.8
-    #: Most turns one recall may select, applied **after** the reranker — which
-    #: sees this many times the store's pool multiple, so its order decides
-    #: membership rather than only the order of an already-selected set.  A cap
-    #: rather than a preference, for the reason `MAX_PAGE` is one: the count is
-    #: what is left to bound a context by when the model's window is undeclared.
-    recall_limit: int = 40
+    #: How many candidates one recall retrieves for its precision stage.  The
+    #: pool is a retrieval width, not a selection: `min_similarity`,
+    #: `rerank_min_score` and the token budget decide membership.  Wide enough
+    #: at the default that a turn the legs ranked low is still judged, and short
+    #: enough that one cross-encoder call over it stays cheap.  The store's page
+    #: bound (`MAX_PAGE`, 200) caps anything larger.
+    recall_pool_size: int = 80
     #: The similarity a *measured* candidate must reach to be recalled.  **A
     #: filter, not an ordering**: a candidate below it is dropped whether or not
     #: the rest of the ranking would have selected it.  The keyword leg is
@@ -1523,15 +1524,15 @@ class ContextSettings:
     keyword_weight: float = 1.0
     #: The cross-encoder score a candidate must reach to stay in the selection,
     #: in 0–1.  **A filter, not an ordering**: what the ranker returned below it
-    #: is dropped; its order is used only by the count cut and the token budget.
-    #: `0.0` keeps whatever the reranker returned (it still reorders,
-    #: and the order only matters where the token budget cuts); the shipped
-    #: `0.1` drops the incidentals a keyword leg finds — measured at
-    #: 0.0007–0.006 on this project's log — while keeping the real turns
-    #: (0.69–0.81).  The scale belongs to the reranker, so calibrate it like
-    #: `min_similarity` rather than copying a number from another model.  Every
-    #: candidate in the pool (`recall_limit × RECALL_POOL_MULTIPLE`) is
-    #: reranked, so a hit RRF put low is still judged.
+    #: is dropped; its order is used only by the token budget.  `0.0` keeps
+    #: whatever the reranker returned (it still reorders, and the order only
+    #: matters where the token budget cuts); the shipped `0.1` drops the
+    #: incidentals a keyword leg finds — measured at 0.0007–0.006 on this
+    #: project's log — while keeping the real turns (0.69–0.81).  The scale
+    #: belongs to the reranker, so calibrate it like `min_similarity` rather
+    #: than copying a number from another model.  Every candidate in the
+    #: configured recall pool (`recall_pool_size`, 80 by default) is reranked,
+    #: so a hit RRF put low is still judged.
     rerank_min_score: float = 0.1
     #: How long the discriminator call may take before the turn runs on the
     #: context it already has.  Generous for a remote model, because the answer is
@@ -3260,10 +3261,11 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     section is the default, as everywhere else; an *explicit* zero is refused
     rather than read as absent, which is `_int_or`'s rule one type over.
 
-    **`floor:` is refused rather than ignored.**  A recall now spends what the
-    kept turns leave below the ceiling, so a file still naming a per-recall floor
-    would load with the key silently dropped — the one failure a config change
-    must not have.
+    **`floor:` and `recall_limit:` are refused rather than ignored.**  A recall
+    now spends what the kept turns leave below the ceiling, and its membership
+    is the two floors plus that budget; a file still naming a per-recall floor
+    or a count cap would load with the key silently dropped — the one failure a
+    config change must not have.
     """
     if raw is None:
         return base
@@ -3273,17 +3275,25 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
             "context.floor is gone: a recall spends what the kept turns leave "
             "below context.ceiling, not a fraction of its own — remove the key"
         )
+    if section.get("recall_limit") is not None:
+        raise ConfigError(
+            "context.recall_limit is gone: the recall's floors and the ceiling's "
+            "token budget decide membership, and the retrieval width is "
+            "context.recall_pool_size — remove the key"
+        )
     ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
     ceiling = base.ceiling if ceiling is None else ceiling
     if not 0 < ceiling <= 1:
         raise ConfigError(
             f"context.ceiling: {ceiling} is not a window fraction (0 < ceiling <= 1)"
         )
-    limit = _int_or(
-        section.get("recall_limit"), base.recall_limit, "context.recall_limit"
+    pool = _int_or(
+        section.get("recall_pool_size"),
+        base.recall_pool_size,
+        "context.recall_pool_size",
     )
-    if limit < 1:
-        raise ConfigError(f"context.recall_limit: {limit} recalls nothing")
+    if pool < 1:
+        raise ConfigError(f"context.recall_pool_size: {pool} recalls nothing")
     timeout = _optional_float(section.get("timeout"), "context.timeout")
     if timeout is not None and timeout <= 0:
         raise ConfigError(
@@ -3314,7 +3324,7 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         )
     return ContextSettings(
         ceiling=ceiling,
-        recall_limit=limit,
+        recall_pool_size=pool,
         min_similarity=base.min_similarity if similarity is None else similarity,
         keyword_weight=base.keyword_weight if weight is None else weight,
         rerank_min_score=(

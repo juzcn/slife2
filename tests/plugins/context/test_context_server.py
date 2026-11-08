@@ -800,19 +800,19 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 
 @pytest.mark.asyncio
 async def test_the_recall_policy_comes_from_the_callers_home() -> None:
-    """The gate and the place count are the caller's `context:`, not the daemon's.
+    """The floors and the budget are the caller's `context:`, not the daemon's.
 
     The same shared process serves every home, and the numbers are sized against
     the window and the model the caller's own config names — so they have to be
     read from the caller's file too.  A daemon started on one home's
-    `recall_limit` must not spend it on another home's recall.
+    `rerank_min_score` must not apply it to another home's recall.
     """
     mine, callers = default_config(), default_config()
-    mine = replace(mine, context=replace(mine.context, recall_limit=1))
-    callers = replace(callers, context=replace(callers.context, recall_limit=2))
+    mine = replace(mine, context=replace(mine.context, rerank_min_score=0.9))
+    callers = replace(callers, context=replace(callers.context, rerank_min_score=0.0))
     server = build_server(
         mine,
-        embedder=EMBEDDER,
+        embedder=RerankingEmbedder(),
         source=lambda: callers,
         ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
     )
@@ -821,7 +821,7 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
         await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
         answer = await _rebuild(client, "")
 
-    assert answer.data["recalled"] == 2, "the caller's two places were spent"
+    assert answer.data["recalled"] == 2, "the caller's floor kept both"
 
 
 def _config_with_window(window: int):
@@ -978,63 +978,40 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_ranker_sees_a_pool_wider_than_the_selection() -> None:
-    """A turn RRF put past `recall_limit` is still judged, and can be selected.
+async def test_a_recall_has_no_count_cap() -> None:
+    """Membership is the floors' and the budget's; no count cuts the selection.
 
-    The target is deliberately last in the fused order: the other turn repeats
-    the query word twice while the target says it once.  A pool exactly
-    `recall_limit` (1) long would hand the ranker only the first turn; the
-    wider pool (2) gives it the target, and the count cap is applied after its
-    order is known.
+    The old `recall_limit` (40) stopped at 40 turns however many had passed the
+    floors.  Every one of these is a genuine match and the window is wide enough
+    for all of them, so all 41 are recalled.
     """
-    base = default_config()
-    config = replace(
-        base,
-        context=replace(base.context, recall_limit=1, rerank_min_score=0.0),
-    )
-    reranker = RerankingEmbedder()
-
     async with Client(
         build_server(
-            config,
-            embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"query": "trump"}}'),
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         ids = await _seed(
-            client,
-            "jack",
-            ("trump trump", "1"),
-            ("trump high", "2"),
+            client, "jack", *[(f"trump {index}", str(index)) for index in range(41)]
         )
         answer = await _rebuild(client, "", turn_ids=[])
 
-    assert ids == [1, 2]
-    assert len(reranker.asked[0][1]) == 2, "the pool is wider than the one place"
-    assert answer.data["turn_ids"] == [2], "the ranker's first choice is selected"
-    assert answer.data["recalled"] == 1
-    # The premise: the old, selection-sized pool could only have returned turn
-    # 1, so the ranker could not have rescued the target.
-    store = TurnStore(agent_dir("jack") / "turns.db")
-    old = await store.recall(query="trump", embedder=reranker, limit=1)
-    assert [turn_id for turn_id, _ in old] == [1]
+    assert len(ids) == 41
+    assert answer.data["recalled"] == 41, "the 41st turn is not cut by a count"
 
 
 @pytest.mark.asyncio
-async def test_the_similarity_floor_backfills_from_the_wider_pool() -> None:
-    """A candidate the floor drops must not consume the only recall place.
+async def test_the_similarity_floor_drops_a_diluted_candidate() -> None:
+    """The floor filters; a candidate above it is recalled wherever it ranks.
 
     Turn 2 is the keyword leg's best — its summary repeats `trump` — but its
     meaning vector is diluted by the other vocabulary words in its reasoning,
-    so its cosine is below the floor.  Turn 1 is the meaning leg's best.  With
-    a pool of one the floor would empty the recall; the wider pool lets turn 1
-    take the place turn 2 could not use.
+    so its cosine is below the floor.  Turn 1 is the meaning leg's best, and
+    the floor leaves it as the only candidate the budget may buy.
     """
     base = default_config()
-    config = replace(
-        base,
-        context=replace(base.context, recall_limit=1, min_similarity=0.52),
-    )
+    config = replace(base, context=replace(base.context, min_similarity=0.52))
 
     async with Client(
         build_server(
@@ -1072,11 +1049,12 @@ async def test_the_similarity_floor_backfills_from_the_wider_pool() -> None:
 
     assert answer.data["turn_ids"] == [1]
     assert answer.data["recalled"] == 1
-    # The premise: the old pool's one place was turn 2, the one the floor drops
-    # — so the recall would have been empty rather than backfilled.
+    # The premise: the fused order puts the floor-dropped turn first, and the
+    # similarity the floor measures is genuinely below it.
     store = TurnStore(agent_dir("jack") / "turns.db")
-    old = await store.recall(query="trump", embedder=EMBEDDER, limit=1)
-    assert [turn_id for turn_id, _ in old] == [2]
+    ranked = await store.recall(query="trump", embedder=EMBEDDER, limit=10)
+    assert [turn_id for turn_id, _ in ranked] == [2, 1]
+    assert ranked[0][1] is not None and ranked[0][1] < 0.52
 
 
 def test_a_long_question_does_not_cut_the_answer_out_of_the_rerank_document() -> None:
@@ -1251,28 +1229,30 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
 
 @pytest.mark.asyncio
 async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
-    """Keep ∪ recall is joined by id, so a kept turn must not spend a recall place.
+    """Keep ∪ recall is joined by id, so a kept turn must not spend the budget.
 
-    `recall_limit` is the place count, and the kept turn ranks first here: with
-    the exclusion the *next* turn comes back, which is the one the decision is
-    actually asking for.  Without it the recall answers with the turn already in
-    hand and the rebuild changes nothing.
+    The kept turn ranks first and is deliberately sized to take the headroom
+    the recall has left, while the turn the decision is actually asking for is
+    a little larger.  Without the exclusion the recall would buy the kept turn
+    again — the union collapses it, nothing changes, and the other turn never
+    fits; with it the budget goes to the turn not already in hand.
     """
-    config = default_config()
-    config = replace(config, context=replace(config.context, recall_limit=1))
+    config = _config_with_window(1000)
+    kept = "工具 工具 " + "word " * 240
+    wanted = "工具 trump " + "word " * 280
     reply = '{"context": [1], "recall": {"query": "工具"}}'
 
     async with Client(
         build_server(config, embedder=EMBEDDER, ask=Replies(reply))
     ) as client:
-        ids = await _seed(client, "jack", ("工具 工具", "1"), ("工具 trump", "2"))
+        ids = await _seed(client, "jack", (kept, "1"), (wanted, "2"))
         answer = await client.call_tool(
             "rebuild",
             {
                 "agent": "jack",
                 "messages": [
                     SYSTEM,
-                    {"role": "user", "content": "工具 工具"},
+                    {"role": "user", "content": kept},
                     {"role": "assistant", "content": "1"},
                 ],
                 "turn_ids": [ids[0]],
@@ -1282,6 +1262,11 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
     assert answer.data["turn_ids"] == ids
     assert answer.data["recalled"] == 1
+    # The premise: the kept turn ranks first, so without the exclusion it would
+    # be the first thing the recall spends the headroom on.
+    store = TurnStore(agent_dir("jack") / "turns.db")
+    ranked = await store.recall(query="工具", embedder=EMBEDDER, limit=10)
+    assert [turn_id for turn_id, _ in ranked] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -1587,10 +1572,11 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
     window from a broken config.
 
     A model the config does not have is a *failure*, not a zero: folding the two
-    together silently dropped the token cap and let a recall spend by count — the
-    overfill the cap exists to stop.  A window nobody *declared* still keeps the
-    count cap; a window that cannot be asked for is loud (SDD Appendix C: a
-    weaker path is not a substitute for a missing capability).
+    together silently dropped the token cap and let a recall spend by retrieval
+    width — the overfill a declared window's budget exists to stop.  A window
+    nobody *declared* still bounds the recall by the pool's width; a window that
+    cannot be asked for is loud (SDD Appendix C: a weaker path is not a
+    substitute for a missing capability).
     """
 
     async with Client(

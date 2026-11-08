@@ -113,18 +113,6 @@ CONFIG_KEY = "context"
 #: rate-limited even when the model is free.
 RERANK_DOC_CHARS = 2000
 
-#: How much wider than the final selection the pool handed to the cross-encoder
-#: is.  RRF is a cheap first pass over an over-fetched pair of legs; the ranker
-#: is the precise one, and it can only judge what it is given.  A pool exactly
-#: `recall_limit` long would leave the ranker only a reorder of the already
-#: selected set — and the rebuilt list is chronological, so that reorder would
-#: have nowhere to show.  Two is the cost/recall compromise: it reaches the
-#: candidates the legs put just past the selection, without doubling the
-#: cross-encoder's document count again (the legs already over-fetch by four).
-#: `page_limit` caps the pool at `MAX_PAGE` when a home raises `recall_limit`
-#: high.
-RECALL_POOL_MULTIPLE = 2
-
 
 def _rerank_text(messages: list[dict[str, Any]]) -> str:
     """The exchange a cross-encoder judges: what was asked and what was answered.
@@ -856,16 +844,17 @@ def build_server(
         Zero when the config does not say, which is a real answer and not a
         missing one: the budget is a fraction of a window, and a window nobody
         declared is a budget nobody can compute.  The caller drops the token cap
-        and keeps the count cap, rather than inventing a number — a guessed
-        window is a context silently sized against a model that is not the one
-        answering.
+        and the configured pool's width is the only bound left, rather than
+        inventing a number — a guessed window is a context silently sized
+        against a model that is not the one answering.
 
         **A model the config cannot resolve is not that answer.**  A broad
         `except` would fold a `ConfigError` in with a declared-absent window, and
         a broken config would silently drop the token cap and let a recall spend
-        by count — the overfill the cap exists to stop.  A window that cannot be
-        *asked for* is a failure, not a zero (SDD Appendix C: a weaker path is
-        not a substitute for a missing capability).
+        by retrieval width instead of by a budget — the overfill a declared
+        window would have stopped.  A window that cannot be *asked for* is a
+        failure, not a zero (SDD Appendix C: a weaker path is not a substitute
+        for a missing capability).
         """
         return int(current().resolve(model)[2].context_window)
 
@@ -963,10 +952,10 @@ def build_server(
         so an empty recall is harmless and only an explicit `"clear"` empties the
         context (`slife2.libs.turn.context` is where that is argued).  What was
         kept is excluded from the recall: the decision's two halves are one
-        answer, and a turn in both would spend a recall place on something the
-        union would collapse anyway.  When the decision asks in sentences, the
-        input is read by meaning beside them, so the model's paraphrase is never
-        the only way the subject is asked for.
+        answer, and a turn in both would spend retrieval depth and budget on
+        something the union would collapse anyway.  When the decision asks in
+        sentences, the input is read by meaning beside them, so the model's
+        paraphrase is never the only way the subject is asked for.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -1158,21 +1147,21 @@ def build_server(
         it: a recall that kept its fused order is a fact the person watching is
         owed, not a fallback to swallow.
 
-        **The recall is a funnel, and every stage after retrieval has the wider
-        set to choose from.**  The store fuses an over-fetched pair of legs;
-        `min_similarity` drops measured noise; the cross-encoder reorders the
-        survivors and may drop those below `rerank_min_score`; **only then**
-        does `recall_limit` cut the selection, and the kept turns' estimated
-        cost is subtracted from `ceiling × window` before the budget spends what
-        is left.  The count cap is last on purpose: a pool exactly
-        `recall_limit` long would let the cheap RRF order decide membership,
-        leaving the ranker only an order the chronological rebuild then
-        discards.
+        **The recall is a funnel, and the floors and the budget decide
+        membership.**  The store fuses an over-fetched pair of legs into the
+        configured pool; `min_similarity` drops measured noise; the
+        cross-encoder reorders the survivors and drops those below
+        `rerank_min_score`; the kept turns' estimated cost is subtracted from
+        `ceiling × window`, and the budget spends what is left.  **No count
+        cuts the selection**: a turn that passed both floors is a turn the
+        budget may buy, and a count applied after the ranker would discard
+        relevant turns on the strength of an order the chronological rebuild
+        does not keep.
 
-        **The pool is wider than the selection.**  `recall_limit ×
-        RECALL_POOL_MULTIPLE` candidates go to the ranker, so a turn the legs
-        put just past the selection is still judged.  The multiple is the cost
-        knob: the whole pool is one cross-encoder call, and a slow or
+        **The pool only bounds what the ranker may see.**  Retrieval hands the
+        cross-encoder `recall_pool_size` candidates, so a turn the legs ranked
+        low is still judged; the width is a retrieval bound, not a place
+        count.  The whole pool is one cross-encoder call, and a slow or
         rate-limited reranker is paid for before every turn.
 
         Every cap here is the caller's and not the store's, for the split of
@@ -1188,10 +1177,9 @@ def build_server(
 
         **What was kept is excluded from what is recalled.**  The two halves are
         joined by id, so a turn in both is one turn; the recall would have spent
-        one of its `recall_limit` places, a distance in the semantic leg's `k`
-        and a share of the budget on a turn the caller already holds.  The
-        exclusion is handed to the store, which can look past those turns for
-        more rather than filtering a short answer here.
+        retrieval depth and a share of the budget on a turn the caller already
+        holds.  The exclusion is handed to the store, which can look past those
+        turns for more rather than filtering a short answer here.
 
         **The person's own words are a question too.**  When the decision asked
         in sentences, the input joins them: the model's sentence is a paraphrase
@@ -1275,19 +1263,18 @@ def build_server(
             # `budget <= 0` exit below rather than by a recall that overfills.
             budget = int(window * policy.ceiling) - base_cost
         else:
-            # No declared window: no token cap, and the count cap is what is
-            # left.  Better a context bounded by count than one sized against a
-            # window nobody stated.
+            # No declared window: no token cap, so the pool's own width is the
+            # only bound left.  Better a context bounded by retrieval width
+            # than one sized against a window nobody stated.
             budget = 0
         if window and budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
             return [], ""
 
-        # The pool is the ranker's, not the selection's: `recall_limit` is
-        # applied after the precision stage below.  `page_limit` is the store's
-        # own page bound, so a home that raises `recall_limit` cannot ask for a
-        # pool larger than one query can answer.
-        pool = page_limit(policy.recall_limit * RECALL_POOL_MULTIPLE)
+        # The pool is the ranker's, and it is a configured retrieval width: no
+        # count cuts the selection afterwards.  The store applies its own page
+        # bound to every query, so a configured width larger than one page is
+        # capped there rather than here.
         ranked = await store.recall(
             query=query,
             sentences=sentences,
@@ -1295,12 +1282,12 @@ def build_server(
             since=since,
             until=until,
             anchor=anchor,
-            limit=pool,
+            limit=policy.recall_pool_size,
             # The keep-list is what is *in hand*, so it is also what a recall
-            # must not spend its places on: the union would collapse a turn in
-            # both, and the slot, the distance and the budget would be gone.
-            # The model's keep is the more accurate half of its decision, which
-            # is exactly why the recall is the half that looks elsewhere.
+            # must not spend retrieval depth or budget on: the union collapses
+            # a turn in both, so retrieving it would spend on something already
+            # held.  The model's keep is the more accurate half of its decision,
+            # which is exactly why the recall is the half that looks elsewhere.
             exclude=base,
             keyword_weight=policy.keyword_weight,
         )
@@ -1323,12 +1310,10 @@ def build_server(
             order, rerank = await _rerank_into(store, order, ask, policy)
             if not order:
                 return [], rerank
-        # **The selection cut, after the precision stage.**  This is where
-        # `recall_limit` becomes a count of turns the turn will run on; before
-        # the rerank it would have been a pool width, and the ranker could only
-        # reorder the already-selected set.  A time-ordered pool is cut here
-        # too, from the end its anchor named.
-        order = order[: policy.recall_limit]
+        # **No count cut.**  What passed the floors is what the budget may buy;
+        # a count here would make membership depend on a rank order the rebuilt
+        # list then discards.  A time-ordered pool is bounded the same way, by
+        # the budget, from the end its anchor named.
         costs = await off_loop(_cost_of, store, order)
         if not window:
             return sorted(order), rerank
@@ -1340,12 +1325,11 @@ def build_server(
     ) -> tuple[list[int], str]:
         """Reorder the pool with the provider's cross-encoder.
 
-        **A precision stage over a pool wider than the selection.**  Retrieval
-        hands it `recall_limit × RECALL_POOL_MULTIPLE` candidates, so a turn
-        the two legs ranked past the selection is still judged; the caller
-        applies `recall_limit` after this returns, which is what lets the
-        ranker's order decide *membership* rather than only an order the
-        chronological rebuild would discard.
+        **A precision stage over the whole retrieved pool.**  Retrieval hands
+        it the configured `recall_pool_size` candidates, so a turn the two legs
+        ranked low is still judged; `rerank_min_score` is the membership
+        decision this stage makes, and its order matters only where the token
+        budget spends down it.
 
         **An unavailable or failing reranker is not a failed recall.**  The
         provider may serve no cross-encoder (`rerank_model` empty), the call may
