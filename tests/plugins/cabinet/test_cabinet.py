@@ -1058,6 +1058,14 @@ async def test_a_saved_file_is_searched_like_a_dump() -> None:
         some = await payload(
             client, "file_grep", path="documents/grep.txt", pattern="line", limit=5
         )
+        after = await payload(
+            client,
+            "file_grep",
+            path="documents/grep.txt",
+            pattern="line",
+            char=some["next"],
+            limit=5,
+        )
         by_char = await payload(
             client,
             "file_read",
@@ -1072,7 +1080,8 @@ async def test_a_saved_file_is_searched_like_a_dump() -> None:
     assert by_char["text"] == "MARKER", "the character address is the match"
     assert some["matched"] == 300
     assert [match["line"] for match in some["matches"]] == [1, 2, 3, 4, 5]
-    assert some["next"] == 6
+    assert some["next"] > some["matches"][-1]["char"], "the address moves on"
+    assert [match["line"] for match in after["matches"]] == [6, 7, 8, 9, 10]
 
 
 @pytest.mark.asyncio
@@ -2088,7 +2097,7 @@ async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -
 
     async with Client(cabinet()) as client:
         all_of_them = await payload(
-            client, "dump_grep", call="call_grep", pattern="marker"
+            client, "dump_grep", call="call_grep", pattern="marker", limit=0
         )
         some = await payload(client, "dump_grep", call="call_grep", pattern="line")
         none = await payload(
@@ -2110,8 +2119,65 @@ async def test_a_pattern_finds_lines_and_counts_them_across_the_whole_output() -
 
 
 @pytest.mark.asyncio
-async def test_a_grep_page_names_the_line_the_next_one_starts_at() -> None:
-    """A match answer pages by match, and `next` resolves to the next match."""
+async def test_a_grep_line_refusal_names_the_character_address() -> None:
+    """A one-line dump has one line address and many match addresses.
+
+    `offset=2` is a line refusal; it has to say that `char` is where matches are
+    addressed, or the caller reads a correct sentence about the wrong axis.
+    """
+    await save_dump("call_line_only", "one line with marker and marker")
+
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError) as refused:
+            await payload(
+                client, "dump_grep", call="call_line_only", pattern="marker", offset=2
+            )
+        with pytest.raises(ToolError) as read_refused:
+            await payload(client, "dump_read", call="call_line_only", offset=2)
+
+    message = str(refused.value)
+    assert "not a line" in message
+    assert "`char`" in message, "the refusal names the match address"
+    assert "`next`" in message
+    assert 'mode="char"' in str(read_refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_search_pages_ten_matches_by_default() -> None:
+    """A high-frequency pattern gets a page, not the whole output.
+
+    `limit` omitted is ten: `matched` says how many there are and `next` is
+    where the rest starts, so a word that appears thousands of times cannot turn
+    one grep into a dump of its own.
+    """
+    await save_dump("call_default_page", dump_body(300))
+
+    async with Client(cabinet()) as client:
+        first = await payload(
+            client, "dump_grep", call="call_default_page", pattern="line"
+        )
+        rest = await payload(
+            client,
+            "dump_grep",
+            call="call_default_page",
+            pattern="line",
+            char=first["next"],
+        )
+
+    assert first["matched"] == 300
+    assert len(first["matches"]) == 10
+    assert [match["line"] for match in first["matches"]] == list(range(1, 11))
+    assert rest["matches"][0]["line"] == 11
+
+
+@pytest.mark.asyncio
+async def test_a_grep_page_names_the_next_match_by_character() -> None:
+    """`next` is the next match's character, and passing it as `char` reads on.
+
+    A line number cannot name which of several matches sharing a line comes
+    next, so the page continues by character — even when every match happens to
+    be on a line of its own.
+    """
     await save_dump("call_page_matches", dump_body(300))
 
     async with Client(cabinet()) as client:
@@ -2123,14 +2189,93 @@ async def test_a_grep_page_names_the_line_the_next_one_starts_at() -> None:
             "dump_grep",
             call="call_page_matches",
             pattern="line",
-            offset=first["next"],
+            char=first["next"],
             limit=5,
         )
 
     assert first["matched"] == 300
     assert [match["line"] for match in first["matches"]] == [1, 2, 3, 4, 5]
-    assert first["next"] == 6
+    assert first["next"] > first["matches"][-1]["char"], "the address moves on"
     assert [match["line"] for match in second["matches"]] == [6, 7, 8, 9, 10]
+
+
+@pytest.mark.asyncio
+async def test_every_occurrence_on_one_line_is_a_match() -> None:
+    """A minified dump is one line, and every hit in it is its own match.
+
+    A scan that answered once per line made every occurrence after the first
+    invisible, and `limit` could not page what the scan never collected.
+    """
+    body = "alpha marker beta marker gamma marker"
+    await save_dump("call_many_matches", body)
+
+    async with Client(cabinet()) as client:
+        all_of_them = await payload(
+            client, "dump_grep", call="call_many_matches", pattern="marker"
+        )
+        first = await payload(
+            client, "dump_grep", call="call_many_matches", pattern="marker", limit=2
+        )
+        rest = await payload(
+            client,
+            "dump_grep",
+            call="call_many_matches",
+            pattern="marker",
+            char=first["next"],
+        )
+
+    assert all_of_them["matched"] == 3
+    assert [match["char"] for match in all_of_them["matches"]] == [
+        body.index("marker"),
+        body.index("marker", 7),
+        body.index("marker", 19),
+    ]
+    assert first["matched"] == 3, "the count is of the whole text, not the page"
+    assert [match["char"] for match in first["matches"]] == [
+        body.index("marker"),
+        body.index("marker", 7),
+    ]
+    assert first["next"] == body.index("marker", 19)
+    assert [match["char"] for match in rest["matches"]] == [body.index("marker", 19)]
+
+
+@pytest.mark.asyncio
+async def test_a_long_line_pages_by_character_after_a_match() -> None:
+    """The user's case: one 120 KB line, two hits, and `limit=1` pages them.
+
+    The window keeps each match small; the character address is what makes the
+    second one reachable at all.
+    """
+    body = "x" * 60000 + " marker " + "y" * 60000 + " marker " + "z" * 100
+    second_at = body.index("marker", 60007)
+    await save_dump("call_long_pages", body)
+
+    async with Client(cabinet()) as client:
+        first = await payload(
+            client, "dump_grep", call="call_long_pages", pattern="marker", limit=1
+        )
+        second = await payload(
+            client,
+            "dump_grep",
+            call="call_long_pages",
+            pattern="marker",
+            char=first["next"],
+            limit=1,
+        )
+        both = await payload(
+            client, "dump_grep", call="call_long_pages", pattern="marker", limit=2
+        )
+
+    assert first["matched"] == 2
+    assert [match["char"] for match in first["matches"]] == [body.index("marker")]
+    assert first["next"] == second_at
+    assert [match["char"] for match in second["matches"]] == [second_at]
+    assert "marker" in second["matches"][0]["text"]
+    assert [match["char"] for match in both["matches"]] == [
+        body.index("marker"),
+        second_at,
+    ], "`limit` is what bounds the page, not the line's size"
+    assert "next" not in both, "both matches fitted, so there is nowhere to read on"
 
 
 @pytest.mark.asyncio
@@ -2138,7 +2283,7 @@ async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> No
     """A match's line can be longer than the whole window.
 
     The two addresses are what let the model read it in character mode, so they
-    stay; the text is cut and the match says so.
+    stay; the text is a window around the match and says so.
     """
     body = "start " + "x" * 60000
     await save_dump("call_long_match", body)
@@ -2152,7 +2297,53 @@ async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> No
     assert found["matched"] == 1
     assert match["line"] == 1 and match["char"] == 0
     assert match["cut"] is True
+    assert match["text_char"] == 0, "the window starts at the line's own start"
+    assert match["text"].startswith("start ")
     assert 0 < len(match["text"]) < len(body)
+    assert len(match["text"]) <= len("start ") + cabinet_server.GREP_AFTER_CHARS
+    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+
+
+@pytest.mark.asyncio
+async def test_a_mid_line_match_gets_a_window_around_it() -> None:
+    """Not the head of the line: the window is where the match is.
+
+    A dump is often one minified record — `tool_list`'s output is a 115 KB
+    single line — so a pattern tens of kilobytes in used to come back with the
+    head, which is the one part that cannot contain the match.  The window
+    carries the match, `text_char` says where it starts, and reading from that
+    address gives the same text back.
+    """
+    body = "x" * 60000 + " marker " + "y" * 60000
+    await save_dump("call_mid_match", body)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_mid_match", pattern="marker"
+        )
+        match = found["matches"][0]
+        window = await payload(
+            client,
+            "dump_read",
+            call="call_mid_match",
+            mode="char",
+            offset=match["text_char"],
+            limit=len(match["text"]),
+        )
+
+    assert found["matched"] == 1
+    assert match["char"] == body.index("marker")
+    assert match["cut"] is True
+    assert "marker" in match["text"], "the window carries what was asked for"
+    assert 0 < match["text_char"] <= match["char"]
+    assert len(
+        match["text"]
+    ) <= cabinet_server.GREP_BEFORE_CHARS + cabinet_server.GREP_AFTER_CHARS + len(
+        "marker"
+    )
+    assert window["text"] == match["text"], (
+        "`text_char` is the address the same window is read back from"
+    )
     assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
 
 

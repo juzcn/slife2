@@ -1145,7 +1145,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         path: str,
         pattern: str,
         offset: int = 1,
-        limit: int = 0,
+        char: int = 0,
+        limit: int = 10,
     ) -> dict[str, Any]:
         """Find text in a saved file.
 
@@ -1153,21 +1154,38 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         every match answers with both addresses — the line and the character
         offset — so either read mode can continue from it.
 
+        A match in a very long line — a minified JSON dump is one line — answers
+        with a short window around the match rather than the line, and
+        `text_char` says where that window starts in the text. `file_read` with
+        `mode="char"` continues from there.
+
+        Every occurrence is a match of its own, including several on one line,
+        so a minified dump is searched in full rather than down to the first
+        hit.
+
         Args:
             path: The saved file's path inside the cabinet.
             pattern: The text to find.
             offset: The first line to search, 1-based; negative counts from the
-                end.
-            limit: The most matches to show. `0` shows as many as fit.
+                end. This is a line address, not a match number: to page
+                matches, use `char`.
+            char: The first character to search, 0-based; negative counts from
+                the end. Omit for the start. A previous answer's `next` goes
+                here to continue.
+            limit: The most matches to show; omit for 10. `0` shows as many as
+                fit.
 
         Returns:
             `lines` and `chars`, how many lines and characters the whole text
-            has; `matched`, how many lines hold the pattern at or after
-            `offset`; `matches`, each with `line`, `char` (the 0-based character
-            offset the match starts at) and `text` (the line; `cut` is true when
-            only the beginning of a very long line fits); `path`, the file
-            relative to the data directory; and `next`, the line of the next
-            match when not all of them are shown.
+            has; `matched`, how many times the pattern occurs at or after the
+            point searched — on a paged call that is what remains from `char`,
+            not the whole text's total; `matches`, each with `line`, `char` (the 0-based
+            character offset the match starts at) and `text` (the line, or a
+            window around the match when the line is longer than that window;
+            `text_char` then names the window's own start and `cut` is true);
+            `path`, the file relative to the data directory; and `next`, the
+            0-based character offset of the next match when not all of them are
+            shown — pass it as `char` to read on.
         """
         target = await file_target(ctx, path)
         return _stream_grep(
@@ -1175,6 +1193,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             pattern,
             where=accessible_path(target),
             offset=offset,
+            char=char,
             limit=limit,
             budget=config.tool_result.tokens,
         )
@@ -1421,7 +1440,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         call: str,
         pattern: str,
         offset: int = 1,
-        limit: int = 0,
+        char: int = 0,
+        limit: int = 10,
     ) -> dict[str, Any]:
         """Find text in a saved tool output.
 
@@ -1432,21 +1452,38 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         within one line; every match answers with both addresses — the line and
         the character offset — so either read mode can continue from it.
 
+        A match in a very long line — a minified JSON dump is one line — answers
+        with a short window around the match rather than the line, and
+        `text_char` says where that window starts in the output. `dump_read`
+        with `mode="char"` continues from there.
+
+        Every occurrence is a match of its own, including several on one line,
+        so a minified dump is searched in full rather than down to the first
+        hit.
+
         Args:
             call: The tool call id, from the marker in the conversation.
             pattern: The text to find.
             offset: The first line to search, 1-based; negative counts from the
-                end.
-            limit: The most matches to show. `0` shows as many as fit.
+                end. This is a line address, not a match number: to page
+                matches, use `char`.
+            char: The first character to search, 0-based; negative counts from
+                the end. Omit for the start. A previous answer's `next` goes
+                here to continue.
+            limit: The most matches to show; omit for 10. `0` shows as many as
+                fit.
 
         Returns:
             `lines` and `chars`, how many lines and characters the whole output
-            has; `matched`, how many lines hold the pattern at or after
-            `offset`; `matches`, each with `line`, `char` (the 0-based character
-            offset the match starts at) and `text` (the line; `cut` is true when
-            only the beginning of a very long line fits); `path`, the file
-            relative to the data directory; and `next`, the line of the next
-            match when not all of them are shown.
+            has; `matched`, how many times the pattern occurs at or after the
+            point searched — on a paged call that is what remains from `char`,
+            not the whole output's total; `matches`, each with `line`, `char` (the 0-based
+            character offset the match starts at) and `text` (the line, or a
+            window around the match when the line is longer than that window;
+            `text_char` then names the window's own start and `cut` is true);
+            `path`, the file relative to the data directory; and `next`, the
+            0-based character offset of the next match when not all of them are
+            shown — pass it as `char` to read on.
         """
         target = await dump_target(ctx, call)
         return _stream_grep(
@@ -1454,6 +1491,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             pattern,
             where=accessible_path(target),
             offset=offset,
+            char=char,
             limit=limit,
             budget=config.tool_result.tokens,
         )
@@ -1794,17 +1832,24 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     return mcp
 
 
-def _line_start(offset: int, total: int) -> int:
+def _line_start(offset: int, total: int, *, hint: str = "") -> int:
     """A 1-based line address, negative counting from the end; always a line.
 
     A negative number is where a log's own summary is, and a reader asking for
     the tail of something it has never read does not know how long it is.
+
+    **`hint` is where a caller's other address is named.**  A one-line dump has
+    one line address and many matches, so `offset=2` is a refusal that used to
+    say only what the line axis holds; the caller that wanted the second match
+    needed to be told the axis that has it (`char` for a grep, the char mode for
+    a read).  The sentence is the caller's because only it knows the name.
     """
     start = offset if offset > 0 else total + offset + 1
     if start < 1 or start > total:
         raise ToolError(
             f"{offset} is not a line of this text: it has {total}, and 1 to "
-            f"{total} (or -1 to -{total}) are the addresses."
+            f"{total} (or -1 to -{total}) are the line addresses."
+            + (f" {hint}" if hint else "")
         )
     return start
 
@@ -1981,9 +2026,15 @@ def _grep_pattern(pattern: str) -> str:
 
 
 def _grep_hits(
-    lines: Iterable[tuple[int, int, str]], wanted: str, start: int
+    lines: Iterable[tuple[int, int, str]], wanted: str, start: int, after: int
 ) -> Iterator[tuple[int, int, str]]:
-    """Every match in *lines* at or after line *start*, with both addresses.
+    """Every occurrence in *lines* at or after line *start* and character *after*.
+
+    **Every occurrence, not the first one in a line.**  A minified JSON dump is
+    one line, so yielding once per line would make every match after the first
+    invisible — and those are most of them.  The caller sees each address and
+    pages by it; the address is the character offset, because a line number
+    cannot say which occurrence on that line.
 
     **The matching is the same for a dump and a file.**  It reads a line source,
     not a body: both readers feed lines as they are read from the file.  The
@@ -1994,9 +2045,13 @@ def _grep_hits(
     for number, offset, line in lines:
         if number < start:
             continue
-        found = line.casefold().find(wanted)
-        if found >= 0:
-            yield number, offset + min(found, len(line)), line
+        folded = line.casefold()
+        found = folded.find(wanted)
+        while found >= 0:
+            at = offset + min(found, len(line))
+            if at >= after:
+                yield number, at, line
+            found = folded.find(wanted, found + len(wanted))
 
 
 def _grep_payload(
@@ -2025,6 +2080,7 @@ def _grep_finalize(
     first_unshown: int | None,
     matched: int,
     *,
+    wanted: str,
     total_lines: int,
     total_chars: int,
     budget: int,
@@ -2033,10 +2089,12 @@ def _grep_finalize(
     """Trim a page until it fits, keeping the address of what it sheds.
 
     **A page that still goes over after the scan is trimmed from its end**, and
-    the line it sheds becomes `next` — so a model that asked for too much gets
-    the start of what it asked for and an address for the rest, never an answer
-    over the budget.  A single match too large for the window keeps its two
-    addresses and loses text, marked `cut`.
+    the match it sheds becomes `next` — a character address, because a line
+    number cannot name the second of two matches sharing a line.  So a model
+    that asked for too much gets the start of what it asked for and an address
+    for the rest, never an answer over the budget.  A single match in a line too
+    long for the window answers with a bounded window around that match, marked
+    `cut` and addressed by `text_char`.
     """
     while True:
         page = _grep_payload(
@@ -2046,15 +2104,17 @@ def _grep_finalize(
             return page
         if len(shown) > 1:
             dropped = shown.pop()
-            first_unshown = dropped["line"]
+            first_unshown = dropped["char"]
             continue
         if len(shown) == 1:
             match = shown[0]
             if not match.get("cut"):
                 match["cut"] = True
-                match["text"] = _fit_match_text(page, match["text"], budget)
+                match["text"], match["text_char"] = _fit_match_text(
+                    page, match["text"], wanted, budget
+                )
                 continue
-            first_unshown = match["line"]
+            first_unshown = match["char"]
             shown.clear()
             continue
         raise ToolError(
@@ -2066,6 +2126,7 @@ def _grep_finalize(
 def _grep_answer(
     hits: Iterable[tuple[int, int, str]],
     *,
+    wanted: str,
     total_lines: int,
     total_chars: int,
     limit: int,
@@ -2080,36 +2141,54 @@ def _grep_answer(
     whole text and the memory held is the page, not the file.
     """
     limit = max(limit, 0)
+    #: The most a match will show: the line when it is short, a window around
+    #: the match when it is not.  Cutting at this size rather than only when the
+    #: page overflows is what lets several matches on one minified line fit
+    #: together (`limit` would otherwise stop at the first 115 KB line).
+    window = GREP_BEFORE_CHARS + len(wanted) + GREP_AFTER_CHARS
     shown: list[dict[str, Any]] = []
     first_unshown: int | None = None
     matched = 0
     full = False
+
+    def page() -> dict[str, Any]:
+        return _grep_payload(total_lines, total_chars, matched, shown, None, where)
+
     for number, at, line in hits:
         matched += 1
         if full or (limit and len(shown) >= limit):
             if first_unshown is None:
-                first_unshown = number
+                first_unshown = at
             continue
         shown.append({"line": number, "char": at, "text": line})
-        if (
-            estimate_text_tokens(
-                _wire(
-                    _grep_payload(total_lines, total_chars, matched, shown, None, where)
+        match = shown[-1]
+        if len(line) > window:
+            try:
+                match["text"], match["text_char"] = _fit_match_text(
+                    page(), line, wanted, budget
                 )
-            )
-            > budget
-        ):
+            except ToolError:
+                # There is no room for even an address on this page; the match
+                # stays counted and its character is where the next page starts.
+                shown.pop()
+                if first_unshown is None:
+                    first_unshown = at
+                full = True
+                continue
+            match["cut"] = True
+        if estimate_text_tokens(_wire(page())) > budget:
             if len(shown) == 1:
                 # Keep the only address there is; the finalizer cuts its text.
                 full = True
             else:
                 shown.pop()
-                first_unshown = number
+                first_unshown = at
                 full = True
     return _grep_finalize(
         shown,
         first_unshown,
         matched,
+        wanted=wanted,
         total_lines=total_lines,
         total_chars=total_chars,
         budget=budget,
@@ -2234,7 +2313,11 @@ def _stream_read(
         return page
     limit = max(limit, 0)
     if wanted == "line":
-        start = _line_start(1 if offset is None else offset, total_lines)
+        start = _line_start(
+            1 if offset is None else offset,
+            total_lines,
+            hint='To address it by character instead, use `mode="char"`.',
+        )
         lines = (
             (number, line_start, text)
             for number, line_start, text, _ending, _following in _file_lines(
@@ -2276,6 +2359,7 @@ def _stream_grep(
     *,
     where: str,
     offset: int,
+    char: int,
     limit: int,
     budget: int,
 ) -> dict[str, Any]:
@@ -2284,6 +2368,11 @@ def _stream_grep(
     **The one search behind `dump_grep` and `file_grep`**, just as `_stream_read`
     is the one reader: a dump is a file in the cabinet too, so both scan the
     same way and hold only the page.
+
+    *offset* is the line to start on and *char* the character: the first is how
+    a reader skips a region, the second is how it pages through matches that
+    share a line.  A page's `next` is always a character, because that is the
+    one address that can name an occurrence inside a line.
     """
     wanted = _grep_pattern(pattern)
     encoding = _file_encoding(target)
@@ -2296,7 +2385,13 @@ def _stream_grep(
             "matches": [],
             "path": where,
         }
-    start = _line_start(offset, total_lines)
+    start = _line_start(
+        offset,
+        total_lines,
+        hint="`offset` is a line address; a match is addressed by `char` — pass a "
+        "previous answer's `next` there.",
+    )
+    after = _char_start(char, total_chars)
     hits = _grep_hits(
         (
             (number, line_start, text)
@@ -2306,9 +2401,11 @@ def _stream_grep(
         ),
         wanted,
         start,
+        after,
     )
     return _grep_answer(
         hits,
+        wanted=wanted,
         total_lines=total_lines,
         total_chars=total_chars,
         limit=limit,
@@ -2317,36 +2414,80 @@ def _stream_grep(
     )
 
 
-def _fit_match_text(page: dict[str, Any], line: str, budget: int) -> str:
-    """As much of a very long matched line as fits, with the rest of the page.
+#: How much of a very long matched line a grep shows: this much before the match
+#: (the key or label it sits under) and this much after (its value).  **The two
+#: are not the same size** because a JSON match is usually a name whose meaning
+#: is in what follows it; and both stay small because adjacent matches overlap —
+#: six hits a hundred characters apart would otherwise repeat the same window
+#: six times.  `text_char` and `next` are what carry the rest.
+GREP_BEFORE_CHARS = 100
+GREP_AFTER_CHARS = 300
 
-    The match keeps its two addresses and loses only text; `cut` is already on
-    the match, so a reader can tell a shortened line from one that ended there.
+
+def _fit_match_text(
+    page: dict[str, Any], line: str, wanted: str, budget: int
+) -> tuple[str, int]:
+    """A window of a very long matched line, and where it starts.
+
+    **Around the match, not from the line's start.**  A line is the search's
+    unit and not its answer: in a minified JSON dump the match can sit tens of
+    kilobytes in, and the head that stops short of it is an answer with nothing
+    in it, while the head that reaches it spends the window on what came
+    before.  So this cuts `GREP_BEFORE_CHARS` before the match and
+    `GREP_AFTER_CHARS` after it, and returns `text_char`, the window's own
+    address, for `dump_read` to continue from.
+
+    **The window is bounded, and the budget is the ceiling it must fit under,
+    not the size it aims for.**  A match whose own text is larger than the
+    budget keeps its two addresses and as much of itself as fits, marked `cut`;
+    only a window with not one character of room is refused.
+
+    Returns `(text, text_char)`.  The match's `char` is its absolute offset;
+    its line starts at `char - found`, so the window starts at that plus
+    `start`.
     """
-    match = dict(page["matches"][-1])
+    found = min(max(line.casefold().find(wanted), 0), len(line))
+    length = len(wanted)
+    char = int(page["matches"][-1]["char"])
 
-    def with_text(text: str) -> dict[str, Any]:
-        candidate = dict(page)
-        candidate["matches"] = [*page["matches"][:-1], {**match, "text": text}]
-        return candidate
+    def candidate(start: int, end: int) -> dict[str, Any]:
+        match = {
+            **page["matches"][-1],
+            "cut": True,
+            "text": line[start:end],
+            "text_char": char - found + start,
+        }
+        return {**page, "matches": [*page["matches"][:-1], match]}
 
-    low, high = 0, len(line)
+    def fits(start: int, end: int) -> bool:
+        return estimate_text_tokens(_wire(candidate(start, end))) <= budget
+
+    before, after = GREP_BEFORE_CHARS, GREP_AFTER_CHARS
+    while before or after:
+        start = max(0, found - before)
+        end = min(len(line), found + length + after)
+        if fits(start, end):
+            return line[start:end], char - found + start
+        before //= 2
+        after //= 2
+    start = found
+    end = min(len(line), found + length)
+    if fits(start, end):
+        return line[start:end], char - found + start
+    # The match itself does not fit: keep as much of it as the budget takes.
+    low, high = 0, end - start
     while low < high:
         middle = (low + high + 1) // 2
-        if estimate_text_tokens(_wire(with_text(line[:middle]))) <= budget:
+        if fits(start, start + middle):
             low = middle
         else:
             high = middle - 1
-    text = line[:low]
-    while low > 0 and estimate_text_tokens(_wire(with_text(text))) > budget:
-        low -= max(low // 16, 1)
-        text = line[:low]
-    if estimate_text_tokens(_wire(with_text(text))) > budget:
+    if low == 0:
         raise ToolError(
-            f"this line is longer than a {budget}-token window even as an "
+            f"this match is longer than a {budget}-token window even as an "
             f"address; raise `tool_result.tokens`."
         )
-    return text
+    return line[start : start + low], char - found + start
 
 
 def _where(where: str) -> str:
