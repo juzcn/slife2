@@ -3283,8 +3283,7 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         )
     if section.get("recall_pool_size") is not None:
         raise ConfigError(
-            "context.recall_pool_size is now context.recall_page_limit — "
-            "rename the key"
+            "context.recall_pool_size is now context.recall_page_limit — rename the key"
         )
     ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
     ceiling = base.ceiling if ceiling is None else ceiling
