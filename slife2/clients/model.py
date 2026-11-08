@@ -141,22 +141,24 @@ class MCPBackend:
                 timeout=self._timeout,
             )
             # **An answer this build cannot read is refused, not read as an
-            # empty one.**  `from_wire` tolerates a missing *field* (a server
-            # from before that field existed sends no `thinking`, and no
-            # `thinking` is the truth about a model that reasoned nothing), but
-            # a missing *result* is a different fact: FastMCP leaves
-            # `CallToolResult.data` as None whenever the far end sent no
-            # structured content, and `from_wire(None)` builds an assistant
-            # message with no text and no tool calls.  The turn then ends
-            # "successfully" with an empty answer and the model's real reply is
-            # discarded — the confident negative SDD Appendix C forbids, on the
-            # one hop that does not go through `tool_payload`.  The likely cause
-            # is a model server from another build, so the sentence says so.
+            # empty one.**  FastMCP leaves `CallToolResult.data` as None
+            # whenever the far end sent no structured content, and a mapping
+            # missing a key `from_wire` requires is just as unreadable.  Either
+            # read as an empty answer ends the turn "successfully" with the
+            # model's real reply discarded — the confident negative SDD
+            # Appendix C forbids, on the one hop that does not go through
+            # `tool_payload`.  The likely cause is a model server from another
+            # build, so the sentence says so.
             if not isinstance(result.data, dict):
                 raise unreadable(
                     "the model server", "return a stream_chat result", result.data
                 )
-            return StreamChatResult.from_wire(result.data)
+            try:
+                return StreamChatResult.from_wire(result.data)
+            except KeyError as exc:
+                raise unreadable(
+                    "the model server", "return a stream_chat result", result.data
+                ) from exc
         finally:
             queue.put_nowait(_DONE)
 

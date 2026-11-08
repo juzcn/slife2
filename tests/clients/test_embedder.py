@@ -24,6 +24,7 @@ DESCRIBED = {
     "base_url": "http://example.invalid/v1",
     "dimension": 2,
     "max_chars": 10,
+    "rerank_model": "",
 }
 
 

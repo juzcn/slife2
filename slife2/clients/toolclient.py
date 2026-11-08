@@ -157,13 +157,9 @@ class ToolCounts:
     and the rows of a server that is down.  One without the other cannot say
     what on-demand loading is doing: `26/358` is a working budget, `26/26` is
     everything.
-
-    `loaded` is `None` for one case and not zero: a server that predates the
-    loaded half of the answer.  A zero would be a claim about the list, and a
-    display would show `0/358` for a conversation that had simply not said.
     """
 
-    loaded: int | None
+    loaded: int
     total: int
 
 
@@ -288,8 +284,8 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     a warning (its next request re-lists the tools and fails loudly on a hub
     that is really gone), while the agent-task server logs an error (a task runs
     one turn and has no next request).  So a call that could not be made — a hub
-    from an older build that does not know the tool, or one that is gone —
-    raises here and each caller reports it at its own level.
+    that is gone, or one that does not know the tool — raises here and each
+    caller reports it at its own level.
 
     Returns:
         The hub's payload: `unloaded` (the names that moved), `refused`,
@@ -320,8 +316,9 @@ class CatalogueLookup:
 
     answer: CatalogueAnswer
     #: The advertised definition, when the row is present and its schema is
-    #: readable.  `None` for an absent row and for an older hub that answers the
-    #: three values alone; the caller then cannot check a call against it.
+    #: readable.  `None` for an absent row and for a row whose stored schema the
+    #: hub cannot turn into a definition; the caller then cannot check a call
+    #: against it.
     tool: UpstreamTool | None = None
 
 
@@ -339,9 +336,8 @@ async def tool_lookup(
 
     **The two booleans are one answer here.**  `exists` is the row; `starting`
     is the catalogue still being written, and it is only meaningful when the row
-    is absent.  An older hub answers `exists` alone, and its `false` is its
-    whole answer — reading an absent `starting` as `false` keeps that hint
-    working; a value of the wrong type is damage and raises.
+    is absent.  Both are required, and either one with the wrong type is damage
+    and raises.
 
     `client_id` is the conversation this question is for; the hub's catalogue is
     one file per home, and the identity is what makes it answer for the right
@@ -360,26 +356,26 @@ async def tool_lookup(
     exists = answer.get("exists")
     if not isinstance(exists, bool):
         raise unreadable("the toolhub", "say whether it holds a tool", answer)
+    if "tool" not in answer:
+        raise unreadable("the toolhub", "return its definition or null", answer)
+    starting = answer.get("starting")
+    if not isinstance(starting, bool):
+        raise unreadable("the toolhub", "say whether it is still starting", answer)
     if exists:
-        definition = _definition(answer.get("tool"))
+        definition = _definition(answer["tool"])
         if definition is not None and definition.name != name:
             raise unreadable("the toolhub", "return this tool's definition", answer)
         return CatalogueLookup(CATALOGUE_PRESENT, definition)
-    starting = answer.get("starting")
-    if starting is None:
-        return CatalogueLookup(CATALOGUE_MISSING)
-    if not isinstance(starting, bool):
-        raise unreadable("the toolhub", "say whether it is still starting", answer)
     return CatalogueLookup(CATALOGUE_STARTING if starting else CATALOGUE_MISSING)
 
 
 def _definition(raw: Any) -> UpstreamTool | None:
-    """The row's advertised definition, or `None` when the hub did not send one.
+    """The row's advertised definition, or `None` for a row the hub cannot serve.
 
-    Absent is the older hub (the three values were its whole answer), and it is
-    also the hub's answer for a row whose stored schema it cannot read: either
-    way there is nothing to check a call against, and the caller falls back to
-    the hint.  A *present* value with the wrong shape is damage, not a tool —
+    `None` is the hub's answer for a row whose stored schema it cannot turn into
+    a definition, and there is then nothing to check a call against, so the
+    caller falls back to the hint.  A *present* value with the wrong shape is
+    damage, not a tool —
     and the arguments field in particular, because `from_wire` tolerates a
     non-mapping as `{}` and `{}` here means "no schema to check", which would
     turn a broken answer into a call that runs unchecked.

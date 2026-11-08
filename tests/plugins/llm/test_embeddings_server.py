@@ -416,6 +416,7 @@ def test_a_server_that_cannot_describe_its_endpoint_is_refused() -> None:
         "base_url": "http://example.invalid/v1",
         "dimension": 4,
         "max_chars": 4,
+        "rerank_model": "",
     }
     assert RemoteEmbedder(None, complete).identity == ("p|m|http://example.invalid/v1")
 
@@ -423,6 +424,10 @@ def test_a_server_that_cannot_describe_its_endpoint_is_refused() -> None:
         described = {k: v for k, v in complete.items() if k != missing}
         with pytest.raises(RuntimeError, match="provider, a model or a base_url"):
             RemoteEmbedder(None, described)
+
+    without_rerank = {k: v for k, v in complete.items() if k != "rerank_model"}
+    with pytest.raises(RuntimeError, match="rerank_model"):
+        RemoteEmbedder(None, without_rerank)
 
 
 @pytest.mark.asyncio

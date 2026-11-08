@@ -83,10 +83,6 @@ class ToolsCounted:
     not say what on-demand loading is doing; one that showed only `loaded` would
     hide how much there is to find.
 
-    `loaded` is `None` for a server that predates this half of the answer.  A
-    zero would be a claim about the list; the display leaves the loaded half out
-    instead of inventing it.
-
     **Emitted before every model call, not once per turn**, because that is when
     the list is asked for.  The hub's answer is as fresh as that ask and no
     fresher — there is no timer behind it, deliberately (`slife2.plugins.toolhub.server`:
@@ -96,7 +92,7 @@ class ToolsCounted:
     """
 
     total: int
-    loaded: int | None = None
+    loaded: int
 
 
 @dataclass(frozen=True)
@@ -136,9 +132,8 @@ class ToolCallStarted:
     #: turn sees it advancing.
     #:
     #: `iteration` of 0 is **"nobody said" rather than an iteration**: a rebuilt
-    #: transcript has no iteration numbers to draw, and neither has a server
-    #: from before these keys — so the counter is left off rather than drawn as
-    #: `(0)`.
+    #: transcript has no iteration numbers to draw, so the counter is left off
+    #: rather than drawn as `(0)`.
     iteration: int = 0
     max_iterations: int = 0
 
@@ -294,12 +289,8 @@ def encode(event: TurnEvent) -> str:
         case ToolsCounted(total=total, loaded=loaded):
             # Two integers per model call; short keys like every other, because
             # the volume this convention is for is per token and this is not,
-            # but a second spelling of either count would be.  `l` is omitted
-            # when there is no loaded half — an older server's answer, which a
-            # new display reads as unknown rather than as zero.
-            payload = {"t": "tools", "n": total}
-            if loaded is not None:
-                payload["l"] = loaded
+            # but a second spelling of either count would be.
+            payload = {"t": "tools", "n": total, "l": loaded}
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -376,38 +367,45 @@ def encode(event: TurnEvent) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
-#: The four keys `Usage.to_wire()` writes.  A progress payload's breakdown may
-#: omit one (an older build), but a present one must be an int — `Usage` would
-#: otherwise coerce or raise while the line is being read.
+#: The four keys `Usage.to_wire()` writes.  A progress payload's breakdown
+#: carries all four: `to_wire` always writes them, so a hole is a line this
+#: build did not write, and `Usage` would have to invent the missing number.
 _USAGE_FIELDS = tuple(Usage().to_wire())
 
 
-def _counts_ok(payload: dict[str, Any], *keys: str) -> bool:
-    """Every present count is an int rather than a bool or a string.
-
-    **A readable line with the wrong type is still unreadable.**  Without this,
-    `int(payload["kept"])` raises out of `decode` and into the progress callback,
-    where the registered answer is to drop the line and draw the turn (SDD
-    Appendix C).
-    """
-    return all(
-        key not in payload
-        or (isinstance(payload[key], int) and not isinstance(payload[key], bool))
-        for key in keys
+def _int_at(payload: dict[str, Any], key: str) -> bool:
+    """The named count is present and an int rather than a bool or a string."""
+    return (
+        key in payload
+        and isinstance(payload[key], int)
+        and not isinstance(payload[key], bool)
     )
+
+
+def _counts_ok(payload: dict[str, Any], *keys: str) -> bool:
+    """Every named count is present and an int rather than a bool or a string.
+
+    **Absent is not zero.**  `encode` writes every count it has, so a payload
+    with a hole was not written by this build; reading the hole as a number
+    would put a figure nobody measured on the screen.  Such a line is dropped
+    like any other this build cannot read (SDD Appendix C).
+    """
+    return all(_int_at(payload, key) for key in keys)
+
+
+def _optional_counts_ok(payload: dict[str, Any], *keys: str) -> bool:
+    """Every named count that is present is an int rather than a bool or a string."""
+    return all(key not in payload or _int_at(payload, key) for key in keys)
+
+
+def _strings_ok(payload: dict[str, Any], *keys: str) -> bool:
+    """Every named key is present and a string."""
+    return all(isinstance(payload.get(key), str) for key in keys)
 
 
 def _usage_ok(raw: Any) -> bool:
-    """A breakdown `Usage.from_wire` can read without inventing a number."""
-    if raw is None:
-        return True
-    if not isinstance(raw, dict):
-        return False
-    return all(
-        raw.get(key) is None
-        or (isinstance(raw[key], int) and not isinstance(raw[key], bool))
-        for key in _USAGE_FIELDS
-    )
+    """The four counts `Usage.to_wire` writes, present and ints."""
+    return isinstance(raw, dict) and all(_int_at(raw, key) for key in _USAGE_FIELDS)
 
 
 def decode(message: str) -> TurnEvent | None:
@@ -427,91 +425,84 @@ def decode(message: str) -> TurnEvent | None:
     if not isinstance(payload, dict):
         return None
 
-    # `d` is always a string when present; a payload whose `d` is a number is
-    # somebody else's message that happens to share our key space.
+    # Every key `encode` always writes is required here: a hole is a line this
+    # build did not write, not a value it may invent.  The keys `encode` omits
+    # when they are empty (`args`, the iteration pair, a cut-in's receipt, a
+    # context's rerank status) are the only ones absent may stand for.
     match payload.get("t"):
         case "context" if _counts_ok(payload, "kept", "recalled"):
             rerank = payload.get("r", "")
             if not isinstance(rerank, str):
-                # A status this build cannot read is a shape it does not know,
-                # not a status of nothing (`events.py` says why a value that
-                # cannot be read is not an absent one).
                 return None
             return ContextChosen(
-                kept=int(payload.get("kept") or 0),
-                recalled=int(payload.get("recalled") or 0),
+                kept=payload["kept"],
+                recalled=payload["recalled"],
                 rerank=rerank,
             )
-        case "tools" if isinstance(payload.get("n"), int) and not isinstance(
-            payload.get("n"), bool
-        ):
-            loaded = payload.get("l")
-            if loaded is not None and (
-                not isinstance(loaded, int) or isinstance(loaded, bool)
-            ):
-                # A loaded half that is present and not an integer is a shape
-                # this build cannot read — not a count of nothing (`events.py`
-                # says why a value that cannot be read is not an absent one).
-                return None
-            return ToolsCounted(total=payload["n"], loaded=loaded)
+        case "tools" if _counts_ok(payload, "n", "l"):
+            return ToolsCounted(total=payload["n"], loaded=payload["l"])
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):
             return ThinkingDelta(text=payload["d"])
-        case "tool_start" if isinstance(payload.get("name"), str) and _counts_ok(
+        case "tool_start" if _strings_ok(payload, "id", "name") and _optional_counts_ok(
             payload, "iteration", "max_iterations"
         ):
-            arguments = payload.get("args")
+            arguments = payload.get("args", {})
+            if not isinstance(arguments, dict):
+                # `args` is omitted when empty and written as a mapping
+                # otherwise; anything else is not this build's line.
+                return None
             return ToolCallStarted(
-                call_id=str(payload.get("id") or ""),
+                call_id=payload["id"],
                 name=payload["name"],
-                arguments=arguments if isinstance(arguments, dict) else {},
-                # Absent reads as 0, which is the counter's "nobody said" — the
-                # honest answer for a server that predates these keys.
+                arguments=arguments,
                 iteration=int(payload.get("iteration") or 0),
                 max_iterations=int(payload.get("max_iterations") or 0),
             )
-        case "tool_approval" if isinstance(payload.get("name"), str):
-            arguments = payload.get("args")
+        case "tool_approval" if _strings_ok(payload, "id", "name"):
+            arguments = payload.get("args", {})
+            if not isinstance(arguments, dict):
+                return None
             return ToolApprovalRequested(
-                call_id=str(payload.get("id") or ""),
+                call_id=payload["id"],
                 name=payload["name"],
-                arguments=arguments if isinstance(arguments, dict) else {},
+                arguments=arguments,
             )
-        case "tool_end" if isinstance(payload.get("name"), str) and _counts_ok(
-            payload, "n", "ms"
+        case "tool_end" if (
+            _strings_ok(payload, "id", "name", "d")
+            and isinstance(payload.get("ok"), bool)
+            and _counts_ok(payload, "n", "ms")
         ):
             return ToolCallFinished(
-                call_id=str(payload.get("id") or ""),
+                call_id=payload["id"],
                 name=payload["name"],
-                ok=bool(payload.get("ok")),
-                result_preview=str(payload.get("d") or ""),
-                result_chars=int(payload.get("n") or 0),
-                elapsed_ms=int(payload.get("ms") or 0),
+                ok=payload["ok"],
+                result_preview=payload["d"],
+                result_chars=payload["n"],
+                elapsed_ms=payload["ms"],
             )
-        case "cut_in" if isinstance(payload.get("d"), str):
+        case "cut_in" if _strings_ok(payload, "d", "c"):
+            receipt = payload.get("r", "")
+            if not isinstance(receipt, str):
+                return None
             return MessageCutIn(
                 text=payload["d"],
-                # Absent reads as the stream's own default, which is the honest
-                # answer for a build that predates the field: the words are the
-                # message, and where they came from is a display detail.
-                channel=str(payload.get("c") or ""),
-                receipt=str(payload.get("r") or ""),
+                channel=payload["c"],
+                receipt=receipt,
             )
         case "done" if (
-            _counts_ok(payload, "iterations")
+            _strings_ok(payload, "d", "stop")
+            and _counts_ok(payload, "iterations")
             and _usage_ok(payload.get("usage"))
             and _usage_ok(payload.get("last"))
         ):
             return TurnFinished(
-                text=str(payload.get("d") or ""),
-                usage=Usage.from_wire(payload.get("usage")),
-                # An absent key reads as zero, which is the honest answer to
-                # "how full is the context" when nobody said — and is what a
-                # server from before this key existed sends.
-                last_usage=Usage.from_wire(payload.get("last")),
-                iterations=int(payload.get("iterations") or 0),
-                stop_reason=str(payload.get("stop") or ""),
+                text=payload["d"],
+                usage=Usage.from_wire(payload["usage"]),
+                last_usage=Usage.from_wire(payload["last"]),
+                iterations=payload["iterations"],
+                stop_reason=payload["stop"],
             )
         case _:
             return None

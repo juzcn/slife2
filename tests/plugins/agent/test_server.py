@@ -2936,6 +2936,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
             "changed": False,
             "kept": len(turn_ids),
             "recalled": 0,
+            "rerank": "",
         }
 
     state = {"refuse_next": True, "next_id": 1}

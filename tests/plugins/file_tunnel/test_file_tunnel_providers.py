@@ -545,8 +545,6 @@ def test_localhost_run_forwards_the_port_without_a_prompt(monkeypatch) -> None:
 
 def test_the_ssh_binary_option_is_honoured() -> None:
     assert LocalhostRunTunnel({"binary": "/opt/ssh"})._binary == "/opt/ssh"
-    # The legacy key, which reads better in a config for an SSH provider.
-    assert LocalhostRunTunnel({"ssh": "/opt/ssh"})._binary == "/opt/ssh"
 
 
 def test_a_named_binary_that_is_missing_is_not_replaced_by_a_guess(

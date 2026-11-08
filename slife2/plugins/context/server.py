@@ -224,7 +224,12 @@ async def _ask_model(
     )
     if not isinstance(result.data, dict):
         raise unreadable("the model server", "return a stream_chat result", result.data)
-    return StreamChatResult.from_wire(result.data).text
+    try:
+        return StreamChatResult.from_wire(result.data).text
+    except KeyError as exc:
+        raise unreadable(
+            "the model server", "return a stream_chat result", result.data
+        ) from exc
 
 
 def build_server(

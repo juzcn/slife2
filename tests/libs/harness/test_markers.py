@@ -150,16 +150,6 @@ def test_the_agent_speaking_in_a_subagents_conversation_is_drawn_as_an_agent() -
     assert LOCAL_AGENT.marker in MARKERS
 
 
-def test_a_stored_scheduled_turn_says_which_task_came_due() -> None:
-    """A fire is no longer a turn, but a conversation written by an older build
-    can still hold one, and its channel is the whole of what says where it came
-    from (SDD §9.4)."""
-    from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
-
-    assert channel_prefix(f"{SCHEDULE_CHANNEL}:daily") == "Scheduled(daily)> "
-    assert channel_prefix(SCHEDULE_CHANNEL) == f"{SCHEDULE_CHANNEL}> "
-
-
 def test_a_group_message_names_its_sender_and_its_group() -> None:
     """**The group word and the sender, because a group turn is either.**
 

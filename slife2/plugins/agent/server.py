@@ -2019,16 +2019,20 @@ def build_server(
                 },
             )
         )
+        # **`turns` is part of the answer's shape**, like `messages` and
+        # `turn_ids`: `restore` always writes it, and a hole is another build.
+        turns = payload.get("turns")
+        if not isinstance(turns, list):
+            raise unreadable("the context store", "return the stored turns", payload)
         _adopt(loop, payload, carried=0)
         # **The status bar's figure, taken from the turn it restored.**  A window
         # that has only restored has run no turn of its own, so `context_tokens`
         # would otherwise be 0 while the bar (which reads the same column,
         # `tui.app.context_of`) shows the last stored turn's size.  A size nobody
-        # measured reads 0, the bar's own rule; a value of another type is damage
-        # and is read the same way rather than failing a restore over a display
-        # fact.
-        turns = payload.get("turns")
-        if isinstance(turns, list) and turns:
+        # measured reads 0, the bar's own rule; a value of another type is a
+        # stored row's fact and is read the same way rather than failing a
+        # restore over a display fact.
+        if turns:
             last = turns[-1]
             if isinstance(last, dict):
                 tokens = last.get("context_tokens")
@@ -2194,15 +2198,18 @@ def build_server(
             raise unreadable(
                 "the context store", "report the rebuild's counts", payload
             )
-        # The rerank status is display-only: an older context server does not
-        # send it, and a value of the wrong shape must not fail a turn whose
-        # context was decided.  An unrecognised status still reaches the
-        # window, which is where the words for it live.
+        # **The rerank status is part of the answer's shape**, like the two
+        # counts beside it: `rebuild` always writes it, and an unrecognised
+        # status still reaches the window, which is where the words for it live.
         rerank = payload.get("rerank")
+        if not isinstance(rerank, str):
+            raise unreadable(
+                "the context store", "report the recall's rerank status", payload
+            )
         return ContextChosen(
             kept=int(kept),
             recalled=int(recalled),
-            rerank=rerank if isinstance(rerank, str) else "",
+            rerank=rerank,
         )
 
     async def forget_context(agent: str, subagent: str) -> None:

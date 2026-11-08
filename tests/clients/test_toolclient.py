@@ -597,13 +597,12 @@ async def test_tool_lookup_reads_the_definition_beside_the_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_older_hub_answers_without_a_definition() -> None:
+async def test_a_row_with_no_definition_key_is_unreadable() -> None:
+    """The hub always writes `tool`, `null` included; a hole is another build."""
     hub = FakeHub(catalogue={"fake__late": {"exists": True, "starting": False}})
 
-    found = await tool_lookup(hub, "fake__late")
-
-    assert found.answer == "present"
-    assert found.tool is None, "the three values are still the whole answer"
+    with pytest.raises(ConnectionError, match="another build"):
+        await tool_lookup(hub, "fake__late")
 
 
 @pytest.mark.asyncio

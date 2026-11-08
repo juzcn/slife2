@@ -15,6 +15,7 @@ import json
 import pytest
 
 from slife2.libs.turn.events import ContextChosen, TurnFinished, decode
+from slife2.libs.turn.messages import Usage
 
 pytestmark = pytest.mark.unit
 
@@ -47,10 +48,30 @@ def test_a_count_with_the_wrong_type_drops_the_line_instead_of_raising() -> None
 
 
 def test_a_usage_breakdown_with_a_string_is_dropped() -> None:
-    """`Usage.from_wire` would raise on the string, and `or 0` on a missing key
-    would be a number nobody measured."""
+    """`Usage.from_wire` would raise on the string, and a missing key would be a
+    number nobody measured."""
     assert decode(json.dumps({"t": "done", "usage": {"prompt_tokens": "ten"}})) is None
     assert decode(json.dumps({"t": "done", "usage": "none"})) is None
-    finished = decode(json.dumps({"t": "done", "iterations": 3}))
-    assert isinstance(finished, TurnFinished)
-    assert finished.iterations == 3
+    assert decode(json.dumps({"t": "done", "iterations": 3})) is None
+
+
+def test_a_line_with_a_hole_is_not_read_as_a_zero() -> None:
+    """`encode` writes every count it has, so a missing one is not this build's
+    line — and reading the hole as a number would show a figure nobody measured."""
+    assert decode(json.dumps({"t": "tools", "n": 3})) is None
+    assert decode(json.dumps({"t": "context", "kept": 2})) is None
+    full = {
+        "t": "done",
+        "d": "ok",
+        "iterations": 1,
+        "stop": "stop",
+        "usage": Usage(10, 20).to_wire(),
+        "last": Usage(7, 3).to_wire(),
+    }
+    assert decode(json.dumps(full)) == TurnFinished(
+        text="ok",
+        usage=Usage(10, 20),
+        last_usage=Usage(7, 3),
+        iterations=1,
+        stop_reason="stop",
+    )

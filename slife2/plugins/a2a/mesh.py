@@ -528,13 +528,6 @@ class MeshResponder(Responder):
             return f"Error: task_id {task_id!r} already completed."
         return "ok"
 
-    def complete_task(
-        self, task_id: str, result: str = "", cancelled: bool = False
-    ) -> str:
-        """The old binary settlement, kept for callers and tests."""
-        outcome = CANCELLED if cancelled else COMPLETED
-        return self.resolve(task_id, RoundOutcome(outcome, result))
-
 
 class _PresencePeer:
     __slots__ = ("name", "status")
@@ -664,7 +657,7 @@ class A2AMesh:
 
     The plugin sets its callbacks, then :meth:`connect` /
     :meth:`disconnect`.  Tools call :meth:`send_message`, :meth:`cancel_task`,
-    :meth:`list_agents`, :meth:`complete_task`.
+    :meth:`list_agents`, :meth:`task_response`.
     """
 
     def __init__(self, config: A2ASettings, agent: str, *, subagent: str = "") -> None:
@@ -1737,8 +1730,8 @@ class A2AMesh:
         ``message_type`` rides the request's ``metadata.variables`` so a peer
         can classify the message: only ``"task_request"`` creates a task
         (recorded + result pushed); ``"message"`` is a bare conversation (not
-        recorded, replies pushed as messages); ``"task_response"`` is unused
-        here (completed via :meth:`complete_task`).  Delivery follows the
+        recorded, replies pushed as messages).  A completion is the reply to a
+        task, not a message of its own.  Delivery follows the
         requester retry profile; the result is pushed back later
         (:meth:`_handle_reply` terminal → :attr:`on_task_completion`).
         """
@@ -2113,16 +2106,6 @@ class A2AMesh:
                 row["interrupt"] = task.interrupt
             rows.append(row)
         return sorted(rows, key=lambda row: row["since"] or "")
-
-    def complete_task(
-        self,
-        task_id: str,
-        result: str = "",
-        cancelled: bool = False,
-    ) -> str:
-        """The old binary settlement, kept for callers and tests."""
-        outcome = CANCELLED if cancelled else COMPLETED
-        return self._responder.resolve(task_id, RoundOutcome(outcome, result))
 
     def task_response(self, task_id: str, outcome: str, text: str = "") -> str:
         """Settle an inbound round with the model's chosen outcome."""

@@ -70,8 +70,16 @@ class RemoteEmbedder:
         self._dimension = int(described.get("dimension") or 0)
         self._max_chars = int(described.get("max_chars") or 0)
         #: Empty means the endpoint serves no cross-encoder; the recall then
-        #: keeps its fused order and says nothing failed.
-        self._rerank_model = str(described.get("rerank_model") or "")
+        #: keeps its fused order and says nothing failed.  The key itself is
+        #: required: `describe` always writes it, so a hole is another build.
+        rerank_model = described.get("rerank_model")
+        if not isinstance(rerank_model, str):
+            raise RuntimeError(
+                f"the embeddings server described itself without a rerank_model "
+                f"({described!r}); an empty value is its answer for an endpoint "
+                f"with no cross-encoder"
+            )
+        self._rerank_model = rerank_model
         if not self._dimension or not self._max_chars:
             raise RuntimeError(
                 f"the embeddings server described itself without a width or an "

@@ -1009,9 +1009,8 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
 async def test_a_recall_has_no_count_cap() -> None:
     """Membership is the floors' and the budget's; no count cuts the selection.
 
-    The old `recall_limit` (40) stopped at 40 turns however many had passed the
-    floors.  Every one of these is a genuine match and the window is wide enough
-    for all of them, so all 41 are recalled.
+    Every one of these is a genuine match and the window is wide enough for all
+    of them, so all 41 are recalled.
     """
     async with Client(
         build_server(

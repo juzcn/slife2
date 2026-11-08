@@ -432,16 +432,25 @@ class StreamChatResult:
 
     @classmethod
     def from_wire(cls, raw: dict[str, Any] | None) -> StreamChatResult:
-        raw = raw or {}
+        """Rebuild the result this build's `to_wire` wrote.
+
+        `None` is FastMCP's "the far end sent no structured content" and reads
+        as an empty result; the caller that cannot tell that from an empty
+        answer must guard the shape before it gets here (`slife2.clients.model`).
+        A mapping must carry every key `to_wire` writes: a hole is not an empty
+        answer, and defaulting it would invent one.
+        """
+        if raw is None:
+            return cls()
+        missing = sorted(
+            {"text", "tool_calls", "thinking", "usage", "stop_reason"} - raw.keys()
+        )
+        if missing:
+            raise KeyError(f"stream_chat result is missing {', '.join(missing)}")
         return cls(
-            text=str(raw.get("text") or ""),
-            tool_calls=tuple(
-                ToolCall.from_wire(c) for c in raw.get("tool_calls") or []
-            ),
-            # An absent key reads as empty, which is what a server from before
-            # this field existed sends — and is the truth about a model that
-            # reported no reasoning.
-            thinking=str(raw.get("thinking") or ""),
-            usage=Usage.from_wire(raw.get("usage")),
-            stop_reason=str(raw.get("stop_reason") or ""),
+            text=str(raw["text"] or ""),
+            tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"] or []),
+            thinking=str(raw["thinking"] or ""),
+            usage=Usage.from_wire(raw["usage"]),
+            stop_reason=str(raw["stop_reason"] or ""),
         )

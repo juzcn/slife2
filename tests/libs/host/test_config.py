@@ -654,32 +654,6 @@ def test_the_terminal_is_a_server_now(tmp_path) -> None:
     assert moved.server("tui").url == "http://127.0.0.1:9005/mcp"
 
 
-def test_a_leftover_tui_section_is_refused(tmp_path) -> None:
-    """The old spelling parsed and was *silently* ignored, which is the reason
-    this is an error rather than a migration.
-
-    Every key in `tui:` is optional, so a config written before the move would
-    load cleanly with its port discarded — a window that quietly listened
-    somewhere else than the file said.
-    """
-    with pytest.raises(ConfigError, match="servers.tui"):
-        load(write(tmp_path, "tui:\n  port: 9005\n"))
-
-
-def test_a_leftover_tools_section_is_refused(tmp_path) -> None:
-    """`tools:` is `mcp:` now, and this one is refused for the `tui:` reason
-    with more force behind it.
-
-    A top-level key nothing reads is not an error anywhere else in this loader,
-    so a config that still said `tools:` would load with every one of those
-    servers gone and nothing said — the operator's model would simply have
-    fewer tools, and nothing would name the reason.  The section is named for
-    the catalogue category its rows are declared under, and that is `mcp`.
-    """
-    with pytest.raises(ConfigError, match="tools: is `mcp:`"):
-        load(write(tmp_path, "tools:\n  serper:\n    command: npx\n"))
-
-
 def test_a_file_with_no_providers_is_refused(tmp_path) -> None:
     """**There is no built-in provider to run on** (SDD §4.1).
 
@@ -1996,26 +1970,6 @@ def test_without_the_flag_the_file_is_the_answer(tmp_path, monkeypatch) -> None:
 
     assert config.peer_agent.address == "localhost:1883"
     assert not config.peer_agent.overridden
-
-
-def test_the_section_named_a2a_is_refused_rather_than_ignored(tmp_path) -> None:
-    """**A config written before the rename must not silently lose the network.**
-
-    `a2a:` is `peer_agent:` now: the section is named for what it configures —
-    an agent's peer agents — and `a2a` is the plugin that serves it.  An unknown
-    top-level key is normally ignored, which here would load with the network
-    off and nothing said, so the old name is refused by name with the new one in
-    the sentence.
-    """
-    text = (
-        A_PROVIDER
-        + """
-a2a:
-  provider: mosquitto
-"""
-    )
-    with pytest.raises(ConfigError, match="peer_agent"):
-        load(write(tmp_path, text))
 
 
 #: A remote section that says nothing about where to meet, and a subagent

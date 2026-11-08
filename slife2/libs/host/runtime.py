@@ -207,8 +207,9 @@ def _read_json_dataclass[RecordT](
     error.**  Both files this reads are bookkeeping — a record names a pid, a
     claim names a holder — and refusing to start because a crash truncated one
     would be a worse failure than losing the number it held.  `factory` is the
-    half each caller answers for itself: which fields it needs, and which a
-    release older than this one may have written without.
+    half each caller answers for itself: which fields it needs.  A field this
+    build's writer always emits is required here too — a hole is not an older
+    record this reader should fill in.
 
     **This is a registered fallback, and its cost is real**: a record whose
     damage is read as absence makes a running server look record-less, and
@@ -268,8 +269,7 @@ def read_record(url: str) -> ServerRecord | None:
     """Read a record, or None when it is missing, unreadable or corrupt.
 
     The reading rules are `_read_json_dataclass`'s; what belongs to a record is
-    its shape — which fields it must carry, and which an older release may have
-    left out.
+    its shape — every field `ServerRecord.now` writes.
     """
     return _read_json_dataclass(
         record_path(url),
@@ -277,10 +277,10 @@ def read_record(url: str) -> ServerRecord | None:
             name=str(raw["name"]),
             url=str(raw["url"]),
             pid=int(raw["pid"]),
-            start_token=str(raw.get("start_token") or ""),
-            config=str(raw.get("config") or ""),
-            version=str(raw.get("version") or ""),
-            started_at=str(raw.get("started_at") or ""),
+            start_token=str(raw["start_token"] or ""),
+            config=str(raw["config"] or ""),
+            version=str(raw["version"] or ""),
+            started_at=str(raw["started_at"] or ""),
         ),
     )
 
@@ -358,6 +358,13 @@ class AgentClaim:
         )
 
 
+def _claim_headless(raw: Any) -> bool:
+    """The claim's `headless` field, which must be the bool this build writes."""
+    if not isinstance(raw, bool):
+        raise TypeError("headless is not a bool")
+    return raw
+
+
 def read_claim(name: str) -> AgentClaim | None:
     """Read an agent's claim, or None when there is not a readable one."""
     return _read_json_dataclass(
@@ -365,12 +372,9 @@ def read_claim(name: str) -> AgentClaim | None:
         lambda raw: AgentClaim(
             name=str(raw["name"]),
             pid=int(raw["pid"]),
-            start_token=str(raw.get("start_token") or ""),
-            started_at=str(raw.get("started_at") or ""),
-            # `.get`, like the two above it: a claim written by a release that
-            # did not have this field is a claim from an instance that had a
-            # terminal, which is what an absent field means.
-            headless=bool(raw.get("headless")),
+            start_token=str(raw["start_token"] or ""),
+            started_at=str(raw["started_at"] or ""),
+            headless=_claim_headless(raw["headless"]),
         ),
     )
 

@@ -69,7 +69,6 @@ from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
 from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
 from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
 from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
-from slife2.plugins.schedule.server import CHANNEL as SCHEDULE_CHANNEL
 from slife2.plugins.wechat.server import CONFIG_KEY as WECHAT_CHANNEL
 from slife2.plugins.wechat.server import MARKER_PREFIX as WECHAT_MARKER
 from slife2.tui import notes
@@ -206,12 +205,6 @@ def channel_prefix(channel: str) -> str:
         # needs, since several calls can be in the background at once
         # (`slife2.libs.harness.async_tasks.channel_for`).
         return f"AsyncTool({channel.split(':', 1)[1]})> "
-    if channel.startswith(f"{SCHEDULE_CHANNEL}:"):
-        # A turn written by an older build, when a fire was handed over as a
-        # message.  A fire is no longer a turn, but a stored conversation can
-        # still hold one, and the channel is the whole of what says which task
-        # spoke.
-        return f"Scheduled({channel.split(':', 1)[1]})> "
     if channel.startswith(f"{REMOTE.group_channel}:"):
         # A group on the peer network.  The bubble names the sender *and* the
         # group, because a group turn's channel is the only place either can be
@@ -1971,14 +1964,9 @@ class StatusBar(Static):
         # count this window keeps (`slife2.libs.turn.events.ToolsCounted`).
         # `total` of zero is "nobody has said yet" rather than an empty
         # catalogue: the hub always holds its own tools, so the bar says nothing
-        # until it knows.  A pair without the loaded half is an older server's
-        # answer, and the bar shows just the total rather than inventing a zero.
+        # until it knows.
         if tools is not None and tools.total:
-            label = (
-                t("status_tools", n=tools.total)
-                if tools.loaded is None
-                else t("status_tools_loaded", loaded=tools.loaded, total=tools.total)
-            )
+            label = t("status_tools_loaded", loaded=tools.loaded, total=tools.total)
             parts.append(f"[{PALETTE['dim']}]{label}[/]")
 
         # What the model *is*, as opposed to what it is doing — which is why

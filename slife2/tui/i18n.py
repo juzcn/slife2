@@ -462,18 +462,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "zh": "{n} 个排队中",
     },
     # The model's list against the catalogue: loaded first, every category
-    # after — so a skill and a CLI entry count in the total.  `status_tools`
-    # is the total-only form, kept for a server that predates the loaded half
-    # (its answer is not zero loaded tools, and saying so would be a claim).
-    # The label leads in both languages, which also keeps the numbers where
-    # the eye expects them beside the other counts.
+    # after — so a skill and a CLI entry count in the total.  The label leads in
+    # both languages, which also keeps the numbers where the eye expects them
+    # beside the other counts.
     "status_tools_loaded": {
         "en": "tools {loaded}/{total}",
         "zh": "工具 {loaded}/{total}",
-    },
-    "status_tools": {
-        "en": "tools {n}",
-        "zh": "工具 {n}",
     },
     # The one dim row's key hint.  **The key caps stay English** — `Esc`, `Ctrl+S`
     # — because they are what is printed on the keyboard and a translated one

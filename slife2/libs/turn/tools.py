@@ -126,9 +126,8 @@ ToolFunc = Callable[[dict[str, Any]], Awaitable[str | dict[str, Any]]]
 #: about to have — `starting` is the answer that says "ask again".
 #:
 #: The words are the registry's, not the wire's: the hub answers
-#: `{"exists": bool, "starting": bool}`, because an older hub still answers the
-#: first field alone, and `slife2.clients.toolclient` is where the pair becomes
-#: this one value.
+#: `{"exists": bool, "starting": bool}`, and `slife2.clients.toolclient` is
+#: where the pair becomes this one value.
 CatalogueAnswer = Literal["present", "missing", "starting"]
 
 #: The catalogue holds a row under the name — loaded or not; loading is what

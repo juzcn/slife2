@@ -79,7 +79,7 @@ providers, and the WeChat bridge.
 | **Catalogue** | The tool catalogue: one SQLite file per home holding every row the model may discover. |
 | **Conversation** | One client id's history, stored by the context plugin. |
 | **Turn** | One exchange: input, model output, and tool calls, stored as one row. |
-| **Channel** | The origin of a message: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. |
+| **Channel** | The origin of a message: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | A machine-readable prefix on a delivered message, of the form `[Name:{…}]`. A marker is content and is stored with the message. |
 | **Dump** | A tool output stored whole in the cabinet because it was too large for the conversation. |
 | **Runtime directory** | The machine-wide directory holding server records, locks, logs, and agent-name claims. |
@@ -878,7 +878,6 @@ the turn records where it came in.
 | `subagent:<name>` | One of this agent's subagents | `Subagent(<name>)>` | `[Subagent:{…}]` |
 | `agent-task:<name>` | A background loop's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
 | `async-tool:<name>` | A background tool call's result | `AsyncTool(<name>)>` | `[AgentToolResult:{…}]` |
-| `schedule:<name>` | The scheduler | `Scheduled(<name>)>` | none; a trigger is not a result |
 
 The channel is recorded, so the marker belongs to the channel, the displayed line
 wears the channel's name, and a rebuilt conversation still says where each
@@ -2423,6 +2422,12 @@ name. A daemon from a previous build can answer the name check and still have th
 old tool signatures, so every turn fails until the stack is restarted. `slife2
 down` is the remedy. A rename of a server or a tool must be accompanied by a
 stop.
+
+An internal wire carries no compatibility path for a previous build. A progress
+line requires every field this build's encoder writes, and a store from another
+schema is refused rather than migrated. A fallback for an older shape is stale
+logic that hides the version mismatch instead of reporting it.
+
 ## 13. Project structure and development
 
 ### 13.1 Layers
@@ -2630,7 +2635,7 @@ The four shapes an undeclared fallback takes:
 | No ancestor names this checkout | Use `~/.slife2` | The checkout's data directory | An override, which wins; a marker that cannot be read, which raises | A missing database or config |
 | The default CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, which is refused when not found | The resolved path in `tunnel_status` |
 | A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive and its URL as reachable | Telling a broken probe from an outage | A transport the provider proves dead | A debug line and `tunnel_status` |
-| A progress line cannot be read | Drop it; default counts to zero | The difference between unmeasured and zero | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
+| A progress line cannot be read | Drop it | The line's display | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
 | A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
 | A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server; a code-level failure, warned | A warning for a code-level failure, debug for a connection failure |
 | `taskkill` could not run | Poll the pid and report | Why the force failed | A process that survives the poll | The pid the caller then polls |

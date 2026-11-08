@@ -35,7 +35,7 @@ a reader does belongs in the design document.
 | **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. |
 | **Conversation** | One client id's history. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made. |
-| **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, `async-tool:<name>`, or `schedule:<name>`. |
+| **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | The machine-readable prefix a sender adds to a message, e.g. `[Wechat:{…}]`. Stored with the message, removed only for display. |
 | **Family** | A plugin that owns one configuration section or folder and declares its rows to the hub. |
 | **Catalogue** | Every tool, playbook, job, and command the model may discover. |

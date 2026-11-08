@@ -60,9 +60,9 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     the history — it kills the worker that runs turns, leaves the window saying
     "working" with the message still counted as queued, and never runs or shows
     it.  The record is not this module's to trust: `_draw_turn` reads a stored
-    row field by field (an id it parses, a tool call it decodes), and a row
-    written by an older build or a half-finished one can carry a shape none of
-    that expects.  So the failure is contained to the one turn it came from,
+    row field by field (an id it parses, a tool call it decodes), and a row a
+    failed write left half-finished can carry a shape none of that expects.  So
+    the failure is contained to the one turn it came from,
     said in the log where the store it contradicts can be looked at, *and* drawn
     as an error line — because the note below counts what was drawn, and a drop
     nobody is told about would make `[restored N turns]` read as the whole

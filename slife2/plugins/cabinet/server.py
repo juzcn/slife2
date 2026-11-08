@@ -651,8 +651,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """One corpus document's text, from the file its row points at.
 
         A note, a day and a report are one copy on disk; the row carries the
-        metadata and the address.  An old row written before that still has its
-        body and is read from there (`body_of`).
+        metadata and the address.  A row whose `mirror` is empty has no text to
+        read and answers empty (`body_of`).
         """
         opened = await cabinet(ctx)
         return await off_loop(opened.body_of, row)
@@ -2350,11 +2350,10 @@ def _fit_match_text(page: dict[str, Any], line: str, budget: int) -> str:
 
 
 def _where(where: str) -> str:
-    """Where a dump's bytes are, or the cabinet — the one spelling of it.
+    """Where a document's bytes are, as a sentence a reader can act on.
 
-    A row written before the harness named a mirror has none, and an answer that
-    said `""` would be one a reader cannot act on; the cabinet is true of every
-    dump, because that is the directory they live in.
+    `where` is the document's accessible path; an answer that said `""` would
+    name nothing, and "the cabinet" is true of every document there.
     """
     return where or "the cabinet"
 

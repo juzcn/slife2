@@ -727,11 +727,10 @@ def tool_payload(result: Any) -> dict[str, Any]:
     gets an empty mapping and says so itself.
 
     **The text block is `result.content`, and it has to be read there.**  A
-    result that carried no structured content — an older build of one of our
-    servers, which is the tolerance this exists for, or any tool whose return
-    the SDK did not wrap — arrives with `data` `None` and the JSON sitting in a
-    text block, because `fastmcp.client` fills `data` from `structured_content`
-    alone (`_parse_call_tool_result`).  A tool returning a scalar is wrapped by
+    result that carried no structured content — any tool whose return the SDK
+    did not wrap — arrives with `data` `None` and the JSON sitting in a text
+    block, because `fastmcp.client` fills `data` from `structured_content` alone
+    (`_parse_call_tool_result`).  A tool returning a scalar is wrapped by
     FastMCP, so its JSON arrives in `data` itself, which is why the loop below
     reads both.  Only the JSON matters, so a text block that is not a mapping —
     a refusal's message, a tool that answered in prose — is still `{}`, which

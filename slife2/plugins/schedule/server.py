@@ -138,13 +138,6 @@ SCHEDULE_RUNS = "schedule_runs"
 SCHEDULE_RUN_NOW = "schedule_run_now"
 SCHEDULE_RUN_SKIP = "schedule_run_skip"
 
-#: The channel a turn written by an older build wears, and the first half of what
-#: it is keyed by: `schedule:daily_diary`.  A fire is no longer a turn, but a
-#: stored conversation can still hold one, and the window draws its bubble from
-#: the channel alone (`slife2.tui.widgets.channel_prefix`), so the name stays
-#: part of the display vocabulary.
-CHANNEL = "schedule"
-
 #: What a task name may be.  Safe as a filename is not the requirement — nothing
 #: is named after it — but safe as *a word a model says back* is, and the two
 #: come out the same set: a leading letter or digit, then letters, digits, dot,

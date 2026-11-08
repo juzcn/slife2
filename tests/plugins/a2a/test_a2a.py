@@ -545,8 +545,10 @@ def test_completing_an_unknown_id_is_refused_with_the_sentence_that_fits() -> No
     """
     mesh = A2AMesh(default_config().peer_agent, AGENT)
     mesh._note_withdrawn("withdrawn-id", PEER)
-    assert "was withdrawn by jill" in mesh.complete_task("withdrawn-id", "x")
-    assert "unknown task_id" in mesh.complete_task("never-seen", "x")
+    assert "was withdrawn by jill" in mesh.task_response(
+        "withdrawn-id", "completed", "x"
+    )
+    assert "unknown task_id" in mesh.task_response("never-seen", "completed", "x")
 
 
 # ── the outbound task store ─────────────────────────────────────────────────
@@ -3060,15 +3062,13 @@ async def test_a_prose_answer_to_a_task_does_not_complete_it(
     members: every "received / I will not send any more messages" became the
     peer's next message, and the two ran ~2,200 turns over 3h13m.
     """
-    completed: list[tuple[str, str, bool]] = []
+    completed: list[tuple[str, str, str]] = []
 
-    def complete_task(
-        self: A2AMesh, task_id: str, result: str = "", cancelled: bool = False
-    ) -> str:
-        completed.append((task_id, result, cancelled))
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        completed.append((task_id, outcome, text))
         return "ok"
 
-    monkeypatch.setattr(A2AMesh, "complete_task", complete_task)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
     session = local_member(tmp_path)
     session.mesh.on_inbound_task(AGENT, "add one and one", TASK)
     await drain_until_idle(session, agent=agent_server)
@@ -3317,7 +3317,7 @@ async def test_a_subagent_answers_as_itself_rather_than_as_its_maker(
     already says who is speaking — and it has to be used.  Published under the
     maker's name the reply would be the maker talking to itself, and it would
     complete nothing: the bridge it is answering is on *the member's* responder,
-    and `complete_task` against the wrong mesh answers "unknown task_id" to the
+    and `task_response` against the wrong mesh answers "unknown task_id" to the
     very peer that sent it.
     """
     places: list[str] = []

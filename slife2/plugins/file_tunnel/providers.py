@@ -1338,12 +1338,7 @@ class LocalhostRunTunnel(_CliTunnelProvider):
 
     def __init__(self, options: dict | None = None) -> None:
         opts = options or {}
-        # ``ssh`` is accepted as a synonym for ``binary`` — it reads better in
-        # the config for an SSH-based provider.
-        merged = dict(opts)
-        if "binary" not in merged and merged.get("ssh"):
-            merged["binary"] = merged["ssh"]
-        super().__init__(merged)
+        super().__init__(opts)
 
         self._host: str = str(opts.get("host") or "localhost.run")
         self._user: str = str(opts.get("user") or "nokey")

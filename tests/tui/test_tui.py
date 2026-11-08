@@ -1809,10 +1809,10 @@ async def test_one_unreadable_stored_row_does_not_kill_the_drain() -> None:
     from — so an exception out of the rebuild does not merely lose the history.
     It escapes the loop, the worker dies, `_draining` goes False, and the
     message the person is waiting on is never run and never shown: the window
-    sits there saying "working" with `1 queued` in the bar.  A record written by
-    an older build can carry a shape a field-by-field read does not expect — a
-    `turn_id` that is not a number is one, and a tool call that is not a mapping
-    is another — and neither is this module's to trust.
+    sits there saying "working" with `1 queued` in the bar.  A record a failed
+    write left half-finished can carry a shape a field-by-field read does not
+    expect — a `turn_id` that is not a number is one, and a tool call that is
+    not a mapping is another — and neither is this module's to trust.
     """
     bad = stored(
         Message(role="user", content="a question nobody can read"),
@@ -2133,26 +2133,6 @@ async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
         assert "tools 24/253" in status(app)
         # The count is the bar's fact, not a line in the transcript.
         assert "tools 24/253" not in shown(app)
-
-
-async def test_a_count_without_the_loaded_half_shows_only_the_total() -> None:
-    """An older server reports one number, and the bar does not invent the other.
-
-    `loaded` absent is not zero loaded: the display keeps its one true number
-    and leaves the half it was not told out, rather than claiming a model list
-    of nothing.
-    """
-
-    def respond(prompt: str, on_event):
-        on_event(ToolsCounted(total=253))
-        return "ok"
-
-    client = FakeAgentClient(respond)
-    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "hi")
-        assert "tools 253" in status(app)
-        assert "0/253" not in status(app)
 
 
 async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:

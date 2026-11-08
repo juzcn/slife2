@@ -45,17 +45,13 @@ EVENTS = [
     # The same event with the rerank stage's report — the key is omitted when
     # empty, so both shapes have to round trip.
     ContextChosen(kept=12, recalled=3, rerank="unavailable"),
-    # The model's list against the catalogue: both halves on one ask, and a
-    # second shape from a server that predates the loaded half — the absent
-    # key must round trip as unknown rather than as zero.
+    # The model's list against the catalogue: both halves on one ask.
     ToolsCounted(loaded=24, total=253),
-    ToolsCounted(total=253),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
     # The iteration counter, and the two keys that are omitted at zero: the first
     # entry round trips a capped iteration, the second one that arrived without
-    # an iteration at all — a rebuilt transcript, or a server from before these
-    # keys.
+    # an iteration at all — a call drawn into a rebuilt transcript.
     ToolCallStarted(
         call_id="c1",
         name="calc",
@@ -305,6 +301,15 @@ def test_a_message_without_a_readable_role_keeps_its_shape() -> None:
 
 def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:
     assert StreamChatResult.from_wire(None) == StreamChatResult()
+
+
+def test_a_stream_chat_result_with_a_hole_is_refused() -> None:
+    """`to_wire` writes all five keys; a mapping missing one is not this
+    build's answer, and defaulting the hole would invent a fact."""
+    wire = StreamChatResult(text="answer").to_wire()
+    del wire["usage"]
+    with pytest.raises(KeyError, match="usage"):
+        StreamChatResult.from_wire(wire)
 
 
 # --- preview truncation ------------------------------------------------------

@@ -2690,37 +2690,6 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
             spec, servers.get(str(name), ServerSettings()), f"servers.{name}"
         )
 
-    # A `tui:` section is refused: every key is optional, so an ignored section
-    # would quietly revert a port somebody chose to 24005.  Refused rather than
-    # migrated, because the fix is one indentation and the failure is silent.
-    if raw.get("tui") is not None:
-        raise ConfigError(
-            "tui: is a `servers:` entry now, not a section of its own; "
-            "move it under `servers:` as `servers.tui`"
-        )
-
-    # `tools:` is `mcp:` now, and the same argument applies with more force: an
-    # unknown top-level key is simply not read, so a config that still says
-    # `tools:` would load with every one of those servers gone and nothing said.
-    # The section is named for the catalogue category its rows are declared
-    # under, and that category is `mcp`.
-    if raw.get("tools") is not None:
-        raise ConfigError(
-            "tools: is `mcp:` now — the section is named for the catalogue "
-            "category its rows are declared under; rename the key"
-        )
-
-    # `a2a:` is `peer_agent:` now, for the reason `tools:` moved: the section is
-    # named for *what it configures* — an agent's peer agents — and `a2a` is the
-    # plugin that carries it, which is a different word in a different layer.  A
-    # config still saying `a2a:` would load with the network silently off, so it
-    # is refused by name, and the sentence says both words so the fix is obvious.
-    if raw.get("a2a") is not None:
-        raise ConfigError(
-            "a2a: is `peer_agent:` now — the section is named for the network "
-            "it configures, and `a2a` is the plugin that serves it; rename the key"
-        )
-
     # **`providers:` is required, and an empty one is refused.**  There is no
     # built-in provider: the file is the description, and a file that names no
     # provider describes a machine with no models.  `providers: {}` is refused as
