@@ -526,9 +526,7 @@ def build_server(
         def withheld(name: str) -> Tool:
             """A stub for a by-name call the hub's list did not carry."""
             return Tool(
-                spec=ToolSpec(
-                    name=name, description="", parameters={"type": "object"}
-                ),
+                spec=ToolSpec(name=name, description="", parameters={"type": "object"}),
                 run=refused(name),
             )
 

@@ -562,8 +562,7 @@ def known_homes() -> list[Path]:
         # wrote.
         if not isinstance(raw, dict) or not isinstance(raw.get("home"), str):
             raise ValueError(
-                f"{entry}: not a home record — expected a mapping with a string "
-                f"`home`"
+                f"{entry}: not a home record — expected a mapping with a string `home`"
             )
         path = Path(raw["home"])
         if path.is_dir():

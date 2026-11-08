@@ -1096,9 +1096,7 @@ class TurnStore:
             ).fetchone()
             if row is None:
                 return False
-            messages = _messages(
-                row["messages"], what=f"turn {turn_id}'s messages"
-            )
+            messages = _messages(row["messages"], what=f"turn {turn_id}'s messages")
             # **The two columns go through `storable` like every other text.**
             # A lone surrogate in a summary is reachable from the same model
             # answer the messages are, and the insert is the thing that must not

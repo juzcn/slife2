@@ -385,6 +385,7 @@ async def test_the_cap_drops_a_delivered_result_before_an_undelivered_one(
     whatever its delivery, so at the 100-task cap a completed answer whose
     hand-back had failed vanished and the tool answered "no async task".
     """
+
     async def delivers(_text: str, _channel: str) -> bool:
         return True
 

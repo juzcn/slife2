@@ -542,9 +542,7 @@ def live_clients() -> list[ClientRecord]:
         # daemon outliving a recycled pid.
         current = process_start_token(record.pid) if record.start_token else None
         if pid_alive(record.pid) and (
-            not record.start_token
-            or current is None
-            or current == record.start_token
+            not record.start_token or current is None or current == record.start_token
         ):
             alive.append(record)
         else:

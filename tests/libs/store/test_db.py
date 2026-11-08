@@ -659,12 +659,8 @@ async def test_a_date_only_until_excludes_the_next_midnight(tmp_path) -> None:
     runner's own zone so the assertion is about the rule and not about UTC+8.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
-    await _turn(
-        store, "named day", "a", at=at(datetime(2026, 1, 1, 23, 59, 59))
-    )
-    await _turn(
-        store, "next midnight", "b", at=at(datetime(2026, 1, 2, 0, 0, 0))
-    )
+    await _turn(store, "named day", "a", at=at(datetime(2026, 1, 1, 23, 59, 59)))
+    await _turn(store, "next midnight", "b", at=at(datetime(2026, 1, 2, 0, 0, 0)))
 
     records, total = store.turns(until="2026-01-01", limit=5)
     assert [table(record) for record in records] == ["named day"]

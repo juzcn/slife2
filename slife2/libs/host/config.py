@@ -3873,9 +3873,7 @@ def _as_int(value: Any, where: str) -> int:
         number = int(value)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ConfigError(f"{where}: expected a whole number, got {value!r}") from exc
-    if isinstance(value, float) and (
-        not math.isfinite(value) or value != number
-    ):
+    if isinstance(value, float) and (not math.isfinite(value) or value != number):
         # A finite, whole float (`2.0`) is still the number it spells; a
         # fractional one is not the setting's whole number, and truncating it
         # would apply a value the file did not contain.

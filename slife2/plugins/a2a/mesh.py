@@ -1437,9 +1437,7 @@ class A2AMesh:
         elif route is not None and route.agent:
             # Both caches pruned; the route is what still knows whose answer it
             # is, and a peer's answer is still an answer.
-            self.on_task_completion(
-                task_id, text, COMPLETED, route.agent, route.kind
-            )
+            self.on_task_completion(task_id, text, COMPLETED, route.agent, route.kind)
 
     def _settle_terminal(
         self,
@@ -1982,9 +1980,7 @@ class A2AMesh:
             # withdrawal to a caller-supplied name without this check told the
             # wrong peer, recorded the row cancelled, and let the real peer run
             # on — the sibling `continue_task` refuses the same mistake.
-            return (
-                f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
-            )
+            return f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
         session = uuid.uuid4().hex[:12]
         # A fresh correlation per request: the profile requires uniqueness
         # across concurrently in-flight requests on one reply topic, and the

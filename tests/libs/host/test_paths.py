@@ -390,7 +390,7 @@ def test_a_home_record_that_is_not_the_shape_is_a_value_error(
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
     homes_dir().mkdir(parents=True, exist_ok=True)
-    for index, text in enumerate(('{}', "null", '{"home": 3}')):
+    for index, text in enumerate(("{}", "null", '{"home": 3}')):
         record = homes_dir() / f"bad-{index}.json"
         record.write_text(text, encoding="utf-8")
         with pytest.raises(ValueError, match="not a home record"):

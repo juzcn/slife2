@@ -232,9 +232,7 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
                 resolved = canonical
 
         if role == "until" and len(resolved) == 10 and "T" not in resolved:
-            resolved = (
-                date.fromisoformat(resolved) + timedelta(days=1)
-            ).isoformat()
+            resolved = (date.fromisoformat(resolved) + timedelta(days=1)).isoformat()
     except (OverflowError, ValueError):
         raise InvalidTimeBound(_bound_error(role, value)) from None
 

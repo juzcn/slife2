@@ -544,7 +544,9 @@ class AgentLoop:
                     # flight, and the next checkpoint would cancel this cleanup
                     # before it was written.
                     returned = answered[0][0] if answered else text
-                    answers.extend(interrupted_results(result.tool_calls[index:], returned))
+                    answers.extend(
+                        interrupted_results(result.tool_calls[index:], returned)
+                    )
                     messages.append(answer)
                     messages.extend(answers)
                     raise

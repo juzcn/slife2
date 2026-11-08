@@ -440,9 +440,7 @@ async def test_a_task_cannot_take_the_live_conversations_cut_in(
             stop_reason="tool_calls",
         )
     )
-    built = build(
-        calling, text_turn("done"), hub=hub, context=store, window=window
-    )
+    built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
 
     await start(built)
     await settle(built)

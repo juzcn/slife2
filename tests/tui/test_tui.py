@@ -910,9 +910,9 @@ async def test_home_and_end_follow_the_watch_screen_not_the_hidden_one() -> None
         await pilot.pause()
 
         await pilot.press("end")
-        assert await settled(
-            pilot, lambda: watched.scroll_y == watched.max_scroll_y
-        ), "End moved the watched transcript"
+        assert await settled(pilot, lambda: watched.scroll_y == watched.max_scroll_y), (
+            "End moved the watched transcript"
+        )
 
         await pilot.press("home")
         assert await settled(pilot, lambda: watched.scroll_y == 0), (

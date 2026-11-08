@@ -296,6 +296,7 @@ async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
     marks a submission drawn on that event and this message is still queued for
     its own turn.
     """
+
     async def nothing_waiting(_arguments: dict[str, Any]) -> str:
         return "Nothing waiting."
 
@@ -749,6 +750,7 @@ async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:
     `INTERRUPTED`, so the model read that a tool which ran never answered — and
     a resume could run its side effect a second time.
     """
+
     async def answer(_arguments: dict[str, Any]) -> str:
         return "the work's answer"
 
