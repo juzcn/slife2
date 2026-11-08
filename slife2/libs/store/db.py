@@ -92,7 +92,6 @@ from slife2.helpers.threads import off_loop
 from slife2.libs.host.paths import TURNS_DB, work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
-    _OVERFETCH,
     MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
@@ -1367,11 +1366,14 @@ class TurnStore:
         ranking a budget can spend.  `keyword_weight` is weighted RRF's lever on
         the sparse leg (`_fuse_questions`).
 
-        **What is returned is ranked pairs, not a selection.**  The count, the
-        similarity floor and the token budget are the *caller's* — they depend on
-        a model's window and on what the decision kept, neither of which this
-        store knows — and the split is deliberate: the store ranks, the policy
-        caps.
+        **`limit` is each leg's page, and the answer is their fusion.**  Each
+        meaning question's leg brings up to `limit + len(excluded)` candidates,
+        the keyword leg as many, and what is returned is their fused union —
+        twice `limit` for one question, more for several — never cut here.
+        The similarity floor, the rerank floor and the token budget are the
+        *caller's* — they depend on a model's window and on what the decision
+        kept, neither of which this store knows — and the split is deliberate:
+        the store ranks, the policy filters.
 
         The similarity is `None` for a turn only the keyword leg found, and that
         it is `None` rather than `0.0` is load-bearing: a fused score is a
@@ -1419,7 +1421,7 @@ class TurnStore:
             )
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
-        over = min((limit + len(excluded)) * _OVERFETCH, MAX_SQL_VARS)
+        over = min(limit + len(excluded), MAX_SQL_VARS)
         keyword: list[int] = []
         if words:
             try:
@@ -1459,9 +1461,13 @@ class TurnStore:
             if turn_id not in excluded
         ][:MAX_SQL_VARS]
         allowed = await off_loop(self._ids_in_window, fused, clauses, params)
+        # **Not cut to `limit`.**  The legs' pages fuse to a union that is not
+        # this store's to cut, and the caller's floors and budget decide what
+        # survives; a count here would make the cheap RRF order decide
+        # membership again.
         return [
             (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
-        ][:limit]
+        ]
 
     def count(self) -> int:
         with self._connect() as connection:
@@ -1732,9 +1738,9 @@ class TurnStore:
         path shares.  A blank question is dropped before the call, so the
         caller's list and the answer line up by position.
 
-        `k` counts **chunks**, not turns, which is why it is over-fetched: a
-        turn with four chunks can occupy four of the k places, and the answer
-        wants turns.  Deduplicated in `_nearest_turns` rather than in SQL
+        `k` counts **chunks**, not turns, so a turn with four chunks can occupy
+        four of the k places and the answer holds fewer turns than the caller
+        asked for.  Deduplicated in `_nearest_turns` rather than in SQL
         because a vec0 KNN refuses `GROUP BY`.  The window is *not* applied — a
         KNN cannot be constrained by a column it does not have — so `recall`
         filters the fused answer instead, and a window narrow enough to exclude

@@ -94,14 +94,17 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
 #: of what was asked for.  Fusion is a vote between ranked lists, so the lists
 #: want to be deeper than the answer — and one leg needs the slack for a second
 #: reason: `k` on a vector search counts *chunks*, and several of them can belong
-#: to one turn.
+#: to one row.
+#:
+#: **The turn store's recall is the exception.**  Each of its legs asks for
+#: exactly `limit + len(excluded)` turns, and the union is returned uncut.
 _OVERFETCH = 4
 
 
 #: How many values one statement may bind, and therefore how long the list a
 #: search hands to its final query may be.  SQLite's default limit is 999 and
 #: the fused id list costs a bound value per *row*, so the cap belongs on the
-#: fused list — two over-fetched legs fuse to twice the length either one had,
+#: fused list — two legs fuse to at most twice the length either one had,
 #: which is the number that has to stay under this.
 #:
 #: **Public, because every store that binds a fused list needs the same number.**

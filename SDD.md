@@ -943,10 +943,12 @@ Rules:
   noise floor. **No term is cut for being common**: a word that appears in
   half the log can still be the one exact string a query is about, and the
   reranker can only judge a candidate it is given.
-- **A cross-encoder reranks the whole retrieved pool** when the embeddings
-  provider names a `rerank_model`: retrieval hands it `recall_pool_size`
-  candidates (80 by default), and `rerank_min_score` is the ranker's own floor.
-  It is a precision stage, not a retriever: a missing or failing reranker keeps
+- **A cross-encoder reranks the whole fused pool** when the embeddings
+  provider names a `rerank_model`: each leg retrieves `recall_page_limit`
+  candidates (80 by default), fusion returns their union — twice that for one
+  question, more for several — and nothing cuts it; the floors and the token
+  budget decide membership. `rerank_min_score` is the ranker's own floor. It
+  is a precision stage, not a retriever: a missing or failing reranker keeps
   the fused order (a short answer is refused, not read as low scores), and a
   period recall — which has no question — keeps its time order. The catalogue
   and cabinet searches keep their own page order; their rerank is deferred
@@ -980,7 +982,7 @@ The context parameters are in `context:`:
 | Key | Meaning |
 |---|---|
 | `ceiling` | Fraction of the model's window the live context is topped up to; a recall spends what the kept turns leave below it. |
-| `recall_pool_size` | Candidates retrieval hands the reranker; the floors and the token budget decide membership from there. |
+| `recall_page_limit` | Candidates each leg retrieves; fusion returns their union uncut, and the floors and the token budget decide membership from there. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
 | `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.1` drops keyword incidentals, `0.0` keeps everything it returned. |

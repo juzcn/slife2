@@ -558,18 +558,20 @@ def test_a_per_recall_floor_is_refused_rather_than_ignored(tmp_path) -> None:
 
 
 def test_a_recall_count_is_refused_rather_than_ignored(tmp_path) -> None:
-    """Membership is the floors' and the budget's; the pool is a width.
+    """Membership is the floors' and the budget's; each leg has a page.
 
     A file still naming `context.recall_limit:` asked for a count cap that no
     longer exists.  Loading it with the key silently dropped would recall more
-    than its author asked for, so the key is refused and the new width key is
+    than its author asked for, so the key is refused; the short-lived
+    `recall_pool_size:` is refused the same way, and `recall_page_limit:` is
     what a home calibrates instead.
     """
-    with pytest.raises(ConfigError, match="context.recall_limit"):
-        load(write(tmp_path, "context:\n  recall_limit: 40\n"))
+    for gone in ("recall_limit", "recall_pool_size"):
+        with pytest.raises(ConfigError, match=f"context.{gone}"):
+            load(write(tmp_path, f"context:\n  {gone}: 40\n"))
 
-    kept = load(write(tmp_path, "context:\n  recall_pool_size: 40\n"))
-    assert kept.context.recall_pool_size == 40
+    kept = load(write(tmp_path, "context:\n  recall_page_limit: 40\n"))
+    assert kept.context.recall_page_limit == 40
 
 
 def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:
@@ -579,17 +581,17 @@ def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:
         "context:\n"
         "  keyword_weight: 2.0\n"
         "  rerank_min_score: 0.3\n"
-        "  recall_pool_size: 120\n",
+        "  recall_page_limit: 120\n",
     )
     context = load(path).context
     assert context.keyword_weight == 2.0
     assert context.rerank_min_score == 0.3
-    assert context.recall_pool_size == 120
+    assert context.recall_page_limit == 120
 
     for text, expected in [
         ("context:\n  keyword_weight: -1\n", "context.keyword_weight"),
         ("context:\n  rerank_min_score: 2\n", "context.rerank_min_score"),
-        ("context:\n  recall_pool_size: 0\n", "context.recall_pool_size"),
+        ("context:\n  recall_page_limit: 0\n", "context.recall_page_limit"),
     ]:
         with pytest.raises(ConfigError, match=expected):
             load(write(tmp_path, text))

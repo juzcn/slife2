@@ -533,8 +533,8 @@ async def test_a_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
 
     The keyword leg filters in SQL and the semantic leg's answer is filtered
     after fusion — a `vec0` KNN has no turn id to filter on — so the excluded
-    turn is absent from both legs' contribution, and `limit` places go to turns
-    that are actually missing.
+    turn is absent from both legs' contribution, and the page's places go to
+    turns that are actually missing.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     embedder = StubEmbedder()
@@ -771,15 +771,15 @@ async def test_a_bound_list_longer_than_sqlite_takes_is_bound_in_chunks(
     """**The cap is on the statement, not on the answer**, and this is the query
     that binds it.
 
-    Nothing the caller passes bounds a search's shortlist: every question brings
-    up to `limit * 4` ids of its own and the keyword leg as many again, so about
-    forty sentences reach SQLite's ceiling for bound variables (32766, measured)
-    and raise `OperationalError: too many SQL variables` — a search that does not
-    answer at all.  All three stores read their page through this one query,
-    which is where the cap therefore is, and the answer is chunks rather than a
-    shorter list: the ranking is already complete when the ids get here, so a
-    page that had quietly lost its tail would be the one thing a caller cannot
-    tell from a short page.
+    Nothing the caller passes bounds a search's shortlist: a catalogue or
+    cabinet search brings up to `limit * 4` ids per question and the keyword
+    leg as many again, so about forty sentences reach SQLite's ceiling for bound
+    variables (32766, measured) and raise `OperationalError: too many SQL
+    variables` — a search that does not answer at all.  All three stores read
+    their page through this one query, which is where the cap therefore is, and
+    the answer is chunks rather than a shorter list: the ranking is already
+    complete when the ids get here, so a page that had quietly lost its tail
+    would be the one thing a caller cannot tell from a short page.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     await store.save_turn(messages=CORPUS[0], embedder=StubEmbedder())

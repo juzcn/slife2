@@ -597,14 +597,19 @@ def build_server(
                 "phrase, or `turn_list` to browse the history without one."
             )
         store = await store_of(agent, subagent)
-        ranked = await store.recall(
-            query=query,
-            sentences=asked,
-            embedder=await embedding.get(),
-            since=since,
-            until=until,
-            limit=limit,
-        )
+        # The store answers with the legs' fused union, uncut; a search's page
+        # is its own edge — the model asked for this many hits, so the cut
+        # belongs here rather than in the ranking.
+        ranked = (
+            await store.recall(
+                query=query,
+                sentences=asked,
+                embedder=await embedding.get(),
+                since=since,
+                until=until,
+                limit=limit,
+            )
+        )[: page_limit(limit)]
         records = {
             record.turn_id: record
             for record in await off_loop(
@@ -1148,21 +1153,21 @@ def build_server(
         owed, not a fallback to swallow.
 
         **The recall is a funnel, and the floors and the budget decide
-        membership.**  The store fuses an over-fetched pair of legs into the
-        configured pool; `min_similarity` drops measured noise; the
-        cross-encoder reorders the survivors and drops those below
-        `rerank_min_score`; the kept turns' estimated cost is subtracted from
-        `ceiling × window`, and the budget spends what is left.  **No count
-        cuts the selection**: a turn that passed both floors is a turn the
-        budget may buy, and a count applied after the ranker would discard
-        relevant turns on the strength of an order the chronological rebuild
-        does not keep.
+        membership.**  The store fuses the legs' pages into a pool that is
+        their union (twice the configured width for one question, more for
+        several); `min_similarity` drops measured noise; the cross-encoder
+        reorders the survivors and drops those below `rerank_min_score`; the
+        kept turns' estimated cost is subtracted from `ceiling × window`, and
+        the budget spends what is left.  **No count cuts the selection**: a
+        turn that passed both floors is a turn the budget may buy, and a count
+        applied after the ranker would discard relevant turns on the strength
+        of an order the chronological rebuild does not keep.
 
-        **The pool only bounds what the ranker may see.**  Retrieval hands the
-        cross-encoder `recall_pool_size` candidates, so a turn the legs ranked
-        low is still judged; the width is a retrieval bound, not a place
-        count.  The whole pool is one cross-encoder call, and a slow or
-        rate-limited reranker is paid for before every turn.
+        **The pool only bounds what the ranker may see.**  Each leg retrieves
+        `recall_page_limit` candidates, and the cross-encoder judges their fused
+        union; there is no count cap on the pool itself.  The whole pool is one
+        cross-encoder call, and a slow or rate-limited reranker is paid for
+        before every turn.
 
         Every cap here is the caller's and not the store's, for the split of
         duties: the store ranks, the policy caps, and the policy depends on a
@@ -1263,9 +1268,9 @@ def build_server(
             # `budget <= 0` exit below rather than by a recall that overfills.
             budget = int(window * policy.ceiling) - base_cost
         else:
-            # No declared window: no token cap, so the pool's own width is the
-            # only bound left.  Better a context bounded by retrieval width
-            # than one sized against a window nobody stated.
+            # No declared window: no token cap, so the fused pool's width is
+            # the only bound left.  Better a context bounded by retrieval
+            # width than one sized against a window nobody stated.
             budget = 0
         if window and budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
@@ -1282,7 +1287,7 @@ def build_server(
             since=since,
             until=until,
             anchor=anchor,
-            limit=policy.recall_pool_size,
+            limit=policy.recall_page_limit,
             # The keep-list is what is *in hand*, so it is also what a recall
             # must not spend retrieval depth or budget on: the union collapses
             # a turn in both, so retrieving it would spend on something already
@@ -1325,11 +1330,11 @@ def build_server(
     ) -> tuple[list[int], str]:
         """Reorder the pool with the provider's cross-encoder.
 
-        **A precision stage over the whole retrieved pool.**  Retrieval hands
-        it the configured `recall_pool_size` candidates, so a turn the two legs
-        ranked low is still judged; `rerank_min_score` is the membership
-        decision this stage makes, and its order matters only where the token
-        budget spends down it.
+        **A precision stage over the whole fused pool.**  Each leg retrieves
+        `recall_page_limit` candidates, so a turn the two legs ranked low is
+        still judged; `rerank_min_score` is the membership decision this stage
+        makes, and its order matters only where the token budget spends down
+        it.
 
         **An unavailable or failing reranker is not a failed recall.**  The
         provider may serve no cross-encoder (`rerank_model` empty), the call may

@@ -1499,13 +1499,11 @@ class ContextSettings:
     #: the ceiling leaves it nothing.  There is no separate per-recall floor —
     #: one would give the two halves two budgets for one window.
     ceiling: float = 0.8
-    #: How many candidates one recall retrieves for its precision stage.  The
-    #: pool is a retrieval width, not a selection: `min_similarity`,
-    #: `rerank_min_score` and the token budget decide membership.  Wide enough
-    #: at the default that a turn the legs ranked low is still judged, and short
-    #: enough that one cross-encoder call over it stays cheap.  The store's page
-    #: bound (`MAX_PAGE`, 200) caps anything larger.
-    recall_pool_size: int = 80
+    #: How many candidates **each leg** of a recall retrieves.  The fused pool
+    #: is their union — twice this for one question, more for several — and the
+    #: store does not cut it; the two floors and the token budget decide
+    #: membership.  The store's page bound (`MAX_PAGE`, 200) caps each leg.
+    recall_page_limit: int = 80
     #: The similarity a *measured* candidate must reach to be recalled.  **A
     #: filter, not an ordering**: a candidate below it is dropped whether or not
     #: the rest of the ranking would have selected it.  The keyword leg is
@@ -1530,8 +1528,8 @@ class ContextSettings:
     #: incidentals a keyword leg finds — measured at 0.0007–0.006 on this
     #: project's log — while keeping the real turns (0.69–0.81).  The scale
     #: belongs to the reranker, so calibrate it like `min_similarity` rather
-    #: than copying a number from another model.  Every candidate in the
-    #: configured recall pool (`recall_pool_size`, 80 by default) is reranked,
+    #: than copying a number from another model.  Every candidate in the fused
+    #: recall pool (each leg's `recall_page_limit`, 80 by default) is reranked,
     #: so a hit RRF put low is still judged.
     rerank_min_score: float = 0.1
     #: How long the discriminator call may take before the turn runs on the
@@ -3261,11 +3259,11 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     section is the default, as everywhere else; an *explicit* zero is refused
     rather than read as absent, which is `_int_or`'s rule one type over.
 
-    **`floor:` and `recall_limit:` are refused rather than ignored.**  A recall
-    now spends what the kept turns leave below the ceiling, and its membership
-    is the two floors plus that budget; a file still naming a per-recall floor
-    or a count cap would load with the key silently dropped — the one failure a
-    config change must not have.
+    **Removed keys are refused rather than ignored.**  A recall now spends what
+    the kept turns leave below the ceiling, and its membership is the two floors
+    plus that budget; a file still naming a per-recall floor, a count cap or the
+    short-lived pool key would load with the key silently dropped — the one
+    failure a config change must not have.
     """
     if raw is None:
         return base
@@ -3278,8 +3276,13 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     if section.get("recall_limit") is not None:
         raise ConfigError(
             "context.recall_limit is gone: the recall's floors and the ceiling's "
-            "token budget decide membership, and the retrieval width is "
-            "context.recall_pool_size — remove the key"
+            "token budget decide membership, and each leg's page is "
+            "context.recall_page_limit — remove the key"
+        )
+    if section.get("recall_pool_size") is not None:
+        raise ConfigError(
+            "context.recall_pool_size is now context.recall_page_limit — "
+            "rename the key"
         )
     ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
     ceiling = base.ceiling if ceiling is None else ceiling
@@ -3287,13 +3290,13 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         raise ConfigError(
             f"context.ceiling: {ceiling} is not a window fraction (0 < ceiling <= 1)"
         )
-    pool = _int_or(
-        section.get("recall_pool_size"),
-        base.recall_pool_size,
-        "context.recall_pool_size",
+    page = _int_or(
+        section.get("recall_page_limit"),
+        base.recall_page_limit,
+        "context.recall_page_limit",
     )
-    if pool < 1:
-        raise ConfigError(f"context.recall_pool_size: {pool} recalls nothing")
+    if page < 1:
+        raise ConfigError(f"context.recall_page_limit: {page} recalls nothing")
     timeout = _optional_float(section.get("timeout"), "context.timeout")
     if timeout is not None and timeout <= 0:
         raise ConfigError(
@@ -3324,7 +3327,7 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         )
     return ContextSettings(
         ceiling=ceiling,
-        recall_pool_size=pool,
+        recall_page_limit=page,
         min_similarity=base.min_similarity if similarity is None else similarity,
         keyword_weight=base.keyword_weight if weight is None else weight,
         rerank_min_score=(
