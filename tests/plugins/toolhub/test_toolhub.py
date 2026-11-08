@@ -3133,9 +3133,7 @@ def test_our_own_upstream_has_no_ceiling_on_one_message() -> None:
     so `github__*` never reached the catalogue although the plugin held them.
     """
     built = mcp_config(
-        ToolServerSettings(
-            name="restapi-tools", url="http://127.0.0.1:24034/mcp"
-        ),
+        ToolServerSettings(name="restapi-tools", url="http://127.0.0.1:24034/mcp"),
         cwd="/data",
         ours=True,
     )
