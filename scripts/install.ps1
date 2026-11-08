@@ -562,16 +562,33 @@ function Ensure-Node {
 
 function Ensure-Cloudflared {
     $target = Join-Path $env:LOCALAPPDATA 'slife2\tools\cloudflared.exe'
-    if (Get-Command cloudflared -ErrorAction SilentlyContinue) {
-        if (-not (Test-Path $target)) { return }
-    }
+    $installed = Test-Path $target
+    if (-not $installed -and (Get-Command cloudflared -ErrorAction SilentlyContinue)) { return }
     # curl writes the file, not the directory: on a machine that has never had
     # a `~/.local` install, `%LOCALAPPDATA%\slife2\tools` does not exist yet.
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
     $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') { '386' } else { 'amd64' }
     $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-$arch.exe"
     Say '  downloading cloudflared'
-    if (-not (Get-RemoteFile $url $target)) { Fail 'cloudflared could not be downloaded'; return }
+    # **Download beside the destination and rename it into place.**  A
+    # transfer that stops halfway would leave a truncated executable behind
+    # the name, and writing over a running `cloudflared` fails; a rename
+    # replaces the name, not the running image.
+    $staged = Join-Path (Split-Path -Parent $target) ('.cloudflared.' + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.exe')
+    $placed = [bool](Get-RemoteFile $url $staged)
+    if ($placed) {
+        try { Move-Item -Force $staged $target -ErrorAction Stop }
+        catch { $placed = $false }
+    }
+    Remove-Item -Force $staged -ErrorAction SilentlyContinue
+    if (-not $placed) {
+        # **A working copy is the requirement met.**  A refresh can fail on
+        # its own — GitHub's release CDN answers 504 — and the install must
+        # not report a dependency missing while the old binary still runs.
+        if ($installed) { Say '  keeping the installed cloudflared'; return }
+        Fail 'cloudflared could not be downloaded'
+        return
+    }
     Add-UserPath (Split-Path -Parent $target)
     Update-ProcessPath
     Add-Owned 'local' $target 'cloudflared'

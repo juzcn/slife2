@@ -1059,6 +1059,72 @@ def test_cloudflared_makes_its_tools_directory(tmp_path: Path) -> None:
     assert "TARGET=True" in result.stdout, result.stdout + result.stderr
 
 
+def test_cloudflared_keeps_a_working_copy_when_the_refresh_fails(
+    tmp_path: Path,
+) -> None:
+    """**A failed refresh must not report a binary that still runs as missing.**
+
+    GitHub's release CDN answered 504 for every asset while the rest of
+    github.com worked, and a reinstall then failed on cloudflared although
+    `%LOCALAPPDATA%\\slife2\\tools\\cloudflared.exe` was installed and ran.
+    The download is staged beside the target, so a failed refresh also leaves
+    the working copy untouched.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    local = tmp_path / "LocalAppData"
+    tools = local / "slife2" / "tools"
+    tools.mkdir(parents=True)
+    target = tools / "cloudflared.exe"
+    target.write_bytes(b"working-binary")
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(
+            POWERSHELL.read_text(encoding="utf-8"), "Ensure-Cloudflared"
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Say([string]$Message) { }\n"
+        "function Fail([string]$Message) { throw $Message }\n"
+        "function Add-UserPath([string]$Path) { }\n"
+        "function Update-ProcessPath { }\n"
+        "function Add-Owned([string]$Manager, [string]$Package, [string]$Tool) { }\n"
+        "function Get-RemoteFile([string]$Url, [string]$Path) {\n"
+        "    [IO.File]::WriteAllBytes($Path, [Text.Encoding]::ASCII.GetBytes('partial'))\n"
+        "    return $false\n"
+        "}\n"
+        f"$env:LOCALAPPDATA = '{local}'\n"
+        f"$env:PATH = '{stub_bin}'\n"
+        f". '{function_file}'\n"
+        "Ensure-Cloudflared\n"
+        f'Write-Output ("BODY=" + [IO.File]::ReadAllText('
+        f"(Join-Path $env:LOCALAPPDATA 'slife2\\tools\\cloudflared.exe')))\n"
+        'Write-Output ("STAGED=" + @(Get-ChildItem (Join-Path $env:LOCALAPPDATA '
+        "'slife2\\tools') -Filter '.cloudflared.*').Count)\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BODY=working-binary" in result.stdout, result.stdout + result.stderr
+    assert "STAGED=0" in result.stdout, result.stdout + result.stderr
+
+
 def _ensure_python_function(path: Path) -> str:
     name = "Ensure-Python" if path.suffix == ".ps1" else "ensure_python"
     pattern = (
