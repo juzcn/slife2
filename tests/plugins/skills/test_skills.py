@@ -278,6 +278,29 @@ def test_install_refuses_a_header_that_does_not_parse(root: Path) -> None:
     assert not (root / ".one.installing").exists()
 
 
+def test_install_parses_the_manifest_the_last_copy_leaves(root: Path) -> None:
+    """**The effective `SKILL.md` is the one on disk, not the first in the list.**
+
+    The gate parsed only the first entry whose path was `SKILL.md`, and the
+    write loop then wrote every entry: a second, invalid copy installed a skill
+    that `scan` refuses, while the call reported success.  The staged manifest
+    is parsed for a create too, so what the gate judges is what the loader will.
+    """
+    with pytest.raises(ValueError, match="no closing"):
+        install(
+            "one",
+            [
+                {"path": "SKILL.md", "content": manifest_text("one")},
+                {
+                    "path": "SKILL.md",
+                    "content": "---\nname: Dup\ndescription: [x\n",
+                },
+            ],
+        )
+    assert not (root / "one").exists()
+    assert not (root / ".one.installing").exists()
+
+
 # --- drafting a playbook from a workflow --------------------------------------
 
 

@@ -481,7 +481,12 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         # that out is handing out a dead link, and the caller finds out later —
         # from a model that could not fetch the file.  Refusing is the honest
         # answer, and the tunnel keeps retrying in the background.
-        if not tunnel.is_reachable():
+        # **The probe is the provider's own I/O** — a metrics HTTP call for
+        # cloudflared, a process check for a CLI child — so it goes off the
+        # loop: a probe that accepted but does not answer would otherwise stall
+        # every other call this server is answering, including the share a
+        # remote model is fetching.
+        if not await asyncio.to_thread(tunnel.is_reachable):
             raise ToolError(
                 "the tunnel has published a URL but nothing is "
                 "reaching it from outside right now — every fetch would answer "
@@ -558,7 +563,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "state": state["state"],
                 "url": state.get("url", ""),
                 "reason": state.get("reason", ""),
-                "reachable": tunnel.is_reachable(),
+                "reachable": await asyncio.to_thread(tunnel.is_reachable),
                 "provider": config.file_tunnel.active,
                 "binary": binary,
                 "edge_ip": edge_ip,
@@ -606,22 +611,35 @@ async def _ensure(tunnel: TunnelProvider, port: int) -> None:
     """
     if tunnel.is_active:
         return
-    if tunnel.is_starting:
-        deadline = time.monotonic() + _T.timeouts.ready.tunnel_start
-        while tunnel.is_starting and not tunnel.is_active:
-            if time.monotonic() >= deadline:
-                # The attempt outlived its own budget — do not start a second
-                # one on top of it (the provider would refuse it as "already in
-                # progress" and log a warning for a start that is not broken).
-                logger.warning(
-                    "file_tunnel_start_still_in_flight timeout=%.0fs",
-                    _T.timeouts.ready.tunnel_start,
-                )
-                return
-            await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)
-        if tunnel.is_active:
-            return  # the in-flight attempt was the answer
+    deadline = time.monotonic() + _T.timeouts.ready.tunnel_start
+    if tunnel.is_starting and await _wait_for_start(tunnel, deadline):
+        return
+    if tunnel.is_active:
+        return  # the in-flight attempt was the answer
     await _start(tunnel, port, why="on-demand")
+    # **The guard can be taken between the check above and `start`'s own
+    # lock.**  A start that arrives after the monitor's attempt has begun is
+    # refused as "already in progress"; that is not this call's attempt failing,
+    # so wait for the one that won rather than reporting a tunnel that is
+    # seconds from publishing as down.
+    if tunnel.is_starting:
+        await _wait_for_start(tunnel, deadline)
+
+
+async def _wait_for_start(tunnel: TunnelProvider, deadline: float) -> bool:
+    """Wait out a start already in flight; True when the budget ran out."""
+    while tunnel.is_starting and not tunnel.is_active:
+        if time.monotonic() >= deadline:
+            # The attempt outlived its own budget — do not start a second one
+            # on top of it (the provider would refuse it as "already in
+            # progress" and log a warning for a start that is not broken).
+            logger.warning(
+                "file_tunnel_start_still_in_flight timeout=%.0fs",
+                _T.timeouts.ready.tunnel_start,
+            )
+            return True
+        await asyncio.sleep(_T.timeouts.pacing.tunnel_retry_delay)
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:

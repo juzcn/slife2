@@ -2911,8 +2911,10 @@ def build_server(
             # would answer as a new fork of wherever its maker stands now.
             # `forget_forks` says why that is a different subagent and not the
             # same one resumed, and why the sweep is every home this process
-            # serves rather than its own.
-            forget_forks()
+            # serves rather than its own.  It walks the filesystem and may wait
+            # out a held file, so it runs on a thread: start-up blocking the
+            # loop would hold every connection this server is about to serve.
+            await asyncio.to_thread(forget_forks)
         try:
             yield {}
         finally:
@@ -3170,6 +3172,18 @@ def build_server(
         """
         explicit = configfile.read_scalar("default")
         if explicit:
+            # **A bare provider is the reference its first model makes.**  The
+            # loader accepts `default: deepseek` and `Config.resolve` answers
+            # with that provider's first model, so the raw scalar here made the
+            # "it is the default model" guard compare two different spellings
+            # of one model and never fire — removing it silently changed what
+            # the system runs on.
+            if "/" in explicit:
+                return explicit
+            entry = providers.get(explicit)
+            models = entry.get("models") if isinstance(entry, dict) else None
+            if isinstance(models, list) and models and isinstance(models[0], dict):
+                return f"{explicit}/{models[0].get('model', '')}"
             return explicit
         for name, entry in providers.items():
             models = entry.get("models")
@@ -4480,7 +4494,10 @@ def build_server(
         # that does not exist *creates* it, and the handle that created it can
         # hold the file against the `rmtree` that follows.
         loops.pop(client_key(maker, directory.name), None)
-        _remove_tree(directory)
+        # The retry loop sleeps up to `storage.sqlite_busy` between attempts;
+        # on the event loop that stalls every turn, stream and approval in this
+        # shared server, so the whole removal runs on a thread.
+        await asyncio.to_thread(_remove_tree, directory)
         # **A watcher is told, not left on a stream that will never write
         # again**, and it is told after the directory is gone: a delete that
         # failed leaves the conversation there (`_remove_tree` raises rather

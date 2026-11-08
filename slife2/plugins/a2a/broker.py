@@ -160,8 +160,15 @@ def log_url(settings: A2ASettings) -> str:
     `runtime.log_path` digests it (`endpoint_key`), and the scheme is `mqtt` so
     a broker's log cannot collide with the log of an MCP server on the same
     port.
+
+    **An IPv6 host is bracketed**, because that is the only spelling `urlsplit`
+    can read: `mqtt://::1:1883` made `.port` raise, so the one address
+    `LOCAL_HOSTS` explicitly accepts could not even name its own log.
     """
-    return f"mqtt://{settings.broker_host}:{settings.broker_port}"
+    host = settings.broker_host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"mqtt://{host}:{settings.broker_port}"
 
 
 def _write_config(settings: A2ASettings) -> Path:

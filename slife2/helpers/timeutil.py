@@ -209,22 +209,34 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
     key = " ".join(value.strip().lower().split())
     today = _today()
 
-    if key == "now":
-        # A time of day, not a calendar date — so `since=now` is this second
-        # rather than the start of today.
-        resolved = now()
-    else:
-        day = _resolve_relative(key, role, today)
-        if day is not None:
-            resolved = day.isoformat()
+    # **A value at the edge of the calendar is a bound this grammar cannot
+    # place**, not an overflow out of a query.  `9999-12-31` is exactly what the
+    # advertised "ISO date" accepts, and advancing it to the next day is how a
+    # date-only `until` names the end of its day; `date`/`timedelta` answer that
+    # with `OverflowError`.  So is a huge `<N> years ago` naming a year before
+    # 1, which `_shift_months` answers with `ValueError`.  Both are the same
+    # fact as an unparseable spelling and take its answer (SDD Appendix C).
+    try:
+        if key == "now":
+            # A time of day, not a calendar date — so `since=now` is this second
+            # rather than the start of today.
+            resolved = now()
         else:
-            canonical = _canonical(value.strip())
-            if canonical is None:
-                raise InvalidTimeBound(_bound_error(role, value))
-            resolved = canonical
+            day = _resolve_relative(key, role, today)
+            if day is not None:
+                resolved = day.isoformat()
+            else:
+                canonical = _canonical(value.strip())
+                if canonical is None:
+                    raise InvalidTimeBound(_bound_error(role, value))
+                resolved = canonical
 
-    if role == "until" and len(resolved) == 10 and "T" not in resolved:
-        resolved = (date.fromisoformat(resolved) + timedelta(days=1)).isoformat()
+        if role == "until" and len(resolved) == 10 and "T" not in resolved:
+            resolved = (
+                date.fromisoformat(resolved) + timedelta(days=1)
+            ).isoformat()
+    except (OverflowError, ValueError):
+        raise InvalidTimeBound(_bound_error(role, value)) from None
 
     # A model may write UTC or some other offset, and the column holds local
     # time.  Comparing the two lexicographically is wrong exactly at the
@@ -250,7 +262,13 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # guarantees, so a value that reached here unparseable is a bound it
             # cannot place (SDD Appendix C).
             raise InvalidTimeBound(_bound_error(role, value)) from None
-        resolved = at(moment)
+        try:
+            resolved = at(moment)
+        except (OverflowError, ValueError):
+            # The offset rewrite can carry the instant past the calendar's end
+            # (`9999-12-31T23:59:59+00:00` in a zone ahead of UTC), which is a
+            # bound this build cannot place for the same reason as the above.
+            raise InvalidTimeBound(_bound_error(role, value)) from None
 
     return resolved
 

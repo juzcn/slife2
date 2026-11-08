@@ -249,6 +249,43 @@ async def test_a_file_that_does_not_load_stays_visible_and_is_not_callable(
 
 
 @pytest.mark.asyncio
+async def test_a_job_file_that_is_not_utf8_is_readable_and_replaceable(
+    isolated_runtime: Path,
+) -> None:
+    """A file in the machine codepage is the case both tools are for.
+
+    `job_read` is where a load error sends the model, and `job_set` is how it
+    fixes the file.  Both read with a text encoding and caught only `OSError`;
+    `UnicodeDecodeError` is a `ValueError`, so a GBK `jobs/report.py` made the
+    two repair paths raise a codec traceback — the file could only be fixed
+    outside the tool.
+    """
+    config_on_disk(isolated_runtime)
+    folder = isolated_runtime / "jobs"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "report.py").write_bytes(
+        "def report() -> str:\n    '''报告'''\n    return 'x'\n".encode("gbk")
+    )
+
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError, match="UTF-8"):
+            await client.call_tool("job_read", {"name": "report"})
+        # The write is the documented repair, and it replaces the bytes.
+        fixed = (
+            "def report() -> str:\n"
+            '    """Return the report.\n\n'
+            "    Returns:\n"
+            "        The report.\n"
+            '    """\n'
+            "    return 'x'\n"
+        )
+        await ask(client, "job_set", name="report", code=fixed)
+        read = await ask(client, "job_read", name="report")
+
+    assert read["code"] == fixed
+
+
+@pytest.mark.asyncio
 async def test_a_missing_job_is_a_refusal_not_an_empty_answer(
     isolated_runtime: Path,
 ) -> None:

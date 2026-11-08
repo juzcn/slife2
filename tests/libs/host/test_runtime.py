@@ -77,6 +77,21 @@ def test_urls_that_are_the_same_server_share_a_key(left: str, right: str) -> Non
     assert runtime.endpoint_key(left) == runtime.endpoint_key(right)
 
 
+def test_an_ipv6_endpoint_is_bracketed_and_re_parsable() -> None:
+    """**The canonical form has to be a URL `urlsplit` can read again.**
+
+    `[::1]` is the only spelling that disambiguates host and port; a canonical
+    form without the brackets raised on the next parse, and an IPv6 broker host
+    — which the config layer accepts and tests — made `endpoint_key` raise, so
+    the a2a plugin could not start its log/lock and `status`/`down` crashed.
+    """
+    url = "mqtt://[::1]:1883"
+    canonical = runtime.normalize_url(url)
+
+    assert canonical == "mqtt://[::1]:1883/"
+    assert runtime.normalize_url(canonical) == canonical
+
+
 def test_different_ports_are_different_servers() -> None:
     assert runtime.endpoint_key("http://127.0.0.1:24001/mcp") != runtime.endpoint_key(
         "http://127.0.0.1:24002/mcp"
@@ -171,6 +186,26 @@ def test_a_client_record_that_cannot_be_parsed_but_is_alive_is_kept() -> None:
         "the live client was uncounted"
     )
     assert path.exists(), "a live client's record was deleted"
+
+
+def test_a_token_lookup_that_cannot_answer_keeps_the_live_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**An unprovable token is not a mismatch.**
+
+    `process_start_token` returning None is the documented "cannot prove", and
+    the caller's rule is to take the safe direction.  `live_clients` compared
+    it to the record's token, deleted the record, and the last *other* client
+    then stopped the shared servers under a client still working.
+    """
+    record = runtime.register_client("alpha")
+    assert record.start_token, "this host records a start token"
+    monkeypatch.setattr(runtime, "process_start_token", lambda pid: None)
+
+    live = runtime.live_clients()
+
+    assert any(one.pid == os.getpid() for one in live)
+    assert record.path.exists(), "a live client's record was deleted"
 
 
 def test_a_client_record_that_cannot_be_parsed_and_is_dead_is_cleaned_up() -> None:

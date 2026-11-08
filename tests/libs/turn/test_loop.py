@@ -286,6 +286,46 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     ] == ["c1"]
 
 
+async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
+    """The delivery verdict is the inbox's, not the gate's optimism.
+
+    `auto()` says a message was waiting, but the call can fail or answer
+    "nothing waiting" (the queue emptied between the two calls, or refused an
+    image).  The pair is still the record of the harness's call; the tool
+    message wears no channel and no `MessageCutIn` is sent, because the window
+    marks a submission drawn on that event and this message is still queued for
+    its own turn.
+    """
+    async def nothing_waiting(_arguments: dict[str, Any]) -> str:
+        return "Nothing waiting."
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="calc", arguments={"e": "2+2"})),
+        text_turn("It is 4."),
+    )
+    harness_tools = [*tools(), a_tool("_check_new_input", nothing_waiting)]
+    observer = ListObserver()
+    messages: list[Message] = []
+    asked = 0
+
+    def auto() -> AutoCall | None:
+        nonlocal asked
+        asked += 1
+        if asked == 1:
+            return AutoCall("_check_new_input", channel="tui", receipt="s-1")
+        return None
+
+    await AgentLoop(backend, ToolRegistry(harness_tools)).run_turn(
+        messages, "one", observer, auto=auto, injected=lambda: 0
+    )
+
+    answered = [m for m in messages if m.role == "tool" and m.channel == "tui"]
+    assert answered == [], "nothing was taken, so no line wears the bubble"
+    assert not [
+        event for event in observer.events if isinstance(event, MessageCutIn)
+    ], "a message that is still queued was not handed over"
+
+
 async def test_a_message_the_model_takes_early_is_the_same_cut_in() -> None:
     """`_check_new_input` is declared, so the model can call it itself.
 
@@ -699,6 +739,37 @@ async def test_an_interruption_in_the_fit_keeps_the_result_it_had() -> None:
 
     assert [m.role for m in messages] == ["user", "assistant", "tool"]
     assert messages[-1].content == "the real answer"
+
+
+async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:
+    """The tool has returned before the event is emitted, so its answer stands.
+
+    `ToolCallFinished` is an await.  A cancellation landing in it used to lose
+    the pair the call had already produced: the batch was completed with
+    `INTERRUPTED`, so the model read that a tool which ran never answered — and
+    a resume could run its side effect a second time.
+    """
+    async def answer(_arguments: dict[str, Any]) -> str:
+        return "the work's answer"
+
+    backend = FakeBackend(tool_turn(ToolCall(id="c1", name="tool", arguments={})))
+    loop = AgentLoop(backend, ToolRegistry([a_tool("tool", answer)]))
+    messages: list[Message] = []
+    holder: list[asyncio.Task[Any]] = []
+
+    class Cancelling:
+        async def on_event(self, event: object) -> None:
+            if isinstance(event, ToolCallFinished):
+                holder[0].cancel()
+                await asyncio.sleep(0)  # deliver the cancel inside the emit
+
+    task = asyncio.create_task(loop.run_turn(messages, "go", Cancelling()))
+    holder.append(task)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == "the work's answer"
 
 
 async def test_observer_receives_deltas_in_order() -> None:

@@ -322,6 +322,32 @@ def test_a_bound_in_no_known_grammar_is_an_error(value: str) -> None:
         normalize_bound(value, role="since")
 
 
+@pytest.mark.parametrize(
+    ("value", "role"),
+    [
+        ("9999-12-31", "until"),
+        ("9999 years ago", "since"),
+        ("9999 years ago", "until"),
+        ("999999999 weeks ago", "since"),
+    ],
+)
+def test_a_bound_at_the_edge_of_the_calendar_is_a_refusal(
+    value: str, role: str
+) -> None:
+    """**The grammar accepts it; the arithmetic cannot place it.**
+
+    `9999-12-31` is a valid ISO date and the natural way to write "everything
+    up to now", and a date-only `until` is advanced one day — which at the
+    calendar's last date is an `OverflowError`.  A huge `<N> years ago` builds
+    a year before 1 and raises `ValueError`.  Both used to escape as a
+    traceback through `can_place` (whose whole job is to answer this before the
+    raise) and out of a window query.
+    """
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound(value, role=role)
+    assert timeutil.can_place(value, role=role) is False
+
+
 def test_the_error_says_what_the_grammar_is() -> None:
     with pytest.raises(InvalidTimeBound, match="until bound"):
         normalize_bound("whenever", role="until")

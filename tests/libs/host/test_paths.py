@@ -30,6 +30,7 @@ from slife2.libs.host.paths import (
     schedule_dbs,
     skills_dir,
     subagent_file,
+    subagent_path,
     turn_dbs,
     work_dir,
 )
@@ -332,6 +333,24 @@ def test_an_empty_fork_record_is_named_too(
     assert any("not a mapping" in one.getMessage() for one in caplog.records)
 
 
+def test_reading_a_subagent_record_does_not_create_the_subagent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read is a read.  `subagent_file` built its path through `agent_dir`.
+
+    `agent_dir` mkdirs, so `send_message(subagent="reserch")` (a typo) created
+    `subagents/reserch/`; `subagent_set` then refused the name for ever as a
+    "half-removed" directory and `subagent_remove` would not delete it.  The
+    writer creates its own parents (`statefile.write`).
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    path = subagent_file("jack", "reserch")
+
+    assert path == subagent_path("jack", "reserch") / "subagent.yaml"
+    assert not path.parent.exists(), "reading a record created its directory"
+
+
 def test_a_home_is_found_by_the_ones_that_were_told_about_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -357,6 +376,26 @@ def test_a_home_is_found_by_the_ones_that_were_told_about_it(
         path.unlink() if path.is_file() else path.rmdir()
     other.rmdir()
     assert known_homes() == [(tmp_path / "mine").resolve()]
+
+
+def test_a_home_record_that_is_not_the_shape_is_a_value_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented failure, not `KeyError`/`TypeError`.
+
+    `json.loads(...)["home"]` answered `{}` with `KeyError` and `null` with
+    `TypeError` — neither in the `OSError, ValueError` contract every daemon's
+    start-up pass guards, so one wrong-shaped record crashed the pass with a
+    traceback instead of the named refusal.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path / "mine"))
+    homes_dir().mkdir(parents=True, exist_ok=True)
+    for index, text in enumerate(('{}', "null", '{"home": 3}')):
+        record = homes_dir() / f"bad-{index}.json"
+        record.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError, match="not a home record"):
+            known_homes()
+        record.unlink()
 
 
 def test_a_home_is_registered_without_ever_truncating_the_record(

@@ -533,9 +533,50 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
         ("tool_result:\n  tokens: lots\n", "tool_result.tokens"),
         ("context:\n  ceiling: high\n", "context.ceiling"),
         ("servers:\n  context:\n    port: eight\n", "servers.context.port"),
+        # **A value that is a number and not the setting's number is a typo
+        # too.**  `int(inf)` raised `OverflowError` past every handler, and
+        # `int(2.9)` truncated a count nobody wrote.
+        ("agent:\n  max_iterations: .inf\n", "agent.max_iterations"),
+        ("agent:\n  max_iterations: 2.9\n", "agent.max_iterations"),
+        ("servers:\n  context:\n    port: true\n", "servers.context.port"),
+        ("context:\n  ceiling: .nan\n", "context.ceiling"),
     ]:
         with pytest.raises(ConfigError, match=expected):
             load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [
+        ("reasoning: no", "reasoning"),
+        ("compat: {store: 'false'}", "compat.store"),
+    ],
+)
+def test_a_switch_written_as_a_yaml_1_1_word_is_refused(
+    tmp_path, switch: str, expected: str
+) -> None:
+    """**`no` is a string under YAML 1.2, and `bool()` reads every string true.**
+
+    `reasoning: no` turned thinking *on*, and `compat: {store: 'false'}` asked
+    the Responses API to retain a response the operator had tried to forbid —
+    a silent inversion in both cases.  `_enabled` refuses the same spelling for
+    the same reason; these two fields now do too.
+    """
+    with pytest.raises(ConfigError, match=re.escape(expected)):
+        load(
+            write(
+                tmp_path,
+                f"""
+providers:
+  p:
+    api: openai-responses
+    base_url: https://example.test/v1
+    models:
+      - model: m
+        {switch}
+""",
+            )
+        )
 
 
 def test_the_ceiling_is_bounded(tmp_path) -> None:
@@ -2146,5 +2187,14 @@ def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -
     answers to (`slife2.plugins.a2a.broker.LOCAL_HOSTS`).
     """
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "::1:2883")
+    settings = load(write(tmp_path, A_MESH)).peer_agent
 
-    assert load(write(tmp_path, A_MESH)).peer_agent.address == "::1:2883"
+    assert settings.address == "::1:2883"
+    # The URL every record, log and lock is named by must be one `urlsplit` can
+    # read: an unbracketed IPv6 host made `.port` raise, so the broker could not
+    # start and `status`/`down` crashed on the address `LOCAL_HOSTS` accepts.
+    from slife2.libs.host.runtime import endpoint_key
+    from slife2.plugins.a2a.broker import log_url
+
+    assert log_url(settings) == "mqtt://[::1]:2883"
+    assert endpoint_key(log_url(settings))

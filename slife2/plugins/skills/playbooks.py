@@ -730,17 +730,19 @@ def _write(
             target.write_text(str(one.get("content") or ""), encoding="utf-8")
         if not (staging / MANIFEST).is_file():
             raise ValueError(f"a skill is a directory with a {MANIFEST} in it")
-        if base is not None:
-            # **The effective manifest is the staged one**, because an edit may
-            # have replaced it or may have left the skill's damaged one in
-            # place.  `_read` is the loader's own read, so a BOM or a non-UTF-8
-            # file is judged exactly where `scan` judges it.
-            try:
-                frontmatter(_read(staging / MANIFEST))
-            except OSError as exc:
-                raise ValueError(f"{MANIFEST}: {exc}") from exc
-            except SkillHeaderError as exc:
-                raise ValueError(f"{MANIFEST}: {exc}") from exc
+        # **The effective manifest is the staged one, for a create as well as an
+        # edit.**  An edit may have replaced the manifest or left the skill's
+        # damaged one in place; a create may name `SKILL.md` twice in `files`,
+        # and the loop above writes every entry — so the copy the early gate
+        # parsed is not necessarily the one on disk.  `_read` is the loader's
+        # own read, so a BOM or a non-UTF-8 file is judged exactly where `scan`
+        # judges it.
+        try:
+            frontmatter(_read(staging / MANIFEST))
+        except OSError as exc:
+            raise ValueError(f"{MANIFEST}: {exc}") from exc
+        except SkillHeaderError as exc:
+            raise ValueError(f"{MANIFEST}: {exc}") from exc
         # The swap: the live one moves aside, the new one takes its place, and a
         # failure puts the old one back.  `os.replace` cannot do this for a
         # non-empty directory — a rename onto one is refused rather than merged.

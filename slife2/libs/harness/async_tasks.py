@@ -265,12 +265,27 @@ def handed_back(task: Task, task_id: str, status: str, body: str) -> str:
 
 
 def _prune_finished() -> None:
-    """Drop the oldest finished tasks while over the cap; running ones stay."""
+    """Drop the oldest finished tasks while over the cap; running ones stay.
+
+    **An undelivered result is the last one the cap may take.**  `check_async`
+    promises that a result whose hand-back did not land stays readable until
+    somebody reads it, and the cap exists for the results *nobody* polls —
+    delivered ones, whose text is already cleared.  So the first pass drops only
+    finished tasks that were delivered; only if the cap is still exceeded with
+    nothing else left does the second pass drop an undelivered one, because the
+    memory bound has to win eventually.
+    """
     if len(_tasks) <= MAX_ASYNC_TASKS:
         return
     for task_id in list(_tasks):  # insertion order = oldest first
         if len(_tasks) <= MAX_ASYNC_TASKS:
-            break
+            return
+        task = _tasks[task_id]
+        if task.handle.done() and task.delivered:
+            _tasks.pop(task_id, None)
+    for task_id in list(_tasks):
+        if len(_tasks) <= MAX_ASYNC_TASKS:
+            return
         if _tasks[task_id].handle.done():
             _tasks.pop(task_id, None)
 

@@ -1943,7 +1943,11 @@ class StatusBar(Static):
             # was tried and failed wears red — a normal start in the error
             # colour reads as a startup failure nobody can find in a log.
             colour = PALETTE["dim"] if connecting else PALETTE["red"]
-            parts.append(f"[{colour}]{connection}[/]")
+            # **A transport's words are not markup.**  `connection` is an
+            # exception sentence; a `[/]` in one raised out of `update` and
+            # killed the drain that was reporting the failure, and a `[bold]`
+            # was swallowed so the reason read with words missing.
+            parts.append(f"[{colour}]{connection.replace('[', '[[')}[/]")
         elif busy:
             parts.append(
                 f"[{PALETTE['amber']}]{t('status_working')}{GLYPHS['ellipsis']}[/]"

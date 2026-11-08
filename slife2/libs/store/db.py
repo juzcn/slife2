@@ -983,6 +983,12 @@ class TurnStore:
         the complaint is the ambiguity, and there is none here.
         """
         stored = strip_images(messages)
+        # **Every text column goes through `storable`, not only the document.**
+        # A summary or a tag arrives from a model answer as readily as the
+        # messages do, and a lone surrogate in one must not lose the turn the
+        # way `storable` exists to prevent.
+        summary = storable(summary)
+        tags = storable(tags)
         record = _Stored(
             document=storable(json.dumps(stored, ensure_ascii=False)),
             search=searchable_text(stored, summary, tags),
@@ -1090,9 +1096,17 @@ class TurnStore:
             ).fetchone()
             if row is None:
                 return False
-            messages = json.loads(str(row["messages"] or "[]"))
-            new_summary = str(row["summary"] or "") if summary is None else summary
-            new_tags = str(row["tags"] or "") if tags is None else tags
+            messages = _messages(
+                row["messages"], what=f"turn {turn_id}'s messages"
+            )
+            # **The two columns go through `storable` like every other text.**
+            # A lone surrogate in a summary is reachable from the same model
+            # answer the messages are, and the insert is the thing that must not
+            # fail because of what somebody wrote.
+            new_summary = storable(
+                str(row["summary"] or "") if summary is None else summary
+            )
+            new_tags = storable(str(row["tags"] or "") if tags is None else tags)
             connection.execute(
                 "UPDATE turn SET summary = ?, tags = ? WHERE rowid = ?",
                 (new_summary, new_tags, turn_id),

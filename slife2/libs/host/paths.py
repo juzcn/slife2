@@ -553,8 +553,19 @@ def known_homes() -> list[Path]:
     """
     found = {home().resolve()}
     for entry in sorted(homes_dir().glob("*.json")):
-        recorded = str(json.loads(entry.read_text(encoding="utf-8"))["home"])
-        path = Path(recorded)
+        raw = json.loads(entry.read_text(encoding="utf-8"))
+        # **A record that parses but is not this record is the same damage.**
+        # `json.loads(...)["home"]` answered a `{}` with `KeyError` and a `null`
+        # with `TypeError` — neither in the `OSError, ValueError` contract every
+        # caller guards, and both out of a daemon's start-up pass.  A string
+        # `"home"` is refused too: `Path(str(...))` of a number is a path nobody
+        # wrote.
+        if not isinstance(raw, dict) or not isinstance(raw.get("home"), str):
+            raise ValueError(
+                f"{entry}: not a home record — expected a mapping with a string "
+                f"`home`"
+            )
+        path = Path(raw["home"])
         if path.is_dir():
             found.add(path)
     return sorted(found)
@@ -774,7 +785,13 @@ def subagent_file(agent: str, subagent: str) -> Path:
     subagent's settings as short-lived as the subagent: nothing else records
     them, so nothing has to be kept in step when one is removed.
     """
-    return agent_dir(agent, subagent) / _SUBAGENT_YAML
+    # **A read must not make the directory it is reading.**  `agent_dir` mkdirs,
+    # and this path is asked for by `read_subagent` and by `conversation` for
+    # names that may be typos or stale: a `send_message(subagent="reserch")`
+    # created `subagents/reserch/`, after which `subagent_set` refused the name
+    # for ever as a "half-removed" directory and `subagent_remove` would not
+    # delete it.  The writer's `statefile.write` makes its own parents.
+    return subagent_path(agent, subagent) / _SUBAGENT_YAML
 
 
 def subagent_dirs(agent: str) -> list[Path]:

@@ -588,8 +588,17 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             # the frontmatter `name:`, which need not equal the folder's; the
             # raw name then removed nothing and left the entry already deleted.
             removed = skills.remove(skill.directory.name)
-        except ValueError as exc:
-            raise ToolError(f"{name!r} was not removed: {exc}") from exc
+        except (ValueError, OSError) as exc:
+            # `OSError` is the filesystem refusing a step whose first half — the
+            # config entry — has already landed.  It is a `ToolError` like every
+            # other file-touching skill tool's, and the sentence says the one
+            # thing a retry needs: removing an entry that is already gone is
+            # harmless, so calling again finishes the job.
+            raise ToolError(
+                f"{name!r} was not removed: {exc} — its `skills:` entry is "
+                f"already gone, so the folder stands alone; close whatever "
+                f"holds it and call `skill_remove` again"
+            ) from exc
         if not removed:
             # `find` said it was there; a folder that vanished between the two
             # reads is the same refusal the old single check made.

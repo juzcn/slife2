@@ -415,8 +415,16 @@ def time_window(since: str | None, until: str | None) -> tuple[list[str], list[s
         clauses.append("julianday(created_at) >= julianday(?)")
         params.append(instant_bound(normalize_bound(since, role="since")))
     if until:
-        clauses.append("julianday(created_at) <= julianday(?)")
-        params.append(instant_bound(normalize_bound(until, role="until")))
+        bound = normalize_bound(until, role="until")
+        # **A date-only `until` stops *before* the next midnight.**  It was
+        # advanced by one day to name the end of its day, and comparing `<=`
+        # then included the first instant of the following day — a turn saved at
+        # exactly midnight belonged to a day the caller excluded.  A datetime
+        # names an instant and stays inclusive.
+        clauses.append(
+            f"julianday(created_at) {'<' if len(bound) == 10 else '<='} julianday(?)"
+        )
+        params.append(instant_bound(bound))
     return clauses, params
 
 

@@ -21,9 +21,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.helpers.clock import at
 from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
 from slife2.libs.plugin.audience import client_meta, for_the_model
@@ -237,6 +240,30 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_body_that_cannot_be_encoded_is_normalised_before_anything_writes() -> (
+    None
+):
+    """**The mirror is written after the row's transaction, so the body has to
+    be storable before either.**
+
+    A lone surrogate — the exact shape the project documents as an ordinary
+    model answer (`index.storable`) — failed the file write *after* the row,
+    keyword index and vector were committed: the call reported failure over a
+    note that existed, every retry was refused "already a note", and an update
+    left the old mirror beside the new row.  The U+FFFD the turn store writes
+    is what both copies carry here.
+    """
+    async with Client(cabinet()) as client:
+        await payload(client, "note_write", subject="half", content="half \ud83d")
+        read = await payload(client, "note_read", subject="half")
+        written = bag() / "notes" / f"{cabinet_store.mirror_stem('half')}.md"
+        on_disk = written.read_text(encoding="utf-8")
+
+    assert read["text"] == "half �"
+    assert on_disk == "half �"
+
+
+@pytest.mark.asyncio
 async def test_a_note_is_created_then_replaced_by_an_update() -> None:
     """One verb creates, one replaces, and the key is refused between them.
 
@@ -311,6 +338,51 @@ def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None
     assert [entry["key"] for entry in windowed["entries"]] == ["newer"]
 
 
+def test_a_connection_is_closed_on_the_way_out(tmp_path: Path) -> None:
+    """`with sqlite3.connect(...)` commits; it does not close.
+
+    A connection per call that is never closed is a handle leak, and on Windows
+    it is a file another process cannot delete — the rule the turn store and
+    the catalogue already state.
+    """
+    store = CabinetStore(tmp_path / "index.db")
+
+    with store._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+
+def test_a_date_only_until_excludes_the_next_midnight_on_a_moment_axis(
+    tmp_path: Path,
+) -> None:
+    """A date names a whole day; the following day's first instant is outside it.
+
+    `normalize_bound` advances a date-only `until` to the next local midnight,
+    and the moment axis compared it inclusively — so a row written exactly at
+    midnight of the day after the named one came back under a bound that
+    excluded it.  The moments are built in the runner's zone, so the assertion
+    is about the rule rather than about UTC+8.
+    """
+    store = CabinetStore(tmp_path / "index.db")
+
+    def add(key: str, stamp: str) -> None:
+        with store._connect() as connection:
+            connection.execute(
+                "INSERT INTO cabinet_doc (kind, key, title, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?)",
+                (NOTE, key, key, stamp, stamp),
+            )
+
+    add("named day", at(datetime(2026, 1, 1, 23, 59, 59)))
+    add("next midnight", at(datetime(2026, 1, 2, 0, 0, 0)))
+
+    listed = store.listing(NOTE, until="2026-01-01")
+
+    assert [entry["key"] for entry in listed["entries"]] == ["named day"]
+
+
 def test_a_listing_counts_and_pages_one_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -337,7 +409,7 @@ def test_a_listing_counts_and_pages_one_snapshot(
 
     class Interleaving:
         def __init__(self) -> None:
-            self.connection = real_connect()
+            self.manager = real_connect()
             self.injected = False
 
         def execute(self, sql: str, params=()):
@@ -361,11 +433,11 @@ def test_a_listing_counts_and_pages_one_snapshot(
             return found
 
         def __enter__(self):
-            self.connection.__enter__()
+            self.connection = self.manager.__enter__()
             return self
 
         def __exit__(self, *exc):
-            return self.connection.__exit__(*exc)
+            return self.manager.__exit__(*exc)
 
     monkeypatch.setattr(store, "_connect", Interleaving)
     listed = store.listing(NOTE)

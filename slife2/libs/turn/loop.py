@@ -396,7 +396,16 @@ class AgentLoop:
             # come back is an answer.
             if auto is not None and (wanted := auto()) is not None:
                 call = harness_call(wanted.name)
+                # **`auto()` says a message was waiting; the tool decides whether
+                # one was taken.**  A failed call answers with an error, and a
+                # queue that emptied between the two calls (or refused an image)
+                # answers `NOTHING_WAITING`; `injected` is what the tool appends
+                # to when it really takes one, so the count across the call is
+                # the delivery verdict.  A loop with no inbox behind it has no
+                # counter and keeps the caller's word, as it always did.
+                before = injected() if injected is not None else 0
                 text, _ok = await self._tools.execute(call)
+                took = injected is None or injected() > before
                 messages.append(
                     Message(role="assistant", content=None, tool_calls=[call])
                 )
@@ -408,23 +417,28 @@ class AgentLoop:
                         # Display metadata, persisted with the turn and never
                         # sent to a provider (`Message.to_record`): the line a
                         # rebuilt transcript draws for this pair wears the
-                        # bubble of the channel the message came in on.
-                        channel=wanted.channel,
+                        # bubble of the channel the message came in on.  No
+                        # message, no bubble.
+                        channel=wanted.channel if took else "",
                     )
                 )
                 # **Said after the pair is written**, so a screen is told about
                 # a message the conversation already holds.  It carries the
                 # tool's own answer, and the receipt the submitting window
                 # matches back to the request it made — no screen may infer
-                # "it was folded in" from an event it could lose.
-                await self._emit(
-                    observer,
-                    MessageCutIn(
-                        text=text,
-                        channel=wanted.channel,
-                        receipt=wanted.receipt,
-                    ),
-                )
+                # "it was folded in" from an event it could lose.  A call that
+                # took nothing sends no event: the window marks the submission
+                # drawn on this event, and the message is still queued for its
+                # own turn — marking it drawn would suppress that turn's line.
+                if took:
+                    await self._emit(
+                        observer,
+                        MessageCutIn(
+                            text=text,
+                            channel=wanted.channel,
+                            receipt=wanted.receipt,
+                        ),
+                    )
             # The tool list goes with the call, so it is asked for with the
             # call.  `specs` is read after this and never cached across
             # iterations.
@@ -435,7 +449,18 @@ class AgentLoop:
             # must not run inside this loop -- that would hold the provider's
             # response stream open across the tool call, risking its read
             # deadline and pinning a socket for no reason.
-            await self._drain(stream.chunks, observer)
+            try:
+                await self._drain(stream.chunks, observer)
+            except asyncio.CancelledError:
+                # **The result is an awaitable nobody will await now.**  A
+                # coroutine left unawaited is reported at collection as one that
+                # was never awaited; closing it is the honest end of a call the
+                # turn abandoned.  A Future has no `close` and is already owned
+                # by whoever made it.
+                close = getattr(stream.result, "close", None)
+                if callable(close):
+                    close()
+                raise
 
             result = await stream.result
             total_usage = total_usage + result.usage
@@ -500,18 +525,26 @@ class AgentLoop:
             cutins: list[tuple[str, str, str]] = []
             for index, call in enumerate(result.tool_calls):
                 text: str | None = None
+                #: Filled by `_one` *before* it emits its closing event, because
+                #: a cancellation can land in that emit: the call has returned by
+                #: then, and the batch must keep its answer.
+                answered: list[tuple[str, bool]] = []
                 before = injected() if injected is not None else 0
                 try:
-                    text, _ok = await self._one(call, observer, iteration, messages)
+                    text, _ok = await self._one(
+                        call, observer, iteration, messages, answered
+                    )
                     fitted = await self._fit(call, text)
                 except asyncio.CancelledError:
                     # **The batch is completed on the way out, not dropped.**
                     # Calls that already ran keep their answers, a call whose fit
-                    # was cut keeps the text it had returned, and every call that
-                    # produced nothing says so.  The appends have no await
-                    # between them: the interruption is in flight, and the next
-                    # checkpoint would cancel this cleanup before it was written.
-                    answers.extend(interrupted_results(result.tool_calls[index:], text))
+                    # — or whose closing event — was cut keeps the text it had
+                    # returned, and every call that produced nothing says so.  The
+                    # appends have no await between them: the interruption is in
+                    # flight, and the next checkpoint would cancel this cleanup
+                    # before it was written.
+                    returned = answered[0][0] if answered else text
+                    answers.extend(interrupted_results(result.tool_calls[index:], returned))
                     messages.append(answer)
                     messages.extend(answers)
                     raise
@@ -576,6 +609,7 @@ class AgentLoop:
         observer: TurnObserver,
         iteration: int,
         messages: Sequence[Message],
+        answered: list[tuple[str, bool]],
     ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
 
@@ -610,6 +644,13 @@ class AgentLoop:
           the meta-parameters, while the dispatch carries the stripped copy:
           what a reader sees is what the model said, and what the tool sees is
           what the tool takes.
+
+        `answered` is filled with the pair **before** the closing event is
+        emitted.  That event is an await, so a cancellation can land in it after
+        the tool has returned; the caller completes the interrupted batch from
+        this list, and without it the answer a tool really produced would be
+        written down as `INTERRUPTED` — telling the model a call that ran never
+        answered, and inviting it to run a side effect twice.
         """
         # **A call this system cannot run is answered, not announced.**  Its
         # arguments could not be read at the hop that decoded it, or its
@@ -680,6 +721,9 @@ class AgentLoop:
         else:
             text, ok = await self._foreground(dispatch, bound)
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        # Recorded before the event, because the event can be cancelled: the
+        # call has returned, and the interruption's repair reads this.
+        answered.append((text, ok))
         await self._emit(
             observer,
             ToolCallFinished(

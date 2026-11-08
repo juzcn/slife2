@@ -2939,6 +2939,8 @@ def write_subagent(maker: str, name: str) -> Path:
     (`subagent_set`), because the two have to agree about what makes a member.
     """
     path = subagent_file(maker, name)
+    # A read does not make the directory; `subagent_set` (and this fixture) do.
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"name: {name}\nrole: test\n", encoding="utf-8")
     return path
 
@@ -4553,6 +4555,7 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
         fork = subagent_file(AGENT, "forked")
+        fork.parent.mkdir(parents=True, exist_ok=True)
         fork.write_text("name: forked\nrole: test\nfork: true\n", encoding="utf-8")
         server = local_build(configured=True)
         async with Client(server) as client:

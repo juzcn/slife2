@@ -271,6 +271,58 @@ def test_a_tool_whose_name_is_whitespace_is_no_name_either(tmp_path) -> None:
     assert "identity" in done, "the sync returned rather than selecting the row again"
 
 
+def test_a_tool_description_that_cannot_be_encoded_does_not_lose_the_source(
+    tmp_path,
+) -> None:
+    """A lone surrogate is normalised, not an insert that fails the whole list.
+
+    The description is model/server text, the same class `storable` exists for
+    on a turn's body.  Before it was applied here, one such description failed
+    the transaction and stored none of that source's tools.
+    """
+    store = store_at(tmp_path)
+
+    merge(
+        store,
+        "px",
+        "mcp",
+        [tool("px__a", description="half a character: \ud83d"), tool("px__b")],
+    )
+
+    assert [row[0] for row in rows_in(store)] == ["px__a", "px__b"]
+    with sqlite3.connect(store.path) as connection:
+        description = connection.execute(
+            "SELECT description FROM tool WHERE name = 'px__a'"
+        ).fetchone()[0]
+    assert description == "half a character: �"
+
+
+def test_a_stored_blank_tool_does_not_hang_the_index_sync(tmp_path) -> None:
+    """A blank row an older build could have written owes no vector.
+
+    `tools_without_vectors` selects rows with *no* chunk row, and an empty
+    document can never get one — so the row must be filtered, and the batch
+    bound applied after the filter.  A `LIMIT` before it would let a page of
+    blank rows end the loop with real rows behind them still unembedded.
+    """
+    store = store_at(tmp_path)
+    with store._connect(write=True) as connection:
+        connection.executemany(
+            "INSERT INTO tool (name, category, source_id) VALUES (?, 'mcp', 'px')",
+            [(" " * (index + 1),) for index in range(64)],
+        )
+    merge(store, "px", "mcp", [tool("px__real")])
+
+    done = asyncio.run(asyncio.wait_for(store.sync_indexes(EMBEDDER), timeout=5))
+
+    assert "identity" in done, "the sync returned rather than spinning"
+    with store._connect() as connection:
+        chunks = connection.execute(
+            "SELECT COUNT(*) FROM tool_chunk WHERE name = 'px__real'"
+        ).fetchone()[0]
+    assert chunks, "the row behind the blank page was still embedded"
+
+
 def test_a_source_that_answers_again_puts_its_rows_back(tmp_path) -> None:
     """`error` is a verdict about now, and the next successful list withdraws it.
 

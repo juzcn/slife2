@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime
 
 import pytest
 
-from slife2.helpers.clock import now
+from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
 from slife2.libs.store.catalogue import ToolStore
@@ -55,6 +56,7 @@ def test_a_fork_has_no_turn_database_of_its_own(
     `turn_read` read. A fork never rebuilds.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    agent_dir("jack", "researcher")  # the record's directory; a read does not make it
     record = subagent_file("jack", "researcher")
 
     record.write_text("fork: false\n", encoding="utf-8")
@@ -269,6 +271,55 @@ async def test_a_damaged_row_does_not_hide_the_others(tmp_path, caplog, damage) 
     # refuses to serve an unready one still comes up.
     assert status["ready"] is True, status["problems"]
     assert "turn 1's messages" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_summary_over_a_damaged_row_is_still_written(tmp_path) -> None:
+    """`update_summary` reads the row the way every other reader does.
+
+    It used to parse `messages` itself, so the tolerance the rest of the store
+    applies to a damaged row stopped at the one writer: annotating the turn
+    raised out of the tool instead of writing the summary beside the damage.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await store.save_turn(
+        embedder=EMBEDDER, messages=[{"role": "user", "content": "hi"}]
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE turn SET messages = ? WHERE rowid = 1", ("[1, 2]",))
+
+    assert store.update_summary(1, summary="a note", tags="filed") is True
+    (record,), _ = store.turns()
+    assert (record.summary, record.tags) == ("a note", "filed")
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
+    tmp_path,
+) -> None:
+    """The text columns are `storable` too, not only the message body.
+
+    A summary and tags come from the same model answer the messages do, so a
+    lone surrogate in one must take the same U+FFFD the body does rather than
+    failing the insert and losing the whole turn.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+
+    turn_id = await store.save_turn(
+        embedder=EMBEDDER,
+        messages=[{"role": "user", "content": "hi"}],
+        summary="half a character: \ud83d",
+        tags="tag\ud83d",
+    )
+
+    assert turn_id == 1
+    (record,), _ = store.turns()
+    assert record.summary == "half a character: �"
+    assert record.tags == "tag�"
+    assert store.update_summary(1, summary="again \ud83d") is True
+    (record,), _ = store.turns()
+    assert record.summary == "again �"
 
 
 def test_an_insert_that_recorded_nothing_is_not_a_rowid_of_zero() -> None:
@@ -595,6 +646,29 @@ async def test_a_window_bounds_what_comes_back_and_what_total_counts(tmp_path) -
 
     records, total = store.turns(limit=5)
     assert [table(r) for r in records] == ["new", "middle", "old"] and total == 3
+
+
+@pytest.mark.asyncio
+async def test_a_date_only_until_excludes_the_next_midnight(tmp_path) -> None:
+    """A date names a whole day, and the day after starts outside it.
+
+    `normalize_bound` advances a date-only `until` to the next local midnight
+    because a moment column is compared inclusively; the boundary instant then
+    fell inside the window, so a turn written at exactly 00:00 of the day after
+    came back under an `until` that excluded it.  The moments are built in the
+    runner's own zone so the assertion is about the rule and not about UTC+8.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _turn(
+        store, "named day", "a", at=at(datetime(2026, 1, 1, 23, 59, 59))
+    )
+    await _turn(
+        store, "next midnight", "b", at=at(datetime(2026, 1, 2, 0, 0, 0))
+    )
+
+    records, total = store.turns(until="2026-01-01", limit=5)
+    assert [table(record) for record in records] == ["named day"]
+    assert total == 1
 
 
 @pytest.mark.asyncio

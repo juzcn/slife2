@@ -890,13 +890,20 @@ class ToolStore:
                     skipped += 1
                     continue
                 incoming.add(name)
+                # **The text columns go through `storable`.**  A lone surrogate
+                # in a description is the same answer text the turn store
+                # normalises, and one of them used to fail the whole insert —
+                # which stores none of the source's tools rather than one bad
+                # one.  The name is left as written: it is the identity the
+                # model calls, and a name that cannot be encoded is the source's
+                # protocol violation rather than this row's prose.
                 fields = {
                     "name": name,
-                    "description": str(row.get("description") or ""),
+                    "description": storable(str(row.get("description") or "")),
                     "category": category,
                     "source_id": source,
-                    "remote_name": str(row.get("remote_name") or name),
-                    "schema": str(row.get("schema") or ""),
+                    "remote_name": storable(str(row.get("remote_name") or name)),
+                    "schema": storable(str(row.get("schema") or "")),
                 }
                 # **A row may carry its own verdict.**  Every other row's status
                 # is the *runtime's* — `source_state` is the only writer, because
@@ -2063,11 +2070,11 @@ class ToolStore:
         # states: the store bounds, the caller finishes.
         #
         # It terminates because `_place` writes a chunk row for every tool it
-        # was handed, and every tool has at least a name to be a chunk of
-        # (`tool_document`) — so a row that was selected is a row that is no
-        # longer missing.  An empty answer is not the other way out: `embed_rows`
-        # refuses an answer shorter than the batch, so the loop ends either with
-        # every tool placed or with the failure named.
+        # was handed, and a row whose document strips to empty is not selected
+        # (`tools_without_vectors`) — so a row that was selected is a row that
+        # is no longer missing.  An empty answer is not the other way out:
+        # `embed_rows` refuses an answer shorter than the batch, so the loop
+        # ends either with every tool placed or with the failure named.
         placed = 0
         while True:
             missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
@@ -2167,10 +2174,22 @@ class ToolStore:
         without one; a rebuild for a changed model leaves them all without one,
         which is how the same query fills the index back in.
 
+        **A row whose document is empty owes no vector, and is not one of
+        these.**  `merge` refuses a blank name, but a row written by an older
+        build — or copied into the file — can still carry one, and
+        `tool_document` of it is empty: `embed_chunks` drops every paragraph
+        that strips to empty, so no sync could ever place a vector for it.  It
+        would be selected again for ever, and `sync_indexes` would spin while
+        the hub awaited it.  The filter is in Python for the reason the bound
+        is: a `LIMIT` before it would count rows it is about to drop, and a
+        batch of empty rows would end the caller's loop with rows still owed
+        behind them (`TurnStore._turns_without_vectors` states the rule).
+
         `limit` is how many one call may carry, and the caller loops until this
         returns nothing (`sync_indexes`).  Bounded because a first run is every
         tool of every server, and one request for all of them is the request
-        that times out.
+        that times out.  The bound is applied after the filter, for the reason
+        above.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -2179,10 +2198,13 @@ class ToolStore:
                 " LEFT JOIN tool_chunk c ON c.name = t.name"
                 " WHERE c.id IS NULL"
                 " ORDER BY t.rowid"
-                " LIMIT ?",
-                (limit or -1,),
             ).fetchall()
-        return [(str(row["name"]), tool_document(dict(row))) for row in rows]
+        found = [
+            (str(row["name"]), document)
+            for row in rows
+            if (document := tool_document(dict(row))).strip()
+        ]
+        return found[:limit] if limit else found
 
 
 def _load_outcome(row: Mapping[str, Any], load_status: str) -> str:

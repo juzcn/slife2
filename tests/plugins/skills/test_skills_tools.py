@@ -416,6 +416,31 @@ async def test_removing_by_the_header_name_removes_its_directory(
 
 
 @pytest.mark.asyncio
+async def test_a_removal_whose_folder_cannot_be_deleted_is_a_tool_error(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry is removed first, so the folder step must speak the same language.
+
+    An `OSError` there — a file held open, a read-only folder — escaped as a raw
+    traceback over a removal that had already taken the `skills:` entry.  The
+    refusal names the state and the retry, which is a call that finishes the job
+    because removing an entry that is already gone is harmless.
+    """
+    config_on_disk(isolated_runtime, CONFIG + "skills:\n  one: {}\n")
+    skill(isolated_runtime, "one")
+    from slife2.plugins.skills import playbooks
+
+    def deny(_name: str) -> bool:
+        raise PermissionError("the folder is held open")
+
+    monkeypatch.setattr(playbooks, "remove", deny)
+
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError, match="skills:.*entry is already gone"):
+            await client.call_tool("skill_remove", {"name": "one"})
+
+
+@pytest.mark.asyncio
 async def test_installing_a_skill_writes_the_env_it_is_given(
     isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

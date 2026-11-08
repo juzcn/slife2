@@ -114,6 +114,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import platform
 import re
@@ -3785,13 +3786,31 @@ def _model(raw: Any, provider: str) -> ModelSettings:
 
     # `None` here is a value, not an absence: `compat.store` says "send
     # nothing" and must stay distinguishable from `compat.store: false`, which
-    # says "send false".  A plain `bool(...)` would collapse the two into False.
+    # says "send false".  A plain `bool(...)` would collapse the two into False
+    # — and read `store: "false"` (YAML 1.2's string) as *true*, asking the API
+    # to keep a response the operator tried to forbid.
     store_raw = compat.get("store")
+    if store_raw is not None and not isinstance(store_raw, bool):
+        raise ConfigError(
+            f"providers.{provider}.{model}.compat.store: expected `true`, "
+            f"`false` or absent, got {store_raw!r} — YAML spells a boolean as "
+            f"one, so a quoted 'false' is a string"
+        )
+    # **A switch is a real YAML boolean, for `_enabled`'s reason.**  `reasoning:
+    # no` is the string `no` under YAML 1.2 and every non-empty string is true
+    # to `bool()`, so the operator's "off" turned thinking on.
+    reasoning = raw.get("reasoning", False)
+    if not isinstance(reasoning, bool):
+        raise ConfigError(
+            f"providers.{provider}.{model}.reasoning: expected `true` or "
+            f"`false`, got {reasoning!r} — YAML spells a boolean as one, so "
+            f"`no`, `off` and a quoted 'false' are strings"
+        )
 
     return ModelSettings(
         model=model,
         name=str(raw.get("name") or ""),
-        reasoning=bool(raw.get("reasoning", False)),
+        reasoning=reasoning,
         input=inputs,
         context_window=_int_or(
             raw.get("context_window"), 0, f"providers.{provider}.{model}.context_window"
@@ -3805,7 +3824,7 @@ def _model(raw: Any, provider: str) -> ModelSettings:
         top_p=_optional_float(raw.get("top_p"), f"providers.{provider}.{model}.top_p"),
         thinking=str(compat.get("thinking") or ""),
         stream_usage=str(compat.get("stream_usage") or ""),
-        store=None if store_raw is None else bool(store_raw),
+        store=store_raw,
     )
 
 
@@ -3840,17 +3859,41 @@ def _optional_float(value: Any, where: str) -> float | None:
 
 
 def _as_int(value: Any, where: str) -> int:
+    """A whole number, or the caller's typo — **and a bool is not one**.
+
+    `int(True)` is 1 and `int(2.9)` is 2, so a bare `int()` turned
+    `port: true` into port 1 and a fractional count into a different number
+    nobody wrote.  `inf` is the third: `int(inf)` raises `OverflowError`, which
+    is past every `except ConfigError` and reaches the user as a traceback
+    (`.inf` is just how some people write "no cap").
+    """
+    if isinstance(value, bool):
+        raise ConfigError(f"{where}: expected a whole number, got {value!r}")
     try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ConfigError(f"{where}: expected a whole number, got {value!r}") from exc
+    if isinstance(value, float) and (
+        not math.isfinite(value) or value != number
+    ):
+        # A finite, whole float (`2.0`) is still the number it spells; a
+        # fractional one is not the setting's whole number, and truncating it
+        # would apply a value the file did not contain.
+        raise ConfigError(f"{where}: expected a whole number, got {value!r}")
+    return number
 
 
 def _as_float(value: Any, where: str) -> float:
+    """A finite number, or the caller's typo.  A bool is not a number either."""
+    if isinstance(value, bool):
+        raise ConfigError(f"{where}: expected a number, got {value!r}")
     try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ConfigError(f"{where}: expected a number, got {value!r}") from exc
+    if not math.isfinite(number):
+        raise ConfigError(f"{where}: expected a finite number, got {value!r}")
+    return number
 
 
 __all__ = [

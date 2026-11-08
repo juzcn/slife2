@@ -294,10 +294,16 @@ class EmbeddingClient:
         """
         if not texts:
             return []
-        from openai import APIConnectionError
+        from openai import APIConnectionError, APITimeoutError
 
         try:
             response = await self._embed_request(texts)
+        except APITimeoutError:
+            # **A timeout is not a connection that never opened.**  It is the
+            # one `APIConnectionError` subclass that means the request may have
+            # reached the provider and been billed; SDD §8.4 says that failure
+            # is never repeated, and the hierarchy makes this branch necessary.
+            raise
         except APIConnectionError as exc:
             logger.warning(
                 "%s: %s could not be reached (%s); trying once more",

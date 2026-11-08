@@ -858,6 +858,100 @@ async def test_home_and_end_jump_to_the_ends() -> None:
     assert following is True, "and End resumed it"
 
 
+def watch_snapshot(*, turns: int = 12) -> Snapshot:
+    """A watched conversation long enough for its transcript to scroll."""
+    return Snapshot(
+        [
+            stored(
+                Message(role="user", content=f"question {index}"),
+                Message(role="assistant", content="word " * 60),
+                turn_id=index + 1,
+            )
+            for index in range(turns)
+        ]
+    )
+
+
+async def test_a_connection_error_is_shown_literally_not_as_markup() -> None:
+    """A transport's sentence is text, not markup.
+
+    `Static.update` parses its argument as Textual markup, and the connection
+    reason is an exception's own words: a `[bold]` was swallowed (the reason
+    read with words missing) and a `[/]` raised `MarkupError` out of the status
+    refresh — killing the drain that was reporting the failure.
+    """
+    app = make_app(answering("ok"))
+    async with app.run_test(size=SIZE):
+        bar = app.query_one(StatusBar)
+        bar.update_status(connection="refused [bold] [/] broken", connected=False)
+        # The doubled brackets are Textual's escape, which is what makes the
+        # sentence render as text instead of being swallowed or raising.
+        assert "refused [[bold] [[/] broken" in str(bar.content)
+
+
+async def test_home_and_end_follow_the_watch_screen_not_the_hidden_one() -> None:
+    """The app's priority scroll keys act on the screen in front.
+
+    `_transcript` resolves through the app's own DOM, which is the *default*
+    screen: with a watch pushed, Home/End moved the transcript underneath while
+    the watched one — the only one anybody can see — stayed where it was.
+    """
+    watch = FakeWatchClient((watch_snapshot(),), finish=True)
+    app = window(FakeAgentClient(answering("ok")))
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+        await pilot.pause()
+
+        watched = app.screen.query_one(ChatView)
+        assert watched.max_scroll_y > 0, "the watch has somewhere to scroll"
+        watched.scroll_home(animate=False)
+        await pilot.pause()
+
+        await pilot.press("end")
+        assert await settled(
+            pilot, lambda: watched.scroll_y == watched.max_scroll_y
+        ), "End moved the watched transcript"
+
+        await pilot.press("home")
+        assert await settled(pilot, lambda: watched.scroll_y == 0), (
+            "Home brought the watched transcript back to its top"
+        )
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+async def test_ctrl_s_on_a_watch_screen_does_not_mount_a_hidden_picker() -> None:
+    """The model picker is the window's own screen's, like the subagent picker.
+
+    Without the guard, Ctrl+S mounted a `ModelPicker` in the transcript
+    underneath the watch, focused it there, and latched `_switching` — so the
+    key looked dead and the picker was only found after Esc closed the watch.
+    """
+    watch = FakeWatchClient((Snapshot([]),), finish=True)
+    app = window(
+        FakeAgentClient(answering("ok")),
+        models=[ModelChoice(ref="deepseek/deepseek-flash")],
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert len(app.screen_stack) == 2, "the watch stayed in front"
+        assert not app.screen.query(ModelPicker), "nothing mounted on the watch"
+        assert not app.query(ModelPicker), "nothing mounted in the hidden window"
+        assert app._switching is False, "the key is not latched"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
 async def test_a_scroll_repaints_what_is_on_screen() -> None:
     """A scroll must repaint, not just move the offset.
 
@@ -1800,6 +1894,34 @@ async def test_a_history_that_cannot_be_read_does_not_close_the_window() -> None
 
     assert running is True
     assert "disconnected" in bar
+
+
+async def test_a_stored_row_that_is_not_a_mapping_does_not_kill_the_drain() -> None:
+    """`restore` drops a row it cannot draw; the bar must drop it too.
+
+    `transcript` validates that `turns` is a list, never its elements, and
+    `context_of` read the *last* one directly — so a None (or a number) in that
+    position raised out of `_restore`, which `_drain` awaits before popping the
+    queue: the worker died and the message the person was waiting on was never
+    run.
+    """
+    from slife2.tui.app import context_of
+
+    good = stored(
+        Message(role="user", content="a question"),
+        Message(role="assistant", content="an answer"),
+        context=42,
+    )
+    client = answering_with(good, None)  # type: ignore[arg-type]
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        assert "[restored 1 turn]" in shown(app)
+        assert "a stored turn could not be drawn" in shown(app)
+        assert app._context_tokens == 42, "the readable row still sizes the bar"
+
+    assert context_of([None]) == 0
+    assert context_of([good, 7, None]) == 42  # type: ignore[list-item]
 
 
 async def test_one_unreadable_stored_row_does_not_kill_the_drain() -> None:

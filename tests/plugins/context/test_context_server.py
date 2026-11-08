@@ -1551,6 +1551,10 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
 
     assert rebuilt.data["changed"] is True, "the newer store list is what it adopted"
     assert rebuilt.data["turn_ids"] == [ids[0], ids[1], saved.data["turn_id"]]
+    # The rerank report is part of the answer's shape on every exit, including
+    # this one: the caller reads it strictly, and an absent key would fail the
+    # turn over a race the store handled correctly.
+    assert rebuilt.data["rerank"] == ""
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [
         ids[0],
         ids[1],
@@ -1562,6 +1566,69 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
         if message["role"] == "user"
     ]
     assert said[-1].startswith("two"), "the turn it had not seen is in its context"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_repairs_a_context_list_naming_a_row_that_is_gone() -> None:
+    """The repair `restore` makes in memory must reach the persisted list.
+
+    `restore` drops an id whose row is gone and the caller adopts the shorter
+    list, but the store's own list still names the missing row.  A
+    compare-and-set against the caller's snapshot then never matches again, so
+    the next rebuild abandons its decision — and so does every rebuild after it,
+    silently disabling the recall for the life of the file.  The surviving ids
+    are published under the same guard, which is what re-arms the next write.
+    """
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"context": "clear"}', '{"context": "clear"}'),
+        )
+    ) as client:
+        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        store = TurnStore(agent_dir("jack") / "turns.db")
+        store.set_context_turns([ids[0], 404])
+        restored = await client.call_tool(
+            "restore", {"agent": "jack", "messages": [SYSTEM]}
+        )
+        assert restored.data["turn_ids"] == [ids[0]], "restore drops the dead id"
+        first = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": restored.data["turn_ids"],
+                "expected": restored.data["turn_ids"],
+                "prompt": "and then?",
+            },
+        )
+        assert first.data["turn_ids"] == [ids[0]]
+        assert store.context_turns() == [ids[0]], "the dead id is gone from the list"
+        # And the repair is what re-arms the compare-and-set: this rebuild's
+        # `expected` now matches the store, so its decision is published.
+        second = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": first.data["turn_ids"],
+                "expected": first.data["turn_ids"],
+                "prompt": "and then?",
+            },
+        )
+
+    assert second.data["changed"] is True, "the conversation can be rebuilt again"
+    assert second.data["turn_ids"] == []
+    assert store.context_turns() == []
 
 
 @pytest.mark.asyncio

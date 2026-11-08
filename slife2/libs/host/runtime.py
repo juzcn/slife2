@@ -59,6 +59,11 @@ def normalize_url(url: str) -> str:
         # "these are the same server".
         host = "127.0.0.1"
     port = parts.port
+    # **An IPv6 host keeps its brackets.**  `urlsplit` reads `[::1]:1883`, and a
+    # canonical form that dropped them was a URL the next parse could not read
+    # — the endpoint key every record, log and lock is named by.
+    if ":" in host:
+        host = f"[{host}]"
     if port and not (
         (parts.scheme == "http" and port == 80)
         or (parts.scheme == "https" and port == 443)
@@ -529,9 +534,17 @@ def live_clients() -> list[ClientRecord]:
         # this host: a record left by a killed client whose pid was then reused
         # keeps the servers alive a little longer than it should, which costs a
         # daemon nobody is using rather than a session somebody is in.
+        # **An unprovable token is not a mismatch.**  `process_start_token`
+        # answers None for "cannot prove" — a `ps` that timed out, an unreadable
+        # procfs — and comparing it to the record's token deleted a live
+        # client's record: the last *other* client then stopped the shared
+        # servers under somebody still working.  The other direction costs one
+        # daemon outliving a recycled pid.
+        current = process_start_token(record.pid) if record.start_token else None
         if pid_alive(record.pid) and (
             not record.start_token
-            or process_start_token(record.pid) == record.start_token
+            or current is None
+            or current == record.start_token
         ):
             alive.append(record)
         else:

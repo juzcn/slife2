@@ -126,7 +126,7 @@ import re
 import sqlite3
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -742,8 +742,25 @@ class CabinetStore:
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
-        return connect_to(self.path)
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection for this call, and **it is closed on the way out**.
+
+        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
+        and leaves the connection open.  On Windows an open handle is a file
+        nobody else can delete, and a connection per call with none closed is a
+        descriptor leak on every other platform.  The turn store and the
+        catalogue state the same rule; this is the third store.
+
+        What the caller's `with` gets is the commit (`with connection:`); the
+        `finally` is the close.
+        """
+        connection = connect_to(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     # ── Bringing the index up to date ────────────────────────────────────
 
@@ -1160,6 +1177,14 @@ class CabinetStore:
         """
         if mode not in (CREATE, REPLACE, UPSERT):
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
+        # **The body is normalised before anything is written.**  A lone
+        # surrogate arrives from the same model answer the turn store handles,
+        # and the mirror is written *after* the row's transaction: a body the
+        # file could not encode failed there — a call reporting failure over a
+        # row, index and vector already committed, so every retry answered
+        # "already a note" and an update left the old text beside the new row.
+        # `storable` makes the row's derived text and the file one text.
+        body = storable(body)
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
@@ -1577,7 +1602,12 @@ class CabinetStore:
                 clauses.append(f"{axis} < ?")
                 values.append(bound)
             else:
-                clauses.append(f"julianday({axis}) <= julianday(?)")
+                # A date-only bound was advanced to the next midnight; like the
+                # day axis above, that instant is the first one *outside* the
+                # day named, so the comparison is exclusive.  A datetime names
+                # an instant and stays inclusive (`time_window` states it too).
+                comparison = "<" if len(bound) == 10 else "<="
+                clauses.append(f"julianday({axis}) {comparison} julianday(?)")
                 values.append(instant_bound(bound))
         return clauses, values
 

@@ -170,7 +170,18 @@ def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
     """
     if not turns:
         return 0
-    value = turns[-1].get("context_tokens")
+    # **The last row may be one `restore` could not draw**, and its size is not
+    # a fact either.  `transcript` validates the *list*, not its elements, so a
+    # damaged row is this function's to skip the way `restore` skips it; asking
+    # a non-mapping for a key killed the drain the row was supposed to cost.
+    last = turns[-1]
+    if not isinstance(last, Mapping):
+        last = next(
+            (turn for turn in reversed(turns) if isinstance(turn, Mapping)), None
+        )
+        if last is None:
+            return 0
+    value = last.get("context_tokens")
     return value if isinstance(value, int) and value > 0 else 0
 
 
@@ -787,6 +798,17 @@ class SlifeApp(App[None]):
     def _transcript(self) -> ChatView:
         return self.query_one(ChatView)
 
+    def _active_transcript(self) -> ChatView:
+        """The transcript of the screen in front — a watch screen's when one is up.
+
+        The app's scroll keys are priority bindings, so they run on whatever
+        screen is showing.  `_transcript` resolves through the app's own DOM and
+        therefore the *default* screen: with a watch up, Home/End moved the
+        hidden transcript underneath while the watched one stayed put.
+        """
+        found = list(self.screen.query(ChatView))
+        return found[0] if found else self._transcript
+
     async def on_history_input_submitted(self, message: HistoryInput.Submitted) -> None:
         self.query_one(HistoryInput).remember(message.text)
         self._submit(message.text, WINDOW_CHANNEL)
@@ -1128,7 +1150,7 @@ class SlifeApp(App[None]):
         through the same funnel as every other mover, which is where following
         is decided.
         """
-        self._transcript.scroll_home(animate=False)
+        self._active_transcript().scroll_home(animate=False)
 
     def action_scroll_end(self) -> None:
         """Scroll to the bottom *and* follow from there.
@@ -1138,7 +1160,7 @@ class SlifeApp(App[None]):
         following to be re-armed by the request's own deferred landing, and a
         token streamed inside that window would find it still off.
         """
-        self._transcript.jump_to_tail()
+        self._active_transcript().jump_to_tail()
 
     def action_switch_model(self) -> None:
         """Open the model picker: the list, a cursor, and a future for the choice.
@@ -1154,6 +1176,12 @@ class SlifeApp(App[None]):
         one answer as to whether it worked.
         """
         if self._switching:
+            return
+        # **Only the window's own screen offers this**, for `action_watch_subagent`'s
+        # reason: with a watch up, the picker would mount in the transcript
+        # underneath it — invisible — and the latch would make the key look dead
+        # until the watch closed.
+        if self.screen is not self.screen_stack[0]:
             return
         if not self._models:
             # Said rather than shown as an empty picker: a list with no rows is

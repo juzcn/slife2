@@ -666,7 +666,24 @@ class Catalogue:
             self._held[source] = (category, rows)
             for key, store in list(self._stores.items()):
                 if key != here:
-                    await self._write(key, store, source, category, rows)
+                    try:
+                        await self._write(key, store, source, category, rows)
+                    except Exception as exc:  # noqa: BLE001 — one home's file
+                        # **One home's file is not another home's plugin.**
+                        # `_write` has recorded the fault against this key, and
+                        # `seed` swallows the same one for the same reason.  The
+                        # raise used to travel through `_listed`, which treats it
+                        # as "the plugin is not answering" and disconnected the
+                        # shared link — a healthy source reported dead in every
+                        # home, and homes after this one never seeded.
+                        if not _refused(exc):
+                            continue  # `_write` kept it; this home is unhealthy
+                        logger.warning(
+                            "the catalogue at %s did not take %s: %s",
+                            store.path,
+                            source,
+                            exc,
+                        )
         return found
 
     async def seed(self, key: str, store: ToolStore) -> None:
@@ -3034,23 +3051,47 @@ def build_server(
                     continue
                 if held is None:
                     continue
-                declared = await upstream.record(held)
-                for one in declared:
-                    if one.name in known:
+                # **The reserved names are checked *before* the merge, not
+                # after it.**  `record` merges each source's rows into the
+                # catalogue, and a merge is the whole truth about that source —
+                # a hand-written `mcp: {skills: ...}` would purge the skills
+                # plugin's rows first and be filtered out here afterwards, so
+                # the collision was reported after its damage and the two
+                # plugins then purged each other on every refresh.
+                allowed: list[Any] = []
+                for raw in held:
+                    name = str(raw.get("name") or "") if isinstance(raw, dict) else ""
+                    if name and name in known:
                         logger.warning(
                             "%s: %r is a name this hub is already connected under",
                             upstream.settings.name,
-                            one.name,
+                            name,
                         )
                         continue
-                    if one.name in owners:
+                    if name and name in owners:
                         logger.warning(
                             "%s: %r is already declared by %s",
                             upstream.settings.name,
-                            one.name,
-                            owners[one.name].settings.name,
+                            name,
+                            owners[name].settings.name,
                         )
                         continue
+                    allowed.append(raw)
+                try:
+                    declared = await upstream.record(allowed)
+                except Exception as exc:  # noqa: BLE001 — one source, one state
+                    # **The catalogue's health is a state, not a raise.**  A
+                    # non-refusal is already kept in `catalogue.failure` by
+                    # `_write`; letting it escape made `servers()` raise the
+                    # raw sqlite/embedding error and kept `list_tools` from
+                    # reaching its own "the catalogue is not working" branch.
+                    logger.warning(
+                        "%s: its declarations could not be recorded: %s",
+                        upstream.settings.name,
+                        exc,
+                    )
+                    continue
+                for one in declared:
                     known.add(one.name)
                     found[one.name] = one
                     owners[one.name] = upstream

@@ -773,17 +773,33 @@ def build_server(
         refused.  `kept` is the list now in hand and `recalled` is zero because
         this rebuild fetched no recall of its own.
 
-        A stored id with no row is the damaged-log case `restore` already
-        handles by dropping it; the caller keeps its own list rather than
-        adopting a context assembled from part of a selection.
+        A stored id with no row is the damaged-log case `restore` already drops
+        from the caller's list.  The persisted list is repaired to the surviving
+        ids here, under the same compare-and-set, because leaving it naming a
+        row that is gone would make every later `expected` mismatch and disable
+        the recall for the life of the file.  A repair that itself loses to a
+        newer writer keeps the caller's list and waits for the next rebuild.
         """
         current = await off_loop(store.context_turns)
         if list(current) == list(stale_ids):
             return _in_hand(messages, stale_ids)
         rows = await off_loop(_rows, store, current) if current else []
         if len(rows) != len(current):
-            logger.warning("recall_abandoned reason=stored_list_damaged")
-            return _in_hand(messages, stale_ids)
+            # **The stored list names a row the log no longer holds.**  `restore`
+            # already dropped it from the caller's list, but the persisted one
+            # still names it — and a compare-and-set against the caller's list
+            # can then never match again, so every later rebuild would abandon
+            # its recall silently, for the life of the file.  Publish the
+            # surviving ids under the same compare-and-set, so the store and the
+            # caller agree again and a newer writer still wins.
+            surviving = [int(row["turn_id"]) for row in rows]
+            repaired = await off_loop(
+                store.set_context_turns, surviving, expected=current
+            )
+            if repaired is None:
+                logger.warning("recall_abandoned reason=stored_list_damaged")
+                return _in_hand(messages, stale_ids)
+            current = repaired
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
         )
@@ -795,6 +811,11 @@ def build_server(
             "changed": True,
             "kept": len(current),
             "recalled": 0,
+            # No recall of this rebuild's ran — the decision was discarded with
+            # the snapshot it was composed against — but the key is part of the
+            # answer's shape the caller reads strictly (`rebuild_into`), so it
+            # is written as the empty report rather than left absent.
+            "rerank": "",
         }
 
     @mcp.tool

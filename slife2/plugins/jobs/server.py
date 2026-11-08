@@ -388,10 +388,15 @@ def build_server(
         job = _refused(name)
         try:
             code = job.path.read_text(encoding="utf-8-sig")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: a job
+            # saved in the machine's codepage answered the documented repair
+            # tool with a raw codec traceback (skills/playbooks.py makes the
+            # same catch for the same reason).
             raise ToolError(
-                f"could not read {job.path}: {exc} — close whatever holds the "
-                f"file and try `job_read` again"
+                f"could not read {job.path}: {exc} — a job is UTF-8; the file "
+                f"may be in another encoding, or something holds it. Rewrite "
+                f"it with `job_set`, which replaces the bytes"
             ) from exc
         return {
             "name": job.name,
@@ -432,11 +437,16 @@ def build_server(
         text = code if code.endswith("\n") else code + "\n"
         registry = _home()
         final = registry.root / f"{name}.py"
-        previous = ""
+        #: The bytes to put back if the new code will not load.  **Bytes, not
+        #: text**: a file saved in the machine's codepage is not decodable as
+        #: UTF-8, and `job_read`'s advice is to rewrite it here — so a codec
+        #: error must not stop the one write that repairs it.  A rollback
+        #: restores what was there, encoding and all.
+        previous: bytes | None = None
         exists = final.exists()
         if exists:
             try:
-                previous = final.read_text(encoding="utf-8")
+                previous = final.read_bytes()
             except OSError as exc:
                 raise ToolError(
                     f"could not read {final}: {exc} — close whatever holds the "
@@ -459,8 +469,8 @@ def build_server(
         loaded = jobs.load_job(final, name=name)
         if not loaded.ok:
             try:
-                if exists:
-                    staging.write_text(previous, encoding="utf-8")
+                if exists and previous is not None:
+                    staging.write_bytes(previous)
                     os.replace(staging, final)
                 else:
                     final.unlink(missing_ok=True)

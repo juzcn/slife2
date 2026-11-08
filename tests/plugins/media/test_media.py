@@ -480,7 +480,22 @@ def test_an_unknown_api_is_refused_at_the_first_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_image_request_has_the_vendors_shape(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("written", "sent"),
+    [
+        ("1024*1024", "1024*1024"),
+        ("1024x1024", "1024*1024"),
+        ("1024 X 1024", "1024*1024"),
+    ],
+)
+async def test_an_image_request_has_the_vendors_shape(
+    monkeypatch, tmp_path, written: str, sent: str
+) -> None:
+    """The tool accepts three spellings; DashScope validates one of them.
+
+    Forwarded verbatim, `1024x1024` was the spelling its API does not take —
+    after the local check that exists to keep a vendor 400 from being paid for.
+    """
     adapter = dashscope()
     seen: dict[str, Any] = {}
 
@@ -500,14 +515,14 @@ async def test_an_image_request_has_the_vendors_shape(monkeypatch, tmp_path) -> 
     )
 
     answer = await adapter.generate_image(
-        model="img", prompt="a cat", size="1024*1024", outputs_dir=tmp_path
+        model="img", prompt="a cat", size=written, outputs_dir=tmp_path
     )
 
     assert answer == str(tmp_path / "x.png")
     assert seen["url"].endswith("/services/aigc/multimodal-generation/generation")
     assert seen["body"]["model"] == "img"
     assert seen["body"]["input"]["messages"][0]["content"] == [{"text": "a cat"}]
-    assert seen["body"]["parameters"] == {"size": "1024*1024"}
+    assert seen["body"]["parameters"] == {"size": sent}
 
 
 def _saver_returning(path: Path):
@@ -858,6 +873,47 @@ async def test_the_images_only_adapter_refuses_the_other_three(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("written", "sent"),
+    [
+        ("1024*1024", "1024x1024"),
+        ("1024x1024", "1024x1024"),
+        (" 1024 X 1024 ", "1024x1024"),
+    ],
+)
+async def test_an_openai_image_size_is_written_with_its_own_separator(
+    monkeypatch, tmp_path, written: str, sent: str
+) -> None:
+    """The tool documents `WIDTH*HEIGHT`; OpenAI validates `WIDTHxHEIGHT`.
+
+    Forwarded verbatim, the spelling the tool itself teaches was a 400 from the
+    images API after the size check had called it valid.
+    """
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="img", prompt="x", size=written, outputs_dir=tmp_path
+    )
+
+    assert seen["size"] == sent
+
+
+@pytest.mark.asyncio
 async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> None:
     adapter = OpenAICompatAdapter(settings().providers["test"])
     encoded = base64.b64encode(b"\x89PNG").decode()
@@ -968,6 +1024,7 @@ def test_a_subagents_media_follows_its_fork_flag(
 ) -> None:
     """A non-fork subagent owns its media; a fork writes to its maker's."""
     monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+    agent_dir("jack", "researcher")  # the record's directory; a read does not make it
     record = subagent_file("jack", "researcher")
 
     record.write_text("fork: false\n", encoding="utf-8")

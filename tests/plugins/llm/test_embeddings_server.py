@@ -502,6 +502,39 @@ async def test_a_connection_that_keeps_failing_is_not_retried_for_ever() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_is_not_retried() -> None:
+    """**A request that was sent may have been billed.**
+
+    `APITimeoutError` derives from `APIConnectionError`, so the connect-failure
+    retry caught the one failure that must never be repeated: the same
+    embeddings request went to the provider a second time.  `ConnectTimeout`
+    is mapped to the same type, so even a timeout before the request was sent
+    is given the conservative answer.
+    """
+    import httpx2
+    from fastmcp.exceptions import ToolError
+    from openai import APITimeoutError
+
+    fake = _FakeOpenAI(dimension=2)
+    attempts: list[list[str]] = []
+
+    async def timed_out(*, model: str, input: list[str]) -> Any:
+        attempts.append(list(input))
+        raise APITimeoutError(
+            request=httpx2.Request("POST", "http://example.invalid/v1/embeddings")
+        )
+
+    fake.embeddings.create = timed_out
+    server = build_server(default_config(), client=_client("mystery", fake))
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool("embed", {"texts": ["a"]})
+
+    assert attempts == [["a"]], "a timed-out request is not repeated"
+
+
+@pytest.mark.asyncio
 async def test_a_provider_refusal_is_a_sentence_not_a_traceback() -> None:
     """A 402 is operational news, and the sentence names the setting that moves it.
 

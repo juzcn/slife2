@@ -305,6 +305,25 @@ async def test_the_default_model_cannot_be_removed(isolated_runtime) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_default_written_as_a_bare_provider_cannot_be_removed(
+    isolated_runtime,
+) -> None:
+    """`default: local` names local's first model; the guard must resolve it.
+
+    `_active_default` returned the raw scalar, so it compared `local` with
+    `local/big`, never matched, and removing the model the system actually ran
+    on was allowed — silently switching the system to the next one.
+    """
+    bare = CONFIG.replace("default: local/big", "default: local")
+
+    async with Client(server_for(isolated_runtime, bare)) as client:
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_remove", ref="local/big")
+
+    assert "default model" in str(refused.value)
+
+
+@pytest.mark.asyncio
 async def test_removing_a_model_leaves_the_ones_beside_it(isolated_runtime) -> None:
     async with Client(server_for(isolated_runtime)) as client:
         await ask(client, "model_switch", ref="local/small")

@@ -1392,6 +1392,13 @@ class Wechat:
             reason = client.last_error or "no reason given"
             client.reject_session()
             clear_session(session.agent)
+            # **The QR state goes with the login it described.**  A scan that
+            # succeeded leaves `confirmed` behind, and `confirmed` is read before
+            # the failure branch below — so the status answer would report a
+            # login still in progress with an empty error, for ever, instead of
+            # the rejection `restore_note` just wrote.
+            session.qr_state = ""
+            session.qr_error = ""
             session.restore_note = (
                 f"the server rejected the login ({reason}), so it has been forgotten"
             )

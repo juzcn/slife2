@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,26 @@ def stamp(moment: datetime | None = None) -> str:
     collision impossible in practice.
     """
     return f"{moment or datetime.now():%Y%m%d-%H%M%S}"
+
+
+#: The two dimensions, however the caller wrote them.  `check_size` accepts
+#: `WIDTH*HEIGHT`, `WIDTHxHEIGHT` and spaces around the mark; the vendors do not
+#: agree on which spelling the API validates.
+_SIZE_PARTS = re.compile(r"^\s*(\d+)\s*[xX*]\s*(\d+)\s*$")
+
+
+def _size_for(size: str, separator: str) -> str:
+    """A size in **this adapter's vendor's** spelling, or the caller's own.
+
+    The tool documents `WIDTH*HEIGHT`; OpenAI validates `WIDTHxHEIGHT` and
+    DashScope documents `WIDTH*HEIGHT`.  Forwarded verbatim, the documented
+    spelling was a vendor 400 after the local validation the size check exists
+    to avoid — and a caller writing the other spelling got the mirror image.
+    The adapter is the party that knows its vendor, so this is where the one
+    input becomes the one the API takes.
+    """
+    found = _SIZE_PARTS.match(size)
+    return f"{found.group(1)}{separator}{found.group(2)}" if found else size
 
 
 class MediaAdapterError(Exception):
@@ -612,7 +633,7 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             content.append({"image": reference})
         params = dict(extra_params or {})
         if size:
-            params["size"] = size
+            params["size"] = _size_for(size, "*")
         output = await self._generate(model, content, params)
         for item in self._content(output):
             if url := item.get("image"):
@@ -767,7 +788,7 @@ class OpenAICompatAdapter(_HttpClientMixin):
             )
         body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
         if size:
-            body["size"] = size
+            body["size"] = _size_for(size, "x")
         body.update(extra_params or {})
         client = await self._ensure_client()
         try:

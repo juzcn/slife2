@@ -1078,11 +1078,6 @@ async def _drain(
         try:
             try:
                 client = await ensure_member_client()
-                if kind == "message":
-                    # A bare message owes its sender no answer, so its round
-                    # ends where its delivery does — here, once the agent
-                    # server has taken the turn.
-                    session.settle(task_id, mesh.COMPLETED)
                 said = await run_turn(
                     config,
                     session.agent,
@@ -1091,6 +1086,13 @@ async def _drain(
                     channel,
                     client=client,
                 )
+                if kind == "message":
+                    # A bare message owes its sender no answer, so its round
+                    # ends once the turn was taken — **after** `run_turn`, so a
+                    # `DeliveryFailed` below can still settle it REJECTED.  Settled
+                    # first, the refusal came back "already resolved" and the
+                    # peer was acknowledged for a message no conversation took.
+                    session.settle(task_id, mesh.COMPLETED)
                 # The length and not the words: the member's answer is its
                 # own, and what it says to its maker is the reply it sends
                 # (`run_turn`).  This line is the evidence that the turn ran.

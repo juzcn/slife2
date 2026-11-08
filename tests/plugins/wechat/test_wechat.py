@@ -1268,6 +1268,49 @@ async def test_a_second_login_of_the_same_account_retires_the_first(
 
 
 @pytest.mark.asyncio
+async def test_a_retired_login_that_had_just_been_scanned_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The QR state left by a successful scan must not outlive the login.
+
+    `status` reads `qr_state` before it reads a failed login, so a `confirmed`
+    left from the scan reported a scan still in progress with an empty error —
+    hiding the rejection `restore_note` had just written, indefinitely.
+    """
+    bridge = Bridge()
+    bridge.scan = {
+        "status": "confirmed",
+        "bot_token": "bot-token-9",
+        "ilink_user_id": "bot-user-9",
+        "ilink_bot_id": "bot-9",
+    }
+    made = rig(monkeypatch, bridge=bridge)
+    async with Client(
+        served(http=bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        await ask(client, "wechat_login")
+        await until(lambda: session_path("jack").exists())
+        # The scan was confirmed and the poll loop is on the bridge; now another
+        # login of the same account retires it.  Wait for polls past the one
+        # that read the envelope before asking.
+        # Another login of the same account retires it.  The poll loop records
+        # the rejection on its next pass; `status` is what reads it, and on the
+        # fixed path the first read after that clears the stale QR state.
+        bridge.envelope = {"errcode": -14, "errmsg": "session timeout"}
+        answer: dict[str, Any] = {}
+        for _ in range(300):
+            answer = await ask(client, "wechat_check_status")
+            if answer["connected"] is False:
+                break
+            await asyncio.sleep(0.01)
+
+    assert answer["connected"] is False
+    assert answer["qr_state"] == "", "a finished scan is not a pending login"
+    assert "session timeout" in answer["error"]
+    assert "forgotten" in answer["error"]
+
+
+@pytest.mark.asyncio
 async def test_a_link_that_never_came_up_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

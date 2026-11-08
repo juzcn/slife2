@@ -375,6 +375,46 @@ async def test_an_undelivered_result_stays_readable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_cap_drops_a_delivered_result_before_an_undelivered_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A result nobody has read is the last one the cap may take.**
+
+    `check_async` promises an undelivered result stays readable, and the cap is
+    for the results nobody polls.  The prune dropped the oldest finished task
+    whatever its delivery, so at the 100-task cap a completed answer whose
+    hand-back had failed vanished and the tool answered "no async task".
+    """
+    async def delivers(_text: str, _channel: str) -> bool:
+        return True
+
+    async def never_delivers(_text: str, _channel: str) -> bool:
+        return False
+
+    async def done() -> tuple[str, bool]:
+        return "the answer", True
+
+    monkeypatch.setattr(async_tasks, "MAX_ASYNC_TASKS", 2)
+
+    def schedule(deliver) -> str:
+        return async_tasks.schedule(done(), call_id="c", tool="t", deliver=deliver)
+
+    first = schedule(never_delivers)
+    second = schedule(delivers)
+    for task_id in (first, second):
+        for _ in range(50):
+            task = async_tasks._get_task(task_id)  # noqa: SLF001 - the registry under test
+            if task is not None and task.handle.done():
+                break
+            await asyncio.sleep(0)
+
+    schedule(never_delivers)  # over the cap: one finished task has to go
+
+    assert async_tasks._get_task(first) is not None, "the unread result stayed"
+    assert async_tasks._get_task(second) is None, "the delivered one made room"
+
+
+@pytest.mark.asyncio
 async def test_a_background_result_is_windowed_before_it_is_handed_back() -> None:
     """**A result is bounded whichever road it took.**
 

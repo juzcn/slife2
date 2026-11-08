@@ -763,7 +763,11 @@ class _TunnelProviderBase:
                     self._public_url,
                     elapsed,
                 )
-                self._teardown()
+                # **Teardown is blocking, off the loop like its start.**  A CLI
+                # child's kill waits for it (and ngrok's disconnect is a
+                # network call); running either here would stall the share
+                # route and every other call on this server for the wait.
+                await asyncio.to_thread(self._teardown)
                 self._drop_url()
                 down_since = None
 

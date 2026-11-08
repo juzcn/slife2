@@ -1397,6 +1397,15 @@ class A2AMesh:
         self._disarm_watchdog(send)
         record = get_store().get(task_id)
         if record is not None:
+            if record.status in TERMINAL_STATUSES:
+                # The conversation already has a verdict for this task; a late
+                # message would contradict the one it was told.
+                logger.info(
+                    "a2a_message_after_terminal task=%s status=%s",
+                    task_id,
+                    record.status,
+                )
+                return
             get_store().record_result(task_id)
         if send is not None:
             kind = "message" if not send.record else "task"
@@ -1413,6 +1422,19 @@ class A2AMesh:
     ) -> None:
         self._disarm_watchdog(send)
         record = get_store().get(task_id)
+        if record is not None and record.status in TERMINAL_STATUSES:
+            # **A terminal reply that arrives after a terminal is not news.**
+            # A local cancel is recorded before the peer's in-flight answer
+            # lands; the tool already told the model "cancelled", so pushing
+            # "the peer completed it" would contradict the answer it has.  The
+            # store's refusal to flip the row and the callback are one rule.
+            logger.info(
+                "a2a_terminal_after_terminal task=%s recorded=%s arrived=%s",
+                task_id,
+                record.status,
+                state,
+            )
+            return
         if record is not None:
             if state == CANCELLED:
                 get_store().record_cancel(task_id)
@@ -1445,6 +1467,16 @@ class A2AMesh:
     ) -> None:
         """The peer paused the task: keep the send, drop the round's routes."""
         self._disarm_watchdog(send)
+        record = get_store().get(task_id)
+        if record is not None and record.status in TERMINAL_STATUSES:
+            # The same rule as a terminal: a pause arriving after the caller was
+            # told the task ended must not be pushed as "paused".
+            logger.info(
+                "a2a_interrupt_after_terminal task=%s status=%s",
+                task_id,
+                record.status,
+            )
+            return
         get_store().record_interrupt(task_id)
         if send is not None:
             send.interrupt = state
@@ -1872,6 +1904,14 @@ class A2AMesh:
         if record.status in _ENDED:
             return record.status
         send = self._sends.get(task_id)
+        if send is not None and send.agent != agent:
+            # **The task belongs to the peer it was sent to.**  Publishing a
+            # withdrawal to a caller-supplied name without this check told the
+            # wrong peer, recorded the row cancelled, and let the real peer run
+            # on — the sibling `continue_task` refuses the same mistake.
+            return (
+                f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
+            )
         session = uuid.uuid4().hex[:12]
         # A fresh correlation per request: the profile requires uniqueness
         # across concurrently in-flight requests on one reply topic, and the
