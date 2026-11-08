@@ -146,9 +146,10 @@ context:
   # `ceiling` is the one total the kept turns and the recall share: the kept
   # turns are estimated first, and the recall spends what they leave below it.
   ceiling: 0.8
-  # How many candidates each recall leg retrieves; the fused union is never
-  # cut, and the filters below and the token budget decide what is kept.
-  # The store's page bound caps each leg at 200.
+  # How many candidates each leg of the rebuild's recall retrieves; the fused
+  # union is never cut, and the filters below and the token budget decide what
+  # is kept.  `turn_search` has its own model-supplied page.  The store's page
+  # bound caps each leg at 200.
   recall_page_limit: 80
   # Gates measured similarity only; a keyword hit is exempt.  Calibrate it above
   # the embedding model's noise floor — bge-m3 scores unrelated text near 0.5.

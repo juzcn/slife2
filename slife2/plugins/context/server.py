@@ -597,9 +597,8 @@ def build_server(
                 "phrase, or `turn_list` to browse the history without one."
             )
         store = await store_of(agent, subagent)
-        # The store answers with the legs' fused union, uncut; a search's page
-        # is its own edge — the model asked for this many hits, so the cut
-        # belongs here rather than in the ranking.
+        # The search runs on the caller's `keyword_weight`, the same vote the
+        # rebuild's recall reads: one home, one weight between the legs.
         ranked = (
             await store.recall(
                 query=query,
@@ -608,6 +607,7 @@ def build_server(
                 since=since,
                 until=until,
                 limit=limit,
+                keyword_weight=current().context.keyword_weight,
             )
         )[: page_limit(limit)]
         records = {

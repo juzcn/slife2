@@ -440,6 +440,34 @@ async def test_search_reads_only_the_callers_conversation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_reads_the_callers_keyword_weight() -> None:
+    """The search fuses on the same `context.keyword_weight` the rebuild does.
+
+    A weight of zero removes the keyword leg.  The keyword hit is the newer
+    turn, and the meaning leg's page holds the older one; with the default
+    weight the keyword hit wins the tie, and with the caller's zero it is the
+    only turn left.
+    """
+    mine, callers = default_config(), default_config()
+    callers = replace(callers, context=replace(callers.context, keyword_weight=0.0))
+    server = build_server(mine, embedder=EMBEDDER, source=lambda: callers)
+
+    async with Client(server) as client:
+        await _seed(client, "jack", ("gamma", "1"), ("alpha beta 工具", "2"))
+        answer = await client.call_tool(
+            "turn_search",
+            {"query": "alpha beta", "limit": 1},
+            meta=client_meta("jack"),
+        )
+
+    assert [entry["turn_id"] for entry in answer.data["entries"]] == [1]
+    # The premise: with the default weight the keyword hit leads the fusion.
+    store = TurnStore(agent_dir("jack") / "turns.db")
+    ranked = await store.recall(query="alpha beta", embedder=EMBEDDER, limit=1)
+    assert [turn_id for turn_id, _ in ranked] == [2, 1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("query", ["", "***", "   "])
 async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
     query: str,

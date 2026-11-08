@@ -1499,10 +1499,11 @@ class ContextSettings:
     #: the ceiling leaves it nothing.  There is no separate per-recall floor —
     #: one would give the two halves two budgets for one window.
     ceiling: float = 0.8
-    #: How many candidates **each leg** of a recall retrieves.  The fused pool
-    #: is their union — twice this for one question, more for several — and the
-    #: store does not cut it; the two floors and the token budget decide
-    #: membership.  The store's page bound (`MAX_PAGE`, 200) caps each leg.
+    #: How many candidates **each leg of the rebuild's recall** retrieves.  The
+    #: fused pool is their union — twice this for one question, more for
+    #: several — and the store does not cut it; the two floors and the token
+    #: budget decide membership.  The store's page bound (`MAX_PAGE`, 200) caps
+    #: each leg.  `turn_search` has a page of its own and reads none of this.
     recall_page_limit: int = 80
     #: The similarity a *measured* candidate must reach to be recalled.  **A
     #: filter, not an ordering**: a candidate below it is dropped whether or not
@@ -1517,8 +1518,9 @@ class ContextSettings:
     #: Weighted RRF's weight on the keyword leg; the meaning leg is always 1.0.
     #: Start equal and lower it only against a labelled set — a weight is a
     #: belief about the corpus until it is measured.  `0` leaves the leg out.
-    #: The *order* the recall runs on is the reranker's when one is configured;
-    #: this only shapes the pool it sees.
+    #: Read by the rebuild's recall and `turn_search`; the *order* the rebuild
+    #: runs on is the reranker's when one is configured, so there it only
+    #: shapes the pool the ranker sees.
     keyword_weight: float = 1.0
     #: The cross-encoder score a candidate must reach to stay in the selection,
     #: in 0–1.  **A filter, not an ordering**: what the ranker returned below it
