@@ -75,8 +75,8 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import agents_dir, turn_dbs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
-    client_reader,
     close_server,
+    conversation_reader,
     describe,
     house_server,
     open_server,
@@ -374,7 +374,7 @@ def build_server(
 
         Args:
             agent: Whose memory.  With `subagent` it names the database file, so
-                client ids are isolated from each other by construction.
+                conversations are isolated from each other by construction.
             messages: The whole turn, as the agent loop returned it: the user's
                 message first, then every assistant message, tool call and
                 result.  Store it as it is.  What the user said is in there as
@@ -393,7 +393,7 @@ def build_server(
                 computed from.  Omitted when the caller measured none.
             who_helped: The agent that answered.
             what_model: Which model answered, as `provider/model`.
-            channel: Where the turn came in from — `tui`, or a client id.
+            channel: Where the turn came in from — `tui`, or a conversation id.
                 Empty when the caller has nothing to say about it.
             summary: The summary a `turn_summarize` call wrote for this turn in
                 flight; the agent server captures it at the save point.
@@ -448,7 +448,7 @@ def build_server(
         this plugin's, because the road that always supplies an identity is the
         hub, and a reader who is told so knows where to look.
         """
-        return client_reader(
+        return conversation_reader(
             "memory to read",
             "the memory",
             why="it is reached through the toolhub, which forwards the "
@@ -683,7 +683,7 @@ def build_server(
     # --- the two decisions ---------------------------------------------------
     #
     #  Harness tools, unmarked, and the caller is the agent server.  They carry
-    #  the client id as an ordinary argument rather than in `_meta`, and the
+    #  the conversation id as an ordinary argument rather than in `_meta`, and the
     #  difference from `turn_list` above is the point: a model *chooses* to read
     #  its history and must not be able to say whose, while the agent server is
     #  the party that already knows whose conversation it is running.  Same

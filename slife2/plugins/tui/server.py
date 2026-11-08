@@ -72,7 +72,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.libs.plugin.audience import client_key
+from slife2.libs.plugin.audience import conversation_key
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 
 logger = logging.getLogger(__name__)
@@ -305,7 +305,7 @@ class Windows:
     every agent, and a `dict` keyed by the caller rather than a process per
     agent.
 
-    **The key is `slife2.libs.plugin.audience.client_key`'s triple**, because the
+    **The key is `slife2.libs.plugin.audience.conversation_key`'s triple**, because the
     process is shared by every *home* as well: two homes may each be running an
     agent called `jack`, and a table keyed by the name alone would hand the
     second window the first one's stream — its hand-overs typed into somebody
@@ -323,7 +323,7 @@ class Windows:
         the moment the stale session is discovered.  Two *live* windows cannot
         collide here: an agent name is exclusive (`slife2.libs.host.launcher.claim_agent`).
         """
-        key = client_key(agent)
+        key = conversation_key(agent)
         previous = self._sessions.get(key)
         if previous is not None:
             previous.attached = False
@@ -340,7 +340,7 @@ class Windows:
         would delete the window that is actually there.
         """
         session.attached = False
-        key = client_key(agent)
+        key = conversation_key(agent)
         if self._sessions.get(key) is session:
             del self._sessions[key]
 
@@ -352,7 +352,7 @@ class Windows:
         means the same thing it has always meant: nobody is showing that
         conversation, so there is nowhere for the words to be typed.
         """
-        session = self._sessions.get(client_key(agent))
+        session = self._sessions.get(conversation_key(agent))
         return session if session is not None and session.attached else None
 
 

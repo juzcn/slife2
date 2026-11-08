@@ -42,7 +42,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import jobs_dir
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_conversation
 from slife2.libs.plugin.family import LIST_PAGE, Homes, listed
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -321,7 +321,7 @@ def build_server(
         job = registry.find(tool)
         if job is None:
             return {"text": _unknown_job(tool, registry.names()), "ok": False}
-        client = request_client(ctx) or ("", "")
+        client = request_conversation(ctx) or ("", "")
         text, ok = await registry.run(
             job, arguments, agent=client[0], subagent=client[1]
         )
@@ -537,7 +537,7 @@ def build_server(
         job = _refused(name)
         if not job.ok:
             raise ToolError(_not_loaded(job))
-        client = request_client(ctx) or ("", "")
+        client = request_conversation(ctx) or ("", "")
         text, ok = await _home().run(
             job, arguments or {}, agent=client[0], subagent=client[1]
         )

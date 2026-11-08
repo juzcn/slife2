@@ -30,8 +30,8 @@ MCP server。
 |---|---|
 | **plugin** | slife2 自己的一个 MCP server，由 launcher 启动并共享。外部 MCP server 不是 plugin。 |
 | **agent** | 由 `--agent NAME` 命名的身份。一个名字在一台机器上只能有一个活着的持有者。 |
-| **client id** | `(agent, subagent)`：一次调用所代表的身份。 |
-| **conversation** | 一个 client id 的历史。 |
+| **conversation id** | `(agent, subagent)`：一次调用所面向的对话身份。 |
+| **conversation** | 一个 agent 自己的历史，或它的某个 subagent 的历史。 |
 | **turn** | 一次交换：输入、模型的回答以及它发起的工具调用。 |
 | **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>` 或 `async-tool:<name>`。 |
 | **marker** | 发送者在消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。随消息存储，只在显示时移除。 |

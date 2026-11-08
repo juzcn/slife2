@@ -1,11 +1,19 @@
-"""Who a call is for: the tool's audience, and the caller's own name.
+"""Who a call is for: the tool's audience, and the conversation's identity.
 
 Both travel out of band — beside the model rather than in it — and there are two
 of them because a tool call has two parties.  **The tool says who may call it**
-(`slife2/audience`, read from `tools/list`), and **the caller says who it is**
-(the other key in this module, attached to the call), and neither is an argument
-a model writes.  The first section below is the tool's half; `CLIENT` and its
-readers are the caller's.
+(`slife2/audience`, read from `tools/list`), and **the call says which
+conversation it is for** (the other key in this module, attached to the call),
+and neither is an argument a model writes.  The first section below is the
+tool's half; `CONVERSATION` and its readers are the conversation's.
+
+**An identity in two layers.**  The conversation *id* is `(agent, subagent)`:
+which agent, and which of that agent's conversations.  It is what travels on the
+wire to every server, and every server here is shared — one process serves every
+conversation — so the id has to be said rather than inferred from a connection.
+The conversation *key* adds the home: `(home, agent, subagent)` is what a shared
+daemon holds state under, because two homes may each run an agent called `jack`.
+The id is the common identity; the key is the unique one.
 
 Who a tool is for, said on the tool itself.
 
@@ -51,6 +59,19 @@ from typing import Any
 
 from slife2.libs.host import paths
 
+#: The conversation a call is for: which agent, and which of that agent's
+#: conversations (empty for the one a person is watching, a name for a worker
+#: it is running).  This is the identity that travels on the wire; it is not the
+#: key a daemon holds state under, which adds the home (`ConversationKey`).
+ConversationId = tuple[str, str]
+
+#: The key a shared daemon holds one conversation's state under:
+#: `(home, agent, subagent)`, built by :func:`conversation_key`.  The home is
+#: what makes it unique on a machine — two homes may each run an agent called
+#: `jack`, and a table keyed by the pair alone answers the second home with the
+#: first one's state.
+ConversationKey = tuple[str, str, str]
+
 #: The `_meta` key a tool declares its audience under.  Namespaced because
 #: `_meta` is shared with the server, with FastMCP and with every other client
 #: that reads it — the protocol's own keys are reverse-DNS for the same reason.
@@ -87,12 +108,17 @@ def for_the_model(meta: Mapping[str, Any] | None) -> bool:
     return MODEL in (declared or ())
 
 
-#: The `_meta` key a *call* carries to say whose behalf it is on.  Every server
-#: here is shared — one process serves every client id, the way one model
-#: server serves every provider — so the identity has to be said, and this is
-#: where.  A process per agent would let the connection be the identity; these
-#: servers cannot.
-CLIENT = "slife2/client"
+#: The `_meta` key a *call* carries to say which conversation it is for.  Every
+#: server here is shared — one process serves every conversation, the way one
+#: model server serves every provider — so the identity has to be said, and
+#: this is where.  A process per conversation would let the connection be the
+#: identity; these servers cannot.
+#:
+#: **The spelling keeps `client`, because it is a wire value and not a name.**
+#: A running stack of daemons shares this key, so correcting the word in it
+#: would be a protocol change — every daemon would have to restart — rather than
+#: a rename.  What it names is the conversation (`conversation_meta`).
+CONVERSATION = "slife2/client"
 
 #: The key inside that mapping naming the *home* the call is for: the data
 #: directory of the process that made it.
@@ -101,7 +127,7 @@ CLIENT = "slife2/client"
 #: identity does and for the same reason: the servers are shared, so a plugin
 #: writing an agent's turn file is not the process that was started with
 #: `--data-dir`, and only the caller knows which directory the work belongs in.
-#: `forwarded_client` already carries this whole mapping on to the next hop, so a
+#: `forwarded_conversation` already carries this whole mapping on to the next hop, so a
 #: home reaches the far end of a chain of proxies without a second mechanism.
 #:
 #: **Not an argument, for the reason the conversation is not one**: a model that
@@ -109,15 +135,16 @@ CLIENT = "slife2/client"
 DATA_DIR = "data_dir"
 
 
-def client_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any]:
+def conversation_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any]:
     """What a harness-side caller attaches to a tool call it makes for one
     conversation.
 
     **The home defaults to this process's**, which is right at every call site
     there is: a client, a launcher and a test are one home from start to finish,
-    and a plugin making a call on somebody else's behalf is *inside* a call of
-    its own, where `slife2.libs.host.paths.home` already answers with the caller's
-    (`slife2.libs.plugin.protocol.ServeTheCallersHome` is what put it there).
+    and a plugin making a call for somebody else's conversation is *inside* a
+    call of its own, where `slife2.libs.host.paths.home` already answers with
+    the caller's (`slife2.libs.plugin.protocol.ServeTheCallersHome` is what put
+    it there).
 
     An explicit argument is for the case the ambient answer is the wrong one —
     a caller acting for a home it is not itself in — and there is no such caller
@@ -131,7 +158,7 @@ def client_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any
     different directory.
     """
     return {
-        CLIENT: {
+        CONVERSATION: {
             "agent": agent,
             "subagent": subagent,
             "data_dir": home or _for_the_wire(paths.home()),
@@ -161,14 +188,14 @@ def _for_the_wire(root: Path) -> str:
     return str(root if root.is_absolute() else root.resolve())
 
 
-def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
-    """The `(agent, subagent)` a call is on behalf of, or `None` if it says.
+def conversation_of(meta: Mapping[str, Any] | None) -> ConversationId | None:
+    """The conversation id a call is for, or `None` when it names none.
 
-    `None` is not an error here — most calls are not on anyone's behalf, and a
-    model backend has no idea what a client id is.  It is the *reader* that
+    `None` is not an error here — most calls name no conversation, and a model
+    backend has no idea what a conversation id is.  It is the *reader* that
     decides whether it can proceed without one, and a tool that needs it says so.
     """
-    found = (meta or {}).get(CLIENT)
+    found = (meta or {}).get(CONVERSATION)
     if not isinstance(found, Mapping):
         return None
     agent = found.get("agent")
@@ -178,7 +205,7 @@ def client_of(meta: Mapping[str, Any] | None) -> tuple[str, str] | None:
     return agent, subagent if isinstance(subagent, str) else ""
 
 
-def client_key(agent: str, subagent: str = "") -> tuple[str, str, str]:
+def conversation_key(agent: str, subagent: str = "") -> ConversationKey:
     """The key a shared daemon holds one conversation's state under.
 
     **(home, agent, subagent)** — and the first element is the one this exists
@@ -209,7 +236,7 @@ def home_of(meta: Mapping[str, Any] | None) -> str:
     the field arrives off a wire, and a caller that sent something unusable is
     not a caller that named a directory.
     """
-    found = (meta or {}).get(CLIENT)
+    found = (meta or {}).get(CONVERSATION)
     if not isinstance(found, Mapping):
         return ""
     named = found.get(DATA_DIR)
@@ -253,23 +280,24 @@ def with_home(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     the *caller's* — rewriting it with this process's would move somebody else's
     work into whichever directory happens to be in front of us.  A meta that says
     nothing gets a blob with a home and no agent, and that is not the same thing
-    as a nameless client: `client_of` answers `None` for it, so no plugin reads
-    it as somebody's, and `home_of` answers with the directory the work belongs
-    in, which is the whole of what that call needed to say.
+    as a call that names no conversation: `conversation_of` answers `None` for
+    it, so no plugin reads it as somebody's, and `home_of` answers with the
+    directory the work belongs in, which is the whole of what that call needed
+    to say.
     """
     found = dict(meta or {})
-    blob = found.get(CLIENT)
+    blob = found.get(CONVERSATION)
     named = home_of(found)
     if named:
         return found
     merged = dict(blob) if isinstance(blob, Mapping) else {}
     merged[DATA_DIR] = _for_the_wire(paths.home())
-    found[CLIENT] = merged
+    found[CONVERSATION] = merged
     return found
 
 
-def forwarded_client(meta: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Just the caller's identity, as `_meta` for the next hop.
+def forwarded_conversation(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Just the conversation identity — and the home with it — for the next hop.
 
     Not the whole `_meta`, which carries the protocol's own keys as well —
     `progressToken` names *this* request's progress stream, and passing it on
@@ -277,8 +305,8 @@ def forwarded_client(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     A hub is a proxy, and a proxy forwarding its caller's identity forwards that
     and nothing else.
     """
-    found = (meta or {}).get(CLIENT)
-    return {CLIENT: found} if found is not None else {}
+    found = (meta or {}).get(CONVERSATION)
+    return {CONVERSATION: found} if found is not None else {}
 
 
 def request_meta(ctx: Any) -> Mapping[str, Any] | None:
@@ -296,9 +324,9 @@ def request_meta(ctx: Any) -> Mapping[str, Any] | None:
     return meta if isinstance(meta, Mapping) else None
 
 
-def request_client(ctx: Any) -> tuple[str, str] | None:
-    """The `(agent, subagent)` a tool call is on behalf of."""
-    return client_of(request_meta(ctx))
+def request_conversation(ctx: Any) -> ConversationId | None:
+    """The `(agent, subagent)` a tool call is for."""
+    return conversation_of(request_meta(ctx))
 
 
 def request_home(ctx: Any) -> str:

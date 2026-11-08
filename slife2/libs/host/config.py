@@ -323,7 +323,7 @@ class Net:
     def namespace(self, settings: A2ASettings, agent: str) -> tuple[str, str]:
         """The `(org, unit)` one agent meets its peers in — **which is one mesh**.
 
-        *agent* is the client id's first half, and it is the whole of what this
+        *agent* is the conversation id's first half, and it is the whole of what this
         needs to know: on either network a mesh holds that agent and the peers it
         is addressed by, so naming the mesh names the agent.
 

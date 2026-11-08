@@ -50,7 +50,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.libs.turn.tools import CHECK_NEW_INPUT
@@ -273,7 +273,7 @@ async def ask(
     result = await client.call_tool(
         tool,
         arguments or {},
-        meta=client_meta(AGENT, home=str(home) if home else ""),
+        meta=conversation_meta(AGENT, home=str(home) if home else ""),
     )
     return result.data
 
@@ -360,7 +360,8 @@ async def test_a_call_that_does_not_say_whose_task_it_is_is_refused(
     """A shared process cannot guess the agent, so it refuses rather than
     answering with somebody else's tasks."""
     async with Client(build(hub=hub, context=store).mcp) as client:
-        # No `slife2/client` in `_meta`: not a call on anybody's behalf.
+        # No conversation in `_meta` (`slife2/client` is absent): not a call for
+        # anybody.
         with pytest.raises(ToolError, match="did not say which conversation"):
             await client.call_tool(AGENT_TASK_START, {"name": "x", "description": "y"})
 
@@ -497,7 +498,7 @@ async def test_the_context_it_runs_on_is_the_agents_own(
                 "created_at": "2026-10-12T09:00:00+08:00",
                 "completed_at": "2026-10-12T09:00:01+08:00",
             },
-            meta=client_meta(AGENT),
+            meta=conversation_meta(AGENT),
         )
 
     built = build(text_turn("done"), hub=hub, context=store, window=window)
@@ -923,7 +924,7 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
                         "created_at": "2026-10-12T09:00:00+08:00",
                         "completed_at": "2026-10-12T09:00:01+08:00",
                     },
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
                 ids.append(stored.data["turn_id"])
         # A keep-list for the first task's own decision: one of the two turns,

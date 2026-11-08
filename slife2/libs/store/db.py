@@ -200,7 +200,7 @@ def safe_agent_name(name: str) -> str:
 
 
 def database_path(agent: str, subagent: str = "") -> Path:
-    """The database for one client id.
+    """The database for one conversation id.
 
     **One file per id, not a column.**  Isolation as a property of the filesystem
     beats isolation as a `WHERE` clause somebody can forget to write — the same
@@ -413,7 +413,7 @@ CREATE TABLE IF NOT EXISTS index_meta (
 -- property of any turn, which is why it is a second table and not a column.
 --
 -- **`id` is pinned to 1, and that is the schema saying what a file is.**  There
--- is one conversation per file (the client id *is* the filename), so there is
+-- is one conversation per file (the conversation id *is* the filename), so there is
 -- exactly one live context to record; a plain `id INTEGER PRIMARY KEY` would
 -- permit a second row, and a second row would be a conversation this file is
 -- not.  The `CHECK` makes that a constraint rather than a convention.
@@ -2037,5 +2037,5 @@ def _structural(raw: Any, *, what: str) -> Any:
 
 
 def store_for(agent: str, subagent: str = "") -> TurnStore:
-    """The store for one client id, creating its file if needed."""
+    """The store for one conversation id, creating its file if needed."""
     return TurnStore(database_path(agent, subagent))

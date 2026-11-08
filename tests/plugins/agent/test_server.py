@@ -56,7 +56,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import (
@@ -253,7 +253,7 @@ async def attach(
     """
     async with Client(server) as client:
         result = await client.call_tool(
-            ATTACH_IMAGE, {"sources": sources}, meta=client_meta(agent)
+            ATTACH_IMAGE, {"sources": sources}, meta=conversation_meta(agent)
         )
     return result.data
 
@@ -3780,12 +3780,12 @@ async def set_subagent(
     role: str = "subagent",
     fork: bool = False,
 ):
-    """Name a subagent, with the caller's client id attached — as a turn does."""
+    """Name a subagent, with the caller's conversation id attached — as a turn does."""
     async with Client(server) as client:
         return await client.call_tool(
             SUBAGENT_SET,
             {"name": name, "model": model, "role": role, "fork": fork},
-            meta=client_meta(agent),
+            meta=conversation_meta(agent),
         )
 
 
@@ -3793,7 +3793,7 @@ async def remove_subagent(server: FastMCP, name: str, *, agent: str = DEFAULT_AG
     """Unmake one, the same way."""
     async with Client(server) as client:
         return await client.call_tool(
-            SUBAGENT_REMOVE, {"name": name}, meta=client_meta(agent)
+            SUBAGENT_REMOVE, {"name": name}, meta=conversation_meta(agent)
         )
 
 
@@ -3905,7 +3905,7 @@ async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
             await client.call_tool(
                 SUBAGENT_SET,
                 {"name": "deeper"},
-                meta=client_meta(DEFAULT_AGENT, "researcher"),
+                meta=conversation_meta(DEFAULT_AGENT, "researcher"),
             )
 
     assert "cannot make a subagent" in str(refused.value)

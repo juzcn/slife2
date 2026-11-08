@@ -209,7 +209,11 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import catalogue_db, data_dir, home_key, in_home
-from slife2.libs.plugin.audience import for_the_model, forwarded_client, request_meta
+from slife2.libs.plugin.audience import (
+    for_the_model,
+    forwarded_conversation,
+    request_meta,
+)
 from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -983,7 +987,8 @@ class Catalogue:
         place it has to be released.
 
         Every home's, because the stores are per home
-        (`slife2.libs.plugin.audience.client_key` is the same fact one plugin over).
+        (`slife2.libs.plugin.audience.conversation_key` is the same fact one
+        plugin over).
         """
         self._stores.clear()
 
@@ -3450,7 +3455,7 @@ def build_server(
                 return {"text": f"{name} failed: {exc}", "ok": False}
             return {"text": as_tool_text(answer), "ok": True}
 
-        forwarded = forwarded_client(request_meta(ctx))
+        forwarded = forwarded_conversation(request_meta(ctx))
         row = await catalogue.route(name)
         if row is None:
             # Not routable *yet*, which is not the same as unknown: a server may

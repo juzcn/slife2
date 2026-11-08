@@ -354,7 +354,7 @@ def cabinet_dir(agent: str, subagent: str = "") -> Path:
     **Per conversation, with forks sharing their maker's.**  A non-fork subagent
     owns its cabinet (`agents/<agent>/subagents/<name>/cabinet/`); a fork is a
     temporary copy of its maker's conversation and uses the maker's cabinet.  A
-    diary is one person's, and the client id is what says whose.
+    diary is one person's, and the conversation id is what says whose.
 
     The name is sanitised by `safe_agent_name` for the reason that function
     gives: an agent name comes from a command line, and `jack` becoming a

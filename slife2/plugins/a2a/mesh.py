@@ -41,11 +41,12 @@ is the requester role.
 **One mesh per member, in a process that serves several.**  The plugin holds one
 per member it serves, and everything below follows from that — the collision
 check, the two client ids and the topic namespace are all keyed by the name this
-object was built with.  What the name *is* comes from the caller's client id
-rather than from the config, which is why it is a constructor argument.  **A
+object was built with.  What the name *is* comes from the caller's conversation
+id rather than from the config, which is why it is a constructor argument.  **A
 member is either the agent or one of its subagents**: the second is a peer on
-the *local* network and only there, so it is a client id's second half — the two
-arguments below — and the name it answers as is the one it is addressed by.
+the *local* network and only there, so it is a conversation id's second half —
+the two arguments below — and the name it answers as is the one it is addressed
+by.
 
 **What puts an agent on the mesh is somebody being there.**  One of these is
 connected because a window is showing that agent — `slife2.tui.client.MeshClient`
@@ -170,7 +171,7 @@ class _NotConnected(RuntimeError):
 
 
 def member_name(agent: str, subagent: str = "") -> str:
-    """What a member answers as, from the client id it is one member of.
+    """What a member answers as, from the conversation id it is one member of.
 
     `subagent or agent`, and it is a function because it is *one* rule with more
     than one reader: the mesh's identity, the card it publishes and the topic it
@@ -679,7 +680,7 @@ class A2AMesh:
     """
 
     def __init__(self, config: A2ASettings, agent: str, *, subagent: str = "") -> None:
-        """*agent* and *subagent* are the client id this mesh is one member of.
+        """*agent* and *subagent* are the conversation id this mesh is one member of.
 
         **The whole id, because a member is the second half of one.**  The name
         it answers as is `subagent or agent` — that is the MQTT client id, the

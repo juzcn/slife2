@@ -22,7 +22,7 @@ from fastmcp.exceptions import ToolError
 from slife2.libs.host.config import Config, load, load_cached
 from slife2.libs.host.configfile import read_section
 from slife2.libs.host.paths import in_home
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.plugins.mcp_tools.server import build_server
 from slife2.plugins.toolhub.server import build_server as build_hub
 from tests.fakes import StubEmbedder, answering, config_file, plugin_transports
@@ -442,11 +442,11 @@ async def test_two_homes_naming_one_entry_run_one_server(
     async with Client(server) as client:
         with in_home(mine):
             here = await client.call_tool(
-                "list_sources", {}, meta=client_meta("jack", home=str(mine))
+                "list_sources", {}, meta=conversation_meta("jack", home=str(mine))
             )
         with in_home(theirs):
             there = await client.call_tool(
-                "list_sources", {}, meta=client_meta("jack", home=str(theirs))
+                "list_sources", {}, meta=conversation_meta("jack", home=str(theirs))
             )
 
     assert len(started) == 1, f"one entry, and {len(started)} processes for it"
@@ -494,11 +494,11 @@ async def test_a_second_home_naming_one_entry_differently_is_told(
         async with Client(server) as client:
             with in_home(mine):
                 await client.call_tool(
-                    "list_sources", {}, meta=client_meta("jack", home=str(mine))
+                    "list_sources", {}, meta=conversation_meta("jack", home=str(mine))
                 )
             with in_home(theirs):
                 await client.call_tool(
-                    "list_sources", {}, meta=client_meta("jack", home=str(theirs))
+                    "list_sources", {}, meta=conversation_meta("jack", home=str(theirs))
                 )
 
     assert len(started) == 1, "the name wins, so no second process"

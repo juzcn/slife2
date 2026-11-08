@@ -5,7 +5,7 @@ anything about the mesh.
 
 **SDD §2.6: one process, one mesh per member.**  slife2's servers are shared,
 so one mesh, one set of queues and one identity live in a :class:`Session`
-keyed by the **client id every call carries**, exactly as `slife2-wechat`'s
+keyed by the **conversation id every call carries**, exactly as `slife2-wechat`'s
 login does.
 That is not a formality here: the name *is* the mesh identity — the MQTT client
 id and the request topic's last segment — so a second member is a second
@@ -15,7 +15,7 @@ one are the same thing to all of this: both are agents on the broker, and nothin
 in the code can tell them apart.
 
 **A member is an agent, or one of an agent's subagents** — and the second half of
-the client id is an identity on the **local** network and only there, which is the
+the conversation id is an identity on the **local** network and only there, which is the
 whole of the difference between the two instances of this module.  Everything the
 local one adds is the part a peer without a process needs: a place held for it by
 somebody else (:data:`MEMBER`), a road that is not a window (`run_turn`), and a
@@ -106,8 +106,8 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import forked, home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
-    client_reader,
     close_server,
+    conversation_reader,
     describe,
     house_server,
     open_server,
@@ -353,8 +353,8 @@ class Session:
     another server; and arrival order is the order the model should read things
     in.  One queue with one writer behind it is both.
 
-    **`agent` is the maker and `subagent` the member, which is the client id
-    every server in this system keys by** — and which of them a delivery runs a
+    **`agent` is the maker and `subagent` the member, which is the conversation id
+    every server in this system addresses by** — and which of them a delivery runs a
     turn for is decided by the second: an agent's conversation is run by its
     window, a subagent's by this plugin, because a subagent has none.
     """
@@ -366,7 +366,7 @@ class Session:
     #: on, the envelope a message opens with (`Net`).
     net: Net
     mesh: A2AMesh
-    #: The other half of this session's client id, and empty for an agent's own.
+    #: The other half of this session's conversation id, and empty for an agent's own.
     #: **It is what the member answers as** (`mesh.agent_name` is `subagent or
     #: agent`), so it is also what a delivery that is not the window's has to
     #: address its turn with (`run_turn`).
@@ -598,8 +598,8 @@ async def run_turn(
     accepts it.
 
     **The turn is run by the agent server, so it is an ordinary turn**: the same
-    loop, the same tools, the same store, addressed by the client id the message
-    named — `send_message(agent=<maker>, subagent=<receiver>)`, which is the
+    loop, the same tools, the same store, addressed by the conversation id the
+    message named — `send_message(agent=<maker>, subagent=<receiver>)`, which is the
     shape an agent task already has.  `watched` is left False for the reason
     `Pending.watched` gives: nobody is watching, so a tool call the model puts up
     for approval is granted rather than waiting for an answer nobody will send.
@@ -1344,7 +1344,7 @@ def build_server(
         **A loop outlives the call that started it**, so by the time it resolves
         a path the ambient home is the daemon's own — and everything this writer
         does resolves one: `hand_over` stamps the caller's home on the call it
-        makes to the window (`client_meta`), and the window it reaches is the one
+        makes to the window (`conversation_meta`), and the window it reaches is the one
         showing *that* home's conversation.  Leaving the home to the ambient one
         would hand another home's message to this one's window, which the tui
         refuses with `a2a_delivery_unreachable` while the peer is told nothing.
@@ -1359,11 +1359,11 @@ def build_server(
     def session_of(agent: str, subagent: str = "", root: Path | None = None) -> Session:
         """This member's mesh, built on first use and kept.
 
-        **Keyed by the home and by the whole client id, because neither the name
-        nor the pair is an identity here.**  One process serves every home, two
+        **Keyed by the home and by the whole conversation id, because neither the
+        name nor the pair is an identity here.**  One process serves every home, two
         homes may each be running an agent called `jack`, and a table keyed by
         the name alone answers the second home with the first one's mesh — the
-        arrangement `slife2.libs.plugin.audience.client_key` and
+        arrangement `slife2.libs.plugin.audience.conversation_key` and
         `slife2.plugins.tui.server.Windows` exist to prevent.  The second half
         is the same argument one level in: on the local network two agents may
         each have a `researcher`, and a table keyed by the member's name alone
@@ -1519,7 +1519,7 @@ def build_server(
         return session
 
     def speaker(ctx: Any) -> tuple[str, str]:
-        """The `(agent, subagent)` a call is on behalf of — its client id.
+        """The `(agent, subagent)` a call is for — its conversation id.
 
         **Both halves, because on the local network the second one is who is
         speaking.**  A subagent's tool call carries the pair it is run under, and
@@ -1533,7 +1533,7 @@ def build_server(
         remote peer sees an agent name, a subagent is not an instance and never
         claimed one (SDD §3.5), so its maker is the name anybody out there knows.
         """
-        agent, subagent = client_reader(
+        agent, subagent = conversation_reader(
             "mesh it could be sent from",
             "",
             why="one process serves every agent, and the agent name is "
@@ -1829,7 +1829,7 @@ def build_server(
         this is not a message to the member.
 
         Args:
-            agent: Whose member it is — the client id's first half.
+            agent: Whose member it is — the conversation id's first half.
             subagent: The member's own name.  Empty is the agent itself, which
                 only the remote network has a session for.
         """
@@ -2239,7 +2239,7 @@ def build_server(
         and this network's members are not the remote network's peers.
 
         Args:
-            ctx: The call, whose client id is whose tasks these are.
+            ctx: The call, whose conversation id is whose tasks these are.
         """
         agent, mine = speaker(ctx)
         settings = mesh_settings()

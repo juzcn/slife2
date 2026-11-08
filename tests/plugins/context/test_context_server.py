@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 import slife2.plugins.context.server as context_server
 from slife2.libs.host.config import default_config
 from slife2.libs.host.paths import agent_dir
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
@@ -166,7 +166,7 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
             },
         )
         read = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
 
     assert stored.data["turn_id"] == 1
@@ -296,14 +296,14 @@ async def test_a_model_reads_the_history_it_is_calling_from() -> None:
             },
         )
 
-        jack = await client.call_tool("turn_list", {}, meta=client_meta("jack"))
-        jill = await client.call_tool("turn_list", {}, meta=client_meta("jill"))
+        jack = await client.call_tool("turn_list", {}, meta=conversation_meta("jack"))
+        jill = await client.call_tool("turn_list", {}, meta=conversation_meta("jill"))
         # Turn 1 exists in all three files, and is a different turn in each.
         read = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
         scoped = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=client_meta("jill", "worker")
+            "turn_read", {"turn_id": 1}, meta=conversation_meta("jill", "worker")
         )
 
     assert [e["user_message"] for e in jack.data["entries"]] == ["jack's question"]
@@ -341,7 +341,7 @@ async def test_browsing_pages_and_reports_a_total() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("q0", "a0"), ("q1", "a1"), ("q2", "a2"))
         page = await client.call_tool(
-            "turn_list", {"limit": 2, "offset": 1}, meta=client_meta("jack")
+            "turn_list", {"limit": 2, "offset": 1}, meta=conversation_meta("jack")
         )
 
     assert page.data["total"] == 3
@@ -363,7 +363,7 @@ async def test_the_page_reports_the_limit_that_built_it() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("q0", "a0"))
         page = await client.call_tool(
-            "turn_list", {"limit": 1000}, meta=client_meta("jack")
+            "turn_list", {"limit": 1000}, meta=conversation_meta("jack")
         )
 
     assert page.data["total"] == 1
@@ -378,7 +378,7 @@ async def test_a_bound_the_grammar_does_not_know_is_a_refusal() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="invalid since bound"):
             await client.call_tool(
-                "turn_list", {"since": "whenever"}, meta=client_meta("jack")
+                "turn_list", {"since": "whenever"}, meta=conversation_meta("jack")
             )
 
 
@@ -388,7 +388,7 @@ async def test_reading_a_turn_that_is_not_there_says_which_one() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="no turn 7"):
             await client.call_tool(
-                "turn_read", {"turn_id": 7}, meta=client_meta("jack")
+                "turn_read", {"turn_id": 7}, meta=conversation_meta("jack")
             )
 
 
@@ -408,7 +408,7 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
             ("unrelated chatter", "a1"),
         )
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=client_meta("jack")
+            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
         )
 
     entries = found.data["entries"]
@@ -433,7 +433,7 @@ async def test_search_reads_only_the_callers_conversation() -> None:
         await _seed(client, "jack", ("jack's trump note", "a"))
         await _seed(client, "jill", ("jill's trump note", "a"))
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=client_meta("jack")
+            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
         )
 
     assert [e["user_message"] for e in found.data["entries"]] == ["jack's trump note"]
@@ -457,7 +457,7 @@ async def test_search_reads_the_callers_keyword_weight() -> None:
         answer = await client.call_tool(
             "turn_search",
             {"query": "alpha beta", "limit": 1},
-            meta=client_meta("jack"),
+            meta=conversation_meta("jack"),
         )
 
     assert [entry["turn_id"] for entry in answer.data["entries"]] == [1]
@@ -477,7 +477,7 @@ async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="turn_list"):
             await client.call_tool(
-                "turn_search", {"query": query}, meta=client_meta("jack")
+                "turn_search", {"query": query}, meta=conversation_meta("jack")
             )
 
 
@@ -492,7 +492,7 @@ async def test_search_takes_sentences_as_well_as_words() -> None:
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         await _seed(client, "jack", ("工具 工具", "1"), ("trump", "2"))
         answer = await client.call_tool(
-            "turn_search", {"sentences": ["工具"]}, meta=client_meta("jack")
+            "turn_search", {"sentences": ["工具"]}, meta=conversation_meta("jack")
         )
 
     assert answer.data["entries"][0]["turn_id"] == 1
@@ -515,7 +515,7 @@ async def test_search_honours_the_same_time_window_as_the_browse() -> None:
         found = await client.call_tool(
             "turn_search",
             {"query": "trump", "since": "2025-01-01"},
-            meta=client_meta("jack"),
+            meta=conversation_meta("jack"),
         )
 
     assert [e["user_message"] for e in found.data["entries"]] == ["new trump note"]
@@ -540,7 +540,7 @@ async def test_search_finds_the_topic_a_person_names_in_chinese() -> None:
         found = await client.call_tool(
             "turn_search",
             {"query": "首经贸发展", "since": "yesterday"},
-            meta=client_meta("jack"),
+            meta=conversation_meta("jack"),
         )
 
     assert [e["user_message"] for e in found.data["entries"]][0] == (
@@ -557,13 +557,13 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
         wrote = await client.call_tool(
             "turn_summarize",
             {"turn_id": 1, "summary": "the quarterly forecast", "tags": "planning"},
-            meta=client_meta("jack"),
+            meta=conversation_meta("jack"),
         )
         read = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
         found = await client.call_tool(
-            "turn_search", {"query": "quarterly"}, meta=client_meta("jack")
+            "turn_search", {"query": "quarterly"}, meta=conversation_meta("jack")
         )
 
     assert wrote.data == {"status": "updated", "turn_id": 1}
@@ -582,12 +582,12 @@ async def test_the_current_turns_annotation_is_captured_not_written() -> None:
         wrote = await client.call_tool(
             "turn_summarize",
             {"summary": "the current turn", "tags": "now"},
-            meta=client_meta("jack"),
+            meta=conversation_meta("jack"),
         )
         # Nothing was stored, so the id cannot resolve.
         with pytest.raises(ToolError, match="no turn 1"):
             await client.call_tool(
-                "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+                "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
             )
 
     assert wrote.data["status"] == "captured"
@@ -600,7 +600,7 @@ async def test_a_summary_with_nothing_to_write_is_refused() -> None:
         await _seed(client, "jack", ("q0", "a0"))
         with pytest.raises(ToolError, match="summary and/or tags"):
             await client.call_tool(
-                "turn_summarize", {"turn_id": 1}, meta=client_meta("jack")
+                "turn_summarize", {"turn_id": 1}, meta=conversation_meta("jack")
             )
 
 
@@ -611,7 +611,7 @@ async def test_summarizing_a_turn_that_is_not_there_says_which_one() -> None:
             await client.call_tool(
                 "turn_summarize",
                 {"turn_id": 7, "summary": "nowhere"},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -1793,7 +1793,7 @@ async def test_forget_clears_the_context_and_keeps_the_turns() -> None:
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
         still_readable = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=client_meta("jack")
+            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
 
     assert forgotten.data == {"turn_ids": []}

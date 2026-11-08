@@ -26,16 +26,18 @@ piece of protocol knowledge, and splitting them is how the halves drift.
 Nothing here is LLM-specific.  That is the point of the module: the serving
 scaffold every plugin shares does not belong inside the LLM package.
 
-## The contract: a server keys its state by client id
+## The contract: a server keys its state by conversation key
 
-**Every server here keys whatever state it has by a client id, and no client
-carries state on a server's behalf.**  The id is `(agent, subagent)` — which
-agent is talking, and which of that agent's conversations, empty for the one a
-person is watching and a name for a worker it is running — and it travels with
-every call, at every hop, including the ones that key nothing on it.  A
-process that outlives one home's calls adds the home to the key it stores
-under (`slife2.libs.plugin.audience.client_key`), so two homes' same-named
-agents do not share state.
+**Every server here keys whatever per-conversation state it has by a
+conversation key, and no caller carries state on a server's behalf.**  The wire
+identity is the conversation id `(agent, subagent)` — which agent, and which of
+that agent's conversations, empty for the one a person is watching and a name
+for a worker it is running — and it travels with every call, at every hop,
+including the ones that key nothing on it.  A process that outlives one home's
+calls keys state by `conversation_key(agent, subagent)`:
+`(home, agent, subagent)`.  The pair is the identity every server shares; the
+triple is what makes it unique on a machine, so two homes' same-named agents do
+not share state.
 
 Three things follow, and each is a property the whole system has rather than a
 rule each server remembers:
@@ -45,18 +47,19 @@ rule each server remembers:
   observe, so there is no "not found" for one to handle either.  An idle sweep
   may drop the state underneath; the next call simply starts it again, and the
   caller cannot tell.
-* **Isolation is the key.**  Two agents cannot reach each other's state because
-  their ids differ, not because a query remembered a `WHERE` — and neither can
-  two homes' agents of one name, because the home is in that key too.
+* **Isolation is the key.**  Two conversations cannot reach each other's state
+  because their keys differ, not because a query remembered a `WHERE` — and
+  neither can two homes' agents of one name, because the home is in that key
+  too.
 * **A hop is never anonymous.**  Even a server with no state to key receives the
   id, so any log line or future accounting can say whose call it served.
 
 This is the shape SEP-2567 asks for once sessions are gone — state addressed by
 an explicit argument rather than by the connection — with one deliberate
-difference: the id is a **name the caller already has**, not an opaque handle
-the server minted.  An opaque handle has to be stored, and a stored handle is
-one more thing that can be lost, expired, or wrong after a restart.  See
-SDD §3.2 for the argument and for what this costs.
+difference: the identity is a **name the caller already has**, not an opaque
+handle the server minted.  An opaque handle has to be stored, and a stored
+handle is one more thing that can be lost, expired, or wrong after a restart.
+See SDD §3.2 for the argument and for what this costs.
 """
 
 from __future__ import annotations
@@ -112,20 +115,15 @@ from slife2.libs.host.runtime import (
 from slife2.libs.host.secrets import masked, masked_obj
 from slife2.libs.plugin.audience import (
     FOREIGN_HOME,
+    ConversationId,
     foreign_home,
-    request_client,
+    request_conversation,
     request_home,
     unaddressed,
     with_home,
 )
 
 logger = logging.getLogger(__name__)
-
-#: The client id every call names: which agent is talking, and which of that
-#: agent's conversations.  A process serving more than one home adds the home to
-#: the key it stores state under (`slife2.libs.plugin.audience.client_key`); see
-#: the module docstring for the contract, this is only its shape.
-ClientId = tuple[str, str]
 
 #: The tool a plugin serves when it holds **sources** of its own — the ones it
 #: connects to on the operator's behalf, and the ones that are not tools at all.
@@ -174,14 +172,14 @@ CLI_SOURCE = "cli"
 JOB_SOURCE = "job"
 
 
-def describe(client: ClientId) -> str:
-    """A client id as one readable token, for a log line.
+def describe(conversation: ConversationId) -> str:
+    """A conversation id as one readable token, for a log line.
 
     `jack` rather than `jack/` for an agent's own conversation, because that is
     what a person calls it — and the worker form keeps the slash, so the two are
     never confusable in a log.
     """
-    agent, subagent = client
+    agent, subagent = conversation
     return f"{agent}/{subagent}" if subagent else agent
 
 
@@ -233,35 +231,37 @@ def unknown_name(
     )
 
 
-def client_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], ClientId]:
-    """The `client_of(ctx)` a plugin binds its own refusal words to: the pair.
+def conversation_reader(
+    what: str, own: str, *, why: str = ""
+) -> Callable[[Any], ConversationId]:
+    """The `conversation_of(ctx)` a plugin binds its own refusal words to: the pair.
 
     **The raising idiom in its full form, and what :func:`agent_reader` is made
     from.**  A tool that needs only the agent asks the agent question; one that
     resolves a store or a directory against both halves — the cabinet, and the
     directory media writes into — asks this and gets `(agent, subagent)`.  Both
-    read the same `_meta` (`slife2.libs.plugin.audience.client_of`) and refuse
-    with the same sentence (`slife2.libs.plugin.audience.unaddressed`), so the
-    two shapes differ by what they return and nothing else.
+    read the same `_meta` (`slife2.libs.plugin.audience.conversation_of`) and
+    refuse with the same sentence (`slife2.libs.plugin.audience.unaddressed`),
+    so the two shapes differ by what they return and nothing else.
 
     **A factory rather than a function**, for the reason `agent_reader` states:
-    every caller already had a one-argument `client_of(ctx)` it called from a
-    dozen tool bodies, and the words are the only part that varies.
+    every caller already had a one-argument `conversation_of(ctx)` it called
+    from a dozen tool bodies, and the words are the only part that varies.
 
     **The condition is `None` *or* an empty agent**, and both halves matter: a
     call with no `_meta` at all and a call whose `_meta` names nobody are the
     same situation to a server that has to know whose state it is looking at,
-    and `client_of` already answers `None` for the second.
+    and `conversation_of` already answers `None` for the second.
     """
 
-    def client_of(ctx: Any) -> ClientId:
-        """The conversation this call is on behalf of, refused rather than guessed."""
-        found = request_client(ctx)
+    def conversation_of(ctx: Any) -> ConversationId:
+        """The conversation this call is for, refused rather than guessed."""
+        found = request_conversation(ctx)
         if found is None or not found[0]:
             raise ToolError(unaddressed(what, own, why=why))
         return found
 
-    return client_of
+    return conversation_of
 
 
 def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
@@ -280,27 +280,27 @@ def agent_reader(what: str, own: str, *, why: str = "") -> Callable[[Any], str]:
 
     The sentence is `slife2.libs.plugin.audience.unaddressed` either way, which is the
     half that matters, and :func:`agent_or_blank` is the question a server asks
-    when the *blank* is the answer rather than the raise.  :func:`client_reader`
+    when the *blank* is the answer rather than the raise.  :func:`conversation_reader`
     is the pair-returning form this builds on, which is what the cabinet and
     media ask for because their state is keyed by both halves.
     """
 
-    read = client_reader(what, own, why=why)
+    read = conversation_reader(what, own, why=why)
 
     def agent_of(ctx: Any) -> str:
-        """The agent this call is on behalf of, refused rather than guessed."""
+        """The agent this call is for, refused rather than guessed."""
         return read(ctx)[0]
 
     return agent_of
 
 
 def agent_or_blank(ctx: Any) -> str:
-    """The agent a call is on behalf of, or `""` when the call did not say.
+    """The agent a call is for, or `""` when the call did not say.
 
     **The second of the two idioms, and each has one caller.**  Every
     model-facing tool *raises* now — a refusal is a `ToolError`, so that the
     call's status and its text agree (`SDD` §7.6) — which is what
-    `agent_reader` and `client_reader` build and what the mesh, the context
+    `agent_reader` and `conversation_reader` build and what the mesh, the context
     store, the task server, the schedule, the cabinet and media use.  This is
     the other shape: a plugin that asks the question in a
     *class* whose tool bodies decide what to do with the blank, which is the
@@ -311,7 +311,7 @@ def agent_or_blank(ctx: Any) -> str:
     empty name is what a server that keys nothing on it can act on.  `None`
     would say "no answer" where the answer being *nobody* is the fact.
     """
-    found = request_client(ctx)
+    found = request_conversation(ctx)
     return found[0] if found else ""
 
 
@@ -834,7 +834,7 @@ class ServeTheCallersHome(Middleware):
     file is generally not the one that was started with `--data-dir`: it is
     whichever is already up.  What decides where
     that file goes is therefore the call, which says whose home it is for
-    (`slife2.libs.plugin.audience.client_meta`), and this is the one place that
+    (`slife2.libs.plugin.audience.conversation_meta`), and this is the one place that
     turns the saying into an answer — `slife2.libs.host.paths.home` for everything the
     tool reaches, including the plugins it calls in turn, because their outgoing
     calls carry the ambient home as well.

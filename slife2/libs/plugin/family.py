@@ -57,7 +57,7 @@ from slife2.libs.host.config import (
     for_the_call,
 )
 from slife2.libs.host.paths import home_key
-from slife2.libs.plugin.audience import forwarded_client, request_meta
+from slife2.libs.plugin.audience import forwarded_conversation, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
     CLI_SOURCE,
@@ -1512,7 +1512,11 @@ def build_family_server(
         this process is a second hop on the way there rather than a reader.
         """
         text, ok = await family.current().call(
-            source, tool, arguments, forwarded_client(request_meta(ctx)), words=words
+            source,
+            tool,
+            arguments,
+            forwarded_conversation(request_meta(ctx)),
+            words=words,
         )
         return {"text": text, "ok": ok}
 

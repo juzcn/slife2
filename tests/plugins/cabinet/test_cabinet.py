@@ -37,7 +37,7 @@ from fastmcp.exceptions import ToolError
 from slife2.helpers.clock import at
 from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.store import index as store_index
 from slife2.libs.store.index import connect_to, table_exists
 from slife2.libs.turn.tokens import estimate_text_tokens
@@ -88,7 +88,7 @@ async def ask(
 ) -> str:
     """One tool call's answer as **text** — what a model is handed, byte for byte."""
     result = await client.call_tool(
-        tool, arguments, meta=client_meta(agent, subagent) if agent else None
+        tool, arguments, meta=conversation_meta(agent, subagent) if agent else None
     )
     return "".join(getattr(block, "text", "") for block in result.content or [])
 
@@ -227,7 +227,7 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
     """A shared process cannot guess the cabinet, so it refuses to.
 
     One cabinet per agent, and which agent is a fact only the caller has — so a
-    call with no client id is **refused**, rather than answered with somebody
+    call with no conversation id is **refused**, rather than answered with somebody
     else's diary or with a sentence a model reads as a result (the rule
     every other plugin of this kind states, for the same reason).
     """

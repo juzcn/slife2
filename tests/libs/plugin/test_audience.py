@@ -4,7 +4,7 @@ Both travel out of band — beside the arguments rather than in them — because
 model must not be able to name somebody else's conversation, and must not be
 able to name somebody else's directory either.  The home is the newer half and
 it rides in the same blob, which is what makes it reach the far end of a chain
-of proxies: `forwarded_client` carries the identity on, and the home is part of
+of proxies: `forwarded_conversation` carries the identity on, and the home is part of
 it.
 """
 
@@ -17,11 +17,11 @@ import pytest
 
 from slife2.libs.host.paths import DATA_ENV_VAR, in_home
 from slife2.libs.plugin.audience import (
-    client_key,
-    client_meta,
-    client_of,
+    conversation_key,
+    conversation_meta,
+    conversation_of,
     foreign_home,
-    forwarded_client,
+    forwarded_conversation,
     home_of,
     with_home,
 )
@@ -35,14 +35,15 @@ def test_a_call_says_which_conversation_and_which_home(
     """The home defaults to this process's, which is right at every call site.
 
     A client, a launcher and a test are one home from start to finish; a plugin
-    making a call on somebody else's behalf is inside a call of its own, where
-    this already answers with the caller's (`slife2.libs.plugin.protocol.serve`).
+    making a call for somebody else's conversation is inside a call of its own,
+    where this already answers with the caller's
+    (`slife2.libs.plugin.protocol.serve`).
     """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / "mine"))
 
-    assert home_of(client_meta("jack", "worker")) == str(tmp_path / "mine")
-    assert client_of(client_meta("jack", "worker")) == ("jack", "worker")
-    assert home_of(client_meta("jack", home="/somewhere")) == "/somewhere"
+    assert home_of(conversation_meta("jack", "worker")) == str(tmp_path / "mine")
+    assert conversation_of(conversation_meta("jack", "worker")) == ("jack", "worker")
+    assert home_of(conversation_meta("jack", home="/somewhere")) == "/somewhere"
 
 
 def test_a_call_that_names_no_home_is_not_a_call_about_nothing(
@@ -59,7 +60,7 @@ def test_a_call_that_names_no_home_is_not_a_call_about_nothing(
     assert home_of({}) == ""
     assert home_of({"slife2/client": {"agent": "jack"}}) == ""
     assert home_of({"slife2/client": {"agent": "jack", "data_dir": 7}}) == ""
-    assert client_of({"slife2/client": {"data_dir": "/somewhere"}}) is None
+    assert conversation_of({"slife2/client": {"data_dir": "/somewhere"}}) is None
 
 
 def test_the_home_goes_out_with_every_call_a_server_makes(
@@ -77,11 +78,13 @@ def test_the_home_goes_out_with_every_call_a_server_makes(
     theirs = {"slife2/client": {"agent": "jack", "data_dir": str(tmp_path / "theirs")}}
 
     assert home_of(with_home(None)) == str(mine)
-    assert client_of(with_home({"protocol": "keys"})) is None, "no agent was named"
+    assert conversation_of(with_home({"protocol": "keys"})) is None, (
+        "no agent was named"
+    )
     assert home_of(with_home(theirs)) == str(tmp_path / "theirs"), "not rewritten"
     # And a proxy forwards the home on with the identity it forwards, which is
     # what makes it reach the far end of a chain rather than the first hop.
-    assert home_of(forwarded_client(with_home(None))) == str(mine)
+    assert home_of(forwarded_conversation(with_home(None))) == str(mine)
 
 
 def test_a_relative_home_is_made_absolute_before_it_travels(
@@ -102,7 +105,7 @@ def test_a_relative_home_is_made_absolute_before_it_travels(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(DATA_ENV_VAR, "rel/chk")
 
-    sent = home_of(client_meta("jack"))
+    sent = home_of(conversation_meta("jack"))
 
     assert Path(sent).is_absolute(), "a relative home is a different directory"
     assert sent == str((tmp_path / "rel" / "chk").resolve())
@@ -129,7 +132,7 @@ def test_a_home_spelled_on_another_platform_is_foreign(tmp_path: Path) -> None:
 def test_one_conversation_is_keyed_by_the_three_things_that_identify_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**(home, agent, subagent)** — a name alone is half an identity here.
+    """**(home, agent, subagent)** — a name alone is not an identity here.
 
     Every plugin in this system is one process serving every agent, which is why
     each keys its state by an agent name at all; the moment there are two homes
@@ -142,10 +145,10 @@ def test_one_conversation_is_keyed_by_the_three_things_that_identify_it(
     # assertions below are the same path written two ways and must be one key.
     mine = str((tmp_path / "mine").resolve())
     theirs = str((tmp_path / "theirs").resolve())
-    assert client_key("jack") == (mine, "jack", "")
+    assert conversation_key("jack") == (mine, "jack", "")
     with in_home(tmp_path / "theirs"):
-        assert client_key("jack") == (theirs, "jack", "")
-        assert client_key("jack", "worker")[2] == "worker"
+        assert conversation_key("jack") == (theirs, "jack", "")
+        assert conversation_key("jack", "worker")[2] == "worker"
 
 
 def test_two_spellings_of_one_home_are_one_key(
@@ -157,12 +160,12 @@ def test_two_spellings_of_one_home_are_one_key(
     hold the launcher's resolved spelling, so `D:\\x` and `D:\\x\\..\\x` — one
     directory, two strings — would be two conversations to a table keyed by the
     string.  Two loops for one agent is not a stale read: it is two writers of
-    one conversation.  `paths.home_key` resolves, and `client_key` is what uses
+    one conversation.  `paths.home_key` resolves, and `conversation_key` is what uses
     it; this is the assertion that keeps the two from drifting apart.
     """
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path))
-    canonical = client_key("jack")[0]
+    canonical = conversation_key("jack")[0]
 
     monkeypatch.setenv("SLIFE2_DATA_DIR", str(tmp_path / ".." / tmp_path.name))
-    assert client_key("jack")[0] == canonical
+    assert conversation_key("jack")[0] == canonical
     assert canonical == str(tmp_path.resolve())

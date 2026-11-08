@@ -145,14 +145,15 @@ from slife2.libs.host.runtime import read_claim
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import (
     FOR_THE_MODEL,
-    client_key,
-    client_meta,
-    request_client,
+    ConversationId,
+    ConversationKey,
+    conversation_key,
+    conversation_meta,
+    request_conversation,
 )
 from slife2.libs.plugin.protocol import (
-    ClientId,
-    client_reader,
     close_server,
+    conversation_reader,
     describe,
     house_server,
     open_server,
@@ -224,7 +225,7 @@ MAX_QUEUED = 32
 #: in return for the callback the loop asks.  A *builder* rather than the
 #: callback, because the dump is written into that conversation's cabinet and
 #: the key is what names which one.
-Compressor = Callable[[ClientId], Compress]
+Compressor = Callable[[ConversationId], Compress]
 
 #: The call the subagent network answers for a member that no longer exists —
 #: `slife2.plugins.a2a.server`'s tool of that name, and **spelled here too**: a
@@ -267,13 +268,6 @@ DEFAULT_ROLE = "subagent"
 #: rather than guessed at — a role that selects `prompts/<role>.j2` needs an
 #: answer for a role with no file, and that answer is a design decision.
 SUBAGENT_PROMPT = "subagent.j2"
-
-#: What this process holds one conversation's state under: `(home, agent,
-#: subagent)`, built by `slife2.libs.plugin.audience.client_key`.  Not `ClientId`,
-#: which is what travels on the wire — a home rides in the call's `_meta` rather
-#: than in an argument, so the two are built from different places and only one
-#: of them is a key.
-ConversationKey = tuple[str, str, str]
 
 
 #: The harness tool a message that arrived mid-turn is delivered under — the
@@ -883,7 +877,7 @@ def build_server(
     #: used, which is what makes isolation a property of the key rather than a
     #: rule somebody has to remember to apply.
     #:
-    #: **The key is `client_key`'s triple, and the home in it is load-bearing.**
+    #: **The key is `conversation_key`'s triple, and the home in it is load-bearing.**
     #: This process is shared by every home on the machine, so `jack` names two
     #: conversations the moment two homes have an agent by that name — and a
     #: table keyed by the name alone does not answer the second caller with a
@@ -1057,7 +1051,7 @@ def build_server(
             return cabinet_conn
 
     async def attach_sources(
-        client_id: ClientId, wanted: list[str]
+        conversation_id: ConversationId, wanted: list[str]
     ) -> tuple[list[tuple[str, str]], list[str]]:
         """Resolve what a model named into `(source, url)` pairs, keys included.
 
@@ -1113,7 +1107,7 @@ def build_server(
                 answer = await client.call_tool(
                     "image_source",
                     {"key": key},
-                    meta=client_meta(*client_id),
+                    meta=conversation_meta(*conversation_id),
                     timeout=_T.timeouts.work.hub,
                 )
                 payload = tool_payload(answer)
@@ -1192,7 +1186,7 @@ def build_server(
                 # straight through it and leave the connection open.
                 await asyncio.shield(close_server(peer))
 
-    def compress_for(client_id: ClientId) -> Compress:
+    def compress_for(conversation_id: ConversationId) -> Compress:
         """How one conversation's tool results are fitted into it.
 
         **A fixed rule, not a model call** (SDD §5.2.4).  Under
@@ -1216,7 +1210,7 @@ def build_server(
             answer = await client.call_tool(
                 "dump_save",
                 {"call": call.id, "output": text, "tool": call.name},
-                meta=client_meta(*client_id),
+                meta=conversation_meta(*conversation_id),
                 timeout=_T.timeouts.work.hub,
             )
             payload = tool_payload(answer)
@@ -1241,7 +1235,7 @@ def build_server(
 
         return compress
 
-    async def turn_tools(client_id: ClientId) -> ToolListing:
+    async def turn_tools(conversation_id: ConversationId) -> ToolListing:
         """What the model may call, and how big the catalogue is, asked of the hub.
 
         Asked **before every model call**, not once per turn: the turn's tool
@@ -1259,7 +1253,7 @@ def build_server(
         is appended: a hub that is not there is a system that has come apart, and
         the moment to find that out is before the conversation has been touched.
 
-        **The tools come back bound to `client_id`**, so a tool that reads the db
+        **The tools come back bound to `conversation_id`**, so a tool that reads the db
         reads *this* conversation's.  That is the one thing this process knows
         and the model does not, and it is why the binding happens here rather
         than in an argument — see `slife2.clients.toolclient`.
@@ -1272,10 +1266,10 @@ def build_server(
         sources are connecting.  See `registry`, which is where the size is
         reported to a display.
         """
-        return await remote_catalogue(await hub(), client_id, wait=False)
+        return await remote_catalogue(await hub(), conversation_id, wait=False)
 
     async def registry(
-        client_id: ClientId, observer: TurnObserver | None = None
+        conversation_id: ConversationId, observer: TurnObserver | None = None
     ) -> ToolRegistry:
         """What the model may call: the hub's list, bound to this conversation.
 
@@ -1306,7 +1300,7 @@ def build_server(
             and a name the catalogue is still being written for is told to retry
             — the three sentences `ToolRegistry._unknown` keeps apart.
             """
-            return (await tool_lookup(await hub(), name, client_id)).answer
+            return (await tool_lookup(await hub(), name, conversation_id)).answer
 
         async def catalogue_acquire(
             name: str, arguments: dict[str, Any]
@@ -1318,9 +1312,9 @@ def build_server(
             three sentences, which is where a call that no longer fits the row,
             or a name the hub will not load, belongs.
             """
-            return await acquire_tool(await hub(), name, arguments, client_id)
+            return await acquire_tool(await hub(), name, arguments, conversation_id)
 
-        found = await turn_tools(client_id)
+        found = await turn_tools(conversation_id)
         if observer is not None:
             await AgentLoop._emit(
                 observer,
@@ -1451,7 +1445,7 @@ def build_server(
 
     async def make_loop(
         active: LLMBackend,
-        client_id: ClientId,
+        conversation_id: ConversationId,
         max_iterations: int,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
@@ -1460,7 +1454,7 @@ def build_server(
     ) -> AgentLoop:
         return AgentLoop(
             active,
-            await registry(client_id),
+            await registry(conversation_id),
             # The conversation's own, taken from the config it started on
             # (`Loop.max_iterations`): an iteration cap somebody raises
             # *because* a turn ran into it reaches the next conversation, which
@@ -1472,7 +1466,7 @@ def build_server(
             # conversation, and a bare `registry` would forget whose it was.
             # The observer rides along so each refresh can report the
             # catalogue's size on the turn's own stream (`registry`).
-            refresh=partial(registry, client_id, observer),
+            refresh=partial(registry, conversation_id, observer),
             # None when this turn's caller cannot be asked — see `Pending.watched`
             # and `ask`, which is the other half of this.
             approve=approve,
@@ -1484,12 +1478,12 @@ def build_server(
             # is what names the cabinet the dump goes into.  None when the
             # caller did not ask for one, and a result then goes in as it came —
             # see `AgentLoop._fit`.
-            compress=None if compressor is None else compressor(client_id),
+            compress=None if compressor is None else compressor(conversation_id),
         )
 
     async def loop_for(
         loop: Loop,
-        client_id: ClientId,
+        conversation_id: ConversationId,
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compressor: Compressor | None = None,
@@ -1516,7 +1510,7 @@ def build_server(
         if backend is not None:
             return await make_loop(
                 backend,
-                client_id,
+                conversation_id,
                 loop.max_iterations,
                 approve,
                 deliver,
@@ -1550,8 +1544,8 @@ def build_server(
                 )
                 logger.info("model %s via %s", reference, url)
         return await make_loop(
-            model_backends[reference].with_key(*client_id),
-            client_id,
+            model_backends[reference].with_key(*conversation_id),
+            conversation_id,
             loop.max_iterations,
             approve,
             deliver,
@@ -1642,7 +1636,7 @@ def build_server(
         timestamp says: its own turn refreshes `last_used` when it finishes.
         """
         cutoff = time.monotonic() - _T.timeouts.pacing.loop_idle
-        # The key is a `client_key` triple, so it is *not* unpacked: the words
+        # The key is a `conversation_key` triple, so it is *not* unpacked: the words
         # that name a conversation come from the loop (`agent`, `subagent`),
         # which is also what keeps the home out of a log line.
         for key, loop in list(loops.items()):
@@ -1678,7 +1672,7 @@ def build_server(
         running a turn on the empty list the restore was about to replace.
         `Loop.restored` is the claim, and it is made under the lock.
         """
-        client = client_key(agent, subagent)
+        client = conversation_key(agent, subagent)
         loop = loops.get(client)
         if loop is None:
             live = current()
@@ -1722,7 +1716,7 @@ def build_server(
 
         **Read inside a call, which is the only place it is the caller's.**
         `ServeTheCallersHome` (`slife2.libs.plugin.protocol`) has put the caller's
-        directory around the whole message, so `client_key` answers with *their*
+        directory around the whole message, so `conversation_key` answers with *their*
         home rather than this daemon's — and this process serves every home on the
         machine, so the difference decides whether an edit reaches a conversation
         somebody else is having.
@@ -1732,7 +1726,7 @@ def build_server(
         filed under rather than from `paths.home` beside it — so a key and a
         filter can never disagree about where a conversation belongs.
         """
-        return client_key("")[0]
+        return conversation_key("")[0]
 
     def detach(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         """Run a write that must outlive the cancellation that prompted it.
@@ -1813,7 +1807,7 @@ def build_server(
                 answer = await client.call_tool(
                     "image_save",
                     {"url": source},
-                    meta=client_meta(agent, subagent),
+                    meta=conversation_meta(agent, subagent),
                     timeout=_T.timeouts.work.hub,
                 )
                 kept = tool_payload(answer)
@@ -2307,7 +2301,7 @@ def build_server(
             )
         )
 
-    def take_waiting(client_id: ClientId) -> str:
+    def take_waiting(conversation_id: ConversationId) -> str:
         """The first message waiting for one conversation, taken for delivery.
 
         **The delivery itself, and the reason `_check_new_input` is a real tool
@@ -2338,7 +2332,7 @@ def build_server(
         delivering one would drop what somebody attached, and the message keeps
         its place and its own turn instead.
         """
-        loop = loops.get(client_key(*client_id))
+        loop = loops.get(conversation_key(*conversation_id))
         if loop is None or not loop.inbox:
             return ""
         waiting = loop.inbox[0]
@@ -2994,8 +2988,11 @@ def build_server(
             this call named them — and `refused`, one entry per source that
             could not be read, each naming the source and the reason.
         """
-        client_id = request_client(ctx)
-        if client_id is None or (loop := loops.get(client_key(*client_id))) is None:
+        conversation_id = request_conversation(ctx)
+        if (
+            conversation_id is None
+            or (loop := loops.get(conversation_key(*conversation_id))) is None
+        ):
             raise ToolError(
                 "this call is not inside a running turn, so there is no request "
                 "to attach an image to."
@@ -3017,14 +3014,14 @@ def build_server(
                 f"move to a model whose config lists `image` under `input`."
             )
 
-        pairs, refusals = await attach_sources(client_id, wanted)
+        pairs, refusals = await attach_sources(conversation_id, wanted)
         if pairs and not attachments.inject(
             loop.messages, [url for _source, url in pairs]
         ):
             raise ToolError("there is no message here to attach an image to.")
         logger.info(
             "attach_image %s: %d attached, %d refused",
-            client_id,
+            conversation_id,
             len(pairs),
             len(refusals),
         )
@@ -3049,15 +3046,15 @@ def build_server(
         mid-turn reaches the turn it arrived in. It hands over the first message
         waiting for this conversation.
         """
-        client_id = request_client(ctx)
-        if not client_id:
+        conversation_id = request_conversation(ctx)
+        if not conversation_id:
             return NOTHING_WAITING
         # **`or`, because `""` is not an answer here.**  `take_waiting` returns
         # the empty string for the one thing it refuses — a head that carries
         # images, which cannot ride a tool result — and *this* is a tool result:
         # a blank one reads as a failure rather than as "nothing was handed
         # over", which is the whole reason `NOTHING_WAITING` is a sentence.
-        return take_waiting(client_id) or NOTHING_WAITING
+        return take_waiting(conversation_id) or NOTHING_WAITING
 
     @mcp.tool(name=CHECK_ASYNC, meta=FOR_THE_MODEL)
     async def check_background_call(task_id: str) -> dict[str, Any]:
@@ -3134,7 +3131,7 @@ def build_server(
             `answered` — whether a waiting turn took this answer — and `text`,
             which is what to tell the reader when it did not.
         """
-        loop = loops.get(client_key(agent, subagent))
+        loop = loops.get(conversation_key(agent, subagent))
         waiting = loop.approvals.get(call_id) if loop is not None else None
         if waiting is None or waiting.done():
             return {
@@ -3722,7 +3719,7 @@ def build_server(
         # The key is what the watcher registry and the tap are filed under.
         # Taken from the one function that defines a conversation's identity, so
         # a watcher and the turn it is watching cannot disagree about it.
-        key = client_key(agent, subagent)
+        key = conversation_key(agent, subagent)
 
         if len(loop.inbox) >= MAX_QUEUED:
             raise ToolError(
@@ -4242,7 +4239,7 @@ def build_server(
                 subagent was removed) and the last frame, `Closed`, has been
                 sent.  A cancellation returns nothing — it is a detach.
         """
-        key = client_key(agent, subagent)
+        key = conversation_key(agent, subagent)
         # **The history is read before the watcher is registered, and the tap
         # is taken in the same synchronous step as the registration.**  That
         # order is the whole race: an event during the read is kept by the tap
@@ -4338,7 +4335,7 @@ def build_server(
             `reset`: whether there was a conversation there to forget.
         """
         await forget_context(agent, subagent)
-        forgotten = loops.pop(client_key(agent, subagent), None) is not None
+        forgotten = loops.pop(conversation_key(agent, subagent), None) is not None
         logger.debug(
             "reset: %s %s",
             describe((agent, subagent)),
@@ -4396,7 +4393,9 @@ def build_server(
             `name`, `model`, `role`, `fork`, and `created`: whether this call
             was the one that made it.
         """
-        maker, mine = client_reader("agent to make a subagent for", "a subagent")(ctx)
+        maker, mine = conversation_reader("agent to make a subagent for", "a subagent")(
+            ctx
+        )
         if mine:
             # The tree, and it stops at one level — not because a second level is
             # unthinkable, but because nothing would hold a place for it: the
@@ -4479,7 +4478,7 @@ def build_server(
         Returns:
             `name`, and `removed`: whether there was one here to remove.
         """
-        who = client_reader("agent to remove a subagent of", "a subagent")(ctx)
+        who = conversation_reader("agent to remove a subagent of", "a subagent")(ctx)
         maker, mine = who
         if mine:
             raise ToolError(
@@ -4518,7 +4517,7 @@ def build_server(
         # awaited, and the loop is marked removed before it is dropped — so a
         # message already queued behind the lock cannot run and save a turn into
         # the directory after the delete, recreating it without a record.
-        key = client_key(maker, directory.name)
+        key = conversation_key(maker, directory.name)
         loop = loops.get(key)
         if loop is not None:
             try:
@@ -4568,10 +4567,10 @@ def build_server(
         # hand, would be indistinguishable from an idle conversation, so the
         # last frame says why and the call returns after it (`close_watchers`).
         close_watchers(
-            client_key(maker, directory.name),
+            conversation_key(maker, directory.name),
             f"{directory.name} was removed",
         )
-        taps.pop(client_key(maker, directory.name), None)
+        taps.pop(conversation_key(maker, directory.name), None)
         logger.info("subagent %s removed", describe((maker, directory.name)))
         return {"name": directory.name, "removed": True}
 

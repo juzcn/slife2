@@ -23,7 +23,7 @@ from typing import Any
 from slife2.clients.a2a import ProbeError, ProbeResult
 from slife2.helpers import timeouts as _T
 from slife2.libs.host.config import Config
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.store.db import message_text
 
@@ -96,7 +96,7 @@ async def probe_tui(
 ) -> ProbeResult:
     """Ask *agent* one task through the agent-task server, and return its answer.
 
-    The task is started as *agent* (`client_meta`), so it runs on that agent's
+    The task is started as *agent* (`conversation_meta`), so it runs on that agent's
     prompt, model, tools and context.  Its stop message is delivered to the
     conversation by the agent-task plugin; this reads the delivered message,
     never the turn's assistant text.
@@ -112,7 +112,7 @@ async def probe_tui(
     task_id = f"agent-task:{name}"
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    meta = client_meta(agent)
+    meta = conversation_meta(agent)
     task_server = None
     agent_server = None
     try:

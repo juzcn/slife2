@@ -7,7 +7,7 @@ file.  The first four are the corpus a search ranks; the last two are a turn's
 attachments, stored here and addressed by the turn's own markers.  It is built
 the way a plugin here is built: one process, `house_server` plus `serve_plugin`,
 the *store* as a library (`slife2.plugins.cabinet.store`), the embedder opened
-once against the embeddings server, and state keyed by the client id every call
+once against the embeddings server, and state keyed by the conversation id every call
 carries.
 
 **The store's calls hop off the event loop where the hop pays**: opening a
@@ -110,7 +110,7 @@ from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
 from slife2.libs.host.paths import home
 from slife2.libs.plugin.audience import FOR_THE_MODEL
-from slife2.libs.plugin.protocol import client_reader, house_server, serve_plugin
+from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
 from slife2.libs.store.index import Embedder
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import (
@@ -551,13 +551,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: Whose cabinet a call is about, **refused rather than guessed**.  One
     #: cabinet serves every agent, and which one a call is for is a fact only the
     #: caller has — so a call that says nothing is refused rather than answered
-    #: with somebody else's diary.  The pair is the client id: a non-fork
+    #: with somebody else's diary.  The pair is the conversation id: a non-fork
     #: subagent resolves to its own cabinet, and a fork to its maker's.
-    client_of = client_reader("cabinet to act on", "the cabinet")
+    conversation_of = conversation_reader("cabinet to act on", "the cabinet")
 
     async def cabinet(ctx: Context) -> CabinetStore:
         """The cabinet this call is about, with its index up to date."""
-        agent, subagent = client_of(ctx)
+        agent, subagent = conversation_of(ctx)
         return await store(agent, subagent)
 
     # ── The same four verbs over every document kind ─────────────────────

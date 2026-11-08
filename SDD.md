@@ -71,13 +71,14 @@ providers, and the WeChat bridge.
 | Term | Definition |
 |---|---|
 | **Agent** | An identity named by `--agent NAME`, claimed once per machine. It is not a process, a port, or a data directory. |
-| **Client id** | The pair `(agent, subagent)` identifying the conversation a call is made on behalf of. A subagent component is empty for an agent's own conversation. |
+| **Conversation id** | The pair `(agent, subagent)` identifying the conversation a call is for. The subagent component is empty for an agent's own conversation. |
+| **Conversation key** | `(home, agent, subagent)`: the identity a shared server keys per-conversation state by; unique on a machine. |
 | **Home** | A data directory holding `slife2.yaml`, `AGENTS.md`, `skills/`, `jobs/`, and `agents/`. A home may contain several agents. |
 | **Plugin** | One of slife2's own MCP servers, started and shared by the launcher. An external MCP server is not a plugin. |
 | **Family** | A plugin that owns one configuration section or folder and declares the rows it holds to the hub. |
 | **Source** | The name a plugin files rows under: an `mcp:` server, a `rest-api:` document, or the whole of a `skills`, `cli`, or `job` collection. |
 | **Catalogue** | The tool catalogue: one SQLite file per home holding every row the model may discover. |
-| **Conversation** | One client id's history, stored by the context plugin. |
+| **Conversation** | One agent's own history (`subagent` empty) or one of its subagents' history, stored by the context plugin. It is the unit every shared server addresses and keys state by. |
 | **Turn** | One exchange: input, model output, and tool calls, stored as one row. |
 | **Channel** | The origin of a message: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | A machine-readable prefix on a delivered message, of the form `[Name:{…}]`. A marker is content and is stored with the message. |
@@ -174,8 +175,8 @@ the agent loop is a client of the tool hub and of the model backends.
   another party's connection MUST be a plugin. A capability that holds only a
   file MAY be a library; if it must also be reached as a tool, the process is a
   plugin and the file handling is a library or a private module.
-- Internal state is addressed by a client id, not by a session. The MCP
-  transport must therefore preserve the caller's identity on every call.
+- Internal state is addressed by a conversation key, not by a session. The MCP
+  transport must therefore preserve the conversation identity on every call.
 - The model's context window is a hard bound. Every mechanism that adds text to
   a request must have a corresponding bound or eviction rule.
 
@@ -292,7 +293,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 
 | Attribute | Mechanism |
 |---|---|
-| **Isolation** | Credentials stay in the consuming process; state is keyed by client id. |
+| **Isolation** | Credentials stay in the consuming process; state is keyed by conversation key. |
 | **Recoverability** | Turns, the live-context list, the cabinet, the schedule ledger, and the loaded tool set are persisted; a restart restores the conversation and the model's list. |
 | **Testability** | The loop is pure; servers run over in-memory transports in tests. |
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
@@ -323,18 +324,19 @@ startup path.
 A module under `plugins/` MUST NOT call `parse_serve_args`,
 `configure_logging`, or `serve` directly. A test enforces this rule by name.
 
-### 3.2 State keyed by client id
+### 3.2 State keyed by conversation key
 
-Every server that holds per-conversation state MUST key that state by the client
-id `(agent, subagent)`, and by the caller's home when one process serves more
-than one (`audience.client_key`). No client carries a session handle on the
-server's behalf.
+Every server that holds per-conversation state MUST key that state by the
+conversation key `(home, agent, subagent)` (`audience.conversation_key`). The
+identity that travels on the wire is the conversation id `(agent, subagent)`;
+the home rides beside it in the same `_meta` blob, because one process serves
+every home. No caller carries a session handle on the server's behalf.
 
 **Why a name, not a handle.** The MCP revision in use has no protocol-level
 sessions: measured against the installed library, `session_id` was a fresh UUID
 on every request. A server-minted handle was rejected because anything a caller
-must keep can be lost, expired, or wrong after a restart. The client id is a
-name the caller already has and cannot go stale. Its price is that a name is
+must keep can be lost, expired, or wrong after a restart. The conversation id is
+a name the caller already has and cannot go stale. Its price is that a name is
 guessable; here there is no authorization to subvert, because every server
 listens on loopback and the only other party is a process the user started.
 
@@ -344,19 +346,19 @@ Consequences:
   and a key never goes stale.
 - An idle sweep MAY drop state; the next call recreates it, and the caller
   cannot observe the difference.
-- Isolation follows from the key: two agents cannot reach each other's state,
-  and neither can two homes' agents of one name.
+- Isolation follows from the key: two conversations cannot reach each other's
+  state, and neither can two homes' agents of one name.
 - Every call is traceable, because every call carries the id even if the server
   holds no state.
 
-For a model-facing call, the client id travels out of band in the call's `_meta`
-and is not an argument the model writes; a call that does not identify its
-conversation is refused. A plugin's internal tools MAY take it as an ordinary
-argument when the caller already knows the conversation — the context store's
-`remember`, `restore`, and `rebuild` do. The home travels with the same identity:
-a shared server resolves a call's files against the caller's home and keys state
-that outlives the call by that home (`audience.client_key`), not against the
-directory it was started in.
+For a model-facing call, the conversation id travels out of band in the call's
+`_meta` and is not an argument the model writes; a call that does not identify
+its conversation is refused. A plugin's internal tools MAY take it as an
+ordinary argument when the caller already knows the conversation — the context
+store's `remember`, `restore`, and `rebuild` do. The home travels in the same
+blob: a shared server resolves a call's files against the caller's home and
+keys state that outlives the call by that home, not against the directory it
+was started in.
 
 ### 3.3 Audience and authorization
 
@@ -369,9 +371,9 @@ The declaration is a namespaced `_meta` key (`slife2/audience`) read from
 - an entry under `mcp:` needs no mark; the operator opted in by writing it.
 
 Audience and identity are separate questions: audience asks "may a model call
-this tool?"; identity asks "on whose behalf is this call made?". A tool call runs
-on behalf of exactly one conversation. A model cannot assert a different client
-id; the server reads it from `_meta`.
+this tool?"; identity asks "which conversation is this call for?". A tool call
+runs for exactly one conversation. A model cannot assert a different
+conversation id; the server reads it from `_meta`.
 
 ### 3.4 Family plugins
 
@@ -452,12 +454,12 @@ the intended server.
 - **A raised `ToolError`** is the refusal a model reads. It carries one sentence
   saying what is wrong and what to do instead.
 - **`protocol.agent_reader`** is the raising idiom for a tool server that needs
-  the agent; **`protocol.client_reader`** is its pair-returning form for a tool
-  that needs the conversation as well.
+  the agent; **`protocol.conversation_reader`** is its pair-returning form for a
+  tool that needs the conversation as well.
 - **`audience.unaddressed`** is the sentence-returning idiom for a plugin's own
   internal API.
-- **`protocol.agent_or_blank`** answers "the agent this call is on behalf of, or
-  the empty string"; it is the shared question behind both raising idioms.
+- **`protocol.agent_or_blank`** answers "the agent this call is for, or the
+  empty string"; it is the shared question behind both raising idioms.
 
 There is no `[refused]` marker. A refusal is the call's status, not a word in
 its text.
@@ -609,13 +611,13 @@ A subagent is an agent that belongs to another agent. A subagent:
   membership; it is reached only on the local subagent network;
 - shares the maker's schedule ledger, because scheduling stays with the agent;
 - runs when something sends it a message;
-- is addressed by the second half of a client id: `(maker, name)`.
+- is addressed by the second half of a conversation id: `(maker, name)`.
 
 **Why a loop, not a process.** A headless instance costs about 100 MB private
 and the fixed machine stack is about 3 GB because servers are shared; the loop
 table already exists and is keyed by `(home, agent, subagent)`. The cost of a
 subagent plugin would be the transport to it — a new protocol hop for every
-message — while a subagent's identity is already the client id.
+message — while a subagent's identity is already the conversation id.
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
 After creation it is reached over the local network under `subagent_*` names:
@@ -902,10 +904,10 @@ inbox.
 
 ### 5.5 Context decision and memory selection
 
-The agent server owns one loop per client id, created on first use. It reads the
-configuration per turn for everything a conversation can see: the system prompt,
-the model, and the iteration cap. An edit to `slife2.yaml` reaches the next turn,
-not the next restart.
+The agent server owns one loop per conversation key, created on first use. It
+reads the configuration per turn for everything a conversation can see: the
+system prompt, the model, and the iteration cap. An edit to `slife2.yaml`
+reaches the next turn, not the next restart.
 
 Before each turn, the context plugin answers one question: what will this turn
 run on?
@@ -1431,8 +1433,8 @@ the original.
 
 ### 8.1 Turn store
 
-`libs/store/db.py` implements one SQLite file per conversation (client id):
-`agents/<agent>/turns.db` for the agent's own conversation, and
+`libs/store/db.py` implements one SQLite file per conversation (conversation
+id): `agents/<agent>/turns.db` for the agent's own conversation, and
 `agents/<agent>/subagents/<name>/turns.db` for a non-fork subagent's. A fork has
 no file of its own; it reads the maker's turn log and never writes it, and its
 `subagent.yaml` is removed when the agent server starts. Isolation is by file: no
@@ -2529,7 +2531,7 @@ The following are not implemented in this version:
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
 | Background work inside an agent task | A task runs one turn and has no second turn for a result. | `_async` is refused with an explanation. |
-| A client id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn client id is stored. |
+| A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
 | The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
@@ -2544,8 +2546,9 @@ The following are not implemented in this version:
 Each invariant is stated as an assertion. A change that violates one is a defect.
 
 1. **A plugin is an MCP server over Streamable HTTP**, started and shared by the
-   launcher, honoring the contract: state keyed by client id, an audience on
-   every model-facing tool, a checkable identity, and one row of `PLUGINS`.
+   launcher, honoring the contract: state keyed by conversation key, an
+   audience on every model-facing tool, a checkable identity, and one row of
+   `PLUGINS`.
 2. **No capability holds a credential where it is not used.** No provider SDK is
    imported by the agent loop, the terminal, or a library. No key is read outside
    the process that needs it. A reference that did not resolve never travels.

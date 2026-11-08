@@ -43,7 +43,7 @@ from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host import launcher
 from slife2.libs.host.config import LOCAL_SERVERS, load
 from slife2.libs.host.paths import DATA_ENV_VAR, data_dir
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import DUMP, UPSERT, index_path, store_of
@@ -736,7 +736,7 @@ async def _read(
     The answer is an object (`cabinet.server`), and `data` is how a tool's JSON
     reaches this side of the hop.
     """
-    result = await client.call_tool(tool, arguments, meta=client_meta(agent))
+    result = await client.call_tool(tool, arguments, meta=conversation_meta(agent))
     answer = getattr(result, "data", None)
     assert isinstance(answer, dict), answer
     return answer

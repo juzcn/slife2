@@ -76,7 +76,7 @@ def install(monkeypatch, task: FakeTask, *, malformed: bool = False) -> FakeAgen
     monkeypatch.setattr(tui, "open_server", fake_open)
     monkeypatch.setattr(tui, "close_server", fake_close)
     monkeypatch.setattr(tui, "tool_payload", lambda result: result)
-    monkeypatch.setattr(tui, "client_meta", lambda agent: {"agent": agent})
+    monkeypatch.setattr(tui, "conversation_meta", lambda agent: {"agent": agent})
     return agent
 
 

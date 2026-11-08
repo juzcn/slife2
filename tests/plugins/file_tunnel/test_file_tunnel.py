@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FileTunnelSettings, load
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
 from slife2.plugins.file_tunnel.server import (
     Exposed,
@@ -161,7 +161,7 @@ def server_for(tunnel: FakeTunnel | None = None) -> FastMCP:
 
 async def ask(client: Client, tool: str, **arguments: Any) -> str:
     result = await client.call_tool(
-        tool, arguments, meta=client_meta("jack"), raise_on_error=False
+        tool, arguments, meta=conversation_meta("jack"), raise_on_error=False
     )
     return "".join(getattr(block, "text", "") for block in result.content or [])
 
@@ -177,7 +177,7 @@ async def ask_json(client: Client, tool: str, **arguments: Any) -> dict[str, Any
     held would be reading a shape rather than a fact.  A refusal raises
     `ToolError`, which the refusal tests assert.
     """
-    result = await client.call_tool(tool, arguments, meta=client_meta("jack"))
+    result = await client.call_tool(tool, arguments, meta=conversation_meta("jack"))
     return result.data
 
 
@@ -295,7 +295,7 @@ async def test_a_missing_file_is_refused() -> None:
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(Path("nowhere") / "absent.png")},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -306,7 +306,7 @@ async def test_a_directory_is_refused(tmp_path: Path) -> None:
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(tmp_path)},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -322,7 +322,7 @@ async def test_a_private_credential_is_refused(tmp_path: Path) -> None:
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(secret)},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -334,7 +334,7 @@ async def test_a_dotenv_is_refused(tmp_path: Path) -> None:
     async with Client(server_for()) as client:
         with pytest.raises(ToolError, match="private credential"):
             await client.call_tool(
-                "expose_local_image", {"path": str(env)}, meta=client_meta("jack")
+                "expose_local_image", {"path": str(env)}, meta=conversation_meta("jack")
             )
 
 
@@ -367,7 +367,9 @@ async def test_the_credential_guard_reads_the_path_that_will_be_served(
     async with Client(server_for()) as client:
         with pytest.raises(ToolError, match="private credential"):
             await client.call_tool(
-                "expose_local_image", {"path": str(decoy)}, meta=client_meta("jack")
+                "expose_local_image",
+                {"path": str(decoy)},
+                meta=conversation_meta("jack"),
             )
 
 
@@ -382,7 +384,7 @@ async def test_no_tunnel_is_a_failure_not_a_link(tmp_path: Path) -> None:
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(picture)},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -403,7 +405,7 @@ async def test_an_unreachable_tunnel_refuses_instead_of_handing_out_a_link(
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(picture)},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -417,7 +419,7 @@ async def test_a_tunnel_that_died_mid_call_is_a_failure(tmp_path: Path) -> None:
             await client.call_tool(
                 "expose_local_image",
                 {"path": str(picture)},
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
 
 
@@ -452,7 +454,9 @@ async def test_unexposing_something_unknown_is_refused() -> None:
     async with Client(server_for()) as client:
         with pytest.raises(ToolError, match="no link with the token"):
             await client.call_tool(
-                "unexpose_local_image", {"token": "deadbeef"}, meta=client_meta("jack")
+                "unexpose_local_image",
+                {"token": "deadbeef"},
+                meta=conversation_meta("jack"),
             )
 
 
@@ -461,7 +465,7 @@ async def test_an_empty_token_is_refused() -> None:
     async with Client(server_for()) as client:
         with pytest.raises(ToolError, match="no token was given"):
             await client.call_tool(
-                "unexpose_local_image", {"token": "  "}, meta=client_meta("jack")
+                "unexpose_local_image", {"token": "  "}, meta=conversation_meta("jack")
             )
 
 
@@ -480,7 +484,7 @@ async def test_one_conversation_cannot_revoke_anothers_link(tmp_path: Path) -> N
         result = await client.call_tool(
             "unexpose_local_image",
             {"token": token},
-            meta=client_meta("someone-else"),
+            meta=conversation_meta("someone-else"),
             raise_on_error=False,
         )
     assert "another conversation" in "".join(

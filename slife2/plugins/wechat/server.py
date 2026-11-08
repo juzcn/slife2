@@ -9,7 +9,7 @@ message into a turn, and the four tools the model uses to log in and reply.
 queue and a dedup window cannot live in module globals — they would belong to
 whichever agent happened to use them.  slife2's plugins are shared
 (`slife2.libs.plugin.protocol`), so those four things live in a :class:`Session`
-keyed by the calling agent — the first half of the client id every call
+keyed by the calling agent — the first half of the conversation id every call
 already carries (`slife2.libs.plugin.audience`).  A second agent that scans its
 own QR gets its own session file, its own poll loop and its own conversation,
 and neither can see the other's.
@@ -1339,7 +1339,7 @@ class Wechat:
     # ── The tools ────────────────────────────────────────────────────────
     # Four, all of them for the model, and all four need to know *which*
     # conversation is asking: a shared process cannot tell whose phone a scan
-    # belongs to, and the client id every call carries is the answer.
+    # belongs to, and the conversation id every call carries is the answer.
 
     #: The agent a call is on behalf of, or `""` if the call does not say.  The
     #: identity is the caller's, never this process's — one wechat plugin serves

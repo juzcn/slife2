@@ -34,7 +34,7 @@ from slife2.libs.harness import handover, markers
 from slife2.libs.harness.handover import DeliveryFailed
 from slife2.libs.host.config import TUI_SERVER_NAME, Config, load
 from slife2.libs.host.paths import agent_dir, in_home
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat import server as wechat
 from slife2.plugins.wechat.server import (
@@ -272,7 +272,7 @@ async def ask(client: Client, tool: str, agent: str = "jack", **arguments: Any) 
     which is what the tests about refusals assert.
     """
     result = await client.call_tool(
-        tool, arguments, meta=client_meta(agent) if agent else None
+        tool, arguments, meta=conversation_meta(agent) if agent else None
     )
     return result.data
 
@@ -313,7 +313,7 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 
     The login is the agent's, so the process cannot know whose conversation a
     call means: the caller is the only party that says which.  So a call with no
-    client id is *refused* rather than answered about somebody else's WeChat,
+    conversation id is *refused* rather than answered about somebody else's WeChat,
     and the refusal is a `ToolError` rather than a sentence a transcript would
     read as a success.
     """
@@ -1577,7 +1577,7 @@ async def test_a_login_is_keyed_by_the_name_the_file_states(
     second key for one login.**
 
     `a/b` saves to `agents/a_b/wechat.yaml`, but every other entry point — the
-    tools, off the call's client id — uses `a/b`.  Keyed by the directory,
+    tools, off the call's conversation id — uses `a/b`.  Keyed by the directory,
     `start()` created `Session("a_b")` and the first tool call created a second
     `Session("a/b")` on the same token: two poll loops on one login, so every
     message was delivered twice, one copy to a window that was not showing.
@@ -1591,7 +1591,7 @@ async def test_a_login_is_keyed_by_the_name_the_file_states(
     try:
         # The key's first half is the home the login was found in — this
         # process serves every home, so a name alone is half an identity
-        # (`slife2.libs.plugin.audience.client_key`).
+        # (`slife2.libs.plugin.audience.conversation_key`).
         assert [agent for _, agent in made.plugin._sessions] == ["a/b"], (
             "the session is keyed by the name in the file, not the directory"
         )
@@ -1607,7 +1607,7 @@ async def test_one_login_is_one_session_however_the_home_is_spelled(
 
     The two ends of a session's key are spelled by different parties.  A tool
     call's home is the client's own `data_dir`, which travels as a *spelling*
-    rather than as a directory — `slife2.libs.plugin.audience.client_meta` sends it
+    rather than as a directory — `slife2.libs.plugin.audience.conversation_meta` sends it
     "exactly as written" and `_for_the_wire` deliberately leaves an absolute
     path alone — while `_resume_login` keys by the directory `known_homes`
     answered with, which is `Path.resolve()`d.  Both read the *same file*

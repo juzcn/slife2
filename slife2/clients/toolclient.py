@@ -56,7 +56,7 @@ from jsonschema import validate
 from jsonschema.exceptions import ValidationError
 
 import slife2.helpers.timeouts as _T
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import tool_payload, unreadable
 from slife2.libs.turn.messages import ToolSpec
 from slife2.libs.turn.tools import (
@@ -184,14 +184,14 @@ class ToolListing:
 
 async def remote_catalogue(
     client: Client,
-    client_id: tuple[str, str] | None = None,
+    conversation_id: tuple[str, str] | None = None,
     *,
     timeout: float | None = None,
     wait: bool = True,
 ) -> ToolListing:
     """What the hub offers, and how large the catalogue behind it is.
 
-    `client_id` is the conversation these tools will be run for, and it is bound
+    `conversation_id` is the conversation these tools will be run for, and it is bound
     *here* rather than passed by the model — see `_proxy`.  Optional because a
     caller with no conversation behind it (a test, a one-off) is a caller that
     has nobody to be.
@@ -249,7 +249,7 @@ async def remote_catalogue(
         raise unreadable("the toolhub", "return the catalogue's size", payload)
     return ToolListing(
         tools=[
-            Tool(spec=entry.spec(), run=_proxy(client, entry.name, client_id))
+            Tool(spec=entry.spec(), run=_proxy(client, entry.name, conversation_id))
             for entry in (UpstreamTool.from_wire(raw) for raw in listed)
         ],
         total=total,
@@ -257,7 +257,7 @@ async def remote_catalogue(
 
 
 async def remote_tools(
-    client: Client, client_id: tuple[str, str] | None = None
+    client: Client, conversation_id: tuple[str, str] | None = None
 ) -> list[Tool]:
     """Every tool the hub offers, as tools the loop can run.
 
@@ -266,7 +266,7 @@ async def remote_tools(
     reader: the total is read and dropped here, and `remote_catalogue` is where
     both halves are checked.
     """
-    return (await remote_catalogue(client, client_id, wait=False)).tools
+    return (await remote_catalogue(client, conversation_id, wait=False)).tools
 
 
 async def unload_tools(client: Client) -> dict[str, Any]:
@@ -323,7 +323,7 @@ class CatalogueLookup:
 
 
 async def tool_lookup(
-    client: Client, name: str, client_id: tuple[str, str] | None = None
+    client: Client, name: str, conversation_id: tuple[str, str] | None = None
 ) -> CatalogueLookup:
     """What the hub's catalogue says about this name.
 
@@ -339,7 +339,7 @@ async def tool_lookup(
     is absent.  Both are required, and either one with the wrong type is damage
     and raises.
 
-    `client_id` is the conversation this question is for; the hub's catalogue is
+    `conversation_id` is the conversation this question is for; the hub's catalogue is
     one file per home, and the identity is what makes it answer for the right
     one.  A hub that cannot be read raises `UnreadableAnswer`; the registry
     catches it, because the call has already failed and its explanation may not
@@ -349,7 +349,7 @@ async def tool_lookup(
         await client.call_tool(
             TOOL_EXISTS,
             {"name": name},
-            meta=client_meta(*client_id) if client_id else None,
+            meta=conversation_meta(*conversation_id) if conversation_id else None,
             timeout=_T.timeouts.work.hub,
         )
     )
@@ -391,7 +391,7 @@ def _definition(raw: Any) -> UpstreamTool | None:
 
 
 async def load_tool(
-    client: Client, name: str, client_id: tuple[str, str] | None = None
+    client: Client, name: str, conversation_id: tuple[str, str] | None = None
 ) -> bool:
     """Load one tool into the model's list, and say whether it landed.
 
@@ -401,7 +401,7 @@ async def load_tool(
     A name the hub refused — a server that is down, a disabled entry, a playbook
     — answers `False`, and the caller falls back to the three-case sentence.
 
-    `client_id` names the conversation, and with it the home whose catalogue is
+    `conversation_id` names the conversation, and with it the home whose catalogue is
     written: a load is a write, and one aimed at the wrong home is a model
     shown a tool its own request will not carry.
     """
@@ -409,7 +409,7 @@ async def load_tool(
         await client.call_tool(
             TOOL_LOAD,
             {"name": name},
-            meta=client_meta(*client_id) if client_id else None,
+            meta=conversation_meta(*conversation_id) if conversation_id else None,
             timeout=_T.timeouts.work.hub,
         )
     )
@@ -424,7 +424,7 @@ async def acquire_tool(
     client: Client,
     name: str,
     arguments: dict[str, Any],
-    client_id: tuple[str, str] | None = None,
+    conversation_id: tuple[str, str] | None = None,
 ) -> Tool | None:
     """A catalogued tool this call may run, or `None` when it may not.
 
@@ -441,14 +441,14 @@ async def acquire_tool(
     through the same proxy every listed tool does, so the registry has no
     second execution path.
     """
-    found = await tool_lookup(client, name, client_id)
+    found = await tool_lookup(client, name, conversation_id)
     if found.answer != CATALOGUE_PRESENT or found.tool is None:
         return None
     if not arguments_fit(name, found.tool.parameters, arguments):
         return None
-    if not await load_tool(client, name, client_id):
+    if not await load_tool(client, name, conversation_id):
         return None
-    return Tool(spec=found.tool.spec(), run=_proxy(client, name, client_id))
+    return Tool(spec=found.tool.spec(), run=_proxy(client, name, conversation_id))
 
 
 def arguments_fit(
@@ -504,7 +504,7 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
     return [str(name) for name in names], text
 
 
-def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
+def _proxy(client: Client, name: str, conversation_id: tuple[str, str] | None = None):
     """A tool body that calls `name` on the far side and reports what it said.
 
     **The conversation rides in `_meta`, not in the arguments.**  A tool that
@@ -516,7 +516,7 @@ def _proxy(client: Client, name: str, client_id: tuple[str, str] | None = None):
     goes beside the call rather than in it — off the schema the model reads, and
     out of reach of a prompt that asks for somebody else's turns.
     """
-    meta = client_meta(*client_id) if client_id else None
+    meta = conversation_meta(*conversation_id) if conversation_id else None
 
     async def run(arguments: dict[str, Any]) -> str:
         payload = tool_payload(

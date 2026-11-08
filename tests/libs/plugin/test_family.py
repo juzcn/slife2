@@ -28,7 +28,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import in_home
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.family import Family, Links
 from slife2.libs.plugin.protocol import CALL_SOURCE, LIST_SOURCES
 from slife2.plugins.cli.server import build_server as build_cli
@@ -78,7 +78,7 @@ cli:
 async def list_from(client: Client, home: Path) -> Any:
     """`list_sources` as the caller in *home* — the meta a server reads it from."""
     with in_home(home):
-        return await client.call_tool(LIST_SOURCES, {}, meta=client_meta("jack"))
+        return await client.call_tool(LIST_SOURCES, {}, meta=conversation_meta("jack"))
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ from slife2.libs.host.config import DEFAULT_AGENT, load, load_cached
 from slife2.libs.host.configfile import read_scalar, read_section
 from slife2.libs.host.launcher import Outcome, Status
 from slife2.libs.model.base import Chunk, StreamChatResult
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.turn.messages import ToolCall
 from slife2.plugins.agent.server import build_server
 from slife2.plugins.context.server import build_server as build_context
@@ -474,7 +474,7 @@ async def send(
         return await client.call_tool(
             "send_message",
             {"agent": DEFAULT_AGENT, "prompt": prompt, **arguments},
-            meta=client_meta(DEFAULT_AGENT, home=str(home)) if home else None,
+            meta=conversation_meta(DEFAULT_AGENT, home=str(home)) if home else None,
         )
 
 

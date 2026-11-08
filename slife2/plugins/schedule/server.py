@@ -83,7 +83,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import home_key, in_home, schedule_dbs
-from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
+from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.protocol import (
     agent_reader,
     close_server,
@@ -490,7 +490,7 @@ async def dispatch(
             # this process serves every agent: without it the peer would have to
             # guess whose loop to start, and would refuse with its own
             # unaddressed answer (`slife2.libs.plugin.audience.UNADDRESSED`).
-            meta=client_meta(store.agent),
+            meta=conversation_meta(store.agent),
             timeout=_T.timeouts.transport.tasks,
         )
     except Exception as exc:  # noqa: BLE001 - refusals and a missing peer alike
@@ -580,7 +580,7 @@ async def _reconcile_one(
     """One ledger's runs asked after, **in that ledger's home**.
 
     The home is entered by the caller rather than here, because the ask and
-    everything it reaches — the agent-task peer, the address `client_meta`
+    everything it reaches — the agent-task peer, the address `conversation_meta`
     stamps, the runs it settles against — are one home's view of one agent, and
     the walk is what knows which home that is (`schedule_dbs`).
 
@@ -643,7 +643,7 @@ async def _tasks_of(
         answer = await peer.call_tool(
             AGENT_TASK_LIST,
             {},
-            meta=client_meta(agent),
+            meta=conversation_meta(agent),
             timeout=_T.timeouts.transport.tasks,
         )
     finally:
@@ -702,7 +702,7 @@ async def poll_once(
         # **And the pass runs in the ledger's own home.**  This process serves
         # every home on the machine (`schedule_dbs` walks them all), while the
         # ambient home is the one the daemon was started in — so everything a
-        # fire reaches for is otherwise the *wrong* home's: `client_meta` stamps
+        # fire reaches for is otherwise the *wrong* home's: `conversation_meta` stamps
         # the dispatch with it, the agent-task peer starts the work there, and
         # `window_attached` asks a window that is not showing this agent at all.
         # `in_home` is what makes the home a property of this

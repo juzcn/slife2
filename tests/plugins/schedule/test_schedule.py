@@ -45,7 +45,11 @@ import slife2.plugins.schedule.server as schedule_server
 from slife2.helpers.clock import now
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings, default_config
-from slife2.libs.plugin.audience import client_meta, for_the_model, request_client
+from slife2.libs.plugin.audience import (
+    conversation_meta,
+    for_the_model,
+    request_conversation,
+)
 from slife2.plugins.agent_task.server import (
     FAILED as TASK_FAILED,
 )
@@ -118,7 +122,7 @@ class Window:
         @self.mcp.tool
         async def attached(agent: str) -> dict[str, Any]:
             # **The home the call arrived in**, read on this side of the hop: it
-            # is the caller's (`client_meta`'s `data_dir`), applied by the
+            # is the caller's (`conversation_meta`'s `data_dir`), applied by the
             # protocol's own middleware, so a fire asking in the wrong home is
             # visible here rather than only in the ledger it went on to close.
             self.asked.append({"agent": agent, "home": str(paths.home())})
@@ -167,7 +171,7 @@ class Tasks:
         self.mcp: FastMCP = FastMCP("tasks")
 
         def who(ctx: Context) -> str:
-            found = request_client(ctx)
+            found = request_conversation(ctx)
             return found[0] if found else ""
 
         @self.mcp.tool
@@ -300,7 +304,9 @@ async def ask(
     agent: str = AGENT,
 ) -> dict[str, Any]:
     """One call, with the identity where every hop carries it (`_meta`)."""
-    result = await client.call_tool(tool, arguments or {}, meta=client_meta(agent))
+    result = await client.call_tool(
+        tool, arguments or {}, meta=conversation_meta(agent)
+    )
     return result.data
 
 
@@ -1401,7 +1407,7 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
     process that happens to be running.  But a home is a property of the
     *request* a shared process is serving, not of the process, so a ledger found
     in another home has to be fired with that home in force.  Everything a fire
-    reaches for is otherwise the daemon's own: the address `client_meta` stamps
+    reaches for is otherwise the daemon's own: the address `conversation_meta` stamps
     on the dispatch, the agent-task peer that starts the work, and the window the
     fire asks.  Fired in the wrong home, the fire asks a conversation that is not
     the ledger's — the real window answers "no window is showing it" — and the
@@ -1416,13 +1422,13 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
 
     async with Client(build(window, tasks)) as client:
         # **Written through the plugin's own tool, addressed at the other home.**
-        # `client_meta`'s explicit `home` is for exactly this — a caller acting
+        # `conversation_meta`'s explicit `home` is for exactly this — a caller acting
         # for a home it is not itself in — so the task lands in a ledger this
         # process is not living in, which is the whole arrangement under test.
         await client.call_tool(
             SCHEDULE_SET,
             {"name": "daily", "description": DESCRIPTION, "cron": EVERY_MINUTE},
-            meta=client_meta(AGENT, home=str(other)),
+            meta=conversation_meta(AGENT, home=str(other)),
         )
 
     ledger = other / "agents" / AGENT / "schedule.db"

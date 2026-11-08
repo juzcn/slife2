@@ -32,8 +32,8 @@ a reader does belongs in the design document.
 |---|---|
 | **Plugin** | One of slife2's own MCP servers, started and shared by the launcher. An external MCP server is not a plugin. |
 | **Agent** | An identity named by `--agent NAME`. One name has one live holder per machine. |
-| **Client id** | `(agent, subagent)`: the identity a call is made on behalf of. |
-| **Conversation** | One client id's history. |
+| **Conversation id** | `(agent, subagent)`: the identity a call is for. |
+| **Conversation** | One agent's own history, or one of its subagents'. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made. |
 | **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | The machine-readable prefix a sender adds to a message, e.g. `[Wechat:{…}]`. Stored with the message, removed only for display. |

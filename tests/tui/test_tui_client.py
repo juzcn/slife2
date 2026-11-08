@@ -106,7 +106,7 @@ def sent(transport: FakeTransport, tool: str) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
-    """The client id *is* the conversation, so it goes out with every message.
+    """The conversation id *is* the conversation, so it goes out with every message.
 
     There is no second call to make first: the server starts a conversation
     under a key it has not seen, so naming the key is the whole of addressing
@@ -135,7 +135,7 @@ async def test_a_turn_names_the_client_it_speaks_for(monkeypatch) -> None:
         # rather than running unasked (`slife2.tui.app`, SDD §7.7).
         "watched": True,
     }
-    assert client.client_id == ("jack", "")
+    assert client.conversation_id == ("jack", "")
 
 
 @pytest.mark.asyncio
@@ -171,7 +171,7 @@ async def test_a_subagent_name_is_carried_as_part_of_the_id(monkeypatch) -> None
     await client.connect()
     await client.run_turn("hi", lambda event: None)
 
-    assert client.client_id == ("jack", "helper")
+    assert client.conversation_id == ("jack", "helper")
     assert sent(transport, "send_message")[0]["subagent"] == "helper"
 
 
@@ -249,7 +249,7 @@ async def test_a_failed_turn_keeps_the_connection(monkeypatch) -> None:
 
     with pytest.raises(ToolError, match="API key"):
         await client.run_turn("hi", lambda event: None)
-    assert client.client_id == ("jack", "")
+    assert client.conversation_id == ("jack", "")
 
 
 @pytest.mark.asyncio

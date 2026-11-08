@@ -328,7 +328,7 @@ def home_key(root: str | Path | None = None) -> str:
     two spellings of one directory are not equal while being the same home.
 
     **A spelling is what a call carries.**  A client sends its `data_dir` exactly
-    as it was named (`slife2.libs.plugin.audience.client_meta`), and the daemon
+    as it was named (`slife2.libs.plugin.audience.conversation_meta`), and the daemon
     that started with the same directory may have been handed the resolved
     spelling by the launcher (`launcher._argv`).  `D:\\Dev\\...` against
     `d:\\DEV\\...`, a junction, a symlink, a trailing `..`: each is one directory
@@ -382,7 +382,7 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
     subagent's name is a name *inside* `subagents/`, and nothing else in this
     system writes there.
 
-    It takes **both halves of the client id** because it is the one place that
+    It takes **both halves of the conversation id** because it is the one place that
     knows the layout: every per-agent path in this system is this function plus a
     file name, so the nesting is written once here rather than restated wherever
     a file happens to live.

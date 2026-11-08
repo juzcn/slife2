@@ -28,7 +28,7 @@ from slife2.libs.host.config import (
     load,
 )
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.media import adapters
 from slife2.plugins.media.adapters import (
     DashScopeAIGCAdapter,
@@ -127,7 +127,7 @@ async def ask(client: Client, tool: str, **arguments: Any) -> Any:
     rather than about the spelling of one.  A refusal raises (`ToolError`),
     which `refused` is for.
     """
-    result = await client.call_tool(tool, arguments, meta=client_meta("jack"))
+    result = await client.call_tool(tool, arguments, meta=conversation_meta("jack"))
     return result.data
 
 
@@ -139,7 +139,7 @@ async def refused(client: Client, tool: str, **arguments: Any) -> str:
     from an answer — so the tests that are *about* a refusal come through here.
     """
     result = await client.call_tool(
-        tool, arguments, meta=client_meta("jack"), raise_on_error=False
+        tool, arguments, meta=conversation_meta("jack"), raise_on_error=False
     )
     return "".join(getattr(block, "text", "") for block in result.content or [])
 
@@ -329,7 +329,7 @@ async def test_a_provider_failure_is_a_failure_not_a_transcript_entry() -> None:
         # this test is about the failure being one.
         with pytest.raises(ToolError, match="401"):
             await client.call_tool(
-                "generate_image", {"prompt": "x"}, meta=client_meta("jack")
+                "generate_image", {"prompt": "x"}, meta=conversation_meta("jack")
             )
 
 

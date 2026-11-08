@@ -90,9 +90,12 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import home_key
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.plugin.audience import FOR_THE_MODEL, client_key
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    ConversationId,
+    conversation_key,
+)
 from slife2.libs.plugin.protocol import (
-    ClientId,
     agent_reader,
     close_server,
     house_server,
@@ -260,18 +263,18 @@ class AgentTask:
         return channel_for(self)
 
     @property
-    def identity(self) -> ClientId:
-        """`(agent, "")` — **the agent's own id, which is the whole point.**
+    def identity(self) -> ConversationId:
+        """`(agent, "")` — **the agent's own conversation, which is the point.**
 
         A task is the main agent's task, not a conversation beside it: the same
         prompt, the same model, the same tools, the same context store, and the
-        same key.  So every hop it makes carries the agent's own id — the tool
-        list the hub hands back is bound to it, the model call goes out under it,
-        and `restore` and `rebuild` are asked about *this agent's* context, which
-        is what "it runs on the current agent's context" means at the only place
-        that is observable.  A `turn_read` from inside a task answers from the
-        log the conversation is also written to, because that is the log a task
-        is working out of.
+        same key.  So every hop it makes carries the agent's own conversation id
+        — the tool list the hub hands back is bound to it, the model call goes
+        out under it, and `restore` and `rebuild` are asked about *this agent's*
+        context, which is what "it runs on the current agent's context" means at
+        the only place that is observable.  A `turn_read` from inside a task
+        answers from the log the conversation is also written to, because that
+        is the log a task is working out of.
 
         The empty second half is `subagent`'s "this agent's own conversation",
         which is exactly what a task is running on (SDD §3.2).
@@ -1078,7 +1081,7 @@ def build_server(
         )
 
     def find(agent: str, name: str) -> AgentTask | None:
-        found = tasks.get(client_key(agent, name))
+        found = tasks.get(conversation_key(agent, name))
         return found
 
     # ── the tools ────────────────────────────────────────────────────────
@@ -1185,7 +1188,7 @@ def build_server(
             description=description,
             started_at=now(),
             # The home this call came in on, read *here*, at the only moment it
-            # is the caller's (`slife2.libs.plugin.audience.client_key` explains why
+            # is the caller's (`slife2.libs.plugin.audience.conversation_key` explains why
             # the object keeps it rather than asking again later).
             home=home_key(),
         )

@@ -225,7 +225,7 @@ class MCPAgentClient:
 
     **This class holds an identity, not a conversation.**  The server keeps the
     history — that is what makes a message sent to a busy agent wait its turn
-    instead of displacing it — and it addresses that history by the client id
+    instead of displacing it — and it addresses that history by the conversation id
     this client already knows: who it is (`agent`) and which of that agent's
     conversations it is (`subagent`).
 
@@ -275,8 +275,8 @@ class MCPAgentClient:
         self._connecting = asyncio.Lock()
 
     @property
-    def client_id(self) -> tuple[str, str]:
-        """Who this client is, as every server in this system spells it."""
+    def conversation_id(self) -> tuple[str, str]:
+        """The conversation this client serves, as every server here spells it."""
         return (self._agent, self._subagent)
 
     @property

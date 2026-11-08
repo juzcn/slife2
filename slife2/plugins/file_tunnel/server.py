@@ -51,7 +51,7 @@ from starlette.responses import Response, StreamingResponse
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_client
+from slife2.libs.plugin.audience import FOR_THE_MODEL, request_conversation
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
     TunnelProvider,
@@ -493,7 +493,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "HTTP 530. `tunnel_status` has the detail; try again shortly."
             )
 
-        found = exposed.register(str(served), request_client(ctx))
+        found = exposed.register(str(served), request_conversation(ctx))
         url = tunnel.share_url_for(found.token)
         if url is None:
             raise ToolError("the tunnel went away as the file was published.")
@@ -517,7 +517,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             raise ToolError(
                 "no token was given — it is the last part of the share URL."
             )
-        outcome = exposed.revoke(wanted, request_client(ctx))
+        outcome = exposed.revoke(wanted, request_conversation(ctx))
         if outcome is Revoked.UNKNOWN:
             raise ToolError(f"no link with the token {wanted!r} is being served.")
         if outcome is Revoked.FOREIGN:

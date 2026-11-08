@@ -60,7 +60,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import CALL_TOOL
 from slife2.libs.host.config import Config, ConfigError, plugin
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 
 #: The hub's key in `servers:`.  One system fact, not a capability: every job's
@@ -230,7 +230,7 @@ async def call(
         return await client.call_tool(
             tool,
             dict(arguments or {}),
-            meta=client_meta(context.agent, context.subagent),
+            meta=conversation_meta(context.agent, context.subagent),
         )
 
     try:

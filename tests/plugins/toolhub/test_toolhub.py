@@ -43,7 +43,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import catalogue_db, in_home
 from slife2.libs.host.paths import home as home_dir
-from slife2.libs.plugin.audience import FOR_THE_MODEL, client_meta
+from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.catalogue import DEFAULT_TOOL_PAGE, LOADED, UNLOADED, ToolStore
@@ -3283,7 +3283,7 @@ async def test_a_second_home_is_served_its_own_declarations(
                     "name": "tool_search",
                     "arguments": {"keywords": [query], "sentences": []},
                 },
-                meta=client_meta("jack"),
+                meta=conversation_meta("jack"),
             )
         return str(answer.data["text"])
 
@@ -3347,7 +3347,7 @@ async def test_a_second_home_holds_every_tool_the_machine_has(
         """What the model may call, asked as the caller in *home*."""
         with in_home(home):
             answer = await hub_client.call_tool(
-                "list_tools", {}, meta=client_meta("jack")
+                "list_tools", {}, meta=conversation_meta("jack")
             )
         return names(answer.data)
 
@@ -3409,7 +3409,7 @@ async def test_a_relist_reaches_a_home_that_is_not_asking(
 
     async def listed(hub_client: Client, home: Path) -> None:
         with in_home(home):
-            await hub_client.call_tool("list_tools", {}, meta=client_meta("jack"))
+            await hub_client.call_tool("list_tools", {}, meta=conversation_meta("jack"))
 
     def routed(path: Path) -> bool:
         """Whether the file holds the grown tool, read without opening a store."""
@@ -3694,7 +3694,7 @@ async def test_a_source_one_home_stopped_holding_is_forgotten(
                     "name": "tool_search",
                     "arguments": {"keywords": [query], "sentences": []},
                 },
-                meta=client_meta("jack", home=str(home)),
+                meta=conversation_meta("jack", home=str(home)),
             )
         return str(answer.data["text"])
 
@@ -3747,9 +3747,11 @@ async def test_a_fault_in_one_homes_catalogue_is_not_anothers(
     async with Client(hub) as client:
         with in_home(theirs):
             with pytest.raises(ToolError, match="that home's catalogue file is locked"):
-                await client.call_tool("list_tools", {}, meta=client_meta("jack"))
+                await client.call_tool("list_tools", {}, meta=conversation_meta("jack"))
         with in_home(mine):
-            listed = await client.call_tool("list_tools", {}, meta=client_meta("jack"))
+            listed = await client.call_tool(
+                "list_tools", {}, meta=conversation_meta("jack")
+            )
 
     assert "skill_use" in names(listed.data), "this home's catalogue is working"
 

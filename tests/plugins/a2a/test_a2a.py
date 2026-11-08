@@ -67,7 +67,7 @@ from slife2.libs.host.paths import (
     subagent_file,
 )
 from slife2.libs.host.runtime import read_record
-from slife2.libs.plugin.audience import client_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.a2a import broker
 from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import server as a2a_server
@@ -2218,7 +2218,7 @@ async def test_a_call_that_does_not_say_whose_mesh_it_is_is_refused() -> None:
 @pytest.mark.asyncio
 async def test_a_machine_with_no_section_is_told_so_rather_than_dialled() -> None:
     async with Client(build()) as client:
-        answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(PEER_LIST, {}, meta=conversation_meta(AGENT))
     assert answer.data["agents"] == []
     assert "no `peer_agent:` section" in answer.data["error"]
 
@@ -2231,7 +2231,7 @@ async def test_an_invented_message_type_is_refused() -> None:
             await client.call_tool(
                 PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "hi", "message_type": "invented"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
 
@@ -2242,7 +2242,7 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
             await client.call_tool(
                 PEER_TASK_RESPONSE,
                 {"agent": PEER, "outcome": "completed", "message": "done"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
 
@@ -2279,7 +2279,7 @@ async def test_a_task_response_settles_the_task_in_the_same_call(
                 "outcome": "completed",
                 "message": "the answer",
             },
-            meta=client_meta(AGENT),
+            meta=conversation_meta(AGENT),
         )
 
     assert settled == [(TASK, "completed", "the answer")], (
@@ -2306,7 +2306,7 @@ async def test_an_interrupted_response_needs_a_question(
             await client.call_tool(
                 PEER_TASK_RESPONSE,
                 {"agent": PEER, "task_id": TASK, "outcome": "input_required"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
 
@@ -2316,7 +2316,7 @@ async def test_the_roster_says_why_it_is_short_when_it_is() -> None:
     this one's name — reported in the roster's `error`, here rather than in a
     tool of its own."""
     async with Client(build(on_the_mesh=True)) as client:
-        answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(PEER_LIST, {}, meta=conversation_meta(AGENT))
     data = answer.data
     assert data["agent_name"] == AGENT
     assert data["status"] == "offline"
@@ -2457,7 +2457,9 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
     async with Client(mcp) as client:
         with pytest.raises(ToolError, match="could not join the mesh"):
             await client.call_tool(
-                PEER_BROADCAST, {"event": "the build is green"}, meta=client_meta(AGENT)
+                PEER_BROADCAST,
+                {"event": "the build is green"},
+                meta=conversation_meta(AGENT),
             )
 
     assert any(
@@ -3078,7 +3080,7 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
     the subagent had never been reached.
 
     A subagent has no window and never gets one, so the turn is run here, on the
-    agent server, addressed by the client id the message named.  The pair is what
+    agent server, addressed by the conversation id the message named.  The pair is what
     matters: `subagent` is the *member*, and the prompt arrives wearing the
     **agent's** envelope — `[Agent:…]` and `agent:<maker>` — because a subagent
     has to be able to tell its maker from a sibling.
@@ -3300,7 +3302,7 @@ async def test_a_send_to_a_subagent_gives_it_its_place_before_publishing(
             answer = await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": "tester", "message": "please do this"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
     assert places == [AGENT, "tester"], "the receiver's place was not taken first"
@@ -3349,7 +3351,7 @@ async def test_a_local_send_to_a_name_that_is_not_a_member_is_refused_before_pub
                 await client.call_tool(
                     LOCAL.tool(SEND_MESSAGE),
                     {"agent": "xiaoyou", "message": "hello"},
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
 
     assert places == [], "the broker was dialled for a name that cannot exist"
@@ -3381,7 +3383,7 @@ async def test_a_remote_send_to_an_unlisted_name_is_accepted_but_says_unverified
         answer = await client.call_tool(
             PEER_SEND_MESSAGE,
             {"agent": "ghost-agent-xyz-not-exist", "message": "hello"},
-            meta=client_meta(AGENT),
+            meta=conversation_meta(AGENT),
         )
 
     assert published == [f"{AGENT}->ghost-agent-xyz-not-exist"]
@@ -3395,7 +3397,7 @@ async def test_a_subagent_answers_as_itself_rather_than_as_its_maker(
 ) -> None:
     """**A member's reply is published by the member.**
 
-    It arrives as a call from the member's own conversation, so the client id
+    It arrives as a call from the member's own conversation, so the conversation id
     already says who is speaking — and it has to be used.  Published under the
     maker's name the reply would be the maker talking to itself, and it would
     complete nothing: the bridge it is answering is on *the member's* responder,
@@ -3423,7 +3425,7 @@ async def test_a_subagent_answers_as_itself_rather_than_as_its_maker(
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": AGENT, "message": "done", "message_type": "message"},
-                meta=client_meta(AGENT, "tester"),
+                meta=conversation_meta(AGENT, "tester"),
             )
 
     # Only the member's own place: the maker is not one of its own subagents, and
@@ -3461,7 +3463,9 @@ async def test_a_broadcast_wakes_every_member_before_it_is_published(
         server = local_build(configured=True)
         async with Client(server) as client:
             await client.call_tool(
-                LOCAL.tool(BROADCAST), {"event": "stand up"}, meta=client_meta(AGENT)
+                LOCAL.tool(BROADCAST),
+                {"event": "stand up"},
+                meta=conversation_meta(AGENT),
             )
 
     assert places == [AGENT, "tester", "tester2"]
@@ -3499,7 +3503,7 @@ async def test_the_local_roster_takes_its_own_place_and_lists_the_members(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
+                LOCAL.tool(LIST), {}, meta=conversation_meta(AGENT)
             )
 
     data = answer.data
@@ -3543,7 +3547,7 @@ async def test_a_removed_subagents_retained_card_is_not_listed(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
+                LOCAL.tool(LIST), {}, meta=conversation_meta(AGENT)
             )
 
     assert answer.data["agents"] == [
@@ -3579,7 +3583,7 @@ async def test_a_local_roster_that_cannot_connect_says_why(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST), {}, meta=client_meta(AGENT)
+                LOCAL.tool(LIST), {}, meta=conversation_meta(AGENT)
             )
 
     data = answer.data
@@ -3623,9 +3627,11 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
             await client.call_tool(
                 PEER_SEND_MESSAGE,
                 {"agent": PEER, "message": "hello"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
-            answer = await client.call_tool(PEER_LIST, {}, meta=client_meta(AGENT))
+            answer = await client.call_tool(
+                PEER_LIST, {}, meta=conversation_meta(AGENT)
+            )
 
     assert places == [AGENT], "a peer on the remote network is not this process's"
     # The cards and nothing else: `jill` is a directory that would be a member on
@@ -3660,7 +3666,7 @@ async def test_a_members_own_roster_lists_it_once(
         server = local_build(configured=True)
         async with Client(server) as client:
             answer = await client.call_tool(
-                LOCAL.tool(LIST), {}, meta=client_meta(AGENT, "tester")
+                LOCAL.tool(LIST), {}, meta=conversation_meta(AGENT, "tester")
             )
 
     names = [card["agent_name"] for card in answer.data["agents"]]
@@ -3683,9 +3689,11 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": "tester", "message": "hello"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
-        answer = await client.call_tool(LOCAL.tool(LIST), {}, meta=client_meta(AGENT))
+        answer = await client.call_tool(
+            LOCAL.tool(LIST), {}, meta=conversation_meta(AGENT)
+        )
 
     said = str(refused.value)
     assert "`subagent:` section" in said, "the refusal names the wrong section"
@@ -3731,10 +3739,10 @@ async def test_the_task_list_is_the_send_tools_own_bookkeeping(
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": AGENT, "message": "hello"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             answer = await client.call_tool(
-                LOCAL.tool(TASK_LIST), {}, meta=client_meta(AGENT)
+                LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
             )
 
     data = answer.data
@@ -3757,7 +3765,7 @@ async def test_a_task_list_on_a_switched_off_network_names_its_own_section() -> 
     server = build_server(default_config(), net=LOCAL, connecting=False)
     async with Client(server) as client:
         answer = await client.call_tool(
-            LOCAL.tool(TASK_LIST), {}, meta=client_meta(AGENT)
+            LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
         )
 
     assert answer.data["tasks"] == []
@@ -3834,12 +3842,12 @@ async def test_forget_gives_up_a_members_place(
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": "tester", "message": "hello"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             first = await client.call_tool(
                 FORGET,
                 {"agent": AGENT, "subagent": "tester"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             # The member's is the only connection this retires, and reading it
             # here is what makes that assertable: the lifespan retires the rest
@@ -3848,12 +3856,12 @@ async def test_forget_gives_up_a_members_place(
             again = await client.call_tool(
                 FORGET,
                 {"agent": AGENT, "subagent": "tester"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
                 {"agent": "tester", "message": "again"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
     assert first.data["forgotten"] is True
@@ -4436,35 +4444,35 @@ async def test_group_tools_on_the_peer_network(
             made = await client.call_tool(
                 PEER_GROUP_SET,
                 {"group": GROUP, "members": [PEER, "bob"]},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             listed = await client.call_tool(
-                PEER_GROUP_LIST, {}, meta=client_meta(AGENT)
+                PEER_GROUP_LIST, {}, meta=conversation_meta(AGENT)
             )
             members_read = await client.call_tool(
-                PEER_GROUP_MEMBER_LIST, {"group": GROUP}, meta=client_meta(AGENT)
+                PEER_GROUP_MEMBER_LIST, {"group": GROUP}, meta=conversation_meta(AGENT)
             )
             spoke = await client.call_tool(
                 PEER_GROUP_SEND_MESSAGE,
                 {"group": GROUP, "message": "@jill hello"},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             left = await client.call_tool(
-                PEER_GROUP_LEAVE, {"group": GROUP}, meta=client_meta(AGENT)
+                PEER_GROUP_LEAVE, {"group": GROUP}, meta=conversation_meta(AGENT)
             )
             with pytest.raises(ToolError, match="no group named"):
                 await client.call_tool(
                     PEER_GROUP_MEMBER_LIST,
                     {"group": GROUP},
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
             await client.call_tool(
                 PEER_GROUP_SET,
                 {"group": "other", "members": [PEER]},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
             removed = await client.call_tool(
-                PEER_GROUP_REMOVE, {"group": "other"}, meta=client_meta(AGENT)
+                PEER_GROUP_REMOVE, {"group": "other"}, meta=conversation_meta(AGENT)
             )
 
         assert made.data["owner"] == AGENT
@@ -4536,7 +4544,7 @@ async def test_a_peer_group_and_a_local_group_stay_in_their_own_lists(
 
     async def listed(server: FastMCP, tool: str) -> list[str]:
         async with Client(server) as client:
-            answer = await client.call_tool(tool, {}, meta=client_meta(AGENT))
+            answer = await client.call_tool(tool, {}, meta=conversation_meta(AGENT))
         return [one["group"] for one in answer.data["groups"]]
 
     with in_home(tmp_path):
@@ -4546,7 +4554,7 @@ async def test_a_peer_group_and_a_local_group_stay_in_their_own_lists(
             await client.call_tool(
                 PEER_GROUP_SET,
                 {"group": "peer-g2", "members": [PEER]},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
         assert await listed(local_build(), LOCAL.tool(GROUP_LIST)) == []
@@ -4556,7 +4564,7 @@ async def test_a_peer_group_and_a_local_group_stay_in_their_own_lists(
             await client.call_tool(
                 LOCAL.tool(GROUP_SET),
                 {"group": "sub-g1", "members": ["tester"]},
-                meta=client_meta(AGENT),
+                meta=conversation_meta(AGENT),
             )
 
         assert await listed(build(on_the_mesh=True), PEER_GROUP_LIST) == ["peer-g2"]
@@ -4565,7 +4573,7 @@ async def test_a_peer_group_and_a_local_group_stay_in_their_own_lists(
         peer = build(on_the_mesh=True)
         async with Client(peer) as client:
             removed = await client.call_tool(
-                PEER_GROUP_REMOVE, {"group": "peer-g2"}, meta=client_meta(AGENT)
+                PEER_GROUP_REMOVE, {"group": "peer-g2"}, meta=conversation_meta(AGENT)
             )
         assert removed.data["disbanded"] is True
 
@@ -4613,7 +4621,7 @@ async def test_a_send_to_an_empty_group_is_refused(
                 await client.call_tool(
                     PEER_GROUP_SEND_MESSAGE,
                     {"group": GROUP, "message": "@jill hello"},
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
 
     assert published == [], "a send to an empty group publishes nothing"
@@ -4643,19 +4651,19 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
                 await client.call_tool(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["nobody"]},
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
             with pytest.raises(ToolError, match="forked"):
                 await client.call_tool(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["forked"]},
-                    meta=client_meta(AGENT),
+                    meta=conversation_meta(AGENT),
                 )
             with pytest.raises(ToolError, match="forked subagent"):
                 await client.call_tool(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["tester"]},
-                    meta=client_meta(AGENT, "forked"),
+                    meta=conversation_meta(AGENT, "forked"),
                 )
 
 
@@ -4695,18 +4703,18 @@ async def test_only_the_owner_can_change_or_disband_a_group(
                 await client.call_tool(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["tester2"]},
-                    meta=client_meta(AGENT, "tester"),
+                    meta=conversation_meta(AGENT, "tester"),
                 )
             with pytest.raises(ToolError, match="only the owner"):
                 await client.call_tool(
                     LOCAL.tool(GROUP_REMOVE),
                     {"group": GROUP},
-                    meta=client_meta(AGENT, "tester"),
+                    meta=conversation_meta(AGENT, "tester"),
                 )
             left = await client.call_tool(
                 LOCAL.tool(GROUP_LEAVE),
                 {"group": GROUP},
-                meta=client_meta(AGENT, "tester"),
+                meta=conversation_meta(AGENT, "tester"),
             )
 
         assert left.data["left"] is True

@@ -28,7 +28,7 @@ from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
-from slife2.libs.plugin.audience import client_meta
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import (
     close_server,
     house_server,
@@ -443,7 +443,7 @@ async def test_a_shared_server_resolves_the_home_the_call_named(
 
     A plugin is one process for every home, so the directory an agent's file
     belongs in is not the process's: it is the caller's, said out of band
-    (`slife2.libs.plugin.audience.client_meta`) because a model must not be able to
+    (`slife2.libs.plugin.audience.conversation_meta`) because a model must not be able to
     name somebody else's.  The middleware turns that saying into the ambient
     home for the length of the call — which is what every `agent_dir(agent)`
     deeper in the stack reads, and what makes the plugins this one calls in turn
@@ -457,7 +457,7 @@ async def test_a_shared_server_resolves_the_home_the_call_named(
     server = _home_server()
     async with Client(server) as client:
         named = await client.call_tool(
-            "where", {}, meta=client_meta("jack", home=str(theirs))
+            "where", {}, meta=conversation_meta("jack", home=str(theirs))
         )
         unnamed = await client.call_tool("where", {})
 
@@ -493,7 +493,7 @@ async def test_the_home_does_not_leak_out_of_a_call_that_raised(
         # is the part that has to be back afterwards.
         with pytest.raises(ToolError):
             await client.call_tool(
-                "breaks", {}, meta=client_meta("jack", home=str(tmp_path / "x"))
+                "breaks", {}, meta=conversation_meta("jack", home=str(tmp_path / "x"))
             )
         after = await client.call_tool("where", {})
 
@@ -522,7 +522,9 @@ async def test_a_home_spelled_on_another_platform_is_refused(
     server = _home_server()
     async with Client(server) as client:
         with pytest.raises(ToolError) as caught:
-            await client.call_tool("where", {}, meta=client_meta("jack", home=foreign))
+            await client.call_tool(
+                "where", {}, meta=conversation_meta("jack", home=foreign)
+            )
         after = await client.call_tool("where", {})
 
     assert "not an absolute path on this machine" in str(caught.value)
