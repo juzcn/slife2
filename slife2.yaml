@@ -159,9 +159,9 @@ context:
   keyword_weight: 1.0
   # The cross-encoder reranks the configured candidate pool and this is the
   # score it must reach to stay, 0-1; 0.0 keeps everything it returned.
-  # The shipped 0.1 sits above the incidental turns keyword hits score
-  # (0.001-0.006) and below the real ones (0.69-0.81).
-  rerank_min_score: 0.1
+  # Calibrated on this log: the turns a recall needs scored 0.37-1.0, the
+  # incidental tail 0.00-0.24, so 0.3 keeps the first and drops the second.
+  rerank_min_score: 0.3
   # Seconds for the discriminator call; past it the turn uses its current
   # context.
   timeout: 20.0
