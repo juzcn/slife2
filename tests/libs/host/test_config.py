@@ -538,40 +538,23 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
             load(write(tmp_path, text))
 
 
-def test_a_per_recall_floor_is_refused_rather_than_ignored(tmp_path) -> None:
-    """The ceiling is the one budget the keep and the recall share.
+def test_the_ceiling_is_bounded(tmp_path) -> None:
+    """The ceiling is a window fraction, and the one budget the two halves share.
 
-    A file still naming `context.floor:` used to cap a recall at a fraction of
-    its own; loading it with the key silently dropped would move the recall to
-    the whole headroom with nothing said, so the key is refused — and the
-    ceiling, the one number that remains, is still bounded.
+    An old key beside it is ignored rather than carried across versions: the
+    file is edited with the system, not migrated into it.
     """
-    with pytest.raises(ConfigError, match="context.floor"):
-        load(write(tmp_path, "context:\n  floor: 0.2\n"))
-
     for ceiling in ("0", "1.5"):
         with pytest.raises(ConfigError, match="context.ceiling"):
             load(write(tmp_path, f"context:\n  ceiling: {ceiling}\n"))
 
-    kept = load(write(tmp_path, "context:\n  ceiling: 0.6\n"))
+    kept = load(
+        write(
+            tmp_path,
+            "context:\n  ceiling: 0.6\n  floor: 0.2\n  recall_limit: 40\n",
+        )
+    )
     assert kept.context.ceiling == 0.6
-
-
-def test_a_recall_count_is_refused_rather_than_ignored(tmp_path) -> None:
-    """Membership is the floors' and the budget's; each leg has a page.
-
-    A file still naming `context.recall_limit:` asked for a count cap that no
-    longer exists.  Loading it with the key silently dropped would recall more
-    than its author asked for, so the key is refused; the short-lived
-    `recall_pool_size:` is refused the same way, and `recall_page_limit:` is
-    what a home calibrates instead.
-    """
-    for gone in ("recall_limit", "recall_pool_size"):
-        with pytest.raises(ConfigError, match=f"context.{gone}"):
-            load(write(tmp_path, f"context:\n  {gone}: 40\n"))
-
-    kept = load(write(tmp_path, "context:\n  recall_page_limit: 40\n"))
-    assert kept.context.recall_page_limit == 40
 
 
 def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:

@@ -3260,31 +3260,10 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     one is a budget larger than the window it is a fraction of.  An absent
     section is the default, as everywhere else; an *explicit* zero is refused
     rather than read as absent, which is `_int_or`'s rule one type over.
-
-    **Removed keys are refused rather than ignored.**  A recall now spends what
-    the kept turns leave below the ceiling, and its membership is the two floors
-    plus that budget; a file still naming a per-recall floor, a count cap or the
-    short-lived pool key would load with the key silently dropped — the one
-    failure a config change must not have.
     """
     if raw is None:
         return base
     section = _mapping(raw, "context")
-    if section.get("floor") is not None:
-        raise ConfigError(
-            "context.floor is gone: a recall spends what the kept turns leave "
-            "below context.ceiling, not a fraction of its own — remove the key"
-        )
-    if section.get("recall_limit") is not None:
-        raise ConfigError(
-            "context.recall_limit is gone: the recall's floors and the ceiling's "
-            "token budget decide membership, and each leg's page is "
-            "context.recall_page_limit — remove the key"
-        )
-    if section.get("recall_pool_size") is not None:
-        raise ConfigError(
-            "context.recall_pool_size is now context.recall_page_limit — rename the key"
-        )
     ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
     ceiling = base.ceiling if ceiling is None else ceiling
     if not 0 < ceiling <= 1:

@@ -1673,7 +1673,9 @@ def test_requirements_never_read_the_homes_stale_config(tmp_path: Path) -> None:
     """
     home = tmp_path / "home"
     home.mkdir()
-    (home / "slife2.yaml").write_text("context:\n  floor: 0.2\n", encoding="utf-8")
+    (home / "slife2.yaml").write_text(
+        "context:\n  recall_page_limit: 0\n", encoding="utf-8"
+    )
     source = tmp_path / "source"
     source.mkdir()
     (source / "slife2.yaml").write_text(
@@ -1684,7 +1686,7 @@ def test_requirements_never_read_the_homes_stale_config(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "shipped-tool\tcli:hunt" in result.stdout
-    assert "context.floor" not in result.stderr
+    assert "context.recall_page_limit" not in result.stderr
 
 
 def test_both_installers_take_requirements_from_the_shipped_source() -> None:
