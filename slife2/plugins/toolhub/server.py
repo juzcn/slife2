@@ -2800,7 +2800,15 @@ def build_server(
         return for_the_call(source, config)
 
     def default_transport(settings: ToolServerSettings) -> Any:
-        return mcp_config(settings, cwd=str(directory))
+        """Every upstream here is a plugin — a server this system started.
+
+        So it is the hub's own hop, and it takes no ceiling on one message:
+        a plugin's `list_sources` carries its whole section, and a REST spec's
+        rows can exceed the MCP SDK's 1 MiB SSE default.  The gateway's own
+        entries are peers and keep that ceiling; `mcp_config(ours=True)` is
+        where the difference is written (`slife2.clients.gateway`).
+        """
+        return mcp_config(settings, cwd=str(directory), ours=True)
 
     async def open_catalogue() -> ToolStore:
         """The tool catalogue's own file, with both its indexes current.

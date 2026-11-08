@@ -174,7 +174,9 @@ def proxied_name(server: str, tool: str) -> str:
     return f"{sanitise(server)}{SEPARATOR}{sanitise(tool)}"
 
 
-def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
+def mcp_config(
+    settings: ToolServerSettings, *, cwd: str, ours: bool = False
+) -> dict[str, Any]:
     """One server, in the shape an MCP client takes.
 
     The standard `mcpServers` document, which is the ecosystem's own config
@@ -191,6 +193,18 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
     because an entry is likely to name a path, and `.` has to mean something:
     a daemon's own working directory is its runtime folder, which is nobody's
     idea of where their files are.
+
+    **`ours` lifts the 1 MiB ceiling on one SSE event, for an HTTP entry.**  The
+    ceiling is the MCP SDK's default and the right guard for somebody else's
+    server — it stops a peer making this process buffer an unbounded message —
+    and no guard at all on loopback to a daemon this process started.  It is not
+    theoretical: a plugin answers `list_sources` with every row its section
+    holds, GitHub's spec is 1272 operations and a declaration of 1.07 MB, so the
+    hub refused it ("Server-sent event exceeded the 1048576 byte limit") and kept
+    the rows from the last refresh — the tools were never merged.  `None` is
+    FastMCP's `RemoteMCPServer.max_sse_event_size` spelling "no ceiling"; SDD
+    §3.2 states the split.  Only the hub's own upstreams pass this — the
+    gateway's entries under `mcp:` and `rest-api:` are peers and keep it.
     """
     entry: dict[str, Any] = {}
     if settings.url:
@@ -198,6 +212,8 @@ def mcp_config(settings: ToolServerSettings, *, cwd: str) -> dict[str, Any]:
         entry["transport"] = "http"
         if settings.headers:
             entry["headers"] = settings.resolved_headers()
+        if ours:
+            entry["max_sse_event_size"] = None
     else:
         entry["command"] = settings.command
         entry["args"] = list(settings.args)

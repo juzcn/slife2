@@ -3124,6 +3124,37 @@ def test_an_http_entry_becomes_a_url() -> None:
     }
 
 
+def test_our_own_upstream_has_no_ceiling_on_one_message() -> None:
+    """A plugin's declaration is one message, and a big section exceeds 1 MiB.
+
+    GitHub's spec is 1272 operations and 1.07 MB of rows.  With the SDK's
+    default ceiling the hub refused the declaration ("Server-sent event
+    exceeded the 1048576 byte limit") and kept the rows from the last refresh,
+    so `github__*` never reached the catalogue although the plugin held them.
+    """
+    built = mcp_config(
+        ToolServerSettings(
+            name="restapi-tools", url="http://127.0.0.1:24034/mcp"
+        ),
+        cwd="/data",
+        ours=True,
+    )
+    assert built["mcpServers"]["restapi-tools"] == {
+        "url": "http://127.0.0.1:24034/mcp",
+        "transport": "http",
+        "max_sse_event_size": None,
+    }
+
+
+def test_somebody_elses_entry_keeps_the_sse_ceiling() -> None:
+    """The gateway's entries are peers, and the ceiling is their guard."""
+    built = mcp_config(
+        ToolServerSettings(name="arxiv", url="https://example.invalid/mcp"),
+        cwd="/data",
+    )
+    assert "max_sse_event_size" not in built["mcpServers"]["arxiv"]
+
+
 def test_an_entrys_own_cwd_wins_over_the_default() -> None:
     """Which matters because an argument of `.` has to mean something."""
     entry = mcp_config(
