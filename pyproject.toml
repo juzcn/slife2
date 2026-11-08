@@ -34,7 +34,10 @@ dependencies = [
     "tzdata>=2026.5",
     "a2a-over-mqtt>=0.1.0",
     "aiomqtt>=2.5.0",
-    "paho-mqtt>=2.1.0",
+    # 2.2.0 is the floor: it honours the broker's MQTTv5 Server Keep Alive, and
+    # a payload still arriving no longer trips the keepalive.  Both apply to
+    # the mesh's long-lived connections.
+    "paho-mqtt>=2.2.0",
     # The vocabulary is fetched on first use; a failed fetch degrades to the
     # script measure.
     "tiktoken>=0.14.0",

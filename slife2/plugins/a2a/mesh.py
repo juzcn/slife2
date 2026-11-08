@@ -894,7 +894,7 @@ class A2AMesh:
         )
         # **The CONNACK wait has a bound of its own.**  paho's blocking connect
         # runs in an executor and bounds its socket connect (five seconds in
-        # paho 2.1); aiomqtt's wait for CONNACK has no default timeout in 2.5
+        # paho 2.2); aiomqtt's wait for CONNACK has no default timeout in 2.5
         # (`Client(timeout=None)`), and the `name_probe` window below starts
         # only once the connection is up.  Without passing one, a broker that
         # accepts TCP but never answers would hold this call — and the session
