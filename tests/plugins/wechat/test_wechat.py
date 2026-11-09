@@ -685,14 +685,15 @@ async def test_a_photo_is_skipped_without_burning_the_conversation(
 
 
 @pytest.mark.asyncio
-async def test_the_typing_hint_is_up_while_the_turn_runs(
+async def test_the_typing_hint_is_up_until_the_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Somebody holding the phone is told that something is happening.
+    """Somebody holding the phone is told so for as long as the turn runs.
 
-    The keep-alive belongs to the *turn* rather than to the message: it goes up
-    when the message is handed over, and its task is gone when the turn is —
-    which is what stops it refreshing for a turn that has already ended.
+    The hand-over returning is the turn *starting*: the window runs it after
+    the words are down its stream.  Taking the hint down there would take it
+    down before the agent read the message, so the reply is the stop — and the
+    keep-alive's own lifetime is the bound for a turn that never answers.
     """
     signed_in("jack")
     made = rig(monkeypatch)
@@ -704,6 +705,9 @@ async def test_the_typing_hint_is_up_while_the_turn_runs(
         session = made.plugin.session("jack")
         assert session.typing, "a keep-alive is running for the conversation"
         made.delivery.gate.set()
+        await asyncio.sleep(QUICK * 2)
+        assert session.typing, "a handed-over message is still being worked on"
+        await made.plugin.send(session, "peer-1", "ctx-1", "收到")
         await until(lambda: not session.typing)
         await until(lambda: not session.inflight)
     finally:

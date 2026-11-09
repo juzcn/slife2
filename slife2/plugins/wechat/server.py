@@ -971,17 +971,23 @@ class Wechat:
     async def _answer(
         self, session: Session, peer: str, token: str, prompt: str
     ) -> None:
-        """Hand over one prompt, with the typing indicator up for its duration.
+        """Hand over one prompt, with the typing indicator up while it is worked.
 
-        The keep-alive goes down here *and* in `wechat_send_message`, and the
-        two are not redundant: a model that replies and then keeps working has
-        stopped needing to look busy at the reply, and a turn that ends without
-        a reply must not leave an indicator refreshing until its own bound.
+        **The stop is the reply, not this function's return.**  `_deliver`
+        answers when the words are in the window — which is when the turn
+        *starts*, not when it ends — so an indicator taken down here would come
+        down before the agent had read the message.  `wechat_send_message` is
+        the ordinary stop, and a turn that ends without a reply is bounded by
+        the keep-alive's own lifetime (`_keep_typing`).
+
+        A hand-over that failed is the exception: nothing will reply to that
+        message, so its hint is taken down here.
         """
         self._typing_on(session, peer, token)
         try:
             await self._deliver(session.agent, prompt)
         except Exception as exc:  # noqa: BLE001 — one message is not the loop
+            self._typing_off(session, peer)
             # **An error rather than a warning**, because this is the one outcome
             # a person can see and the plugin cannot make right: their message is
             # not answered, and nothing else will happen to it (`hand_over`'s
@@ -996,8 +1002,6 @@ class Wechat:
                 peer,
                 exc,
             )
-        finally:
-            self._typing_off(session, peer)
 
     def _persist(self, session: Session) -> None:
         """Write the ack cursor, when it has moved.
