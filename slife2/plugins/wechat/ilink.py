@@ -64,17 +64,28 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://ilinkai.weixin.qq.com"
 
-#: The client the far end is told it is talking to.  `2.4.3` is not this
-#: project's version: it is the *bridge's* protocol revision, and the far end is
+#: The client the far end is told it is talking to.  `2.4.10` is not this
+#: project's version: it is the *bridge's* protocol revision — the release the
+#: official `@tencent-weixin/openclaw-weixin` client shipped — and the far end is
 #: entitled to answer differently to a different one.
-CHANNEL_VERSION = "2.4.3"
+CHANNEL_VERSION = "2.4.10"
 ILINK_APP_ID = "bot"
-ILINK_APP_CLIENT_VERSION = str((2 << 16) | (4 << 8) | 3)
-BOT_AGENT = "slife2-wechat/1.0.0 (python)"
 
-#: How long one call may take.  Generous, because the poll is a *long* poll —
-#: the far end holds the request open until it has something to say — and the
-#: number is the far end's cadence, not ours to shorten.
+
+def _client_version(version: str) -> str:
+    """The dotted version as `iLink-App-ClientVersion` packs it: `0x00MMNNPP`.
+
+    Derived rather than written beside :data:`CHANNEL_VERSION`, so a protocol
+    bump is one edit and the two headers cannot disagree about which release
+    this client claims to be.
+    """
+    parts = [int(part) for part in version.split(".")]
+    major, minor, patch = (parts + [0, 0, 0])[:3]
+    return str(((major & 0xFF) << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF))
+
+
+ILINK_APP_CLIENT_VERSION = _client_version(CHANNEL_VERSION)
+BOT_AGENT = "slife2-wechat/1.0.0 (python)"
 
 
 @dataclass(frozen=True)
@@ -260,10 +271,12 @@ class IlinkClient:
         self._bot_token: str = ""
         self._base_url: str = BASE_URL
         self._get_updates_buf: str = ""
-        self._typing_tickets: dict[str, str] = {}
-        #: The bot's own iLink identity, from the login.  Not the peer's: the
-        #: `getconfig` endpoint that mints a typing ticket is a *bot*-level
-        #: call, so the two ids must not be confused.
+        #: Each peer's typing ticket and when it was fetched (`monotonic`), for
+        #: `pacing.typing_ticket_ttl`.
+        self._typing_tickets: dict[str, tuple[str, float]] = {}
+        #: The account that scanned the login, as the bridge named it.  It seeds
+        #: the status answer's peer; it is **not** the id `getconfig` takes —
+        #: that one is each message's sender (`_typing_ticket`).
         self._ilink_user_id: str = ""
         self._ilink_bot_id: str = ""
         #: Who last messaged, so the model can be told who a reply goes to.
@@ -375,6 +388,10 @@ class IlinkClient:
         self._base_url = base_url or BASE_URL
         self._ilink_user_id = ilink_user_id
         self._ilink_bot_id = ilink_bot_id
+        # A ticket belongs to the login that minted it; a new token is a new
+        # account as often as not, and a ticket from the old one would be used
+        # for the new one's first reply.
+        self._typing_tickets.clear()
 
     async def try_restore_session(
         self, saved: Mapping[str, Any] | None, *, max_age: float
@@ -496,6 +513,7 @@ class IlinkClient:
         self._bot_token = ""
         self._base_url = BASE_URL
         self._get_updates_buf = ""
+        self._typing_tickets.clear()
         self._ilink_user_id = ""
         self._ilink_bot_id = ""
         self.last_contact = {"from_id": None, "context_token": None}
@@ -567,13 +585,15 @@ class IlinkClient:
     ) -> dict[str, Any] | None:
         """Show (`status=1`) or hide (`status=2`) the typing indicator.
 
-        Silent when no ticket can be had: a typing indicator is a courtesy and
-        a failed one is not a failed turn.
+        Answers `None` when no ticket can be had: a typing indicator is a
+        courtesy and a failed one is not a failed turn.  A ticket that *was*
+        had and a call the bridge refused are different things, and the refusal
+        is logged so a phone that shows nothing has a line to look for.
         """
         ticket = await self._typing_ticket(to_user_id, context_token)
         if not ticket:
             return None
-        return await self._post(
+        result = await self._post(
             "ilink/bot/sendtyping",
             {
                 "ilink_user_id": to_user_id,
@@ -581,42 +601,80 @@ class IlinkClient:
                 "status": status,
                 "base_info": base_info(),
             },
+            timeout=_T.timeouts.transport.wechat_config,
         )
+        if result.get("ret") not in (None, 0):
+            logger.debug(
+                "typing_refused peer=%s ret=%s errmsg=%s",
+                to_user_id,
+                result.get("ret"),
+                result.get("errmsg") or "",
+            )
+        return result
 
     async def _typing_ticket(self, user_id: str, context_token: str) -> str:
         """The per-conversation ticket a typing indicator needs, cached.
 
-        `getconfig` is a **bot-level** endpoint: it wants the bot's own iLink
-        id, which the login returned, and not the id of whoever is being
-        answered — that one goes to `sendtyping` as the target.  Passing the
-        sender's id here would be the mistake.
+        **`getconfig` takes the peer's id** — the `from_user_id` the message
+        carried — and that conversation's `context_token`; the ticket it mints
+        is what `sendtyping` displays to that person.  The login's own
+        `ilink_user_id` is the account that scanned the code, which is the same
+        value only when that account is the one writing.
+
+        A ticket is cached per peer for `pacing.typing_ticket_ttl`, and an empty
+        answer is not cached: a bridge that was briefly unavailable must not
+        disable the indicator for the rest of the process's life.  The empty
+        answer is a warning rather than a debug line, because nothing else will
+        say why a phone shows nothing.
         """
+        if not user_id:
+            # A message with no sender has no conversation to show the hint in;
+            # asking `getconfig` without an id only earns `ret=-2`.
+            logger.debug("typing_ticket_skipped reason=no_peer")
+            return ""
         cached = self._typing_tickets.get(user_id)
-        if cached:
-            return cached
-        bot_id = self._ilink_user_id or self._ilink_bot_id
-        body: dict[str, Any] = {"base_info": base_info()}
-        if bot_id:
-            body["ilink_user_id"] = bot_id
+        if cached and (
+            time.monotonic() - cached[1] < _T.timeouts.pacing.typing_ticket_ttl
+        ):
+            return cached[0]
+        body: dict[str, Any] = {
+            "ilink_user_id": user_id,
+            "base_info": base_info(),
+        }
         if context_token:
             body["context_token"] = context_token
-        config = await self._post("ilink/bot/getconfig", body)
+        config = await self._post(
+            "ilink/bot/getconfig", body, timeout=_T.timeouts.transport.wechat_config
+        )
         ticket = str(config.get("typing_ticket") or "")
-        if ticket:
-            self._typing_tickets[user_id] = ticket
+        if ticket and config.get("ret") in (None, 0):
+            self._typing_tickets[user_id] = (ticket, time.monotonic())
         else:
-            logger.debug("typing_ticket_empty ilink_user_id=%s", bot_id)
+            logger.warning(
+                "typing_ticket_unavailable peer=%s ret=%s errmsg=%s",
+                user_id,
+                config.get("ret"),
+                config.get("errmsg") or "",
+            )
+            return ""
         return ticket
 
     # ── The wire ─────────────────────────────────────────────────────────
 
-    async def _get(self, path: str, base_url: str = "") -> dict[str, Any]:
-        return await self._call("GET", path, None, base_url)
+    async def _get(
+        self, path: str, base_url: str = "", *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        return await self._call("GET", path, None, base_url, timeout=timeout)
 
     async def _post(
-        self, path: str, body: Mapping[str, Any], base_url: str = ""
+        self,
+        path: str,
+        body: Mapping[str, Any],
+        base_url: str = "",
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        return await self._call("POST", path, body, base_url)
+        return await self._call("POST", path, body, base_url, timeout=timeout)
 
     async def _call(
         self,
@@ -624,6 +682,8 @@ class IlinkClient:
         path: str,
         body: Mapping[str, Any] | None,
         base_url: str,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """One call: build the URL, hand it to the seam, decode what comes back.
 
@@ -640,6 +700,6 @@ class IlinkClient:
             url,
             headers=headers(self._bot_token),
             body=body,
-            timeout=_T.timeouts.transport.wechat_request,
+            timeout=timeout or _T.timeouts.transport.wechat_request,
         )
         return _decoded(answer, path)

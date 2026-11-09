@@ -187,6 +187,10 @@ class Transport:
     rerank: float = 30.0
     #: One request to the WeChat backend.
     wechat_request: float = 120.0
+    #: One of the WeChat calls that is not the long poll: `getconfig` and
+    #: `sendtyping` answer at once, so a hung one must not hold a turn's typing
+    #: keep-alive for the poll's whole budget.
+    wechat_config: float = 10.0
     #: Handing a message to a window: it returns when the words are down the
     #: stream, not when the turn they started ends.
     window: float = 10.0
@@ -273,9 +277,15 @@ class Pacing:
     #: The QR status check while a login waits for a scan.
     qr_poll: float = 2.0
     #: The typing indicator: how often it is refreshed, and how long the
-    #: keepalive may run before it gives up on the agent ever answering.
-    typing_refresh: float = 8.0
+    #: keepalive may run before it gives up on the agent ever answering.  Five
+    #: seconds is the official client's keep-alive cadence, and the indicator
+    #: expires sooner than a longer refresh would notice.
+    typing_refresh: float = 5.0
     typing_max_lifetime: float = 300.0
+    #: How long one peer's `typing_ticket` is reused before `getconfig` mints
+    #: another.  The ticket lives about a day; refreshing inside that keeps a
+    #: process that outlives one login from presenting a retired one.
+    typing_ticket_ttl: float = 43200.0  # 12 h
     #: A message that repeats within this is the same message — the WeChat
     #: backend redelivers, and answering twice is worse than answering once.
     wechat_dedup: float = 30.0

@@ -1538,6 +1538,17 @@ class Wechat:
                 f"is marked as no longer working, and `wechat_login` is usually "
                 f"the fix."
             )
+        # The bridge's acknowledgement carries `ret` too, and it is a different
+        # "no" from the envelope above: 0 is accepted, anything else is the
+        # call refused — a rate limit is the usual one — and the login is still
+        # good, so the session is not marked dead over it.
+        ret = result.get("ret")
+        if ret not in (None, 0):
+            client.last_error = f"send refused: ret={ret}"
+            raise ToolError(
+                f"the server refused the send (ret={ret}); the login is still "
+                f"connected, so try again in a moment."
+            )
         with contextlib.suppress(Exception):
             await client.send_typing(peer, token, status=2)
         logger.debug(

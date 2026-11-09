@@ -96,7 +96,12 @@ class Bridge:
         self.paths: list[str] = []
         self.sent: list[dict[str, Any]] = []
         self.typing: list[int] = []
+        #: Every `getconfig` body, so a test can say which id mints a ticket.
+        self.configs: list[dict[str, Any]] = []
         self.ticket = "ticket-1"
+        #: A `sendmessage` acknowledgement a test wants to steer: `ret` is the
+        #: bridge's third way of saying no.
+        self.send_answer: dict[str, Any] | None = None
         #: An unreachable bridge: every call raises, which is what a machine
         #: that has just booted and whose proxy is not up yet looks like.
         self.down = False
@@ -137,6 +142,8 @@ class Bridge:
             return {"msgs": list(self.messages), "get_updates_buf": self.cursor}
         if path == "ilink/bot/sendmessage":
             self.sent.append(dict(body))
+            if self.send_answer is not None:
+                return self.send_answer
             if self.reject_send:
                 return self.send_envelope or {"errno": 1, "error": "token revoked"}
             return {"message_id": "m-1"}
@@ -144,6 +151,7 @@ class Bridge:
             self.typing.append(int(body.get("status") or 0))
             return {}
         if path == "ilink/bot/getconfig":
+            self.configs.append(dict(body))
             return {"typing_ticket": self.ticket}
         return {}
 
@@ -702,6 +710,29 @@ async def test_the_typing_hint_is_up_while_the_turn_runs(
         await made.close()
 
 
+@pytest.mark.asyncio
+async def test_the_typing_ticket_is_minted_for_the_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`getconfig` is asked about the person being answered, not the login.
+
+    The two ids are the same only when the account that scanned the code is
+    also the one writing; for anybody else, a ticket minted for the login is a
+    ticket for the wrong conversation and the phone shows nothing.
+    """
+    signed_in("jack")  # the login's own account is `bot-user-1`
+    made = rig(monkeypatch)
+    made.delivery.gate = asyncio.Event()
+    made.bridge.messages = [message("在吗", peer="peer-1")]
+    await made.plugin.start()
+    try:
+        await until(lambda: made.bridge.configs)
+    finally:
+        await made.close()
+
+    assert made.bridge.configs[0]["ilink_user_id"] == "peer-1"
+
+
 # --- the session file ---------------------------------------------------------
 
 
@@ -923,6 +954,28 @@ async def test_a_rejected_send_is_not_reported_as_sent(
     assert after["connected"] is False
     assert "rejected" in after["error"]
     assert not session_path("jack").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_send_keeps_the_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero `ret` is a refused call, not a dead token.
+
+    The bridge acknowledges a send with `ret`: 0 accepted, anything else
+    refused — a rate limit is the usual one.  Forgetting the login over that
+    would cost a working account a fresh scan for a wait.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+    made.bridge.send_answer = {"ret": -2, "errmsg": "rate limited"}
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        with pytest.raises(ToolError, match="ret=-2"):
+            await ask(client, "wechat_send_message", peer_wechat_id="peer-1", text="hi")
+        after = await ask(client, "wechat_check_status")
+
+    assert after["connected"] is True
+    assert session_path("jack").exists()
 
 
 @pytest.mark.asyncio
