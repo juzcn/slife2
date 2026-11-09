@@ -51,6 +51,7 @@ from slife2.libs.host.config import (
     _cli_tool,
     load_cached,
 )
+from slife2.libs.host.tool_config import CliConfig, cli_entry, load_cli
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
     LIST_PAGE,
@@ -145,7 +146,7 @@ def rows(entries: Mapping[str, CliToolSettings]) -> list[dict[str, Any]]:
 # actually on this machine.
 
 
-def _prepare(name: str, entry: dict[str, Any]) -> CliToolSettings:
+def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     """Validate a `cli:` entry and write it, or raise why it cannot be.
 
     **Raised, not returned**, which is the contract `skill_set` and `skill_use`
@@ -169,17 +170,18 @@ def _prepare(name: str, entry: dict[str, Any]) -> CliToolSettings:
     The parser below (`_cli_tool`) needs only the entry and the name, and the
     write is `slife2.libs.host.configfile`'s own.
     """
-    command = entry.get("command")
+    command = config.command
     try:
         # The same split `_missing_program` makes, moved before the write: the
         # entry is what the argv runner reads, and refusing an unsplittable line
         # here is the only way the refusal lands on the call rather than a note.
-        shlex.split(command if isinstance(command, str) else "", posix=False)
+        shlex.split(command, posix=False)
     except ValueError as exc:
         raise ToolError(
             f"`{command}` cannot be split into a command line — check for an "
             f"unbalanced quote, or how the path is quoted"
         ) from exc
+    entry = cli_entry(config)
     try:
         settings = _cli_tool(entry, name)
         configfile.upsert(SECTION, name, entry)
@@ -227,7 +229,7 @@ def _missing_program(command: str) -> str:
 
 
 def _describe(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One row of `cli_list` — the entry as the file has it, and its switch.
+    """One row of `cli_list` — what the command is, and whether it is usable.
 
     **No state word beyond the switch**, and that is this family's whole
     difference: `ready` and `failed` are facts about a link, and a command has
@@ -235,24 +237,24 @@ def _describe(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     and neither is something a running process can watch for.  So the two words
     are `on` and `off`, and `off` is the word the hub uses for a switch in the
     same position.
+
+    **A listing is for choosing, not for reading the entry.**  `command` is how
+    it is used, `description` is what it is for, `install` is how to get it, and
+    `missing_program` is the one machine fact that can make it unusable; the
+    `source` provenance is `cli_get`'s.
     """
+    command = str(raw.get("command") or "")
     row: dict[str, Any] = {
         "name": name,
         "state": "off" if raw.get("enabled") is False else "on",
-        "command": str(raw.get("command") or ""),
+        "command": command,
     }
     if install := raw.get("install"):
         row["install"] = str(install)
-    if isinstance(source := raw.get("source"), dict):
-        given = {
-            str(key): str(source[key])
-            for key in ("type", "url", "version")
-            if source.get(key)
-        }
-        if given:
-            row["source"] = given
     if description := str(raw.get("description") or ""):
         row["description"] = description
+    if missing := _missing_program(command):
+        row["missing_program"] = missing
     return row
 
 
@@ -302,12 +304,26 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     would be whichever home this process happened to be started in.
     """
 
+    def entry_of(name: str) -> CliConfig:
+        """One entry's canonical object, or this family's miss."""
+        raw = configfile.read_section(SECTION).get(name)
+        if not isinstance(raw, dict):
+            raise ToolError(
+                f"'{name}' is not recorded under `cli:` — `cli_set` records "
+                f"one, `cli_list` shows what is there."
+            )
+        try:
+            return load_cli(raw, where=f"cli.{name}")
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
     @mcp.tool(name="cli_list", meta=FOR_THE_MODEL)
     async def cli_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the commands recorded under `cli:`, with their switch.
 
-        Each is a command recorded as installed on this machine, and a search
-        finds one by what it does.
+        Each row says what the command is for, whether it is on, its invocation
+        and how to install it, and `missing_program` when the program is not on
+        `PATH`. The `source` provenance is `cli_get`'s, not the browse's.
 
         Args:
             limit: How many entries this page may hold. Omit for the cap.
@@ -315,62 +331,65 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
         Returns:
             `commands` — one row per entry, each with `name`, `state` (`on` or
-            `off`), `command`, and `install`, `source` and `description` when the
-            entry has them — and `total`, `limit` and `offset`, so
+            `off`), `command`, `description` when the entry has one, `install`
+            when it has one, and `missing_program` when the program is absent —
+            and `total`, `limit` and `offset`, so
             `offset + len(commands) < total` says whether more remain.
         """
         written = configfile.read_section(SECTION)
         rows = [_describe(name, raw) for name, raw in written.items()]
         return listed(rows, "commands", limit, offset, cap=LIST_PAGE)
 
-    @mcp.tool(name="cli_set", meta=FOR_THE_MODEL)
-    async def cli_set(
-        name: str,
-        command: str,
-        description: str,
-        install: str = "",
-        source: dict[str, str] | None = None,
-        enabled: bool = True,
-    ) -> dict[str, Any]:
-        """Record a command that is already installed on this machine.
+    @mcp.tool(name="cli_get", meta=FOR_THE_MODEL)
+    async def cli_get(name: str) -> dict[str, Any]:
+        """Read one recorded command's whole entry, by name.
 
-        It writes the entry down for a search to find, installing and running
-        nothing. This is the whole entry: a field left out is dropped, so
-        restate everything.
+        The answer is the canonical entry — `config` has `command`,
+        `description`, `install`, `source` and `enabled` — so `cli_set` takes
+        the same object back. `state` is `on` or `off`, and `missing_program`
+        names the program this machine has not got, when it has not.
 
         Args:
             name: The key it is recorded under.
-            command: The invocation, resolved on `PATH` — one string, which may
-                be more than one word (`python -m mytool`).
-            description: What it does, in the words a search should find it by.
-            install: How to get it, for somebody who does not have it.
-            source: Where the entry came from — `url`, `type`, `version`.
-            enabled: False records it and keeps it out of search.
-
-        Returns:
-            `name`, `enabled` and `state` (`on`, or `off` for a switch written
-            off) — and `missing_program`, the program this entry names that is
-            not on `PATH`, when there is one. That is a note about the machine
-            and not about the entry: it is written down either way.
         """
-        settings = _prepare(
-            name,
-            {
-                "command": command,
-                "description": description or None,
-                "install": install or None,
-                "source": source,
-                "enabled": enabled,
-            },
-        )
+        config = entry_of(name)
+        answer: dict[str, Any] = {
+            "name": name,
+            "config": config.model_dump(),
+            "state": "on" if config.enabled else "off",
+        }
+        if missing := _missing_program(config.command):
+            answer["missing_program"] = missing
+        return answer
+
+    @mcp.tool(name="cli_set", meta=FOR_THE_MODEL)
+    async def cli_set(name: str, config: CliConfig) -> dict[str, Any]:
+        """Record or replace one command — the whole entry, and no patch.
+
+        It writes the entry down for a search to find, installing and running
+        nothing. Every field is required; a field left out is a schema error,
+        not a silent default. Read `cli_get`, change what you mean to change,
+        and pass the whole `config` back.
+
+        The answer is the entry as written — the same `config` shape `cli_get`
+        gives — plus `state` (`on`, or `off` for a switch written off), and
+        `missing_program` when the program this entry names is not on `PATH`.
+        That is a note about the machine and not about the entry: it is written
+        down either way.
+
+        Args:
+            name: The key it is recorded under.
+            config: The whole entry — the `config` object `cli_get` returned.
+        """
+        settings = _prepare(name, config)
         homes.current().entries[name] = settings
         logger.info("cli_set name=%s", name)
         answer: dict[str, Any] = {
             "name": name,
-            "enabled": enabled,
-            "state": "on" if enabled else "off",
+            "config": config.model_dump(),
+            "state": "on" if config.enabled else "off",
         }
-        if missing := _missing_program(command):
+        if missing := _missing_program(config.command):
             answer["missing_program"] = missing
         return answer
 

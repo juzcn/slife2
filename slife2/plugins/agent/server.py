@@ -121,7 +121,6 @@ from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host import configfile, statefile
 from slife2.libs.host.config import (
     AGENT_SERVER_NAME,
-    API_BACKENDS,
     API_SERVER_NAMES,
     CABINET_SERVER_NAME,
     CONTEXT_SERVER_NAME,
@@ -131,6 +130,14 @@ from slife2.libs.host.config import (
     ConfigError,
     for_the_call,
     load_cached,
+)
+from slife2.libs.host.model_config import (
+    ModelEntry,
+    load_model,
+    load_provider,
+    model_entry,
+    show_api_key,
+    to_reference,
 )
 from slife2.libs.host.paths import (
     agent_dir,
@@ -3196,6 +3203,58 @@ def build_server(
                 return f"{name}/{models[0].get('model', '')}"
         return ""
 
+    def _model_ref(ref: str) -> tuple[str, str]:
+        """`provider/model`, split — the one reference check the two tools share."""
+        provider, slash, model = ref.strip().partition("/")
+        provider, model = provider.strip(), model.strip()
+        if not slash or not provider or not model:
+            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
+        return provider, model
+
+    def _model_config(ref: str, providers: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """One model's whole entry, validated by the canonical config object.
+
+        **The file is read raw and judged, not trusted.**  A hand-written typo
+        — `imgae`, `temprature`, an unknown `compat` key — is the failure the
+        shared model exists to catch, so this raises rather than returning the
+        shape the file happens to have.  A literal API key is written as `""`:
+        the reference is what a caller restates, and the secret never travels.
+        """
+        provider_name, model_id = _model_ref(ref)
+        entry = providers.get(provider_name)
+        if not isinstance(entry, dict):
+            raise ToolError(f"`{ref}` is not a model this config defines.")
+        try:
+            provider = load_provider(entry, where=f"providers.{provider_name}")
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        models = entry.get("models")
+        spec = (
+            next(
+                (
+                    one
+                    for one in models
+                    if isinstance(one, dict) and one.get("model") == model_id
+                ),
+                None,
+            )
+            if isinstance(models, list)
+            else None
+        )
+        if spec is None:
+            raise ToolError(f"`{ref}` is not a model this config defines.")
+        try:
+            model = load_model(spec, where=f"providers.{provider_name}")
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return {
+            "provider": {
+                **provider.model_dump(),
+                "api_key": show_api_key(provider.api_key),
+            },
+            "model": model.model_dump(),
+        }
+
     async def _ensure_backend(api: str) -> dict[str, Any]:
         """Start the model server for an api nothing was serving.
 
@@ -3246,15 +3305,17 @@ def build_server(
         """List the models this config defines.
 
         Reads the config file, so it is what the next conversation would use.
+        Each row carries `ref`, the `provider/model` reference `model_get` and
+        `model_set` take.
 
         Returns:
-            `models`, one row per model: `provider` and `model`, which name it —
-            `provider/model` is the reference the rest of these tools take —
-            `name`, whether it is the `default`, and whether it reasons or reads
-            images, under `marks`; and `context_window` and `max_tokens`, both
-            `0` when the config does not say.  Plus `total`, how many models
-            there are, and `default`, the reference the system runs on — `null`
-            when the config names none.
+            `models`, one row per model: `ref` (the `provider/model` reference),
+            `provider`, `model`, `name`, whether it is the `default`, and
+            whether it reasons or reads images, under `marks`; and
+            `context_window` and `max_tokens`, both `0` when the config does
+            not say.  Plus `total`, how many models there are, and `default`,
+            the reference the system runs on — `null` when the config names
+            none.
         """
         try:
             providers = _providers()
@@ -3286,6 +3347,7 @@ def build_server(
                     marks.append("image")
                 models.append(
                     {
+                        "ref": f"{provider}/{model}",
                         "provider": provider,
                         "model": model,
                         "name": str(spec.get("name") or model),
@@ -3296,117 +3358,114 @@ def build_server(
                 )
         return {"models": models, "total": len(models), "default": active or None}
 
-    @mcp.tool(name="model_set", meta=FOR_THE_MODEL)
-    async def model_set(
-        ref: str,
-        name: str,
-        api: str = "",
-        base_url: str = "",
-        api_key: str = "",
-        reasoning: bool = False,
-        input: list[str] | None = None,
-        context_window: int = 0,
-        max_tokens: int = 0,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        compat: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Add or update one model, creating its provider.
+    @mcp.tool(name="model_get", meta=FOR_THE_MODEL)
+    async def model_get(ref: str) -> dict[str, Any]:
+        """Read one model's whole entry, by `provider/model`.
 
-        This is the model's whole entry: a field left out is dropped, so restate
-        everything it should have. The next conversation can name it.
+        The answer is the canonical entry — `config.provider` and
+        `config.model`, every writable field present — so `model_set` takes the
+        same object back. `default` says whether the config's `default:` names
+        this model.
+
+        `config.provider.api_key` is the `${VAR}`/`keyring:` reference, never
+        the resolved key; empty means the file has a literal key that is not
+        shown. A hand-written typo in the entry is refused here rather than
+        answered as if it were the truth.
 
         Args:
-            ref: The model, as `provider/model` — the same reference its
-                siblings take. The provider is created when it is new.
-            name: The display name.
-            api: The wire protocol — `openai-completions`,
-                `anthropic-messages` or `openai-responses`. Empty uses the
-                provider's own, or openai-completions for a new one.
-            base_url: The endpoint. A new provider needs it.
-            api_key: A `${VAR}` reference, so the key stays out of the file. A
-                new provider needs it.
-            reasoning: The model thinks natively, and its reasoning is kept on
-                the turn.
-            input: What it reads — `["text"]`, or `["text", "image"]`.
-            context_window: Its context window, in tokens.
-            max_tokens: Its output limit, in tokens.
-            temperature: Sampling temperature.
-            top_p: Nucleus sampling.
-            compat: Wire quirks the endpoint needs, e.g. `{"thinking": "omit"}`.
-
-        Returns:
-            `ref`, and what the write did: `created` when this call added a model
-            the file did not have rather than replacing one it did, and
-            `provider_created` when it made the provider too. When this call also
-            had to start the provider's model server, `ready` says whether it is
-            up, and `error` says why it is not.
+            ref: The model, as `provider/model`.
         """
-        provider, _slash, model = ref.strip().partition("/")
-        provider, model, name = provider.strip(), model.strip(), name.strip()
-        if not provider or not model:
-            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
-        if not name:
+        ref = ref.strip()
+        providers = _providers()
+        return {
+            "ref": ref,
+            "config": _model_config(ref, providers),
+            "default": ref == _active_default(providers),
+        }
+
+    @mcp.tool(name="model_set", meta=FOR_THE_MODEL)
+    async def model_set(ref: str, config: ModelEntry) -> dict[str, Any]:
+        """Add or replace one model — the whole entry, and no patch.
+
+        Every field is required: a field left out is a schema error, not a
+        silent default. Read `model_get`, change what you mean to change, and
+        pass the whole `config` back.
+
+        `config.provider` is shared with the provider's other models: `api`,
+        `base_url` and `api_key` belong to the provider, not this model.
+        `api_key` is a `${VAR}`/`keyring:` reference; empty keeps an existing
+        provider's key, and is refused for a new provider.
+
+        The answer is the entry as written — the same `config` shape
+        `model_get` gives — plus `created`/`provider_created`, and
+        `ready`/`error` when this call started the provider's backend.
+
+        Args:
+            ref: The model, as `provider/model`.
+            config: The whole entry — the `config` object `model_get` returned.
+        """
+        provider, model = _model_ref(ref)
+        if config.model.model != model:
             raise ToolError(
-                "a model needs a display `name` — it is what the model is called "
-                "in a conversation."
-            )
-        if api and api not in API_BACKENDS:
-            raise ToolError(
-                f"{api!r} is not a wire protocol; known: {', '.join(API_BACKENDS)}."
+                f"`{ref}` names the model {model!r}, but `config.model.model` "
+                f"is {config.model.model!r}; they must match."
             )
         try:
-            providers = _providers()
-        except ConfigError as exc:
+            api_key = to_reference(config.provider.api_key)
+        except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
+        providers = _providers()
         existing = providers.get(provider)
         creating = not isinstance(existing, dict)
-        if creating and not (base_url and api_key):
+        if creating and not (config.provider.base_url and api_key):
             raise ToolError(
                 f"`{provider}` is a new provider, so it needs `base_url` and "
                 f"`api_key` — the key as a `${{VAR}}` reference, so it stays out "
                 f"of the file."
             )
-        known = set()
-        for entry in providers.values():
-            if isinstance(entry, dict) and entry.get("api"):
-                known.add(str(entry["api"]))
-        entry_api = api or (existing or {}).get("api") or "openai-completions"
+        if not config.provider.base_url:
+            raise ToolError(
+                f"`{provider}` needs `base_url` — the endpoint its models are "
+                f"reached at."
+            )
+        entry_api = config.provider.api
+        known = {
+            str(entry.get("api"))
+            for entry in providers.values()
+            if isinstance(entry, dict) and entry.get("api")
+        }
         before = [
             one
-            for one in ((existing or {}).get("models") or [])
+            for one in (
+                ((existing or {}).get("models") if isinstance(existing, dict) else None)
+                or []
+            )
             if isinstance(one, dict)
         ]
         had_model = any(one.get("model") == model for one in before)
 
         def change(current: dict[str, Any]) -> dict[str, Any]:
             entry = dict(current)
-            if creating or api:
-                entry["api"] = entry_api
-            if base_url:
-                entry["base_url"] = base_url
+            entry["api"] = config.provider.api
+            entry["base_url"] = config.provider.base_url
             if api_key:
                 entry["api_key"] = api_key
-            spec: dict[str, Any] = {"model": model, "name": name}
-            for key, value in (
-                ("reasoning", reasoning or None),
-                ("input", input),
-                ("context_window", context_window or None),
-                ("max_tokens", max_tokens or None),
-                ("temperature", temperature),
-                ("top_p", top_p),
-                ("compat", compat),
-            ):
-                if value is not None:
-                    spec[key] = value
-            # The changed model goes first and its siblings keep their order, so
-            # a `set` on one model of a provider leaves the rest of the file
-            # exactly as it was.
-            entry["models"] = [
-                spec,
-                *(one for one in before if one.get("model") != model),
+            spec = model_entry(config.model)
+            # Siblings are read from the entry `update_entry` handed us, not
+            # from the earlier read: a concurrent edit between the two must not
+            # be dropped by this write.  An existing model is replaced in
+            # place, so `set(get(...))` does not reorder the list; a new one
+            # goes first, where a reader looks for it.
+            models = [
+                one for one in (current.get("models") or []) if isinstance(one, dict)
             ]
+            if any(one.get("model") == model for one in models):
+                entry["models"] = [
+                    spec if one.get("model") == model else one for one in models
+                ]
+            else:
+                entry["models"] = [spec, *models]
             return entry
 
         try:
@@ -3416,6 +3475,7 @@ def build_server(
 
         answer: dict[str, Any] = {
             "ref": f"{provider}/{model}",
+            "config": _model_config(f"{provider}/{model}", _providers()),
             "created": not had_model,
             "provider_created": creating,
         }

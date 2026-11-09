@@ -85,6 +85,24 @@ def section(data_dir: Path) -> dict[str, Any]:
     return read_section("cli", path=data_dir / "slife2.yaml")
 
 
+def cli_config(
+    *,
+    command: str = "gh",
+    description: str = "d",
+    install: str = "",
+    source: dict[str, str] | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """The whole `config` object `cli_set` takes — every field, every time."""
+    return {
+        "command": command,
+        "description": description,
+        "install": install,
+        "source": {} if source is None else source,
+        "enabled": enabled,
+    }
+
+
 def test_the_server_is_named_where_a_client_can_find_it() -> None:
     assert SERVER_NAME == "slife2-cli"
 
@@ -149,6 +167,7 @@ async def test_the_model_gets_the_tools_that_edit_the_section(
         listed = {tool.name for tool in await client.list_tools()}
 
     assert listed == {
+        "cli_get",
         "cli_list",
         "cli_set",
         "cli_remove",
@@ -193,13 +212,19 @@ async def test_recording_a_command_writes_it_and_declares_it_at_once(
             client,
             "cli_set",
             name="gh",
-            command="gh",
-            description="GitHub from the command line.",
-            install="winget install GitHub.cli",
+            config=cli_config(
+                command="gh",
+                description="GitHub from the command line.",
+                install="winget install GitHub.cli",
+            ),
         )
         declared = await client.call_tool(LIST_SOURCES, {})
 
-    assert (answer["name"], answer["enabled"], answer["state"]) == ("gh", True, "on")
+    assert (answer["name"], answer["config"]["enabled"], answer["state"]) == (
+        "gh",
+        True,
+        "on",
+    )
     assert section(isolated_runtime)["gh"]["command"] == "gh"
     names = {row["name"] for row in declared.data["sources"][0]["rows"]}
     assert "cli:gh" in names, "declared without waiting for a restart"
@@ -221,8 +246,10 @@ async def test_a_command_that_is_not_installed_says_so(isolated_runtime: Path) -
             client,
             "cli_set",
             name="not-a-real-program",
-            command="definitely-not-installed-anywhere-9f3a",
-            description="d",
+            config=cli_config(
+                command="definitely-not-installed-anywhere-9f3a",
+                description="d",
+            ),
         )
 
     assert nowhere["missing_program"] == "definitely-not-installed-anywhere-9f3a"
@@ -243,8 +270,7 @@ async def test_a_command_that_is_on_path_has_nothing_to_report(
             client,
             "cli_set",
             name="interpreter",
-            command=sys.executable,
-            description="d",
+            config=cli_config(command=sys.executable, description="d"),
         )
 
     assert "missing_program" not in answer
@@ -274,11 +300,118 @@ async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
     command = r'"C:\Program Files\tool\tool.exe" --json'
     async with Client(build_server(config_for(isolated_runtime))) as client:
         answer = await ask(
-            client, "cli_set", name="quoted", command=command, description="d"
+            client,
+            "cli_set",
+            name="quoted",
+            config=cli_config(command=command, description="d"),
         )
 
     assert asked == [r"C:\Program Files\tool\tool.exe"], "the whole program, quotes off"
     assert answer["missing_program"] == r"C:\Program Files\tool\tool.exe"
+
+
+@pytest.mark.asyncio
+async def test_get_returns_the_whole_entry(isolated_runtime: Path) -> None:
+    """Every writable field, so `cli_set` can take the same object back."""
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        answer = await ask(client, "cli_get", name="yt-dlp")
+
+    config = answer["config"]
+    assert config["command"] == "yt-dlp"
+    assert config["description"] == "Download a video."
+    assert config["install"] == "uv pip install yt-dlp"
+    assert config["source"] == {}
+    assert config["enabled"] is True
+    assert answer["state"] == "on"
+
+
+@pytest.mark.asyncio
+async def test_get_then_set_is_a_no_op(isolated_runtime: Path) -> None:
+    """`set(get())` reproduces the file; the object is the whole entry."""
+    config = config_for(isolated_runtime)
+    before = section(isolated_runtime)
+
+    async with Client(build_server(config)) as client:
+        config = (await ask(client, "cli_get", name="yt-dlp"))["config"]
+        await ask(client, "cli_set", name="yt-dlp", config=config)
+
+    assert section(isolated_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_setting_enabled_false_keeps_the_row_and_switches_it_off(
+    isolated_runtime: Path,
+) -> None:
+    """There is no server to stop; the switch is the catalogue row's verdict."""
+    config = config_for(isolated_runtime)
+    async with Client(build_server(config)) as client:
+        off = await ask(
+            client,
+            "cli_set",
+            name="yt-dlp",
+            config=cli_config(
+                command="yt-dlp",
+                description="Download a video.",
+                install="uv pip install yt-dlp",
+                enabled=False,
+            ),
+        )
+        declared_off = await client.call_tool(LIST_SOURCES, {})
+        off_entry = section(isolated_runtime)["yt-dlp"]
+        on = await ask(
+            client,
+            "cli_set",
+            name="yt-dlp",
+            config=cli_config(
+                command="yt-dlp",
+                description="Download a video.",
+                install="uv pip install yt-dlp",
+                enabled=True,
+            ),
+        )
+
+    assert off["state"] == "off" and off["config"]["enabled"] is False
+    assert off_entry["enabled"] is False
+    row = next(
+        row
+        for row in declared_off.data["sources"][0]["rows"]
+        if row["name"] == "cli:yt-dlp"
+    )
+    assert row["status"] == "disabled", "the row is still there, and says off"
+    assert on["state"] == "on" and on["config"]["enabled"] is True
+    assert "enabled" not in section(isolated_runtime)["yt-dlp"], "on is the default"
+
+
+@pytest.mark.asyncio
+async def test_get_says_when_the_program_is_missing(isolated_runtime: Path) -> None:
+    """The machine fact is in the read too, not only in the write's answer."""
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        await ask(
+            client,
+            "cli_set",
+            name="missing",
+            config=cli_config(command="definitely-not-installed-anywhere-9f3a"),
+        )
+        answer = await ask(client, "cli_get", name="missing")
+
+    assert answer["missing_program"] == "definitely-not-installed-anywhere-9f3a"
+
+
+@pytest.mark.asyncio
+async def test_the_set_schema_is_the_prompt(isolated_runtime: Path) -> None:
+    """The required fields are visible before the call."""
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        tools = {one.name: one for one in await client.list_tools()}
+
+    config = tools["cli_set"].input_schema["properties"]["config"]
+    assert config["additionalProperties"] is False
+    assert config["required"] == [
+        "command",
+        "description",
+        "install",
+        "source",
+        "enabled",
+    ]
 
 
 def test_the_dead_config_parameter_has_not_come_back() -> None:
@@ -293,7 +426,7 @@ def test_the_dead_config_parameter_has_not_come_back() -> None:
     """
     from slife2.plugins.cli.server import _prepare
 
-    assert list(inspect.signature(_prepare).parameters) == ["name", "entry"]
+    assert list(inspect.signature(_prepare).parameters) == ["name", "config"]
 
 
 @pytest.mark.asyncio
@@ -314,7 +447,11 @@ async def test_an_entry_with_no_command_is_refused_before_anything_is_written(
     async with Client(build_server(config)) as client:
         with pytest.raises(ToolError) as raised:
             await client.call_tool(
-                "cli_set", {"name": "nothing", "command": "", "description": "d"}
+                "cli_set",
+                {
+                    "name": "nothing",
+                    "config": cli_config(command="", description="d"),
+                },
             )
 
     assert "needs `command`" in str(raised.value)
@@ -412,8 +549,7 @@ async def test_a_command_line_that_cannot_be_split_is_refused_before_the_write(
                 "cli_set",
                 {
                     "name": "quoted",
-                    "command": 'tool "unterminated',
-                    "description": "d",
+                    "config": cli_config(command='tool "unterminated', description="d"),
                 },
             )
 
@@ -436,6 +572,7 @@ async def test_the_listing_shows_the_entry_and_its_switch(
     assert rows["yt-dlp"]["command"] == "yt-dlp"
     assert rows["yt-dlp"]["install"] == "uv pip install yt-dlp"
     assert rows["yt-dlp"]["description"] == "Download a video."
+    assert "source" not in rows["yt-dlp"], "provenance is `cli_get`'s"
     assert rows["iflow"]["state"] == "off"
     assert (listed["total"], listed["limit"], listed["offset"]) == (2, 50, 0)
 

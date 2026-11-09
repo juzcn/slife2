@@ -64,6 +64,34 @@ embeddings:
 default: local/big
 """
 
+#: One model with every field at a non-default value, so a `set` that changed
+#: one field and dropped another is visible.
+RICH = """\
+providers:
+  local:
+    api: openai-completions
+    base_url: https://local.test/v1
+    api_key: ${LOCAL_KEY}
+    models:
+      - model: big
+        name: Big
+        reasoning: true
+        input: [text, image]
+        context_window: 100000
+        max_tokens: 4000
+        temperature: 0.3
+        top_p: 0.9
+        compat:
+          thinking: omit
+          store: false
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
+default: local/big
+"""
+
 
 def write_config(data_dir: Path, text: str = CONFIG) -> Path:
     """This module's config, written where the loader looks for it."""
@@ -97,6 +125,49 @@ def written(isolated_runtime: Path) -> str:
 
 def section(isolated_runtime: Path) -> dict[str, Any]:
     return read_section("providers", path=isolated_runtime / "slife2.yaml")
+
+
+def model_config(
+    *,
+    model: str,
+    name: str = "",
+    api: str = "openai-completions",
+    base_url: str = "https://local.test/v1",
+    api_key: str = "${LOCAL_KEY}",
+    reasoning: bool = False,
+    input: list[str] | None = None,
+    context_window: int = 0,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    compat: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The whole `config` object `model_set` takes — every field, every time.
+
+    The point of the type is that a partial object is a schema error, so a test
+    that wants to exercise a refusal has to start from a complete one and
+    remove the field it is about.
+    """
+    return {
+        "provider": {"api": api, "base_url": base_url, "api_key": api_key},
+        "model": {
+            "model": model,
+            "name": name,
+            "reasoning": reasoning,
+            "input": ["text"] if input is None else input,
+            "context_window": context_window,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "compat": {
+                "thinking": None,
+                "stream_usage": None,
+                "store": None,
+                "cache_control": None,
+                **({} if compat is None else compat),
+            },
+        },
+    }
 
 
 # --- what the listing shows ---------------------------------------------------
@@ -143,13 +214,9 @@ async def test_adding_a_model_keeps_the_ones_beside_it(isolated_runtime) -> None
     fields.
     """
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(
-            client,
-            "model_set",
-            ref="local/third",
-            name="Third",
-            context_window=8000,
-        )
+        config = (await ask(client, "model_get", ref="local/small"))["config"]
+        config["model"].update(model="third", name="Third", context_window=8000)
+        answer = await ask(client, "model_set", ref="local/third", config=config)
         listed = await ask(client, "model_list")
 
     entry = section(isolated_runtime)["local"]
@@ -157,13 +224,12 @@ async def test_adding_a_model_keeps_the_ones_beside_it(isolated_runtime) -> None
     assert entry["api"] == "openai-completions", "the provider's own fields stay"
     assert entry["base_url"] == "https://local.test/v1"
     assert entry["api_key"] == "${LOCAL_KEY}", "and the reference, not the key"
-    assert answer == {
-        "ref": "local/third",
-        "created": True,
-        "provider_created": False,
-    }, "added, on a provider that was already there and needs no server started"
+    assert answer["created"] is True
+    assert answer["provider_created"] is False
+    assert answer["config"] == config, "the answer is the entry as written"
     assert any(
-        row["model"] == "third" and row["name"] == "Third" for row in listed["models"]
+        row["ref"] == "local/third" and row["name"] == "Third"
+        for row in listed["models"]
     )
 
 
@@ -174,15 +240,19 @@ async def test_setting_an_existing_model_replaces_its_own_entry(
     """A `set` is that model's whole entry — the rule the four sections'
     `*_set` tools already have, over a list instead of a mapping."""
     async with Client(server_for(isolated_runtime)) as client:
-        answer = await ask(client, "model_set", ref="local/small", name="Tiny")
+        config = (await ask(client, "model_get", ref="local/small"))["config"]
+        config["model"]["name"] = "Tiny"
+        answer = await ask(client, "model_set", ref="local/small", config=config)
+        after = await ask(client, "model_get", ref="local/small")
 
     assert answer["created"] is False, "one the file already had"
     assert answer["provider_created"] is False
+    assert after["config"] == config, "the whole entry, not a patch"
     entry = section(isolated_runtime)["local"]
-    assert [one["model"] for one in entry["models"]] == ["small", "big"]
-    assert "context_window" not in entry["models"][0], (
-        "the field the caller did not name is gone"
+    assert [one["model"] for one in entry["models"]] == ["big", "small"], (
+        "an existing model is replaced in place, not moved to the front"
     )
+    assert entry["models"][1]["name"] == "Tiny"
 
 
 @pytest.mark.asyncio
@@ -192,7 +262,12 @@ async def test_a_new_provider_needs_an_endpoint_and_a_key(isolated_runtime) -> N
 
     async with Client(server_for(isolated_runtime)) as client:
         with pytest.raises(ToolError) as refused:
-            await ask(client, "model_set", ref="fresh/m", name="M")
+            await ask(
+                client,
+                "model_set",
+                ref="fresh/m",
+                config=model_config(model="m", name="M", base_url="", api_key=""),
+            )
 
     assert "new provider" in str(refused.value)
     assert "base_url" in str(refused.value), "and what it needs instead"
@@ -210,11 +285,11 @@ async def test_an_unknown_wire_protocol_is_refused(isolated_runtime) -> None:
                 client,
                 "model_set",
                 ref="local/m",
-                name="M",
-                api="carrier-pigeon",
+                config=model_config(model="m", name="M", api="carrier-pigeon"),
             )
 
-    assert "wire protocol" in str(refused.value)
+    assert "carrier-pigeon" in str(refused.value)
+    assert "openai-completions" in str(refused.value), "and what is allowed"
     assert written(isolated_runtime) == before
 
 
@@ -241,16 +316,21 @@ async def test_a_provider_on_a_new_protocol_starts_its_backend(
             client,
             "model_set",
             ref="claude/sonnet",
-            name="Sonnet",
-            api="anthropic-messages",
-            base_url="https://anthropic.test",
-            api_key="ANTHROPIC_KEY",
+            config=model_config(
+                model="sonnet",
+                name="Sonnet",
+                api="anthropic-messages",
+                base_url="https://anthropic.test",
+                api_key="ANTHROPIC_KEY",
+            ),
         )
 
     assert answer["provider_created"] is True and answer["created"] is True
     assert answer["ready"] is True and "error" not in answer
     assert [spec.name for spec in started] == ["llm:anthropic-messages"]
-    assert section(isolated_runtime)["claude"]["api"] == "anthropic-messages"
+    entry = section(isolated_runtime)["claude"]
+    assert entry["api"] == "anthropic-messages"
+    assert entry["api_key"] == "${ANTHROPIC_KEY}", "a bare name is a reference"
 
 
 @pytest.mark.asyncio
@@ -275,16 +355,214 @@ async def test_a_model_server_that_does_not_start_is_reported_not_raised(
             client,
             "model_set",
             ref="claude/sonnet",
-            name="Sonnet",
-            api="anthropic-messages",
-            base_url="https://anthropic.test",
-            api_key="ANTHROPIC_KEY",
+            config=model_config(
+                model="sonnet",
+                name="Sonnet",
+                api="anthropic-messages",
+                base_url="https://anthropic.test",
+                api_key="ANTHROPIC_KEY",
+            ),
         )
 
     assert answer["provider_created"] is True and answer["created"] is True
     assert answer["ready"] is False
     assert "port 41873 is taken" in answer["error"]
     assert section(isolated_runtime)["claude"]["api"] == "anthropic-messages"
+
+
+# --- reading one --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_shows_the_whole_entry_and_never_the_secret(
+    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read the full-set design was missing.
+
+    Every writable field is there, so `model_set` can take the same object
+    back; the key is the `${VAR}` reference a caller restates, never what it
+    resolves to.
+    """
+    monkeypatch.setenv("LOCAL_KEY", "sk-live-do-not-print-me")
+
+    async with Client(server_for(isolated_runtime)) as client:
+        answer = await ask(client, "model_get", ref="local/big")
+
+    config = answer["config"]
+    assert config["provider"] == {
+        "api": "openai-completions",
+        "base_url": "https://local.test/v1",
+        "api_key": "${LOCAL_KEY}",
+    }
+    assert config["model"]["model"] == "big"
+    assert config["model"]["name"] == "Big"
+    assert config["model"]["context_window"] == 100000
+    assert config["model"]["max_tokens"] is None
+    assert config["model"]["temperature"] is None
+    assert config["model"]["top_p"] is None
+    assert config["model"]["compat"] == {
+        "thinking": None,
+        "stream_usage": None,
+        "store": None,
+        "cache_control": None,
+    }
+    assert answer["default"] is True
+    assert "sk-live-do-not-print-me" not in dumped(answer)
+    assert "${LOCAL_KEY}" in dumped(answer), "the reference is what a full set restates"
+
+
+@pytest.mark.asyncio
+async def test_get_masks_a_literal_key_and_set_leaves_it_alone(
+    isolated_runtime,
+) -> None:
+    """A key written as a literal is the operator's secret, not the model's.
+
+    A whole-set has to restate the key, so the one field that cannot be shown
+    is the one field whose empty value means "keep it": the entry survives a
+    rename without the secret travelling through a conversation.
+    """
+    literal = CONFIG.replace("api_key: ${LOCAL_KEY}", "api_key: sk-literal-secret")
+    write_config(isolated_runtime, literal)
+
+    async with Client(server_for(isolated_runtime, literal)) as client:
+        answer = await ask(client, "model_get", ref="local/big")
+        assert answer["config"]["provider"]["api_key"] == ""
+        assert "sk-literal-secret" not in dumped(answer)
+        config = answer["config"]
+        config["model"]["name"] = "Renamed"
+        await ask(client, "model_set", ref="local/big", config=config)
+
+    entry = section(isolated_runtime)["local"]
+    assert entry["api_key"] == "sk-literal-secret", "the key is untouched"
+    assert entry["models"][0]["name"] == "Renamed"
+
+
+@pytest.mark.asyncio
+async def test_get_then_set_is_a_no_op(isolated_runtime) -> None:
+    """`set(get())` reproduces the file, because the object is the whole entry.
+
+    A field the loader defaults and the serializer omits must round-trip
+    through the canonical object; otherwise the pair is not a read-modify-write,
+    it is a read-and-rewrite.
+    """
+    write_config(isolated_runtime)
+    before = section(isolated_runtime)
+
+    async with Client(server_for(isolated_runtime)) as client:
+        config = (await ask(client, "model_get", ref="local/big"))["config"]
+        await ask(client, "model_set", ref="local/big", config=config)
+
+    assert section(isolated_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_set_preserves_the_fields_it_was_not_asked_to_change(
+    isolated_runtime,
+) -> None:
+    """**The regression the old `model_set` had**: a partial call dropped the
+    fields it did not name.
+
+    A full set from `model_get` changes one field and carries the rest, so the
+    sampling, the modality list and the wire quirks survive.
+    """
+    write_config(isolated_runtime, RICH)
+
+    async with Client(server_for(isolated_runtime, RICH)) as client:
+        config = (await ask(client, "model_get", ref="local/big"))["config"]
+        changed = {
+            **config,
+            "model": {**config["model"], "max_tokens": 8000},
+        }
+        await ask(client, "model_set", ref="local/big", config=changed)
+        after = await ask(client, "model_get", ref="local/big")
+
+    assert after["config"] == changed
+    assert after["config"]["model"]["temperature"] == 0.3
+    assert after["config"]["model"]["top_p"] == 0.9
+    assert after["config"]["model"]["input"] == ["text", "image"]
+    assert after["config"]["model"]["compat"]["thinking"] == "omit"
+
+
+@pytest.mark.asyncio
+async def test_set_requires_every_field(isolated_runtime) -> None:
+    """A field left out is a schema error, not a silent default."""
+    async with Client(server_for(isolated_runtime)) as client:
+        config = (await ask(client, "model_get", ref="local/big"))["config"]
+        del config["model"]["temperature"]
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_set", ref="local/big", config=config)
+
+    assert "temperature" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_set_refuses_a_model_id_that_does_not_match_the_ref(
+    isolated_runtime,
+) -> None:
+    """The ref is the address and the object is the entry; they cannot disagree."""
+    async with Client(server_for(isolated_runtime)) as client:
+        config = (await ask(client, "model_get", ref="local/big"))["config"]
+        config["model"]["model"] = "other"
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_set", ref="local/big", config=config)
+
+    assert "must match" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_the_set_schema_is_the_prompt(isolated_runtime) -> None:
+    """**The object's constraints are visible before the call**, not discovered
+    in a validation error after it.
+
+    The enum is the point: a protocol, a modality or a `compat` value written
+    outside the closed set is refused by the schema, and the model reads the
+    allowed values in the same place it reads every other parameter.
+    """
+    async with Client(server_for(isolated_runtime)) as client:
+        tools = {one.name: one for one in await client.list_tools()}
+
+    config = tools["model_set"].input_schema["properties"]["config"]
+    assert config["required"] == ["provider", "model"]
+    assert config["additionalProperties"] is False
+
+    provider = config["properties"]["provider"]
+    assert provider["properties"]["api"]["enum"] == [
+        "openai-completions",
+        "anthropic-messages",
+        "openai-responses",
+    ]
+
+    model = config["properties"]["model"]
+    assert model["required"] == [
+        "model",
+        "name",
+        "reasoning",
+        "input",
+        "context_window",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "compat",
+    ]
+    assert model["properties"]["input"]["items"]["enum"] == ["text", "image"]
+
+    compat = model["properties"]["compat"]
+    assert compat["required"] == [
+        "thinking",
+        "stream_usage",
+        "store",
+        "cache_control",
+    ]
+    assert compat["properties"]["thinking"]["anyOf"][0]["enum"] == [
+        "enabled",
+        "disabled",
+        "omit",
+    ]
+    assert compat["properties"]["cache_control"]["anyOf"][0]["enum"] == [
+        "ephemeral",
+        "5m",
+        "1h",
+    ]
 
 
 # --- removing and switching ---------------------------------------------------
@@ -552,21 +830,27 @@ async def test_switching_writes_the_scalar_and_refuses_a_stranger(
 
 
 @pytest.mark.asyncio
-async def test_the_four_tools_are_marked_for_the_model(isolated_runtime) -> None:
+async def test_the_five_tools_are_marked_for_the_model(isolated_runtime) -> None:
     """**The mark is what makes them reachable**, and it is the only thing here
     that a unit test can check about the hub.
 
     A plugin's own tools arrive by `tools/list` and are offered to the model only
     if they declare themselves the model's (`slife2.libs.plugin.audience`) — `_check_new_input`
     is the precedent, and the agent server is one of `Config.plugins()`, so these
-    four arrive by exactly the same road.
+    five arrive by exactly the same road.
     """
     from slife2.libs.plugin.audience import for_the_model
 
     async with Client(server_for(isolated_runtime)) as client:
         tools = {one.name: one for one in await client.list_tools()}
 
-    for name in ("model_list", "model_set", "model_remove", "model_switch"):
+    for name in (
+        "model_get",
+        "model_list",
+        "model_set",
+        "model_remove",
+        "model_switch",
+    ):
         assert for_the_model(tools[name].meta), name
     assert not for_the_model(tools["send_message"].meta), (
         "the client's tools stay its own"

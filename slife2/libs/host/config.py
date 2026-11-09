@@ -130,7 +130,14 @@ from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host import secrets as _secret_registry
+from slife2.libs.host.model_config import (
+    API_PROTOCOLS,
+    ModelConfig,
+    load_model,
+    load_provider,
+)
 from slife2.libs.host.paths import home
+from slife2.libs.host.tool_config import load_cli, load_mcp, load_rest_api
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -860,6 +867,14 @@ LOCAL_SERVERS: tuple[str, ...] = tuple(one.key for one in PLUGINS if not one.api
 #: rather than a provider that quietly never starts.  Derived from `PLUGINS`, so
 #: that adding a protocol is a row and not a row and a dict entry.
 API_BACKENDS: dict[str, str] = {one.key: one.module for one in PLUGINS if one.api}
+
+#: The canonical model config names the same protocols.  It cannot import this
+#: module without a cycle, so the two sets are held equal here rather than
+#: trusted to be written down twice.
+if set(API_PROTOCOLS) != set(API_BACKENDS):  # pragma: no cover - import-time guard
+    raise RuntimeError(
+        "slife2.libs.host.model_config.API_PROTOCOLS and API_BACKENDS disagree"
+    )
 
 #: The MCP name the server for each wire protocol advertises — what
 #: `Client.server_info` reports, and so what a caller compares against to prove
@@ -3420,33 +3435,27 @@ def _rest_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
 
 
 def _tool_server(raw: Any, name: str) -> ToolServerSettings:
-    """One `mcp:` entry: an MCP server, over stdio or over the network."""
-    if not isinstance(raw, dict):
-        raise ConfigError(f"mcp.{name}: expected a mapping")
+    """One `mcp:` entry, through the canonical `McpConfig`.
 
-    command = str(raw.get("command") or "")
-    url = str(raw.get("url") or "")
-    if command and url:
-        raise ConfigError(
-            f"mcp.{name}: has both `command` and `url`; one entry is one "
-            f"transport — write two entries if you meant two servers"
-        )
-    if not command and not url:
-        raise ConfigError(
-            f"mcp.{name}: needs `command` (a program to start) or `url` (an "
-            f"endpoint to connect to)"
-        )
-
+    The parser here is `slife2.libs.host.tool_config.load_mcp`'s; what remains
+    is the projection onto `ToolServerSettings` and the secret deferral the
+    runtime settings need.  The same object is what `mcp_get` returns and
+    `mcp_set` accepts, so a typo is one refusal rather than three.
+    """
+    try:
+        cfg = load_mcp(raw, where=f"mcp.{name}")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return ToolServerSettings(
         name=name,
-        description=str(raw.get("description") or ""),
-        command=command,
-        args=_string_list(raw.get("args"), f"mcp.{name}.args"),
-        env=_deferred_secrets(raw.get("env"), f"mcp.{name}.env"),
-        url=url,
-        headers=_deferred_secrets(raw.get("headers"), f"mcp.{name}.headers"),
-        cwd=str(raw.get("cwd") or ""),
-        enabled=_enabled(raw, f"mcp.{name}"),
+        description=cfg.description,
+        command=cfg.command or "",
+        args=tuple(cfg.args or ()),
+        env=_deferred_secrets(cfg.env, f"mcp.{name}.env"),
+        url=cfg.url or "",
+        headers=_deferred_secrets(cfg.headers, f"mcp.{name}.headers"),
+        cwd=cfg.cwd,
+        enabled=cfg.enabled,
     )
 
 
@@ -3474,18 +3483,38 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
             f"path) or an explicit `command`"
         )
 
-    env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")
     if not command:
-        command = OPENAPI_PROXY_COMMAND
-        env = {OPENAPI_SPEC_URL: spec, **env}
-        args = (
-            *OPENAPI_PROXY_ARGS,
-            *_string_list(raw.get("args"), f"rest-api.{name}.args"),
+        # The declarative form goes through the canonical object — the same one
+        # `rest_api_get` / `rest_api_set` use.  The `command:` form below is a
+        # different spelling, with a proxy of one's own, and keeps its own reader.
+        try:
+            cfg = load_rest_api(raw, where=f"rest-api.{name}")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        env: dict[str, Any] = {
+            OPENAPI_SPEC_URL: cfg.spec,
+            **_deferred_secrets(cfg.env, f"rest-api.{name}.env"),
+        }
+        args = (*OPENAPI_PROXY_ARGS, *(cfg.args or ()))
+        if cfg.base_url:
+            env[OPENAPI_SERVER_URL] = cfg.base_url
+        if cfg.api_key:
+            env[OPENAPI_API_KEY] = defer_secret(cfg.api_key)
+        return ToolServerSettings(
+            name=name,
+            kind="rest",
+            description=cfg.description,
+            command=OPENAPI_PROXY_COMMAND,
+            args=args,
+            env=env,
+            cwd=cfg.cwd,
+            enabled=cfg.enabled,
         )
-    else:
-        args = _string_list(raw.get("args"), f"rest-api.{name}.args")
-        if spec:
-            env = {OPENAPI_SPEC_URL: spec, **env}
+
+    env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")
+    args = _string_list(raw.get("args"), f"rest-api.{name}.args")
+    if spec:
+        env = {OPENAPI_SPEC_URL: spec, **env}
 
     # These two are the proxy's, and they are written from the entry rather than
     # into `env:` because they are what the entry is *about*: which API, and
@@ -3522,33 +3551,26 @@ def _cli_tools(raw: dict[str, Any]) -> dict[str, CliToolSettings]:
 
 
 def _cli_tool(raw: Any, name: str) -> CliToolSettings:
-    """One `cli:` entry: a command, and what a person needs to know about it.
+    """One `cli:` entry, through the canonical `CliConfig`.
 
     Only `command` is required, and it is required loudly.  An entry naming no
     program is not a disabled entry — it is one that can never work, and saying
     so at load names the entry once instead of failing at every call.
 
-    Unlike `mcp:`, there is no second transport to choose between and so
-    nothing to refuse for naming both.  The strictness that survives is the
-    strictness that has something to be strict about.
+    The parser is `slife2.libs.host.tool_config.load_cli`'s; `cli_get` and
+    `cli_set` read and write the same object.
     """
-    if not isinstance(raw, dict):
-        raise ConfigError(f"cli.{name}: expected a mapping")
-
-    command = str(raw.get("command") or "")
-    if not command:
-        raise ConfigError(
-            f"cli.{name}: needs `command` — the program the model may run "
-            f"(e.g. `gh`, or `python -m mytool`)"
-        )
-
+    try:
+        cfg = load_cli(raw, where=f"cli.{name}")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return CliToolSettings(
         name=name,
-        command=command,
-        description=str(raw.get("description") or ""),
-        install=str(raw.get("install") or ""),
-        source=_provenance(raw.get("source"), f"cli.{name}.source"),
-        enabled=_enabled(raw, f"cli.{name}"),
+        command=cfg.command,
+        description=cfg.description,
+        install=cfg.install,
+        source=cfg.source,
+        enabled=cfg.enabled,
     )
 
 
@@ -3577,17 +3599,6 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
         )
         for name, spec in entries.items()
     }
-
-
-def _provenance(raw: Any, where: str) -> dict[str, str]:
-    """An entry's `source:`, as strings.
-
-    Not `_secrets`: nothing here is a credential, and resolving `${VAR}` in a
-    note about where an entry came from would invent a lookup the operator did
-    not write.  Values are stringified for the same reason a provider's are —
-    a version written bare is a YAML float more often than anybody expects.
-    """
-    return {str(key): str(value) for key, value in _mapping(raw, where).items()}
 
 
 def _string_list(raw: Any, where: str) -> tuple[str, ...]:
@@ -3743,6 +3754,11 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
     if not isinstance(raw, dict):
         raise ConfigError(f"providers.{name}: expected a mapping")
 
+    # **The three named refusals stay here**, above the canonical model, because
+    # each has a sentence the caller acts on and `load_provider` cannot know the
+    # section context.  The model is still what decides the shape: everything
+    # after these is its validation, and `load_provider` rejects a key this
+    # build does not know.
     api = str(raw.get("api") or "")
     if api not in API_BACKENDS:
         raise ConfigError(
@@ -3753,10 +3769,20 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
     if not isinstance(models_raw, list) or not models_raw:
         raise ConfigError(f"providers.{name}: needs a non-empty `models:` list")
 
+    # The entries first, in the order the old parser reported them: a model
+    # entry missing its own `model:` is the more specific mistake, and a file
+    # with both that and no endpoint should name the model.
     models: dict[str, ModelSettings] = {}
     for entry in models_raw:
-        model = _model(entry, name)
-        models[model.model] = model
+        try:
+            cfg = load_model(entry, where=f"providers.{name}")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if cfg.model in models:
+            raise ConfigError(
+                f"providers.{name}.{cfg.model}: the model is listed twice"
+            )
+        models[cfg.model] = _model_settings(cfg)
 
     base_url = str(raw.get("base_url") or "")
     if not base_url:
@@ -3765,76 +3791,40 @@ def _provider(raw: Any, name: str) -> ProviderSettings:
         # sentence existed twice and neither copy was in reach of this function.
         raise _needs_base_url(f"providers.{name}", also="and the conversation")
 
-    key = str(raw.get("api_key") or "")
+    try:
+        provider = load_provider(raw, where=f"providers.{name}")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
     return ProviderSettings(
-        api=api,
-        base_url=base_url,
-        api_key_ref=key,
+        api=provider.api,
+        base_url=provider.base_url,
+        api_key_ref=provider.api_key,
         models=models,
     )
 
 
-def _model(raw: Any, provider: str) -> ModelSettings:
-    if not isinstance(raw, dict):
-        raise ConfigError(f"providers.{provider}: each model must be a mapping")
-    model = str(raw.get("model") or "")
-    if not model:
-        raise ConfigError(f"providers.{provider}: a model entry needs `model:`")
+def _model_settings(cfg: ModelConfig) -> ModelSettings:
+    """The runtime's view of one canonical model config.
 
-    compat = raw.get("compat") or {}
-    if not isinstance(compat, dict):
-        raise ConfigError(f"providers.{provider}.{model}: compat must be a mapping")
-
-    modalities = raw.get("input")
-    if isinstance(modalities, list):
-        inputs = tuple(str(m) for m in modalities)
-    elif modalities is None:
-        inputs = ("text",)
-    else:
-        inputs = (str(modalities),)
-
-    # `None` here is a value, not an absence: `compat.store` says "send
-    # nothing" and must stay distinguishable from `compat.store: false`, which
-    # says "send false".  A plain `bool(...)` would collapse the two into False
-    # — and read `store: "false"` (YAML 1.2's string) as *true*, asking the API
-    # to keep a response the operator tried to forbid.
-    store_raw = compat.get("store")
-    if store_raw is not None and not isinstance(store_raw, bool):
-        raise ConfigError(
-            f"providers.{provider}.{model}.compat.store: expected `true`, "
-            f"`false` or absent, got {store_raw!r} — YAML spells a boolean as "
-            f"one, so a quoted 'false' is a string"
-        )
-    # **A switch is a real YAML boolean, for `_enabled`'s reason.**  `reasoning:
-    # no` is the string `no` under YAML 1.2 and every non-empty string is true
-    # to `bool()`, so the operator's "off" turned thinking on.
-    reasoning = raw.get("reasoning", False)
-    if not isinstance(reasoning, bool):
-        raise ConfigError(
-            f"providers.{provider}.{model}.reasoning: expected `true` or "
-            f"`false`, got {reasoning!r} — YAML spells a boolean as one, so "
-            f"`no`, `off` and a quoted 'false' are strings"
-        )
-
+    **The one place `compat` is flattened.**  The file and the model-facing
+    object spell it nested; the adapters read the four values directly, so this
+    is a projection and not a second definition.  `None` becomes `""` for the
+    two string fields, which is how `ModelSettings` spells "absent".
+    """
     return ModelSettings(
-        model=model,
-        name=str(raw.get("name") or ""),
-        reasoning=reasoning,
-        input=inputs,
-        context_window=_int_or(
-            raw.get("context_window"), 0, f"providers.{provider}.{model}.context_window"
-        ),
-        max_tokens=_optional_int(
-            raw.get("max_tokens"), f"providers.{provider}.{model}.max_tokens"
-        ),
-        temperature=_optional_float(
-            raw.get("temperature"), f"providers.{provider}.{model}.temperature"
-        ),
-        top_p=_optional_float(raw.get("top_p"), f"providers.{provider}.{model}.top_p"),
-        thinking=str(compat.get("thinking") or ""),
-        stream_usage=str(compat.get("stream_usage") or ""),
-        store=store_raw,
-        cache_control=str(compat.get("cache_control") or ""),
+        model=cfg.model,
+        name=cfg.name,
+        reasoning=cfg.reasoning,
+        input=tuple(cfg.input),
+        context_window=cfg.context_window,
+        max_tokens=cfg.max_tokens,
+        temperature=cfg.temperature,
+        top_p=cfg.top_p,
+        thinking=cfg.compat.thinking or "",
+        stream_usage=cfg.compat.stream_usage or "",
+        store=cfg.compat.store,
+        cache_control=cfg.compat.cache_control or "",
     )
 
 
@@ -3858,10 +3848,6 @@ def _int_or(value: Any, default: int, where: str) -> int:
     than as the one line every other bad value produces.
     """
     return default if value is None else _as_int(value, where)
-
-
-def _optional_int(value: Any, where: str) -> int | None:
-    return None if value is None else _as_int(value, where)
 
 
 def _optional_float(value: Any, where: str) -> float | None:

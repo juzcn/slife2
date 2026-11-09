@@ -22,8 +22,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.clients.gateway import ClientFactory
+from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     RESTAPI_TOOLS_SERVER_NAME,
     Config,
@@ -35,6 +37,8 @@ from slife2.libs.host.config import (
     resolve_secret,
     unresolved_reference,
 )
+from slife2.libs.host.model_config import show_api_key
+from slife2.libs.host.tool_config import RestApiConfig, load_rest_api, rest_entry
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
     Family,
@@ -42,6 +46,7 @@ from slife2.libs.plugin.family import (
     Homes,
     apply_and_report,
     build_family_server,
+    entry_report,
     list_entries,
     prepare_entry,
     remove_entry,
@@ -131,19 +136,30 @@ def _validate_http_url(url: str, what: str) -> str:
 
 
 def _prepare(
-    config: Config, name: str, spec: str, base_url: str, api_key: str, **rest: Any
+    config: Config, name: str, rest: RestApiConfig, *, keep_key: str = ""
 ) -> ToolServerSettings:
-    """Validate a `rest-api:` entry and write it, or raise why it cannot be."""
+    """Validate a `rest-api:` entry and write it, or raise why it cannot be.
+
+    The entry is the canonical object's serialization (`rest_entry`); the two
+    URL checks and the key's reference normalization are this family's extra
+    guards, run inside the shared helper's `try` so a `file://` spec is refused
+    as a `ConfigError` like any other bad entry.
+
+    `keep_key` is a literal key the file already has and `get` could not show.
+    An empty `api_key` otherwise means "no key" — but a whole-set from `get`
+    cannot tell that apart from "a literal is there", so the caller passes the
+    literal here and the write leaves it alone.
+    """
 
     def build() -> tuple[ToolServerSettings, dict[str, Any]]:
-        # The two URL checks run here, inside the shared helper's `try`: a
-        # `file://` spec is refused as a `ConfigError` like any other bad entry.
-        entry: dict[str, Any] = {
-            "spec": _validate_http_url(spec, "spec") if spec else None,
-            "base_url": _validate_http_url(base_url, "base_url") if base_url else None,
-            "api_key": _reference(api_key) if api_key else None,
-            **rest,
-        }
+        entry = rest_entry(rest)
+        entry["spec"] = _validate_http_url(rest.spec, "spec")
+        if rest.base_url:
+            entry["base_url"] = _validate_http_url(rest.base_url, "base_url")
+        if rest.api_key:
+            entry["api_key"] = _reference(rest.api_key)
+        elif keep_key:
+            entry["api_key"] = keep_key
         return _rest_api(entry, name), entry
 
     return prepare_entry(config, name, build, section=SECTION)
@@ -186,24 +202,21 @@ def _unresolved(api_key: str) -> str:
 
 
 def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One row of `rest_api_list` — the spec, and whether it is answering.
+    """One row of `rest_api_list` — what the API is, and whether it is usable.
 
-    The spec and the base URL are what this family *is*, and they are not what
-    the entry becomes: the config layer has already turned them into a proxy
-    command by the time a `ToolServerSettings` exists, so a row built from the
-    held settings would say `uvx mcp-openapi-proxy` and lose the only thing a
-    reader wanted.  The command is carried only when the file has no spec, which
-    is the one case a reader has nothing else to go on.
+    **A listing is for choosing, not for reading the entry.**  The key, the
+    operator's sentence about the API, the link's state, and an operation count
+    or the failure's reason are what a model chooses between APIs with; the
+    spec, base URL and credential are `rest_api_get`'s.  The spec in particular
+    is the proxy's document, not the API's purpose — a row that showed it would
+    spend the browse's tokens on the one field a chooser cannot use.
     """
     row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
-    if spec := raw.get("spec"):
-        row["spec"] = str(spec)
-    else:
-        row["command"] = str(raw.get("command") or "")
-    if base_url := raw.get("base_url"):
-        row["base_url"] = str(base_url)
-    if api_key := raw.get("api_key"):
-        row["api_key"] = str(api_key)
+    if one is not None and one.settings.enabled:
+        if one.usable:
+            row["operations"] = len(one.rows or [])
+        elif one.error:
+            row["error"] = one.error
     if description := str(raw.get("description") or ""):
         row["description"] = description
     return row
@@ -212,12 +225,47 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     """Serve the `rest_api_*` tools on this family's server."""
 
+    def entry_of(name: str) -> tuple[dict[str, Any], RestApiConfig]:
+        """One entry's raw mapping and its canonical object, or this family's miss."""
+        raw = configfile.read_section(SECTION).get(name)
+        if not isinstance(raw, dict):
+            raise ToolError(
+                f"`{name}` is not in `rest-api:` — `rest_api_set` adds it, "
+                f"`rest_api_list` shows what is there."
+            )
+        try:
+            config = load_rest_api(raw, where=f"rest-api.{name}")
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        # The tool can write only the URLs it checked; a spec path or another
+        # scheme is a hand-written entry this tool does not edit.  Refusing it
+        # here keeps `set(get())` true rather than handing back an object `set`
+        # would then reject.
+        try:
+            _validate_http_url(config.spec, "spec")
+            if config.base_url:
+                _validate_http_url(config.base_url, "base_url")
+        except ConfigError as exc:
+            raise ToolError(str(exc)) from exc
+        return raw, config.model_copy(update={"api_key": show_api_key(config.api_key)})
+
+    async def report_of(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """The read-only half: the link's state and, when it answered, its count."""
+        family = homes.current()
+        family.connecting()
+        await family.settle()
+        one = family.held(name)
+        if one is None:
+            return {"name": name, "state": state_word(raw, None)}
+        return entry_report(one, name, words=WORDS)
+
     @mcp.tool(name="rest_api_list", meta=FOR_THE_MODEL)
     async def rest_api_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the REST APIs configured under `rest-api:`, with their state.
 
-        Each entry as the file writes it — the spec, the base URL, the
-        credential — and whether it is answering.
+        Each row says what the API is for and whether its link is answering: an
+        `operations` count when it answered, or `error` when it did not. The
+        spec, base URL and credential are `rest_api_get`'s, not the browse's.
 
         Args:
             limit: How many entries this page may hold. Omit for the cap.
@@ -225,59 +273,76 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         Returns:
             `apis` — one row per entry, each with `name`, `state` (`ready`,
-            `connecting`, `failed`, `idle` or `off`) and whatever the file has
-            of it — and `total`, `limit` and `offset`, so
+            `connecting`, `failed`, `idle`, `off` or `not held`), `description`
+            when the file has one, and `operations` or `error` when the link
+            has one — and `total`, `limit` and `offset`, so
             `offset + len(apis) < total` says whether more remain.
         """
         return await list_entries(
             homes.current(), limit, offset, words=WORDS, describe=_describe
         )
 
+    @mcp.tool(name="rest_api_get", meta=FOR_THE_MODEL)
+    async def rest_api_get(name: str) -> dict[str, Any]:
+        """Read one REST API's whole entry, by name.
+
+        The answer is the canonical entry — `config` has `spec`, `base_url`,
+        `api_key`, `args`, `env`, `cwd`, `description` and `enabled` — so
+        `rest_api_set` takes the same object back. `api_key` is the
+        `${VAR}`/`keyring:` reference, never the resolved key; empty means the
+        file has a literal key that is not shown.
+
+        `state` is the link's read-only word, and `operations` or `error` says
+        what it answered when it did. `unresolved` names a reference that
+        resolves to nothing yet, when there is one.
+
+        Args:
+            name: The API's name — the key it is written under.
+        """
+        raw, config = entry_of(name)
+        report = await report_of(name, raw)
+        report.pop("enabled", None)  # the writable field is in `config`
+        answer = {**report, "config": config.model_dump()}
+        if unresolved := _unresolved(config.api_key):
+            answer["unresolved"] = unresolved
+        return answer
+
     @mcp.tool(name="rest_api_set", meta=FOR_THE_MODEL)
-    async def rest_api_set(
-        name: str,
-        spec: str,
-        base_url: str,
-        api_key: str = "",
-        description: str = "",
-        enabled: bool = True,
-    ) -> dict[str, Any]:
-        """Add or update a REST API under `rest-api:` (upsert).
+    async def rest_api_set(name: str, config: RestApiConfig) -> dict[str, Any]:
+        """Add or replace one REST API — the whole entry, and no patch.
+
+        Every field is required; a field left out is a schema error, not a
+        silent default. Read `rest_api_get`, change what you mean to change, and
+        pass the whole `config` back. `api_key` is a `${VAR}`/`keyring:`
+        reference; empty means no key.
 
         Every endpoint in the OpenAPI document becomes an operation named
-        `{name}__{operation}`, so one spec can be hundreds of them. This is the
-        whole entry: a field left out is dropped, so restate everything.
+        `{name}__{operation}`, so one spec can be hundreds of them. The answer is
+        the entry as written — the same `config` shape `rest_api_get` gives —
+        plus the link's read-only `state`, `operations`/`error`, and
+        `unresolved` when the key's reference resolves to nothing yet.
 
         Args:
             name: The API's name — the key it is written under, and the prefix
                 every operation of it reaches you as (`{name}__{operation}`).
-            spec: The OpenAPI document's URL (JSON or YAML). It is fetched here,
-                so it has to be http(s) and reachable.
-            base_url: Where the API actually is, overriding whatever server the
-                document names — e.g. https://api.github.com.
-            api_key: The credential's *name*, not the secret: `GITHUB_TOKEN`
-                stores `${GITHUB_TOKEN}`. Omit it for an API that needs no key.
-            description: What the API is for.
-            enabled: Serve it now. False writes the entry switched off.
-
-        Returns:
-            The payload `mcp_set` answers with over this family's words:
-            `name`, `enabled`, `state` (`ready`, `connecting`, `failed`, `idle`
-            or `off`), `operations` when it answered, `error` when it has not —
-            and `unresolved`, the credential reference that resolves to nothing
-            yet, when there is one.
+            config: The whole entry — the `config` object `rest_api_get`
+                returned.
         """
-        settings = _prepare(
-            load(),
-            name,
-            spec,
-            base_url,
-            api_key,
-            description=description or None,
-            enabled=enabled,
-        )
-        answer = await apply_and_report(homes.current(), settings, words=WORDS)
-        if unresolved := _unresolved(api_key):
+        existing = configfile.read_section(SECTION).get(name)
+        keep_key = ""
+        if isinstance(existing, dict) and not config.api_key:
+            current = str(existing.get("api_key") or "")
+            # A reference is shown by get, so an empty `api_key` is the caller
+            # clearing it.  A literal is hidden, so an empty one means "the
+            # object I was handed did not contain it" — keep it.
+            if current and not show_api_key(current):
+                keep_key = current
+        settings = _prepare(load(), name, config, keep_key=keep_key)
+        report = await apply_and_report(homes.current(), settings, words=WORDS)
+        report.pop("enabled", None)  # the writable field is in `config`
+        _, written = entry_of(name)
+        answer = {**report, "config": written.model_dump()}
+        if unresolved := _unresolved(config.api_key):
             answer["unresolved"] = unresolved
         return answer
 

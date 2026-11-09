@@ -25,10 +25,10 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 | Jobs | `job_list`, `job_read`, `job_set`, `job_remove`, `job_run`, `job__<name>` |
 | Schedule | `schedule_set`, `schedule_remove`, `schedule_list`, `schedule_runs`, `schedule_run_now`, `schedule_run_skip` |
 | WeChat | `wechat_login`, `wechat_check_status`, `wechat_send_message`, `wechat_logout` |
-| MCP | `mcp_list`, `mcp_set`, `mcp_remove`, `mcp_set_enabled` |
-| REST API | `rest_api_list`, `rest_api_set`, `rest_api_remove`, `rest_api_set_enabled` |
-| CLI | `cli_list`, `cli_set`, `cli_remove`, `cli_set_enabled` |
-| Models | `model_list`, `model_set`, `model_remove`, `model_switch` |
+| MCP | `mcp_get`, `mcp_list`, `mcp_set`, `mcp_remove`, `mcp_set_enabled` |
+| REST API | `rest_api_get`, `rest_api_list`, `rest_api_set`, `rest_api_remove`, `rest_api_set_enabled` |
+| CLI | `cli_get`, `cli_list`, `cli_set`, `cli_remove`, `cli_set_enabled` |
+| Models | `model_get`, `model_list`, `model_set`, `model_remove`, `model_switch` |
 
 ## External tools
 

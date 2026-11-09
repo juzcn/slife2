@@ -518,19 +518,21 @@ skills:
 
 | 配置节或文件夹 | 工具 |
 |---|---|
-| `mcp:` | `mcp_set`、`mcp_list`、`mcp_remove`、`mcp_set_enabled` |
-| `rest-api:` | `rest_api_set`、`rest_api_list`、`rest_api_remove`、`rest_api_set_enabled` |
-| `cli:` | `cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
+| `mcp:` | `mcp_get`、`mcp_set`、`mcp_list`、`mcp_remove`、`mcp_set_enabled` |
+| `rest-api:` | `rest_api_get`、`rest_api_set`、`rest_api_list`、`rest_api_remove`、`rest_api_set_enabled` |
+| `cli:` | `cli_get`、`cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
 | `jobs/`（文件夹） | `job_set`、`job_list`、`job_read`、`job_run`、`job_remove` |
-| `providers:` 与 `default:` | `model_set`、`model_list`、`model_remove`、`model_switch` |
+| `providers:` 与 `default:` | `model_get`、`model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），在跨进程锁下进行。写入
 保留注释，结果由启动时同一个 loader 校验。loader 拒绝的条目会被还原，并告诉调用方
 原因。
 
-`set` 写整个条目：没写的字段就是被删掉。`set_enabled` 只改 `enabled`。写入前没有
-审批关卡；特别是 `mcp_set` 带 `command:` 时记录的是 slife2 将要启动的程序。
+`set` 写整个条目：没写的字段就是被删掉。`model`、`mcp`、`rest-api`、`cli` 是例外：
+先读对应的 `*_get`，它返回整个对象，`*_set` 原样接收，所有字段都必填——漏一个字段是
+schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有审批关卡；特别是
+`mcp_set` 带 `command:` 时记录的是 slife2 将要启动的程序。
 
 ## 能力
 

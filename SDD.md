@@ -526,6 +526,15 @@ performs a document edit under a cross-process lock, preserves comments, and
 hands the result to the same loader used at startup. The loader is the judge; an
 entry it refuses is restored.
 
+`libs/host/model_config.py` is the canonical object for a `providers:` entry and
+its models; `libs/host/tool_config.py` is the same for an `mcp:`, `rest-api:`
+or `cli:` entry. The loader validates YAML into them, and each family's
+`*_get`/`*_set` use the same object: the file is an artifact, not the schema.
+Their keys and closed value sets are literal Pydantic fields, and an unknown key
+is refused at load. The objects are complete — the loader applies the file's
+defaults; `*_set` requires every field, so a partial write is a schema error,
+not a silent reset.
+
 `--a2a-broker HOST:PORT` overrides `peer_agent.broker` for one run, through the
 environment so a server started by this command reads the same address. It
 overrides the address only; `org`/`unit` remain the file's, and it cannot enable

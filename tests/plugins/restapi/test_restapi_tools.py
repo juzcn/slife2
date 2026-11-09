@@ -91,6 +91,30 @@ def section(isolated_runtime: Path) -> dict[str, Any]:
     return read_section("rest-api", path=isolated_runtime / "slife2.yaml")
 
 
+def rest_config(
+    *,
+    spec: str = "https://api.example.test/openapi.yaml",
+    base_url: str = "https://api.example.test",
+    api_key: str = "",
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    cwd: str = "",
+    description: str = "",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """The whole `config` object `rest_api_set` takes — every field, every time."""
+    return {
+        "spec": spec,
+        "base_url": base_url,
+        "api_key": api_key,
+        "args": args,
+        "env": env,
+        "cwd": cwd,
+        "description": description,
+        "enabled": enabled,
+    }
+
+
 # --- what is written ----------------------------------------------------------
 
 
@@ -108,9 +132,7 @@ async def test_an_api_is_written_as_the_spec_it_is(isolated_runtime) -> None:
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            description="Issues and pull requests.",
+            config=rest_config(description="Issues and pull requests."),
         )
 
     entry = section(isolated_runtime)["github"]
@@ -137,17 +159,13 @@ async def test_the_credential_is_stored_as_a_name_and_never_as_a_value(
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="GITHUB_TOKEN",
+            config=rest_config(api_key="GITHUB_TOKEN"),
         )
         written_as_given = await ask(
             client,
             "rest_api_set",
             name="other",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="${SOME_OTHER_TOKEN}",
+            config=rest_config(api_key="${SOME_OTHER_TOKEN}"),
         )
 
     assert section(isolated_runtime)["github"]["api_key"] == "${GITHUB_TOKEN}"
@@ -171,16 +189,13 @@ async def test_setting_an_api_again_replaces_the_whole_entry(isolated_runtime) -
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="GITHUB_TOKEN",
+            config=rest_config(api_key="GITHUB_TOKEN"),
         )
         await ask(
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
+            config=rest_config(),
         )
 
     entry = section(isolated_runtime)["github"]
@@ -205,9 +220,7 @@ async def test_a_key_nothing_resolves_says_so_at_the_moment_it_is_written(
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="NOBODY_HAS_THIS_ONE",
+            config=rest_config(api_key="NOBODY_HAS_THIS_ONE"),
         )
 
     assert answer["unresolved"] == "${NOBODY_HAS_THIS_ONE}"
@@ -230,9 +243,7 @@ async def test_a_credential_that_resolves_is_not_reported(
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="SLIFE2_TEST_KEY",
+            config=rest_config(api_key="SLIFE2_TEST_KEY"),
         )
 
     assert "unresolved" not in answer
@@ -265,9 +276,7 @@ async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
             client,
             "rest_api_set",
             name="github",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
-            api_key="keyring:slife2/github",
+            config=rest_config(api_key="keyring:slife2/github"),
         )
 
     # The whole reference, verbatim — and not the `${…}` wrapper's arithmetic,
@@ -296,8 +305,7 @@ async def test_a_url_that_is_not_http_is_refused_before_anything_is_fetched(
                 "rest_api_set",
                 {
                     "name": "sneaky",
-                    "spec": "file:///etc/passwd",
-                    "base_url": "https://api.example.test",
+                    "config": rest_config(spec="file:///etc/passwd"),
                 },
             )
         with pytest.raises(ToolError):
@@ -305,8 +313,7 @@ async def test_a_url_that_is_not_http_is_refused_before_anything_is_fetched(
                 "rest_api_set",
                 {
                     "name": "sneaky",
-                    "spec": "api.example.test/openapi.yaml",
-                    "base_url": "https://api.example.test",
+                    "config": rest_config(spec="api.example.test/openapi.yaml"),
                 },
             )
 
@@ -329,8 +336,10 @@ async def test_a_private_address_is_not_refused(isolated_runtime) -> None:
             client,
             "rest_api_set",
             name="localapi",
-            spec="http://127.0.0.1:8080/openapi.json",
-            base_url="http://127.0.0.1:8080",
+            config=rest_config(
+                spec="http://127.0.0.1:8080/openapi.json",
+                base_url="http://127.0.0.1:8080",
+            ),
         )
 
     assert answer["name"] == "localapi"
@@ -365,8 +374,7 @@ mcp:
                 "rest_api_set",
                 {
                     "name": "clash",
-                    "spec": "https://api.example.test/openapi.yaml",
-                    "base_url": "https://api.example.test",
+                    "config": rest_config(),
                 },
             )
 
@@ -374,15 +382,160 @@ mcp:
     assert (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8") == before
 
 
+# --- reading one --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_returns_the_whole_entry(isolated_runtime) -> None:
+    """Every writable field, so `rest_api_set` can take the same object back."""
+    async with Client(family(isolated_runtime)) as client:
+        answer = await ask(client, "rest_api_get", name="registry")
+
+    config = answer["config"]
+    assert config["spec"] == "https://registry.example.test/openapi.json"
+    assert config["base_url"] == "https://registry.example.test"
+    assert config["api_key"] == ""
+    assert config["args"] is None
+    assert config["env"] is None
+    assert config["cwd"] == ""
+    assert config["description"] == "A registry."
+    assert config["enabled"] is True
+    assert answer["state"] == "ready"
+    assert answer["operations"] == 2
+
+
+@pytest.mark.asyncio
+async def test_setting_enabled_true_or_false_starts_or_stops_the_proxy(
+    isolated_runtime,
+) -> None:
+    """**`enabled` is the switch, through the whole-entry `set` too.**
+
+    The entry is written first and then held; a false switch must release the
+    link (stopping the proxy when this is its last home), and a true one must
+    acquire and connect it again.
+    """
+    async with Client(family(isolated_runtime)) as client:
+        off = await ask(
+            client,
+            "rest_api_set",
+            name="registry",
+            config=rest_config(enabled=False),
+        )
+        listed_off = await ask(client, "rest_api_list")
+        off_entry = section(isolated_runtime)["registry"]
+        on = await ask(
+            client,
+            "rest_api_set",
+            name="registry",
+            config=rest_config(enabled=True),
+        )
+        listed_on = await ask(client, "rest_api_list")
+
+    assert off["state"] == "off"
+    assert off["config"]["enabled"] is False
+    assert "operations" not in off, "a stopped proxy has no count to report"
+    assert listed_off["apis"][0]["state"] == "off"
+    assert off_entry["enabled"] is False
+
+    assert on["state"] == "ready"
+    assert on["config"]["enabled"] is True
+    assert on["operations"] == 2, "written back on, and connected again"
+    assert listed_on["apis"][0]["state"] == "ready"
+    assert "enabled" not in section(isolated_runtime)["registry"], "on is the default"
+
+
+@pytest.mark.asyncio
+async def test_get_then_set_is_a_no_op(isolated_runtime) -> None:
+    """`set(get())` reproduces the file; the object is the whole entry."""
+    write_config(isolated_runtime)
+    before = section(isolated_runtime)
+
+    async with Client(family(isolated_runtime)) as client:
+        config = (await ask(client, "rest_api_get", name="registry"))["config"]
+        await ask(client, "rest_api_set", name="registry", config=config)
+
+    assert section(isolated_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_get_masks_a_literal_key_and_set_leaves_it_alone(
+    isolated_runtime,
+) -> None:
+    """A literal key is the operator's secret; `""` is the one field that keeps it."""
+    literal = CONFIG.replace(
+        "    description: A registry.\n",
+        "    api_key: sk-literal-secret\n    description: A registry.\n",
+    )
+    write_config(isolated_runtime, literal)
+
+    async with Client(family(isolated_runtime, literal)) as client:
+        answer = await ask(client, "rest_api_get", name="registry")
+        assert answer["config"]["api_key"] == ""
+        assert "sk-literal-secret" not in str(answer)
+        config = answer["config"]
+        config["description"] = "Renamed."
+        await ask(client, "rest_api_set", name="registry", config=config)
+
+    entry = section(isolated_runtime)["registry"]
+    assert entry["api_key"] == "sk-literal-secret", "the key is untouched"
+    assert entry["description"] == "Renamed."
+
+
+@pytest.mark.asyncio
+async def test_get_refuses_the_command_form(isolated_runtime) -> None:
+    """A proxy somebody pins has no spec, and this pair edits the spec form."""
+    command_form = (
+        CONFIG
+        + """\
+  pinned:
+    command: uvx
+    args: [--from, my-proxy, run]
+"""
+    )
+    write_config(isolated_runtime, command_form)
+
+    async with Client(family(isolated_runtime, command_form)) as client:
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "rest_api_get", name="pinned")
+
+    assert "command:" in str(refused.value)
+    assert "spec" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_the_set_schema_is_the_prompt(isolated_runtime) -> None:
+    """The required fields are visible before the call."""
+    async with Client(family(isolated_runtime)) as client:
+        tools = {one.name: one for one in await client.list_tools()}
+
+    config = tools["rest_api_set"].input_schema["properties"]["config"]
+    assert config["additionalProperties"] is False
+    assert config["required"] == [
+        "spec",
+        "base_url",
+        "api_key",
+        "args",
+        "env",
+        "cwd",
+        "description",
+        "enabled",
+    ]
+
+
 # --- the listing --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_listing_shows_the_spec_and_not_the_proxy(isolated_runtime) -> None:
-    """What a person configured, not what the config layer made of it.
+async def test_the_listing_shows_what_it_is_and_not_the_proxy(
+    isolated_runtime,
+) -> None:
+    """A listing is for choosing, not for reading the entry.
 
-    A row built from the held settings would say `uvx mcp-openapi-proxy` and lose
-    the only thing a reader came for — which API this is and where it lives.
+    The name, the operator's description, the state and the operation count are
+    what a model picks an API with; the spec, base URL and credential are
+    `rest_api_get`'s.  A row built from the held settings would say
+    `uvx mcp-openapi-proxy`, and one built from the file would spend the browse
+    on a document nobody choosing between APIs reads.
     """
     async with Client(family(isolated_runtime)) as client:
         listed = await ask(client, "rest_api_list")
@@ -390,9 +543,9 @@ async def test_the_listing_shows_the_spec_and_not_the_proxy(isolated_runtime) ->
     (row,) = listed["apis"]
     assert row["name"] == "registry"
     assert row["state"] == "ready"
-    assert row["spec"] == "https://registry.example.test/openapi.json"
-    assert row["base_url"] == "https://registry.example.test"
+    assert row["operations"] == 2
     assert row["description"] == "A registry."
+    assert set(row) == {"name", "state", "operations", "description"}
     assert "mcp-openapi-proxy" not in str(listed)
 
 
@@ -444,8 +597,7 @@ async def test_both_entry_tools_describe_a_live_api_the_same_way(
             client,
             "rest_api_set",
             name="other",
-            spec="https://api.example.test/openapi.yaml",
-            base_url="https://api.example.test",
+            config=rest_config(),
         )
         switched = await ask(client, "rest_api_set_enabled", name="other", enabled=True)
 

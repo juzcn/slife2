@@ -760,6 +760,86 @@ def test_an_unknown_api_is_refused(tmp_path) -> None:
         load(path)
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("temprature: 0.5", "temprature"),
+        ("input: [text, imgae]", "imgae"),
+        ("compat: {thinkng: omit}", "thinkng"),
+    ],
+)
+def test_a_model_entry_with_a_key_or_value_this_build_does_not_know_is_refused(
+    tmp_path, line: str, expected: str
+) -> None:
+    """**The canonical object is the truth, so a typo is a load error.**
+
+    The old parser read the keys it knew and ignored the rest: `temprature` was
+    silently the default, `imgae` was a modality nothing read, and the file
+    started with a model that was not the one written.  The same validation now
+    serves the loader and the tools, so the typo stops at the first one.
+    """
+    path = write(
+        tmp_path,
+        f"""
+providers:
+  p:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models:
+      - model: m
+        {line}
+""",
+    )
+    with pytest.raises(ConfigError, match=re.escape(expected)):
+        load(path)
+
+
+@pytest.mark.parametrize(
+    ("section", "entry", "expected"),
+    [
+        ("mcp", "    command: npx\n    envi: {}\n", "envi"),
+        (
+            "rest-api",
+            "    spec: https://example.test/openapi.json\n    base_uri: x\n",
+            "base_uri",
+        ),
+        ("cli", "    command: gh\n    instal: x\n", "instal"),
+    ],
+)
+def test_a_tool_entry_with_a_key_this_build_does_not_know_is_refused(
+    tmp_path, section: str, entry: str, expected: str
+) -> None:
+    """The same canonical-object rule the model entries have, over the other three."""
+    path = write(tmp_path, f"{section}:\n  one:\n{entry}")
+    with pytest.raises(ConfigError, match=re.escape(expected)):
+        load(path)
+
+
+def test_a_model_listed_twice_is_refused(tmp_path) -> None:
+    """Two entries under one id are one model to every reader but the writer."""
+    path = write(
+        tmp_path,
+        """
+providers:
+  p:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models:
+      - {model: m}
+      - {model: m}
+""",
+    )
+    with pytest.raises(ConfigError, match="listed twice"):
+        load(path)
+
+
+def test_the_model_schema_names_every_backend() -> None:
+    """The literal in the model module and the plugin table are one set."""
+    from slife2.libs.host.model_config import API_PROTOCOLS
+
+    assert set(API_PROTOCOLS) == set(API_BACKENDS)
+
+
 def test_a_provider_without_models_is_refused(tmp_path) -> None:
     path = write(
         tmp_path, "providers:\n  p:\n    api: openai-completions\n    models: []\n"

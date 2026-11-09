@@ -389,6 +389,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "attach_image",
         "cancel_async",
         "check_async",
+        "model_get",
         "model_list",
         "model_remove",
         "model_set",

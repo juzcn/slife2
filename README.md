@@ -570,21 +570,24 @@ its own tools:
 
 | Section or folder | Tools |
 |---|---|
-| `mcp:` | `mcp_set`, `mcp_list`, `mcp_remove`, `mcp_set_enabled` |
-| `rest-api:` | `rest_api_set`, `rest_api_list`, `rest_api_remove`, `rest_api_set_enabled` |
-| `cli:` | `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
+| `mcp:` | `mcp_get`, `mcp_set`, `mcp_list`, `mcp_remove`, `mcp_set_enabled` |
+| `rest-api:` | `rest_api_get`, `rest_api_set`, `rest_api_list`, `rest_api_remove`, `rest_api_set_enabled` |
+| `cli:` | `cli_get`, `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
 | `jobs/` (a folder) | `job_set`, `job_list`, `job_read`, `job_run`, `job_remove` |
-| `providers:` and `default:` | `model_set`, `model_list`, `model_remove`, `model_switch` |
+| `providers:` and `default:` | `model_get`, `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
 cross-process lock. The write preserves comments, and the result is validated by
 the same loader used at startup. An entry the loader refuses is put back and the
 caller is told why.
 
-`set` writes the whole entry: a field left out is removed. `set_enabled` changes
-only `enabled`. There is no approval gate before a write; in particular,
-`mcp_set` with a `command:` records a program slife2 will start.
+`set` writes the whole entry: a field left out is removed. For `model`, `mcp`,
+`rest-api` and `cli`, read the matching `*_get` first: it returns the whole
+object, `*_set` takes it back with every field required, and a field left out is
+a schema error rather than a removal. `set_enabled` changes only `enabled`.
+There is no approval gate before a write; in particular, `mcp_set` with a
+`command:` records a program slife2 will start.
 
 ## Capabilities
 

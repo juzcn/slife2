@@ -109,19 +109,45 @@ def section(isolated_runtime: Path) -> dict[str, Any]:
     return read_section("mcp", path=isolated_runtime / "slife2.yaml")
 
 
+def mcp_config(
+    *,
+    transport: str = "stdio",
+    command: str | None = None,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    url: str | None = None,
+    headers: dict[str, str] | None = None,
+    cwd: str = "",
+    description: str = "",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """The whole `config` object `mcp_set` takes — every field, every time."""
+    return {
+        "transport": transport,
+        "command": command,
+        "args": args,
+        "env": env,
+        "url": url,
+        "headers": headers,
+        "cwd": cwd,
+        "description": description,
+        "enabled": enabled,
+    }
+
+
 # --- what the listing shows ---------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_listing_shows_the_file_and_not_the_credential(
+async def test_the_listing_shows_what_it_is_and_not_its_credential(
     isolated_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**`${VAR}` comes back as `${VAR}`, and this is why the listing reads the file.**
+    """**The browse does not carry the entry, and certainly not its credential.**
 
-    What this process *holds* is the resolved settings, so a row built from them
-    would put the operator's live API key into the conversation and into the turn
-    log.  The file is also simply the better answer: it is what a person reads
-    and edits, and it is the thing these tools change.
+    A listing is for choosing: the name, the description, the state and the tool
+    count.  The command, args, env and headers are `mcp_get`'s, so neither the
+    `${VAR}` reference nor the resolved key has any business in a page of
+    servers.
     """
     monkeypatch.setenv("MCP_TEST_KEY", "sk-live-do-not-print-me")
 
@@ -130,10 +156,11 @@ async def test_the_listing_shows_the_file_and_not_the_credential(
 
     (row,) = listed["servers"]
     assert row["name"] == "existing"
-    assert row["env"] == {"SERPER_API_KEY": "${MCP_TEST_KEY}"}, (
-        "the reference, as written"
-    )
+    assert row["tools"] == 2
+    assert row["description"] == "Already configured."
+    assert set(row) == {"name", "state", "tools", "description"}
     assert "sk-live-do-not-print-me" not in json.dumps(listed)
+    assert "${MCP_TEST_KEY}" not in json.dumps(listed)
 
 
 @pytest.mark.asyncio
@@ -149,9 +176,11 @@ async def test_the_listing_says_which_servers_are_working(isolated_runtime) -> N
 
     (row,) = listed["servers"]
     assert row["state"] == "ready"
-    assert row["transport"] == "stdio"
-    assert row["command"] == "in-memory"
+    assert row["tools"] == 2
     assert row["description"] == "Already configured."
+    assert "command" not in row and "transport" not in row, (
+        "the entry is `mcp_get`'s, not the browse's"
+    )
     assert (listed["total"], listed["limit"], listed["offset"]) == (1, 50, 0)
 
 
@@ -164,7 +193,12 @@ async def test_the_listing_pages_and_says_where_it_stopped(isolated_runtime) -> 
     """
     write_config(isolated_runtime)
     async with Client(family(isolated_runtime)) as client:
-        await ask(client, "mcp_set", name="second", command="in-memory")
+        await ask(
+            client,
+            "mcp_set",
+            name="second",
+            config=mcp_config(command="in-memory"),
+        )
         first = await ask(client, "mcp_list", limit=1)
         rest = await ask(client, "mcp_list", limit=1, offset=1)
 
@@ -186,7 +220,10 @@ async def test_setting_a_server_writes_it_and_connects_it(isolated_runtime) -> N
     """
     async with Client(family(isolated_runtime)) as client:
         answer = await ask(
-            client, "mcp_set", name="added", command="in-memory", description="Added."
+            client,
+            "mcp_set",
+            name="added",
+            config=mcp_config(command="in-memory", description="Added."),
         )
         listed = await ask(client, "mcp_list")
 
@@ -210,8 +247,12 @@ async def test_setting_it_again_does_not_rebuild_the_link(isolated_runtime) -> N
     sides here go through the config layer and are both resolved.
     """
     async with Client(family(isolated_runtime)) as client:
-        first = await ask(client, "mcp_set", name="added", command="in-memory")
-        again = await ask(client, "mcp_set", name="added", command="in-memory")
+        first = await ask(
+            client, "mcp_set", name="added", config=mcp_config(command="in-memory")
+        )
+        again = await ask(
+            client, "mcp_set", name="added", config=mcp_config(command="in-memory")
+        )
 
     assert first["tools"] == 2 and again["tools"] == 2, "both report what it offers"
     assert written(isolated_runtime).count("  added:") == 1, "one entry, not two"
@@ -233,10 +274,15 @@ async def test_setting_it_again_replaces_the_entry_rather_than_patching_it(
             client,
             "mcp_set",
             name="added",
-            url="https://x.test/mcp",
-            description="What it used to be.",
+            config=mcp_config(
+                transport="http",
+                url="https://x.test/mcp",
+                description="What it used to be.",
+            ),
         )
-        answer = await ask(client, "mcp_set", name="added", command="in-memory")
+        answer = await ask(
+            client, "mcp_set", name="added", config=mcp_config(command="in-memory")
+        )
         listed = await ask(client, "mcp_list")
 
     entry = section(isolated_runtime)["added"]
@@ -245,6 +291,104 @@ async def test_setting_it_again_replaces_the_entry_rather_than_patching_it(
     assert "description" not in entry, "and a field this call did not name"
     assert answer["state"] == "ready"
     assert "added" in {row["name"] for row in listed["servers"]}
+
+
+# --- reading one --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_returns_the_whole_entry(isolated_runtime) -> None:
+    """Every writable field, so `mcp_set` can take the same object back."""
+    async with Client(family(isolated_runtime)) as client:
+        answer = await ask(client, "mcp_get", name="existing")
+
+    config = answer["config"]
+    assert config["transport"] == "stdio"
+    assert config["command"] == "in-memory"
+    assert config["args"] is None
+    assert config["env"] == {"SERPER_API_KEY": "${MCP_TEST_KEY}"}
+    assert config["url"] is None
+    assert config["headers"] is None
+    assert config["cwd"] == ""
+    assert config["description"] == "Already configured."
+    assert config["enabled"] is True
+    assert answer["state"] == "ready"
+    assert answer["tools"] == 2
+
+
+@pytest.mark.asyncio
+async def test_setting_enabled_true_or_false_starts_or_stops_the_server(
+    isolated_runtime,
+) -> None:
+    """**`enabled` is the switch, through the whole-entry `set` too.**
+
+    `set_enabled` has always rebuilt the link; the whole-entry `set` reaches the
+    same `Family.put`, so an entry written `enabled: false` must be stopped, not
+    merely written down, and one written back on must be connected again.
+    """
+    async with Client(family(isolated_runtime)) as client:
+        off = await ask(
+            client,
+            "mcp_set",
+            name="existing",
+            config=mcp_config(command="in-memory", enabled=False),
+        )
+        listed_off = await ask(client, "mcp_list")
+        off_entry = section(isolated_runtime)["existing"]
+        on = await ask(
+            client,
+            "mcp_set",
+            name="existing",
+            config=mcp_config(command="in-memory", enabled=True),
+        )
+        listed_on = await ask(client, "mcp_list")
+
+    assert off["state"] == "off"
+    assert off["config"]["enabled"] is False
+    assert "tools" not in off, "a stopped server has no count to report"
+    assert listed_off["servers"][0]["state"] == "off"
+    assert off_entry["enabled"] is False
+
+    assert on["state"] == "ready"
+    assert on["config"]["enabled"] is True
+    assert on["tools"] == 2, "written back on, and connected again"
+    assert listed_on["servers"][0]["state"] == "ready"
+    assert "enabled" not in section(isolated_runtime)["existing"], "on is the default"
+
+
+@pytest.mark.asyncio
+async def test_get_then_set_is_a_no_op(isolated_runtime) -> None:
+    """`set(get())` reproduces the file; the object is the whole entry."""
+    write_config(isolated_runtime)
+    before = section(isolated_runtime)
+
+    async with Client(family(isolated_runtime)) as client:
+        config = (await ask(client, "mcp_get", name="existing"))["config"]
+        await ask(client, "mcp_set", name="existing", config=config)
+
+    assert section(isolated_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_the_set_schema_is_the_prompt(isolated_runtime) -> None:
+    """The transport enum and the required fields are visible before the call."""
+    async with Client(family(isolated_runtime)) as client:
+        tools = {one.name: one for one in await client.list_tools()}
+
+    config = tools["mcp_set"].input_schema["properties"]["config"]
+    assert config["additionalProperties"] is False
+    assert config["required"] == [
+        "transport",
+        "command",
+        "args",
+        "env",
+        "url",
+        "headers",
+        "cwd",
+        "description",
+        "enabled",
+    ]
+    assert config["properties"]["transport"]["enum"] == ["stdio", "http"]
 
 
 @pytest.mark.asyncio
@@ -266,15 +410,21 @@ async def test_an_entry_the_config_refuses_is_refused_before_anything_is_written
 
     async with Client(family(isolated_runtime)) as client:
         with pytest.raises(ToolError) as neither:
-            await client.call_tool("mcp_set", {"name": "nowhere", "description": "d"})
+            await client.call_tool(
+                "mcp_set",
+                {"name": "nowhere", "config": mcp_config(description="d")},
+            )
         with pytest.raises(ToolError) as both:
             await client.call_tool(
                 "mcp_set",
-                {"name": "nowhere", "command": "npx", "url": "https://x.test/mcp"},
+                {
+                    "name": "nowhere",
+                    "config": mcp_config(command="npx", url="https://x.test/mcp"),
+                },
             )
 
     assert "needs `command`" in str(neither.value)
-    assert "both `command` and `url`" in str(both.value)
+    assert "must not name `url`" in str(both.value)
     assert not str(neither.value).startswith("[refused]"), "the status is the call's"
     assert written(isolated_runtime) == before, "nothing was written"
 
@@ -290,7 +440,10 @@ async def test_a_name_the_hub_is_already_using_is_refused(isolated_runtime) -> N
     """
     async with Client(family(isolated_runtime)) as client:
         with pytest.raises(ToolError) as raised:
-            await client.call_tool("mcp_set", {"name": "agent", "command": "in-memory"})
+            await client.call_tool(
+                "mcp_set",
+                {"name": "agent", "config": mcp_config(command="in-memory")},
+            )
 
     assert "slife2 itself runs" in str(raised.value)
     assert "agent" not in section(isolated_runtime)
@@ -308,7 +461,9 @@ async def test_removing_a_server_takes_its_entry_and_stops_it(isolated_runtime) 
     to do — nothing.  A name in neither is refused below.
     """
     async with Client(family(isolated_runtime)) as client:
-        await ask(client, "mcp_set", name="added", command="in-memory")
+        await ask(
+            client, "mcp_set", name="added", config=mcp_config(command="in-memory")
+        )
         answer = await ask(client, "mcp_remove", name="added")
         listed = await ask(client, "mcp_list")
 
@@ -386,6 +541,7 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
             config.tool_load,
             autoload=(
                 *config.tool_load.autoload,
+                "mcp_get",
                 "mcp_list",
                 "mcp_set",
                 "mcp_remove",
@@ -403,7 +559,7 @@ async def test_the_management_tools_are_offered_to_the_model(isolated_runtime) -
         result = await client.call_tool("list_tools", {})
         listed = {one["name"] for one in result.data["tools"]}
 
-    assert {"mcp_list", "mcp_set", "mcp_remove", "mcp_set_enabled"} <= listed
+    assert {"mcp_get", "mcp_list", "mcp_set", "mcp_remove", "mcp_set_enabled"} <= listed
     assert "list_sources" not in listed and "call_source" not in listed
 
 

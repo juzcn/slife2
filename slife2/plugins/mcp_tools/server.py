@@ -23,8 +23,10 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from slife2.clients.gateway import ClientFactory
+from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     MCP_TOOLS_SERVER_NAME,
     Config,
@@ -33,6 +35,7 @@ from slife2.libs.host.config import (
     load,
     load_cached,
 )
+from slife2.libs.host.tool_config import McpConfig, load_mcp, mcp_entry
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
     Family,
@@ -40,6 +43,7 @@ from slife2.libs.plugin.family import (
     Homes,
     apply_and_report,
     build_family_server,
+    entry_report,
     list_entries,
     prepare_entry,
     remove_entry,
@@ -125,37 +129,20 @@ def _prepare(config: Config, name: str, entry: dict[str, Any]) -> ToolServerSett
 
 
 def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One row of `mcp_list` — the file's words and the link's state.
+    """One row of `mcp_list` — what the server is, and whether it is usable.
 
-    Both halves are needed and neither is the other's summary: the file says what
-    was configured (**with `${VAR}` intact** — the settings this process holds
-    have been through `resolve_secret`, so handing those over would put the
-    operator's live keys in the conversation and in the turn log), and the link
-    says whether it is answering — `state_word`'s word, which is the same one a
-    `set` answer and the hub's `servers` use.
-
-    A key the file does not have is **left out** rather than sent empty: an
-    entry with no `args` and one with `args: []` are the same absence, and a row
-    that spelled both as `[]` would be inventing a field the operator never wrote.
+    **A listing is for choosing, not for reading the entry.**  The key, the
+    operator's sentence about what it offers, the link's state, and a count or
+    the failure's reason are what a model chooses between servers with; the
+    command, URL, args, cwd and credentials are `mcp_get`'s, and putting them
+    here would make the browse pay for a configuration it is not editing.
     """
     row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
-    if raw.get("url"):
-        row["transport"] = "http"
-        row["url"] = str(raw["url"])
-    else:
-        row["transport"] = "stdio"
-        row["command"] = str(raw.get("command") or "")
-    args = raw.get("args")
-    if isinstance(args, list) and args:
-        row["args"] = [str(part) for part in args]
-    # The credentials are named and never shown — `KEY=${VAR}`, exactly as the
-    # file has it.  Worth listing for the usual reason a listing exists (which
-    # key does this server need?) and safe for the same one: the reference is
-    # what the file holds, and the resolved value never gets here.
-    for field in ("env", "headers"):
-        values = raw.get(field)
-        if isinstance(values, dict) and values:
-            row[field] = {str(key): str(value) for key, value in values.items()}
+    if one is not None and one.settings.enabled:
+        if one.usable:
+            row["tools"] = len(one.rows or [])
+        elif one.error:
+            row["error"] = one.error
     if description := str(raw.get("description") or ""):
         row["description"] = description
     return row
@@ -164,80 +151,94 @@ def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
     """Serve the `mcp_*` tools on this family's server."""
 
+    def entry_of(name: str) -> tuple[dict[str, Any], McpConfig]:
+        """One entry's raw mapping and its canonical object, or this family's miss."""
+        raw = configfile.read_section(SECTION).get(name)
+        if not isinstance(raw, dict):
+            raise ToolError(
+                f"`{name}` is not in `mcp:` — `mcp_set` adds it, `mcp_list` "
+                f"shows what is there."
+            )
+        try:
+            return raw, load_mcp(raw, where=f"mcp.{name}")
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    async def report_of(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """The read-only half: the link's state and, when it answered, its count."""
+        family = homes.current()
+        family.connecting()
+        await family.settle()
+        one = family.held(name)
+        if one is None:
+            return {"name": name, "state": state_word(raw, None)}
+        return entry_report(one, name, words=WORDS)
+
     @mcp.tool(name="mcp_list", meta=FOR_THE_MODEL)
     async def mcp_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the MCP servers configured under `mcp:`, with their state.
 
-        Each entry as the file writes it — how it is reached, what it is for,
-        and whether its link is answering.
+        Each row says what the server is for and whether its link is answering:
+        a `tools` count when it answered, or `error` when it did not. The
+        command, URL, arguments and credentials are `mcp_get`'s, not the
+        browse's.
 
         Args:
             limit: How many entries this page may hold. Omit for the cap.
             offset: How many entries to skip — that is how you page.
 
         Returns:
-            `servers` — one row per entry, each with `name`, `state`
-            (`ready`, `connecting`, `failed`, `idle` or `off`) and whatever the
-            file has of it — and `total`, `limit` and `offset`, so
+            `servers` — one row per entry, each with `name`, `state` (`ready`,
+            `connecting`, `failed`, `idle`, `off` or `not held`), `description`
+            when the file has one, and `tools` or `error` when the link has
+            one — and `total`, `limit` and `offset`, so
             `offset + len(servers) < total` says whether more remain.
         """
         return await list_entries(
             homes.current(), limit, offset, words=WORDS, describe=_describe
         )
 
-    @mcp.tool(name="mcp_set", meta=FOR_THE_MODEL)
-    async def mcp_set(
-        name: str,
-        command: str = "",
-        args: list[str] | None = None,
-        env: dict[str, str] | None = None,
-        url: str = "",
-        headers: dict[str, str] | None = None,
-        cwd: str = "",
-        description: str = "",
-        enabled: bool = True,
-    ) -> dict[str, Any]:
-        """Add or update an MCP server under `mcp:` (upsert).
+    @mcp.tool(name="mcp_get", meta=FOR_THE_MODEL)
+    async def mcp_get(name: str) -> dict[str, Any]:
+        """Read one MCP server's whole entry, by name.
 
-        One entry is one transport: `command` for a process slife2 starts, `url`
-        for an endpoint somebody else runs. This is the whole entry — a field
-        left out is dropped, so restate everything, which is also how a server
-        switches between the two. It is connected here and now, and the answer
-        says whether it answered.
+        The answer is the canonical entry — `config` has every writable field:
+        `transport`, `command`, `args`, `env`, `url`, `headers`, `cwd`,
+        `description` and `enabled` — so `mcp_set` takes the same object back.
+        `state` is the link's read-only word, and `tools` or `error` says what it
+        answered when it did.
+
+        Args:
+            name: The server's name — the key it is written under.
+        """
+        raw, config = entry_of(name)
+        report = await report_of(name, raw)
+        report.pop("enabled", None)  # the writable field is in `config`
+        return {**report, "config": config.model_dump()}
+
+    @mcp.tool(name="mcp_set", meta=FOR_THE_MODEL)
+    async def mcp_set(name: str, config: McpConfig) -> dict[str, Any]:
+        """Add or replace one MCP server — the whole entry, and no patch.
+
+        `transport` chooses the shape: `stdio` needs `command`, `http` needs
+        `url`. Every field is required; a field left out is a schema error, not
+        a silent default. Read `mcp_get`, change what you mean to change, and
+        pass the whole `config` back.
+
+        The entry is connected here and now, and the answer is the entry as
+        written — the same `config` shape `mcp_get` gives — plus the link's
+        read-only `state`, and `tools` or `error` when it has one.
 
         Args:
             name: The server's name — the key it is written under, and the
                 prefix every tool of it reaches you as (`{name}__{tool}`).
-            command: stdio — the program to start (npx, uvx, python).
-            args: stdio — its arguments.
-            env: stdio — environment overrides; `${VAR}` resolves when needed.
-            url: http — the endpoint (SSE or Streamable HTTP).
-            headers: http — request headers, `${VAR}` for anything secret.
-            cwd: stdio — the process's working directory; the data directory
-                when left out.
-            description: What it is for, for whoever reads the config.
-            enabled: Connect it now. False writes the entry switched off.
-
-        Returns:
-            `name` and `enabled`; `state`, one of `ready`, `connecting`,
-            `failed`, `idle` or `off`; `tools`, how many it offers, when it
-            answered; and `error`, what it said, when it has not answered.
+            config: The whole entry — the `config` object `mcp_get` returned.
         """
-        settings = _prepare(
-            load(),
-            name,
-            {
-                "command": command or None,
-                "args": args,
-                "env": env,
-                "url": url or None,
-                "headers": headers,
-                "cwd": cwd or None,
-                "description": description or None,
-                "enabled": enabled,
-            },
-        )
-        return await apply_and_report(homes.current(), settings, words=WORDS)
+        settings = _prepare(load(), name, mcp_entry(config))
+        report = await apply_and_report(homes.current(), settings, words=WORDS)
+        report.pop("enabled", None)  # the writable field is in `config`
+        _, written = entry_of(name)
+        return {**report, "config": written.model_dump()}
 
     @mcp.tool(name="mcp_remove", meta=FOR_THE_MODEL)
     async def mcp_remove(name: str) -> dict[str, Any]:
