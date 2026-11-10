@@ -12,9 +12,11 @@ report anything).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any
 
@@ -617,6 +619,119 @@ def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
     # version exists — an outbound request per server, in a stack that starts
     # offline.
     assert CapturingMCP.options["show_banner"] is False
+
+
+def test_a_request_body_may_carry_an_attachment_the_config_allows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The request ceiling is this system's, not the SDK's 4 MiB.**
+
+    An attached image travels inside the request that carries the whole
+    conversation, base64-inflated, and `attachments.MAX_BYTES` allows 20 MB for
+    one file — so the SDK's 4 MiB default refused an attachment the system
+    itself says is valid: `attach_image` answered success, and the next model
+    call failed with "Server returned an error response", a 413 the tool never
+    saw.  `serve` installs a manager with `MAX_REQUEST_BODY_SIZE`, which is what
+    this pins.
+    """
+    from fastmcp.server import http as http_module
+
+    from slife2.libs.turn.attachments import MAX_BYTES
+
+    class CapturingMCP:
+        def run(self, **options: Any) -> None:
+            raise OSError("stop before binding")
+
+    # The restore half matters: `serve` replaces a module global, and the next
+    # test in this process should see the class FastMCP shipped.
+    monkeypatch.setattr(
+        http_module,
+        "FastMCPStreamableHTTPSessionManager",
+        http_module.FastMCPStreamableHTTPSessionManager,
+    )
+    with pytest.raises(OSError):
+        protocol_module.serve(
+            CapturingMCP(),
+            ServerSettings(port=24002),
+            SimpleNamespace(host=None, port=None),
+            name="slife2-agent",
+        )
+
+    manager = http_module.FastMCPStreamableHTTPSessionManager(app=None)
+    assert manager.max_request_body_size == protocol_module.MAX_REQUEST_BODY_SIZE
+    assert manager.max_request_body_size > MAX_BYTES * 4 // 3, (
+        "one capped image, base64-inflated, must fit in the body"
+    )
+
+
+@contextlib.asynccontextmanager
+async def _over_http(server: FastMCP) -> AsyncGenerator[str]:
+    """Serve a built server on a real port, and yield its URL.
+
+    A real socket, because the ceiling being tested lives in the HTTP
+    transport's middleware — the in-memory transport never sees a body limit at
+    all, which is why this bug reached a live conversation.
+    """
+    import socket
+
+    import uvicorn
+
+    app = server.http_app(path="/mcp", json_response=False, stateless_http=True)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    uv = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+    serve_task = asyncio.create_task(uv.serve(sockets=[sock]))
+    try:
+        for _ in range(100):
+            if uv.started:
+                break
+            await asyncio.sleep(0.05)
+        assert uv.started, "the server did not start"
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        uv.should_exit = True
+        await asyncio.wait_for(
+            serve_task, timeout=5
+        )  # timeouts: test shutdown, not a budget
+        sock.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_request_body_an_attachment_needs_reaches_the_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The 4 MiB refusal happened before the tool**, which is why the live
+    conversation showed only "Server returned an error response".
+
+    A body the attachment cap allows — one image is 20 MB before base64 — must
+    reach the tool.  `serve` installs `_OwnedSessionManager` for every server
+    this system starts; this is the same replacement applied to a test server,
+    and the body used is over the SDK's old default.
+    """
+    from fastmcp.server import http as http_module
+
+    monkeypatch.setattr(
+        http_module,
+        "FastMCPStreamableHTTPSessionManager",
+        protocol_module._OwnedSessionManager,
+    )
+    server: FastMCP = house_server("request-body-test")
+
+    @server.tool
+    async def measure(text: str) -> int:
+        return len(text)
+
+    body = "x" * (5 * 1024 * 1024)
+    assert len(body) > 4 * 1024 * 1024, "the body is over the SDK's old default"
+
+    async with _over_http(server) as url:
+        async with Client(url) as client:
+            answer = await client.call_tool("measure", {"text": body})
+
+    assert answer.data == len(body)
 
 
 def _asgi_record(

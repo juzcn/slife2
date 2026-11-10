@@ -485,11 +485,12 @@ Four facts about the MCP revision in use bind every plugin and client:
    wait has a client-side timeout.
 
 **Message size.** MCP `tools/call` is request/response, and the client SDK
-refuses an SSE event over 1 MiB. Our own hops use a transport with no ceiling,
-because a daemon this system started is bounded by the model's context. The
-gateway to an external MCP server keeps the SDK's ceiling: an external server is
-a peer, and the ceiling protects a process from a peer making it buffer an
-unbounded message.
+refuses an SSE event over 1 MiB while the server SDK refuses a request body
+over 4 MiB. Our own hops have neither ceiling — a conversation and its attached
+images travel inline, and a daemon this system started is bounded by the
+model's context and the attachment cap. The gateway to an external MCP server
+keeps the SDK's ceilings: an external server is a peer, and they protect a
+process from a peer making it buffer an unbounded message.
 
 ## 4. Machine and agent lifecycle
 

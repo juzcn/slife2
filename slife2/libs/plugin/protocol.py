@@ -80,9 +80,11 @@ import httpx2
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports.base import ClientTransport, TransportOptions
 from fastmcp.exceptions import ToolError
+from fastmcp.server import http as _fastmcp_http
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 import slife2.helpers.logcontext as logcontext
@@ -891,6 +893,49 @@ def _live_owner(url: str) -> ServerRecord | None:
     return None
 
 
+#: The largest request body one of our own servers accepts.
+#:
+#: **The MCP SDK's 4 MiB default is not this system's ceiling to apply.**  It
+#: exists to keep a peer nobody here started from making this process buffer an
+#: unbounded message — the argument `_Ours` makes for the 1 MiB SSE default on
+#: the client side — and our own clients send a whole conversation per call,
+#: with attached images carried inline (`slife2.libs.turn.attachments.MAX_BYTES`
+#: allows 20 MB for one file before base64 inflates it by a third).  4 MiB
+#: therefore refused an attachment the system itself says is valid: `attach_image`
+#: succeeded with a generated picture, and the next `stream_chat` failed with
+#: "Server returned an error response" — a 413 from the SDK's middleware, before
+#: the request reached the tool.
+#:
+#: `sys.maxsize` rather than a large number, because a number is the same wall
+#: further away and there is no size at which one of our own conversations is
+#: too big.  The endpoint has no authentication and a local process can already
+#: call every tool on it, so the body cap is not a boundary this gives up.
+MAX_REQUEST_BODY_SIZE = sys.maxsize
+
+
+class _OwnedSessionManager(_fastmcp_http.FastMCPStreamableHTTPSessionManager):
+    """FastMCP's streamable HTTP manager with this system's request body ceiling.
+
+    **A subclass installed over the module's name, because FastMCP 4.1.6 takes
+    no `max_request_body_size` argument** — `create_streamable_http_app` builds
+    the manager inside its lifespan, where a caller cannot reach it.  The
+    replacement is made in :func:`serve`, so it covers every server this system
+    runs and touches no client process.
+
+    The SDK builds its enforcing wrapper inside `__init__` with the default, so
+    the wrapper is rebuilt here with this system's ceiling.  Calling the
+    grandparent with the argument instead would reimplement FastMCP's own
+    event-store scoping, which is the one thing its subclass adds.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_request_body_size = MAX_REQUEST_BODY_SIZE
+        self.asgi_app = RequestBodyLimitMiddleware(
+            self._handle_request, MAX_REQUEST_BODY_SIZE
+        )
+
+
 def serve(
     mcp: FastMCP,
     server: ServerSettings,
@@ -970,6 +1015,10 @@ def serve(
         )
         return
     try:
+        # **Before `run`, because the app is built there and its lifespan builds
+        # the session manager.**  A request body carries the whole conversation
+        # and its images inline; see `MAX_REQUEST_BODY_SIZE`.
+        _fastmcp_http.FastMCPStreamableHTTPSessionManager = _OwnedSessionManager
         mcp.run(
             transport="http",
             host=args.host or server.host,
