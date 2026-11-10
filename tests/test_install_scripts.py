@@ -890,6 +890,9 @@ def test_requirements_cover_the_shipped_configuration() -> None:
         "browser-harness",
         "rg",
     } <= named
+    # `gitee-ent` is `enabled: false` and names a path on a drive only the
+    # machine that wrote the entry has; a switched-off entry is not required.
+    assert not any("mcp-gitee-ent" in name for name in named), named
 
 
 def test_the_installers_run_slife2_as_a_module() -> None:
@@ -1678,6 +1681,40 @@ def test_requirements_report_unknown_commands_with_their_source(
     assert result.returncode == 0, result.stderr
     assert "no-such-tool\tmcp:mystery" in result.stdout
     assert "yt-dlp\tcli:yt" in result.stdout
+
+
+def test_requirements_skip_switched_off_entries(tmp_path: Path) -> None:
+    """**An entry switched off is not a dependency.**  `enabled: false` means
+    the server never starts, the REST proxy never launches and the `cli:`
+    command is never offered, so a program behind it is nothing the install
+    has to provide.  The shipped `gitee-ent` is disabled and names a path on
+    a drive this machine does not have; it failed the install of everything
+    else.
+    """
+    (tmp_path / "slife2.yaml").write_text(
+        REQUIRED + "mcp:\n"
+        "  off:\n"
+        "    command: no-such-tool-off\n"
+        "    enabled: false\n"
+        "  on:\n"
+        "    command: no-such-tool-on\n"
+        "rest-api:\n"
+        "  off-rest:\n"
+        "    spec: https://example.test/openapi.json\n"
+        "    enabled: false\n"
+        "cli:\n"
+        "  off-cli:\n"
+        "    command: no-such-tool-cli-off\n"
+        "    enabled: false\n",
+        encoding="utf-8",
+    )
+    result = _requirements(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "no-such-tool-on\tmcp:on" in result.stdout
+    assert "no-such-tool-off" not in result.stdout
+    assert "no-such-tool-cli-off" not in result.stdout
+    # A REST entry expands to `uvx`; this config has no enabled one.
+    assert "uvx" not in result.stdout
 
 
 def test_requirements_carry_a_cli_install_hint(tmp_path: Path) -> None:
