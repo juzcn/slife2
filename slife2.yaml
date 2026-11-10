@@ -345,12 +345,6 @@ mcp:
     headers:
       Authorization: Bearer ${GITEE_ACCESS_TOKEN}
     description: Gitee（码云）官方远程 MCP Server（https://api.gitee.com/mcp）— 仓库/Issue/PR/Release/通知/搜索，凭据经 GITEE_ACCESS_TOKEN 以 Bearer 注入。
-  gitee-ent:
-    command: D:\dev\mcp-gitee-ent\mcp-gitee-ent.exe
-    env:
-      GITEE_ENT_MCP_ACCESS_TOKEN: ${GITEE_ACCESS_TOKEN}
-    description: Gitee 企业版 MCP Server（v0.1.2）— 企业仓库/Issue/PR/项目/迭代/成员，需 MCP 企业令牌（GITEE_ENT_MCP_ACCESS_TOKEN）。当前用社区版，暂关。
-    enabled: false
 rest-api:
   # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
   # `command:` uses a proxy of your own instead. A large spec is worth
