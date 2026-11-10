@@ -987,6 +987,11 @@ async def test_a_switched_off_source_is_declared_but_not_merged() -> None:
     """
     answer = one_source(enabled=False, up=False, rows=None, name="nowhere")
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        # The plugins are waited for, because this test is about the merge:
+        # an ask bounds its wait for a source that is still connecting, and on
+        # a loaded runner that bound expires — the list would fail before it
+        # could show that nothing was merged.
+        await wait_until_settled(hub)
         listed = await hub.call_tool("list_tools", {})
         reported = await hub.call_tool("servers", {})
         rows = await found(hub, "cli:thing")
