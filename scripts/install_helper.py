@@ -7,13 +7,13 @@ has, and copies the bundled `skills/` and
 update, and deliberately not the versioned-backup dance the old installer did:
 the bundle is the authority, and a person who edits a seeded file edits their
 copy.  `require` reads the *shipped* configuration with the project's own loader
-and prints every external program it names and has not switched off, with the
-place that names it — and, for a `cli:` entry, the line that installs it.  The
-home's `slife2.yaml` is the server's file and may lag a release; it is never
-the installer's source of requirements.  The installer maps those names to
-packages and installs them; nothing here installs anything.  `secrets` reads
-the home's configuration for the credentials it cannot resolve, so the
-installer can say which `credstore set` commands would make it work.
+and prints every external program it names, with the place that names it — and,
+for a `cli:` entry, the line that installs it.  The home's `slife2.yaml` is the
+server's file and may lag a release; it is never the installer's source of
+requirements.  The installer maps those names to packages and installs them;
+nothing here installs anything.  `secrets` reads the home's configuration for
+the credentials it cannot resolve, so the installer can say which
+`credstore set` commands would make it work.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --source <repo> --home <dir>
@@ -341,13 +341,6 @@ def require(source: Path, home: Path) -> int:
     A program an MCP server, a REST proxy, a tunnel or a skill names is
     required — a hint beside it would read as permission to leave it missing —
     so the third column is left off as soon as one such origin is present.
-
-    **A switched-off entry is not a requirement.**  `enabled: false` means the
-    server is never started, the REST proxy is never launched and the `cli:`
-    command is never offered, so its program is nothing this install has to
-    provide.  Reading every entry made the disabled `gitee-ent` — a path on a
-    drive this machine does not have — fail the install on a program nothing
-    would ever run.
     """
     from slife2.libs.host.config import ConfigError, load
 
@@ -388,20 +381,17 @@ def require(source: Path, home: Path) -> int:
             _add(needed, hints, binary, f"file-tunnel.providers.{name}")
 
     for name, entry in config.mcp.items():
-        if entry.enabled:
-            _add(needed, hints, _first_word(entry.command), f"mcp:{name}")
+        _add(needed, hints, _first_word(entry.command), f"mcp:{name}")
     for name, entry in config.rest_apis.items():
-        if entry.enabled:
-            _add(needed, hints, _first_word(entry.command), f"rest-api:{name}")
+        _add(needed, hints, _first_word(entry.command), f"rest-api:{name}")
     for name, entry in config.cli.items():
-        if entry.enabled:
-            _add(
-                needed,
-                hints,
-                _first_word(entry.command),
-                f"cli:{name}",
-                hint=entry.install,
-            )
+        _add(
+            needed,
+            hints,
+            _first_word(entry.command),
+            f"cli:{name}",
+            hint=entry.install,
+        )
 
     # The home's skills, not the source's: the seeded bundle is there, and so
     # is any skill the person wrote.
