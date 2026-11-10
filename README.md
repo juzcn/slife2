@@ -866,7 +866,9 @@ A note, diary entry, and report live **once**, as a file under
 `agents/<agent>/cabinet/` (`notes/`, `diary/`, `reports/`); the row is the
 address and metadata, and the file's whole text is what the meaning leg embeds.
 Every answer about a document carries `path` — the file relative to the data
-directory, so the model can hand it to its own tools (`pandoc`, `rg`). A dump's
+directory, so the model can hand it to its own tools (`pandoc`, `rg`). A
+corpus-wide literal or regex search is that `rg` over those files, not a third
+cabinet search leg. A dump's
 text lives only in its file under `dumps/`; its row is the address. A
 saved file's bytes live under the cabinet; its title, path, and summary are
 keyword text, and it has no Markdown mirror; an image is the same shape under
@@ -1230,7 +1232,6 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
   shell its tool set provides.
 - Jobs are code: they run in `slife2-jobs` with the caller's identity and are
   not sandboxed. The top-level tool call is the approval point.
-- The cabinet has no `grep` search leg.
 - There is no approval gate before a configuration edit, including `mcp_set`
   with a `command:` that records a program slife2 will start.
 - An agent task may start another agent task; `agent-task.max_running` bounds

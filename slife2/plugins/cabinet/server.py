@@ -48,6 +48,12 @@ copies them into the cabinet (never moving, never deleting what it copied from);
 `file_grep` searches the same text, and the path to the bytes is what every
 other tool takes.
 
+**A corpus-wide literal or regex search is the external `rg`**, run through the
+model's shell over those paths, not a leg of the cabinet's search.  The corpus
+documents are already files on disk, so rebuilding `grep` here would be a second
+implementation of a program the machine has; `file_grep` and `dump_grep` are
+bounded readers for one file, not a second search engine.
+
 **A file comes from a local path or an `http(s)` URL.**  A local file is copied,
 never moved; a URL is fetched whole into the cabinet, bounded by
 `MAX_FETCH_BYTES` and `transport.file_fetch`.  The URL is untrusted input, so the
@@ -67,10 +73,6 @@ is its address, so there is no index entry for it.
 
 What this cut does **not** do, each named rather than half-built:
 
-* **There is no corpus-wide `grep` leg.**  The cabinet's search ranks notes,
-  days, files and reports by words and meaning; `dump_grep` finds text in one
-  saved output by a literal match, which is a reader's address rather than a
-  second search engine (SDD §14.2).
 * **There is no schedule half.**  The cabinet owns no scheduled-task tables and
   no tools over them; there is no scheduler here, so a report is keyed by its
   **title** instead of by a task, and a second write under one title is a

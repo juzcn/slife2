@@ -755,7 +755,8 @@ provider 抓取，不在这里。图片也不参与搜索：`[Image:…]` 的 ke
 笔记、日记和报告只存**一份**：`agents/<agent>/cabinet/` 下的文件（`notes/`、
 `diary/`、`reports/`）；行只是地址和元数据，文件的全文就是语义检索 embed 的内容。
 每份文档的回答都带 `path`——相对于数据目录的文件路径，模型可把它交给自己的工具
-（`pandoc`、`rg`）。dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下；标题、路径
+（`pandoc`、`rg`）。跨语料的字面或正则搜索就是那个 `rg`，不是文件柜的第三条检索腿。
+dump 的正文只在 `dumps/` 下的文件里，行只是地址。保存文件的字节在文件柜下；标题、路径
 和 summary 是关键词文本，它没有 Markdown 镜像；图片是同样的形状，放在 `pictures/` 下。
 `file_read` 和 `file_grep` 按行或按字符读取与搜索保存文件的解码文本；PDF、图片或压缩包按其
 字节的转义渲染来显示。
@@ -1060,7 +1061,6 @@ Windows 上 `uv run pytest` 不能在活栈旁边运行：`uv` 每次运行都�
   通过其工具集提供的 shell 运行命令。
 - job 是代码：它在 `slife2-jobs` 中以调用方身份运行，不在沙箱中。顶层工具调用是审批
   点。
-- 文件柜没有 `grep` 搜索腿。
 - 配置编辑之前没有审批关卡，包括带 `command:` 的 `mcp_set`——它记录的是 slife2 将
   启动的程序。
 - agent task 可以再启动 agent task；`agent-task.max_running` 限制并发，不限制一段

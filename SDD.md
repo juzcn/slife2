@@ -1574,6 +1574,11 @@ change to the naming rule orphans nothing that already exists. Every
 caller-supplied path is resolved against the cabinet root and refused if it
 leaves it.
 
+**A corpus-wide literal or regex search is the external `rg`**, run through the
+model's shell over those paths, and not a third leg of the cabinet's search. The
+documents are already files on disk, so rebuilding `grep` inside the cabinet
+would be a second implementation of a program the machine has.
+
 A subject that is not already lowercase carries a short digest in its filename,
 because `Python.md` and `python.md` are one file on Windows and macOS.
 
@@ -2550,7 +2555,6 @@ The following are not implemented in this version:
 | The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
-| A corpus-wide `grep` search leg | `dump_grep` is a bounded literal reader for one dump; a system-wide regex leg is a larger change. | Partial spellings and symbols in the corpus rely on the two existing legs. |
 | A cross-encoder rerank for the catalogue and cabinet searches | The context recall is the one whose bad candidate persists into every later turn; both searches are one-shot reads the model can repeat, and their pages order words-first on purpose. | Both use RRF and keep that page order; the cross-encoder (`rerank_model`) is wired to the context recall only. |
 | A policy that forces approval | The model-driven `_approve` exists; a named list does not. | `skill_set` and `mcp_set` rely on model judgment. |
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
