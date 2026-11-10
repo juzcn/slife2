@@ -2500,8 +2500,8 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     **A search result is an invitation to call the name in it**, so the two
     families that are findable and not callable have to answer like grown-ups:
     the model read the name, tried it, and is owed the step that actually
-    reaches the thing — `skill_use` for a playbook, and for a command the truth
-    that nothing runs one yet (SDD §14.2).
+    reaches the thing — `skill_use` for a playbook, and for a command the
+    shell, because a command is run rather than called (SDD §7.3).
     """
     if str(row.get("category") or "") == SKILL:
         return (
@@ -2512,7 +2512,8 @@ def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
     return (
         f"{name!r} is a command already installed on this machine"
         + (f" ({command})" if command else "")
-        + " — nothing here runs one yet, so there is no tool to call"
+        + " — run it through the shell your tools provide, not by calling "
+        "this row"
     )
 
 
@@ -2531,7 +2532,7 @@ def _load_refusal(
     them differently: a switched-off entry is the operator's decision, a server
     that is not answering is one to try later (`servers` says which), and the two
     document families are findable and not loadable — `skill_use` reads a
-    playbook, and nothing runs an installed command yet (SDD §14.2).
+    playbook, and an installed command is run through the shell (SDD §7.3).
     """
     outcome = str(answer.get("outcome") or "")
     if outcome in ("loaded", "already"):
@@ -2555,7 +2556,7 @@ def _load_refusal(
         elif name.startswith(f"{CLI}:"):
             what = (
                 "it is a command already installed on this machine, not a tool "
-                "to load — nothing runs one yet"
+                "to load — run it through the shell your tools provide"
             )
         else:
             what = "it has nothing behind it that could be loaded"

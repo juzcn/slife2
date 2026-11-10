@@ -7,6 +7,7 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 - If a capability is really missing, search the web for an existing MCP server, OpenAPI API, CLI or Skill, then add it yourself: `mcp_set`, `rest_api_set`, `cli_set`, `skill_set`.
 - You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
 - You can turn a workflow into a skill: `skill_draft` returns the files, then `skill_set` installs the drafted one.
+- A skill row (`skill:<name>`) is read with `skill_use`; a CLI row (`cli:<name>`) names a command already on this machine — run it through your shell tool. Neither row is called as a tool.
 - Prefer a dedicated tool over a shell command or ad-hoc code. 
 
 ## Built-in tools

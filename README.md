@@ -683,7 +683,8 @@ advertised schema and stripped before dispatch.
 Playbooks live in `<data>/skills/<name>/SKILL.md`. `slife2-skills` serves
 `skill_use`, which returns the playbook's text preceded by its directory.
 Installing a skill is dropping a directory into `skills/`; the tool reads the
-disk on every call.
+disk on every call. A skill is instructions, not code: the model reads the
+procedure and carries out its steps; nothing in slife2 executes a playbook.
 
 A skill can declare environment requirements in its header. The values come from
 the `skills:` section, resolved through the same chain as any other secret.
@@ -699,9 +700,10 @@ files it names and keeps the rest.
 
 `cli:` entries describe programs already installed on the machine. Every entry is
 a catalogue row (`cli:yt-dlp`), so `tool_search` can find it by what it does. The
-row is not a callable tool and has no load state; no tool executes a `cli:` entry
-yet, and `func_tool_load` reports that. An entry's `install:` line is shown when
-the program is missing.
+row is not a callable tool and has no load state: the model runs the command
+through a shell tool in its tool set (the shipped configuration provides
+`desktop-commander`), and `func_tool_load` reports that the row is not loadable.
+An entry's `install:` line is shown when the program is missing.
 
 `enabled: false` keeps an entry configured but never connects it. The value must
 be a real YAML boolean: `no`, `off`, and `'false'` are strings under YAML 1.2 and
@@ -1223,9 +1225,9 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
 
 ## Known limitations
 
-- `cli:` entries are catalogued and discoverable, but no tool executes them yet.
-- Playbook scripts are not executed by slife2; `skill_use` returns the playbook
-  text, and the model runs any commands itself.
+- A skill is instructions and a `cli:` entry is a command: slife2 serves no
+  runner for either. The model reads the playbook and runs commands through the
+  shell its tool set provides.
 - Jobs are code: they run in `slife2-jobs` with the caller's identity and are
   not sandboxed. The top-level tool call is the approval point.
 - The cabinet has no `grep` search leg.

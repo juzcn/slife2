@@ -467,7 +467,7 @@ async def test_a_document_answers_for_itself_when_it_is_called(
     assert "a command already installed" in _load_reason(cli_load)
 
     assert command["ok"] is False, "a command is not a tool to call either"
-    assert "nothing here runs one yet" in command["text"]
+    assert "run it through the shell" in command["text"]
 
 
 # --- what the model may call --------------------------------------------------

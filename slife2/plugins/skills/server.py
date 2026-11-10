@@ -328,11 +328,11 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             raise ToolError(str(exc)) from exc
 
     # ── The management tools ─────────────────────────────────────────────
-    # The `skill_*` set, and the half SDD §14.2 named as next: a skill is a
-    # directory, so installing one is writing files — which is the only thing in
-    # this system that writes anywhere but the config, and the only one whose
-    # paths a model chooses.  `skill_draft` is the authoring half and writes
-    # nothing; `skill_set` and `skill_edit` are the two writes, whole and part.
+    # The `skill_*` set: a skill is a directory, so installing one is writing
+    # files — which is the only thing in this system that writes anywhere but the
+    # config, and the only one whose paths a model chooses.  `skill_draft` is the
+    # authoring half and writes nothing; `skill_set` and `skill_edit` are the two
+    # writes, whole and part.
 
     def _settings(name: str, skill: skills.Skill | None) -> SkillSettings | None:
         """The `skills:` entry for a skill, under either of its two names."""

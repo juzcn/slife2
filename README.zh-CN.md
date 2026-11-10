@@ -609,7 +609,8 @@ catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变
 
 playbook 位于 `<data>/skills/<name>/SKILL.md`。`slife2-skills` 提供 `skill_use`，
 返回 playbook 文本并在前面加上它的目录。安装 skill 就是把目录放进 `skills/`；工具
-每次调用都读磁盘。
+每次调用都读磁盘。skill 是指令而不是代码：模型读这份流程，自己执行其中的步骤；
+slife2 不执行 playbook。
 
 skill 可以在头部声明环境需求，值来自 `skills:` 节，走与其他秘密相同的解析链。
 `skill_use` 会在模型执行依赖它的指令之前报告缺失的 key。`skill_set` 在传入 `env:`
@@ -620,8 +621,9 @@ skill 可以在头部声明环境需求，值来自 `skills:` 节，走与其他
 `skill_edit`，它只写点名的文件，保留其余部分。
 
 `cli:` 条目描述机器上已经安装的程序。每个条目都是目录里的一行（`cli:yt-dlp`），
-`tool_search` 可以按功能找到它。这一行不是可调用工具，也没有加载状态；目前没有工具
-执行 `cli:` 条目，`func_tool_load` 会说明这一点。程序缺失时显示条目的 `install:` 行。
+`tool_search` 可以按功能找到它。这一行不是可调用工具，也没有加载状态：模型通过其
+工具集里的 shell 工具运行命令（随附配置提供 `desktop-commander`），而
+`func_tool_load` 会说明这一行不可加载。程序缺失时显示条目的 `install:` 行。
 
 `enabled: false` 保留配置但从不连接。值必须是真正的 YAML 布尔值：YAML 1.2 下 `no`、
 `off` 和 `'false'` 是字符串，会被拒绝。被禁用条目的工具仍在目录里，标记为
@@ -1054,8 +1056,8 @@ Windows 上 `uv run pytest` 不能在活栈旁边运行：`uv` 每次运行都�
 
 ## 已知限制
 
-- `cli:` 条目会被编目和发现，但目前没有工具执行它们。
-- playbook 脚本不由 slife2 执行；`skill_use` 返回 playbook 文本，命令由模型自己运行。
+- skill 是指令，`cli:` 条目是命令：slife2 不为两者提供运行器。模型读 playbook，并
+  通过其工具集提供的 shell 运行命令。
 - job 是代码：它在 `slife2-jobs` 中以调用方身份运行，不在沙箱中。顶层工具调用是审批
   点。
 - 文件柜没有 `grep` 搜索腿。

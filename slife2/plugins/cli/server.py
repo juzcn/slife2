@@ -8,20 +8,22 @@ command, a sentence about what it does, and how to install it if it is missing.
 **Why a process for a family with nothing to connect to.**  Nothing here needs a
 connection, and that was the argument for keeping it out of one — a server
 invented to wrap a row-builder is a process that exists to be connected to.
-What changed is what is next: SDD §14.2 has an entry becoming *a tool the
-operator's own config gave the model*, run as an argv rather than through a
-shell so that the arguments a model invents cannot become commands it invented.
-One tool per entry is a model-facing tool, and this is the process that will
-serve them.  Building it while the family is cheap beats bolting twenty tools
-onto the hub, which is supposed to hold the tool *set* and nothing else.
+What the process is for is the *section*: a command is reachable only if a
+search can find it, and the search reads the catalogue the hub merges from this
+process's declaration.  So this is where the `cli_*` tools that edit the section
+live, and **nothing here runs a command: a command is run through the shell the
+model's tool set provides, the same way a skill is carried out by the model
+rather than by a tool.**  An entry has no argv of ours: it says what the command
+is, what it is for, and how to install it.
 
-**What it serves to the model is the four `cli_*` tools that edit the section**,
-and to the hub the one row per entry it declares.  This was the last of the four
+**What it serves to the model is the `cli_*` tools that edit the section**, and
+to the hub the one row per entry it declares.  This was the last of the four
 families to get its tools, and the reason it read as the odd one out for so long:
-its *entries* are not tools and nothing runs one, so it had nothing model-facing
-to offer until the tools that write the section arrived.  What a command's row is
-for is `list_sources`: a search reads the catalogue, so an entry nobody wrote a
-row for is a command only a model that already knew its name could reach.
+its *entries* are not tools and nothing here runs one, so it had nothing
+model-facing to offer until the tools that write the section arrived.  What a
+command's row is for is `list_sources`: a search reads the catalogue, so an
+entry nobody wrote a row for is a command only a model that already knew its
+name could reach.
 
 **This process does not write the catalogue.**  It answers `list_sources` and
 the hub merges the answer — the arrangement `slife2.libs.plugin.protocol` describes — so
@@ -96,9 +98,9 @@ SECTION = "cli"
 
 INSTRUCTIONS = (
     "The commands the config's `cli:` section records as already installed on "
-    "this machine, and as the `cli_*` tools that edit that section. Nothing here "
-    "runs a command — an entry is a row a search can find, and the tool that "
-    "executes one is this server's next change."
+    "this machine, and the `cli_*` tools that edit that section. Nothing here "
+    "runs a command — an entry is a row a search can find, and a command is run "
+    "through the shell, not called as a tool."
 )
 
 
@@ -155,11 +157,11 @@ def _prepare(name: str, config: CliConfig) -> CliToolSettings:
 
     **Both refusals come before the write.**  `_cli_tool` refuses an entry
     naming no program, and the split below refuses a command line `shlex` cannot
-    take apart — which the argv runner (`SDD` §14.2) would meet on the way in
-    too.  A line nothing can split is a row a search finds and no call can run,
-    so it is refused here rather than written over a success.  Neither is a name
-    collision: a `cli:` row is called `cli:{name}`, so it cannot collide with
-    anything — which is why this family needs no
+    take apart — the same split `_missing_program` reads to name the program.
+    A line nothing can split is a row whose program cannot be checked against
+    this machine, so it is refused here rather than written over a success.
+    Neither is a name collision: a `cli:` row is called `cli:{name}`, so it
+    cannot collide with anything — which is why this family needs no
     `slife2.libs.plugin.family.refusal` and the other two do.
 
     **No `Config`, unlike the two connection families' `_prepare`s.**  Theirs
@@ -173,8 +175,9 @@ def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     command = config.command
     try:
         # The same split `_missing_program` makes, moved before the write: the
-        # entry is what the argv runner reads, and refusing an unsplittable line
-        # here is the only way the refusal lands on the call rather than a note.
+        # program it names is what the on-PATH check reads, and refusing an
+        # unsplittable line here is the only way the refusal lands on the call
+        # rather than a note.
         shlex.split(command, posix=False)
     except ValueError as exc:
         raise ToolError(
@@ -206,14 +209,13 @@ def _missing_program(command: str) -> str:
     doing about it (add an `install` line, or fix the spelling) are the tool's to
     say once rather than every answer's to repeat.
 
-    **The command line is split the way the argv runner will take it apart**
-    (`SDD` §14.2: an argv rather than a shell), so that quotes are honoured:
+    **The line is split only to name the program, so that quotes are honoured**:
     `"C:\\Program Files\\tool\\tool.exe" --json` names one program, not
     `"C:\\Program`, and a Windows path's backslashes are literal rather than
     escape sequences — which is why this is `posix=False` and why the quotes it
     leaves on a word come off here.  The first word only, because
     `python -m mytool` is a program plus its arguments and the program is what
-    has to exist.
+    has to exist.  Running the line is the shell's, not this split's.
 
     **The split cannot fail here**, and there is deliberately no `try` for it:
     `_prepare` has already refused a line `shlex` cannot take apart, so the only

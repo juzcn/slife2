@@ -1623,8 +1623,9 @@ def test_the_hub_is_a_plugin_the_config_knows(tmp_path) -> None:
 # --- cli: commands already on this machine ------------------------------------
 #
 # The third source of tools, and the only one with no connection in it: a
-# `cli:` entry names a program that is already installed.  Nothing serves these
-# yet (SDD §14.2) — what these tests hold is the shape the tools will read.
+# `cli:` entry names a program that is already installed.  It is a catalogue
+# row and not a tool — the shell is what runs one — so what these tests hold is
+# the shape the section carries.
 
 CLI = """
 cli:

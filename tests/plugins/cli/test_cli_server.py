@@ -154,10 +154,10 @@ async def test_the_model_gets_the_tools_that_edit_the_section(
     """**What this plugin serves now, and which half the model is given.**
 
     It was the one plugin with nothing for the model — its entries are not tools
-    and nothing runs one — and what changed is not that its rows became callable
-    but that the section became writable.  So the four `cli_*` tools are marked
-    and `list_sources` is not: that one is how the hub asks, and a model given it
-    could read a catalogue overview it has `tool_search` for.
+    and the shell is what runs one — and what changed is not that its rows
+    became callable but that the section became writable.  So the `cli_*` tools
+    are marked and `list_sources` is not: that one is how the hub asks, and a
+    model given it could read a catalogue overview it has `tool_search` for.
 
     This is the server's own tool list, which is not the model's — the mark is
     what decides *that* list, and the hub's is tested in
@@ -285,9 +285,9 @@ async def test_a_quoted_command_is_taken_apart_into_the_program_it_names(
     The entry is `"C:\\Program Files\\tool\\tool.exe" --json`; a plain
     `str.split()` makes the first word `"C:\\Program` — a program that cannot
     exist — so the note claims a program is missing that is not, and `shutil.which`
-    is never asked about the one that is.  The line is split the way the argv
-    runner will (`SDD` §14.2: an argv rather than a shell), so quotes group a
-    word and come off, and a Windows path's backslashes stay literal.
+    is never asked about the one that is.  The line is split to name the program,
+    so quotes group a word and come off, and a Windows path's backslashes stay
+    literal.  Running the line is the shell's.
     """
     asked: list[str] = []
 
@@ -532,13 +532,13 @@ async def test_switching_a_name_that_is_not_recorded_is_refused(
 async def test_a_command_line_that_cannot_be_split_is_refused_before_the_write(
     isolated_runtime: Path,
 ) -> None:
-    """A line `shlex` cannot take apart is one the argv runner cannot either.
+    """A line `shlex` cannot take apart is one whose program cannot be named.
 
     `_on_path` used to meet the unbalanced quote *after* the entry was written
     and answer `""` — the same silence as "the program is on PATH" — so `cli_set`
-    reported a success over a row nothing can run (SDD §14.2: an argv rather
-    than a shell).  The split is checked before the write, and the refusal names
-    the line.
+    reported a success over a row whose program the machine check could not
+    read.  The split is checked before the write, and the refusal names the
+    line.
     """
     config = config_for(isolated_runtime)
     before = (isolated_runtime / "slife2.yaml").read_text(encoding="utf-8")

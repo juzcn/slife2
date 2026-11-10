@@ -58,8 +58,9 @@ resolves its `env:` through the same chain as a provider key — shell, then
 credstore — which is what makes a key that lives in the OS keyring reach a
 script whose process was started days later by a daemon that never saw it.  This
 module only reads the *declaration* and reports it; the resolution is
-`slife2.libs.host.config`'s, and injecting what it resolved is the business of whatever
-runs a skill's scripts (`SDD` §14.2 — nothing does yet).
+`slife2.libs.host.config`'s, and `readiness` is where the two meet — nothing here
+runs a skill's scripts, because a skill is instructions the model carries out
+(SDD §7.3).
 
 Authoring one
 -------------

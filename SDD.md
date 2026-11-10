@@ -1262,8 +1262,14 @@ Names are rewritten once, at the hub.
 
 A skill and a command are rows but not callable tools. They have no load state
 and never enter the model's list. Calling a skill row answers with the step that
-reaches it (`skill_use`); calling a command row says that nothing runs one yet.
-Their names are namespaced (`skill:browser-harness`, `cli:yt-dlp`).
+reaches it (`skill_use`); calling a command row answers with the rule that a
+command is run through the shell, not called as a tool. Their names are
+namespaced (`skill:browser-harness`, `cli:yt-dlp`).
+
+Neither family gets a runner of its own, and that is the design rather than a
+gap: a skill is instructions the model carries out, and a command is a program
+the model runs through whatever shell its tool set provides. What the row adds
+is that the command can be found.
 
 A **job** is a row that *is* callable and loadable, because its implementation is
 code rather than a document or an installed program. Its name is `job__<name>`
@@ -2530,8 +2536,6 @@ The following are not implemented in this version:
 | Capability | Why deferred | Current behavior |
 |---|---|---|
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
-| Executing `cli:` entries | The entry is already a catalogue row; execution is an argv, not a shell. | Entries are catalogued and discoverable; no tool runs them. |
-| Executing playbook scripts | Same shape as the `cli:` entry, plus `skills:` environment injection. | `skill_use` returns the playbook text; the model runs commands itself. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
 | The pass behind the context ceiling | The selection is bounded by construction. | A very large turn can exceed the ceiling until the next selection. |

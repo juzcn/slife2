@@ -56,13 +56,13 @@ here: **an entry is the operator's opt-in**, and this file is where the operator
 says it.  That is what the `cli:` section is for.
 
 **`slife2-cli` reads this section**, and declares one catalogue row per entry
-(`cli:yt-dlp`) so that `tool_search` finds a command by what it does.  What is
-still missing is the tool that would *run* one — the row is declared and the
-entry is not yet a tool the model can call (SDD §14.2) — so what is settled
-for now is where an entry is written down and what it may say, which is what
-lets a config written today keep working when that tool lands.  The other half
-of the same family, `skills/`, is read by `slife2-skills`, which serves
-`skill_use`; where a skill's key comes from is the `skills:` section below.
+(`cli:yt-dlp`) so that `tool_search` finds a command by what it does.  Nothing
+is missing from the row for want of a runner: a command is run through the shell
+the model's tool set provides, and slife2 serves no tool that executes one.  What
+is settled here is where an entry is written down and what it may say.  The
+other half of the same family, `skills/`, is read by `slife2-skills`, which
+serves `skill_use`; where a skill's key comes from is the `skills:` section
+below.
 
 Three things are worth stating outright.
 
