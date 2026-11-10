@@ -48,6 +48,8 @@ class FakeTransport:
         self.options: list[dict[str, Any]] = []
         #: What `subagents` answers with, as the server would.
         self.subagents_data: Any = {"subagents": []}
+        #: What `model_list` answers with, as the server would.
+        self.models_data: Any = {"models": []}
         #: Watch frames the fake's `watch` call reports, already encoded.
         self.watch_items: list[str] = []
 
@@ -77,6 +79,8 @@ class FakeTransport:
             )
         if name == "subagents":
             return SimpleNamespace(data=copy.deepcopy(self.subagents_data))
+        if name == "model_list":
+            return SimpleNamespace(data=copy.deepcopy(self.models_data))
         if name == "watch":
             # What a held-open call's stream does: report, then return when the
             # server closes the conversation.
@@ -449,6 +453,42 @@ async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
 
     assert sent(transport, "subagents") == [{"agent": "jack"}]
     assert found == [{"name": "scout", "model": "", "role": "subagent", "fork": False}]
+
+
+@pytest.mark.asyncio
+async def test_the_model_list_is_read_from_the_server(monkeypatch) -> None:
+    """The picker's rows are `model_list`'s answer, read at the key.
+
+    The payload is empty: which config the server reads is the transport's to
+    say (the home on the connection), not the window's to name.  A row list
+    this build cannot read raises rather than answering empty — a config with
+    no models is a real, empty list (SDD Appendix C), and the connection stays
+    because the server answered.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    rows = [
+        {
+            "ref": "local/big",
+            "provider": "local",
+            "model": "big",
+            "name": "Big",
+            "marks": ["default", "reasoning"],
+            "context_window": 100_000,
+            "max_tokens": 0,
+        },
+    ]
+    transport.models_data = {"models": rows}
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    assert await client.models() == rows
+    assert sent(transport, "model_list") == [{}]
+
+    transport.models_data = {"models": [{"provider": "local"}]}
+    with pytest.raises(ConnectionError):
+        await client.models()
+    assert client.connected, "the server answered; the connection stays"
 
 
 @pytest.mark.asyncio

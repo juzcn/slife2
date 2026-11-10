@@ -48,7 +48,6 @@ from slife2.tui.widgets import (
     ChatView,
     ConversationPicker,
     HistoryInput,
-    ModelChoice,
     ModelPicker,
     StatusBar,
     ToolCallWidget,
@@ -931,10 +930,9 @@ async def test_ctrl_s_on_a_watch_screen_does_not_mount_a_hidden_picker() -> None
     key looked dead and the picker was only found after Esc closed the watch.
     """
     watch = FakeWatchClient((Snapshot([]),), finish=True)
-    app = window(
-        FakeAgentClient(answering("ok")),
-        models=[ModelChoice(ref="deepseek/deepseek-flash")],
-    )
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    app = window(client)
     async with app.run_test(size=SIZE) as pilot:
         app.push_screen(WatchScreen("scout", lambda: watch))
         await asyncio.wait_for(watch.watching.wait(), timeout=5)
@@ -2160,18 +2158,28 @@ async def test_ctrl_s_survives_a_server_that_has_died() -> None:
         raise ConnectionError("the server died")
 
     client.switch_model = dead  # type: ignore[method-assign]
+    client.models_answer = [
+        {
+            "ref": "deepseek/deepseek-flash",
+            "provider": "deepseek",
+            "model": "deepseek-flash",
+            "name": "DeepSeek Flash",
+            "marks": ["default"],
+            "context_window": 0,
+            "max_tokens": 0,
+        }
+    ]
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         model_label="deepseek/deepseek-flash",
         agent="jack",
         model="deepseek/deepseek-flash",
-        models=[ModelChoice(ref="deepseek/deepseek-flash")],
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
         await pilot.press("enter")
         await pilot.pause()
 
@@ -2700,21 +2708,42 @@ async def test_a_keystroke_while_a_call_awaits_an_answer_does_not_refuse_it() ->
 # --- the model switch ---------------------------------------------------------
 
 #: Two models, so "switch" has somewhere to switch to, and with different
-#: capabilities, so a bar that kept the old model's facts is visible.
-MODELS = [
-    ModelChoice(ref="local/big", label="Big", context_window=100_000, thinking=True),
-    ModelChoice(ref="local/small", context_window=8_000, vision=True),
+#: capabilities, so a bar that kept the old model's facts is visible.  The rows
+#: are the `model_list` answer the agent server gives, not the config itself:
+#: the picker is built from what the server says now.
+MODEL_ROWS = [
+    {
+        "ref": "local/big",
+        "provider": "local",
+        "model": "big",
+        "name": "Big",
+        "marks": ["default", "reasoning"],
+        "context_window": 100_000,
+        "max_tokens": 0,
+    },
+    {
+        "ref": "local/small",
+        "provider": "local",
+        "model": "small",
+        # Unnamed: `model_list` answers the model's own id, and the picker must
+        # not draw it as a name somebody wrote.
+        "name": "small",
+        "marks": ["image"],
+        "context_window": 8_000,
+        "max_tokens": 0,
+    },
 ]
 
 
 def model_app(respond, **kwargs) -> SlifeApp:
     """A window whose Ctrl+S has something to offer."""
+    client = FakeAgentClient(respond)
+    client.models_answer = MODEL_ROWS
     return SlifeApp(
         "http://test/mcp",
-        client_factory=lambda: FakeAgentClient(respond),
+        client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
         **kwargs,
     )
 
@@ -2728,17 +2757,17 @@ async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
     changing anything.
     """
     client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
         listing = shown(app)
         assert "local/big" in listing and "local/small" in listing
@@ -2754,6 +2783,41 @@ async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
         assert "local/big" in status(app)
 
 
+async def test_ctrl_s_lists_the_models_the_server_answers_with_now() -> None:
+    """**The list is read at the key**, so a model removed a moment ago is gone.
+
+    A list captured when the window opened outlived the config it came from: the
+    model could run `model_remove` in a turn, and the next Ctrl+S still offered
+    the model it had deleted — a row that `model_switch` would then refuse.  The
+    key asks the agent server, which reads the file, so the picker draws the
+    config as it is now.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        # The config moved under the window, as `model_remove` makes it move.
+        client.models_answer = MODEL_ROWS[:1]
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 2)
+
+        latest = app.query(ModelPicker)[-1]
+        assert "local/big" in latest.plain_text()
+        assert "local/small" not in latest.plain_text(), "a deleted model was offered"
+
+
 async def test_a_model_the_list_does_not_offer_is_said_so_and_enter_picks_nothing() -> (
     None
 ):
@@ -2766,17 +2830,17 @@ async def test_a_model_the_list_does_not_offer_is_said_so_and_enter_picks_nothin
     bare `Enter` picks nothing.
     """
     client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/gone",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
         listing = shown(app)
         assert "local/gone" in listing, "the model in use is named"
@@ -2804,17 +2868,17 @@ async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
     not answering any more.
     """
     client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
@@ -2839,17 +2903,17 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
     the keys back — the picker is not a mode that has to be exited from.
     """
     client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
         await pilot.press("escape")
         await pilot.pause()
         await pilot.pause()
@@ -2872,7 +2936,7 @@ async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
         await pilot.press("ctrl+s")
         await pilot.pause()
 
@@ -2896,12 +2960,12 @@ async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
     question; both are read as nothing here.
     """
     client = FakeAgentClient(asking())
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "do it")
@@ -2909,9 +2973,8 @@ async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
         assert app._approval is not None, "the row was drawn"
 
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
-        assert len(app.query(ModelPicker)) == 1, "the picker survives its own key"
         assert app._approval is not None, "and the call is still being asked about"
         assert app._approval.pending is True
 
@@ -2934,17 +2997,17 @@ async def test_a_refused_switch_moves_nothing_and_says_why() -> None:
     """
     client = FakeAgentClient(answering("ok"))
     client.switch_error = ToolError("`local/nope` is not a model this config defines.")
+    client.models_answer = MODEL_ROWS
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
         agent="jack",
         model="local/big",
-        models=MODELS,
     )
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
@@ -2965,9 +3028,8 @@ async def test_ctrl_s_says_so_when_there_is_nothing_to_switch_to() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+s")
-        await pilot.pause()
+        assert await settled(pilot, lambda: "no models are configured" in shown(app))
 
-        assert "no models are configured" in shown(app)
         assert len(app.query(ModelPicker)) == 0
 
 

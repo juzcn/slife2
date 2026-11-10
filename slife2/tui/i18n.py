@@ -225,6 +225,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "no models are configured; `model_set` adds one",
         "zh": "未配置任何模型；可用 `model_set` 添加",
     },
+    "model_list_failed": {
+        "en": "the models could not be listed: {err}",
+        "zh": "无法列出模型：{err}",
+    },
     "model_switch_failed": {
         "en": "the model was not switched: {err}",
         "zh": "模型未切换：{err}",

@@ -1993,7 +1993,7 @@ provider knowledge, and no API key. It maintains three connections:
 
 | Connection | Client | Direction |
 |---|---|---|
-| Agent server | `AgentClient` | The window asks: `run_turn`, `transcript`, `subagents`, `answer_approval`, `switch_model`. |
+| Agent server | `AgentClient` | The window asks: `run_turn`, `transcript`, `models`, `subagents`, `answer_approval`, `switch_model`. |
 | Terminal inbox plugin | `WindowClient` | The window is asked: `attach` is held open and messages are pushed down it. |
 | Mesh plugin | `MeshClient` | The window holds a place: `join` is held open while the agent is online. |
 
@@ -2104,7 +2104,7 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | Section | Reader |
 |---|---|
 | `servers:` | The launcher, every plugin, the terminal, and the CLI |
-| `providers:` | The agent server (reference resolution), model backends, and terminal (for the picker) |
+| `providers:` | The agent server (reference resolution, and the list `Ctrl+S` reads at the key), model backends, and the terminal (the status bar's model facts) |
 | `default:` | The agent server |
 | `agent:` | The agent server and agent-task server |
 | `agent-task:` | The agent-task server |

@@ -192,6 +192,10 @@ class FakeAgentClient:
         #: What `answer_approval` was called with, in order — the half of the
         #: `_approve` handshake that leaves the window (`slife2.tui.app`).
         self.answers: list[tuple[str, bool]] = []
+        #: What `models` answers with — the rows `model_list` returns, as the
+        #: agent server reads the config.  Empty is the real answer for a config
+        #: that names no model.
+        self.models_answer: list[dict[str, Any]] = []
         #: What `subagents` answers with — the directories the agent server
         #: would list.  Empty is the real answer for an agent that made none.
         self.subagents_answer: list[dict[str, Any]] = []
@@ -234,6 +238,16 @@ class FakeAgentClient:
             raise ConnectionError("not connected")
         self.answers.append((call_id, approved))
         return ""
+
+    async def models(self) -> list[dict[str, Any]]:
+        """The list the agent server would answer with, scripted by the test.
+
+        A test that changes it between two Ctrl+S presses is the config moving
+        under the window — the bug the key now asks for the list to avoid.
+        """
+        if not self.connected:
+            raise ConnectionError("not connected")
+        return [dict(one) for one in self.models_answer]
 
     async def subagents(self) -> list[dict[str, Any]]:
         """The list the agent server would answer with, scripted by the test."""

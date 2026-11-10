@@ -109,6 +109,23 @@ class AgentClient(Protocol):
         """
         ...
 
+    async def models(self) -> list[dict[str, Any]]:
+        """The models the config defines, for the model picker.
+
+        **The agent server's answer, read at the key.**  It is the process that
+        resolves a reference and writes `default:`, and it reads the file for
+        this answer — so the rows and the switch cannot disagree about what
+        exists, and a model the model itself added or removed a moment before
+        the key is offered as it is now rather than as start-up saw it.
+
+        Each row has `ref`, `provider`, `model`, `name`, `marks` (any of
+        `default`, `reasoning`, `image`), `context_window` and `max_tokens`.
+        A list this build cannot read raises rather than answering empty: a
+        config with no models is a real, empty list, and the two must not look
+        alike (SDD Appendix C).
+        """
+        ...
+
     async def subagents(self) -> list[dict[str, Any]]:
         """The subagents this agent has made, for the conversation picker.
 
@@ -385,6 +402,24 @@ class MCPAgentClient:
         if not isinstance(turns, list):
             raise _unreadable("return a turn list", payload)
         return list(turns)
+
+    async def models(self) -> list[dict[str, Any]]:
+        """Read the models the config defines.  See `AgentClient.models`.
+
+        The transport rule is `_call_tool`'s: a failure that is not the server
+        answering drops the connection, because a client that kept it would look
+        connected to a server nothing is talking to for the rest of the session.
+        The shape check is outside that, so a damaged answer keeps the link —
+        the server answered, and it is the answer this build cannot read.
+        """
+        result = await self._call_tool("model_list", {})
+        payload = result.data
+        found = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(found, list) or not all(
+            isinstance(one, dict) and isinstance(one.get("ref"), str) for one in found
+        ):
+            raise _unreadable("return a model list", payload)
+        return list(found)
 
     async def subagents(self) -> list[dict[str, Any]]:
         """Read the subagent list.  See `AgentClient.subagents`.
