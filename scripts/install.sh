@@ -359,7 +359,7 @@ install_node() {
         Darwin/arm64) os=darwin; arch=arm64 ;;
         *) return 1 ;;
     esac
-    sums=$(curl_retry -sSL --max-time 60 https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt) || return 1
+    sums=$(curl_retry -sSL --max-time 60 https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt) || return 1
     line=$(printf '%s\n' "$sums" | grep "node-v[0-9.]*-$os-$arch.tar.gz" | head -1)
     [ -n "$line" ] || return 1
     file=$(printf '%s' "$line" | awk '{print $2}')
@@ -367,7 +367,7 @@ install_node() {
     version=$(printf '%s' "$file" | sed -n 's/.*node-\(v[0-9.]*\)-.*/\1/p')
     tmp=$(mktemp -d) || return 1
     say "  downloading node $version"
-    fetch "$tmp/node.tgz" "https://nodejs.org/dist/latest-v22.x/$file" --progress-bar \
+    fetch "$tmp/node.tgz" "https://nodejs.org/dist/latest-v24.x/$file" --progress-bar \
         || { rm -rf "$tmp"; return 1; }
     [ "$(hash_file "$tmp/node.tgz")" = "$sha" ] || { rm -rf "$tmp"; return 1; }
     rm -rf "$HOME/.local/lib/nodejs"
@@ -521,7 +521,7 @@ ensure_tool() {  # executable provenance [install-hint]
                 major=$(node --version 2>/dev/null | sed 's/^v//; s/\..*//')
                 case "$major" in
                     ''|*[!0-9]*) fail "could not read the Node version" ;;
-                    *) [ "$major" -ge 20 ] || fail "Node $major is too old; install Node 20 or newer" ;;
+                    *) [ "$major" -ge 24 ] || fail "Node $major is too old; install Node 24 or newer" ;;
                 esac
                 return 0
             fi
