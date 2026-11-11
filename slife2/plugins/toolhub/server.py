@@ -3382,6 +3382,32 @@ def build_server(
                 f"the tool catalogue is not working — {catalogue.failure}"
             )
 
+        # **A required plugin whose dial is still in flight is waited for, and
+        # a failed one is asked again — once, and only by the ask that waits.**
+        # The hub dials every plugin when it starts, and the launcher starts
+        # `agent-task` and `schedule` only after it, so their first dial is
+        # made against a port nothing is serving yet.  A refusal is immediate
+        # and harmless — the next ask starts a new attempt, which is the
+        # sentence above — but a dial that *fails slowly* is still running when
+        # this ask arrives, and `refresh`'s settle only waits five seconds for
+        # it: the failure then lands after the ask stopped waiting, nothing
+        # re-asks the plugin, and the gate below refuses one that is up by now.
+        # That is the shape of a loopback that drops the SYN instead of
+        # refusing it (WSL's mirrored networking), and of a port that listens
+        # and never answers.  So the dials this ask is waiting on are waited
+        # out — their own transport bounds them, and the start-up build's
+        # budget is the catalogue's — and the failed ones are asked once more.
+        # This is the "next ask" the comment above promises, made here because
+        # the start-up build is the one ask that cannot leave it to a turn.
+        if wait and any(one.required and not one.usable for one in upstreams):
+            dialing = [
+                attempt for one in upstreams if (attempt := one.attempt) is not None
+            ]
+            if dialing:
+                await asyncio.wait(dialing)
+            begin_connecting()
+            await settle()
+
         missing = [
             row
             for one in upstreams

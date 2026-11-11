@@ -2577,6 +2577,79 @@ async def test_a_turns_list_waits_for_a_plugin_that_has_just_come_up() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_waiting_ask_re_asks_a_dial_that_failed_while_it_waited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The ask that waits is the one that must retry: it has no next ask.**
+
+    A turn's list (`wait=False`) answers from the catalogue it has and leaves
+    the plugin that was starting to the next ask — the test above is that half.
+    The start-up build is the other half: it is the ask that *makes* the
+    catalogue, so a plugin whose dial fails while the ask is settling it would
+    be refused by the gate below, the window would never open, and no turn
+    would exist to make the "next ask".
+
+    The second dial is the one that fails, not the first.  A refusal is
+    immediate, and `refresh` starts a new attempt for it itself; what this
+    covers is an attempt that is in flight when the ask begins and *outlasts*
+    the ask's brief wait — the shape of a loopback that drops the SYN instead
+    of refusing it, where the hub's dial to `schedule` (made before the
+    launcher starts that plugin) is still running when the catalogue is built.
+    """
+    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 0.5)
+    attempts = 0
+
+    class SlowFailure(FakeClient):
+        """Refused, then slow to fail, then answered."""
+
+        async def __aenter__(self) -> FakeClient:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionError("the plugin was not up yet")
+            if attempts == 2:
+                # Outlasts the ask's brief wait, so it is still in flight when
+                # the ask stops waiting — the drain is what has to wait for it.
+                await asyncio.sleep(_T.timeouts.ready.list_settle * 1.5)
+                raise ConnectionError("the dial got no answer")
+            return self
+
+        async def list_tools(self) -> list[Any]:
+            # A plugin's tools are offered only when they declare themselves
+            # the model's (`slife2.libs.plugin.audience`); `FakeClient`'s
+            # carries no meta, which is the *not offered* half.
+            return [
+                types.SimpleNamespace(
+                    name="echo",
+                    description="Echo.",
+                    input_schema={"type": "object"},
+                    meta=FOR_THE_MODEL,
+                )
+            ]
+
+    def make(transport: Any, handler: Any) -> Any:
+        if transport is not UNUSED:
+            return make_client(transport, handler)
+        return SlowFailure()
+
+    async with Client(
+        hub_for(
+            connected={"agent": unused},
+            client_factory=make,
+            autoload=("echo",),
+        )
+    ) as hub:
+        listed = await hub.call_tool("list_tools", {})
+        reported = await hub.call_tool("servers", {})
+
+    assert "echo" in names(listed.data)
+    assert attempts == 3, "the dial that failed while the ask waited is re-asked"
+    row = next(one for one in reported.data["servers"] if one["name"] == "agent")
+    assert row["state"] == "ready"
+    assert row["tools"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_tool_from_a_server_that_never_started_is_unknown() -> None:
     """It was never advertised, so there is nothing to call — and the answer
     names the way to find one that does exist."""

@@ -490,8 +490,8 @@ function Test-NodeVersion {
         Fail 'could not read the Node version'
         return $false
     }
-    if ($major -lt 20) {
-        Fail "Node $major is too old; install Node 20 or newer"
+    if ($major -lt 24) {
+        Fail "Node $major is too old; install Node 24 or newer"
         return $false
     }
     return $true
@@ -503,11 +503,11 @@ function Get-NodeLts {
         'x86' { 'x86' }
         default { 'x64' }
     }
-    $sums = Get-RemoteText 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt'
+    $sums = Get-RemoteText 'https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt'
     if (-not $sums) {
         if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return $null }
         $sums = (& curl.exe -fsSL --retry 5 --retry-delay 1 --retry-connrefused `
-            --connect-timeout 15 --max-time 60 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt') -join "`n"
+            --connect-timeout 15 --max-time 60 'https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt') -join "`n"
     }
     $line = ($sums -split "`n") | Where-Object { $_ -match "node-v[0-9.]+-win-$arch\.zip" } | Select-Object -First 1
     if (-not $line) { return $null }
@@ -527,7 +527,7 @@ function Install-Node {
     $zip = Join-Path $env:TEMP ("node-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '.zip')
     $expand = Join-Path $env:TEMP ("node-expand-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     Say "  downloading node $($info.Version)"
-    if (-not (Get-RemoteFile "https://nodejs.org/dist/latest-v22.x/$($info.File)" $zip)) { return $false }
+    if (-not (Get-RemoteFile "https://nodejs.org/dist/latest-v24.x/$($info.File)" $zip)) { return $false }
     if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $info.Sha.ToUpperInvariant()) {
         Remove-Item -Force $zip -ErrorAction SilentlyContinue
         return $false
