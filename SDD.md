@@ -1388,7 +1388,9 @@ already holds, and `loaded` on the row says so.
 matches a question; a listing pages what exists, for a caller with no words to
 search with. They are separate tools because one answer cannot be both: a
 listing has no score and no confidence, and its order — category, then source,
-then name — is the only order it has. The name is last because it is the primary
+then name — is the only order it has. For the same reason `tool_search` takes
+no `limit`: a search finds *a* tool, and paging the catalogue is the listing's
+question — the search's answer still says the ten rows it was cut to. The name is last because it is the primary
 key, which is what makes the order total and two pages unable to drop or repeat
 a row between them.
 
@@ -1485,6 +1487,18 @@ whole is reachable by the tool call id.
 turns, the tool catalogue, and the cabinet. Each corpus is searched by two legs —
 **keyword** (FTS5 over a derived, normalized string) and **meaning**
 (`sqlite-vec` over chunks of a different derived string) — fused by rank.
+
+**The three searches answer one envelope.** `tool_search`, `cabinet_search` and
+`turn_search` take the same two inputs — `keywords` for the words leg,
+`sentences` for the meaning leg — and answer the same object: `results` (the
+hits, in the order that search ranks them), `best` (the highest meaning score on
+the page, `null` when nothing was scored by meaning), `confidence` (`sure`,
+`weak` or `none`, or `null` on a browse, which judged nothing), `browsed` (true
+only for the cabinet's both-empty call; the other two refuse it and name their
+listing tool) and `limit` (the page size applied). `libs/store/answer.py` is the
+one home of the envelope and of the floors behind `confidence`; the floors are
+the embedder's, measured on the catalogue (§7.5), the words override them in
+every corpus, and the tier labels a page without cutting it.
 
 Rules:
 
@@ -2555,22 +2569,14 @@ the field arrives as a test that fails without the fix.
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-9. **The sibling searches do not share their spelling.** `tool_search` and
-   `cabinet_search` take `keywords: list[str]` and `sentences`; `turn_search`
-   takes `query: str` and `sentences`. Their answers are three shapes —
-   `{"results": …, "best": …, "confidence": …}`,
-   `{"results": …, "browsed": …}` and `{"entries": …, "limit": …}` — so a model
-   that has learned one search has to relearn the other two.
-   *Resolution would require:* one input vocabulary and one answer envelope for
-   the three searches, or a stated reason for the exception.
-10. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+9. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-11. **The tunnel publishes its control surface.** The file tunnel forwards the
+10. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than

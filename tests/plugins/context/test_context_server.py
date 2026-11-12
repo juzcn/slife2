@@ -408,13 +408,13 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
             ("unrelated chatter", "a1"),
         )
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
         )
 
-    entries = found.data["entries"]
-    assert entries[0]["user_message"] == "the trump rally"
-    assert entries[0]["similarity"] > 0
-    assert set(entries[0]) == {
+    results = found.data["results"]
+    assert results[0]["user_message"] == "the trump rally"
+    assert results[0]["similarity"] > 0
+    assert set(results[0]) == {
         "turn_id",
         "created_at",
         "user_message",
@@ -422,6 +422,11 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
         "token_count",
         "similarity",
     }
+    # The envelope is the one all three searches give.
+    assert set(found.data) == {"results", "best", "confidence", "browsed", "limit"}
+    assert found.data["best"] == results[0]["similarity"]
+    assert found.data["confidence"] == "sure"
+    assert found.data["browsed"] is False
     assert found.data["limit"] == 10
 
 
@@ -433,10 +438,10 @@ async def test_search_reads_only_the_callers_conversation() -> None:
         await _seed(client, "jack", ("jack's trump note", "a"))
         await _seed(client, "jill", ("jill's trump note", "a"))
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == ["jack's trump note"]
+    assert [e["user_message"] for e in found.data["results"]] == ["jack's trump note"]
 
 
 @pytest.mark.asyncio
@@ -456,11 +461,11 @@ async def test_search_reads_the_callers_keyword_weight() -> None:
         await _seed(client, "jack", ("gamma", "1"), ("alpha beta 工具", "2"))
         answer = await client.call_tool(
             "turn_search",
-            {"query": "alpha beta", "limit": 1},
+            {"keywords": ["alpha", "beta"], "limit": 1},
             meta=conversation_meta("jack"),
         )
 
-    assert [entry["turn_id"] for entry in answer.data["entries"]] == [1]
+    assert [entry["turn_id"] for entry in answer.data["results"]] == [1]
     # The premise: with the default weight the keyword hit leads the fusion.
     store = TurnStore(agent_dir("jack") / "turns.db")
     ranked = await store.recall(query="alpha beta", embedder=EMBEDDER, limit=1)
@@ -468,16 +473,16 @@ async def test_search_reads_the_callers_keyword_weight() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", ["", "***", "   "])
+@pytest.mark.parametrize("keyword", ["", "***", "   "])
 async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
-    query: str,
+    keyword: str,
 ) -> None:
-    """An empty query is not a browse; `turn_list` is."""
+    """An empty search is not a browse; `turn_list` is."""
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="turn_list"):
             await client.call_tool(
-                "turn_search", {"query": query}, meta=conversation_meta("jack")
+                "turn_search", {"keywords": [keyword]}, meta=conversation_meta("jack")
             )
 
 
@@ -495,7 +500,7 @@ async def test_search_takes_sentences_as_well_as_words() -> None:
             "turn_search", {"sentences": ["工具"]}, meta=conversation_meta("jack")
         )
 
-    assert answer.data["entries"][0]["turn_id"] == 1
+    assert answer.data["results"][0]["turn_id"] == 1
 
 
 @pytest.mark.asyncio
@@ -514,11 +519,11 @@ async def test_search_honours_the_same_time_window_as_the_browse() -> None:
         await _seed(client, "jack", ("new trump note", "a"))
         found = await client.call_tool(
             "turn_search",
-            {"query": "trump", "since": "2025-01-01"},
+            {"keywords": ["trump"], "since": "2025-01-01"},
             meta=conversation_meta("jack"),
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == ["new trump note"]
+    assert [e["user_message"] for e in found.data["results"]] == ["new trump note"]
 
 
 @pytest.mark.asyncio
@@ -539,11 +544,11 @@ async def test_search_finds_the_topic_a_person_names_in_chinese() -> None:
         )
         found = await client.call_tool(
             "turn_search",
-            {"query": "首经贸发展", "since": "yesterday"},
+            {"keywords": ["首经贸发展"], "since": "yesterday"},
             meta=conversation_meta("jack"),
         )
 
-    assert [e["user_message"] for e in found.data["entries"]][0] == (
+    assert [e["user_message"] for e in found.data["results"]][0] == (
         "昨天讨论的首经贸发展问题"
     )
 
@@ -563,7 +568,7 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
             "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
         found = await client.call_tool(
-            "turn_search", {"query": "quarterly"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["quarterly"]}, meta=conversation_meta("jack")
         )
 
     assert wrote.data == {"status": "updated", "turn_id": 1}
@@ -571,7 +576,7 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
         "the quarterly forecast",
         "planning",
     )
-    assert [e["turn_id"] for e in found.data["entries"]][0] == 1
+    assert [e["turn_id"] for e in found.data["results"]][0] == 1
 
 
 @pytest.mark.asyncio

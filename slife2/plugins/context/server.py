@@ -83,6 +83,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     unreadable,
 )
+from slife2.libs.store.answer import search_answer
 from slife2.libs.store.db import (
     StaleSchema,
     TurnStore,
@@ -552,7 +553,7 @@ def build_server(
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_search(
         ctx: Context,
-        query: str = "",
+        keywords: list[str] | None = None,
         sentences: list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -560,25 +561,25 @@ def build_server(
     ) -> dict[str, Any]:
         """Search your own history by what a turn was about, or by what it did.
 
-        Words and meaning decide the answer together: the words and exact
-        strings a turn is found by — what was asked and answered, and the tool
-        calls and their results — and what it was about. A path, a command, an
-        error string or a tool name from the record is therefore as searchable
-        as the subject the turn discussed. A turn both find ranks first. Each hit
-        is the one line `turn_list` gives, plus `similarity` — the meaning score
-        when meaning measured the turn, `null` when only its words matched.
-        Read one whole with `turn_read`.
+        Words and meaning decide the answer together: `keywords` are the words
+        and exact strings a turn is found by — what was asked and answered, and
+        the tool calls and their results — and `sentences` are what it was
+        about. A path, a command, an error string or a tool name from the record
+        is therefore as searchable as the subject the turn discussed. A turn
+        both find ranks first. Each hit is the one line `turn_list` gives, plus
+        `similarity` — the meaning score when meaning measured the turn, `null`
+        when only its words matched. Read one whole with `turn_read`.
 
-        **A hit need not contain the query words.**  Meaning ranks the nearest
+        **A hit need not contain the keywords.**  Meaning ranks the nearest
         turns whether or not they carry them, and a low `similarity` says the
         words were not found; there is no exact-only mode, so a nonsense query
         can come back with the history's closest turns.
 
         Args:
-            query: Words to look for — names, paths, an exact string. They rank
-                turns that carry them first, but they are not a filter: when
-                `sentences` is empty the same words are also read by meaning, so
-                a hit may be a turn that does not contain them.
+            keywords: Words to look for — names, paths, an exact string. They
+                rank turns that carry them first, but they are not a filter:
+                when `sentences` is empty the same words are also read by
+                meaning, so a hit may be a turn that does not contain them.
             sentences: What to recall, in your own words, one sentence per idea.
                 Read by meaning; another sentence is another chance to be found.
             since: Lower bound on when the turn was written — an ISO date or
@@ -590,18 +591,27 @@ def build_server(
             limit: How many hits this page may hold.
 
         Returns:
-            `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message`, `token_count` (the turn's own estimated size)
-            and `similarity` per hit, best first — and `limit`.
+            The one search answer: `results` — `turn_id`, `created_at`,
+            `user_message`, `assistant_message`, `token_count` (the turn's own
+            estimated size) and `similarity` per hit, best first — `best` (the
+            highest meaning score on the page, `null` when no hit was scored by
+            meaning), `confidence` (`sure`, `weak` or `none`: how sure this page
+            is), `browsed` (always false here; `turn_list` is the browse) and
+            `limit` (the page size this answer was cut to).
         """
         agent, subagent = _caller(ctx)
+        words = [word for word in (keywords or []) if terms(word)]
         asked = [sentence.strip() for sentence in (sentences or []) if sentence.strip()]
-        if not asked and not terms(query):
+        if not words and not asked:
             raise ToolError(
-                "turn_search needs something to look for — a sentence, a keyword "
-                "phrase, or `turn_list` to browse the history without one."
+                "turn_search needs something to look for — `keywords`, "
+                "`sentences`, or `turn_list` to browse the history without one."
             )
         store = await store_of(agent, subagent)
+        # The store's keyword leg reads one string, and its terms are ANDed
+        # either way; those same words are the meaning query when no sentence is
+        # given.
+        query = " ".join(words)
         # The search runs on the caller's `keyword_weight`, the same vote the
         # rebuild's recall reads: one home, one weight between the legs.
         ranked = (
@@ -629,7 +639,12 @@ def build_server(
             entry = record.to_listing()
             entry["similarity"] = similarity
             entries.append(entry)
-        return {"entries": entries, "limit": page_limit(limit)}
+        return search_answer(
+            entries,
+            scores=[entry["similarity"] for entry in entries],
+            worded=any(entry["similarity"] is None for entry in entries),
+            limit=page_limit(limit),
+        )
 
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_summarize(

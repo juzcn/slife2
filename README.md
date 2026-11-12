@@ -594,9 +594,14 @@ about with `turn_search`, reads one whole with `turn_read`, and writes a summary
 and tags with `turn_summarize`. `turn_list` is newest first, one line per turn,
 with `since`/`until` accepting an ISO date or a phrase such as `yesterday`, and
 `limit`/`offset` paging against `total`. `turn_search` takes the same window and
-returns the same line plus a `similarity` score; its `query` words rank exact
+returns the same line plus a `similarity` score; its `keywords` rank exact
 matches first but are not a filter. None of the tools takes an agent argument: a
 model reads its own history only.
+
+`turn_search`, `cabinet_search` and `tool_search` share one spelling: they take
+`keywords` and `sentences`, and answer `results` with `best`, `confidence`,
+`browsed` and `limit` beside it. `confidence` is `sure`, `weak` or `none` on a
+ranked page and `null` on a browse.
 
 Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and
 `token-usage`; it is prompt text and is not stored. Each turn in a rebuilt

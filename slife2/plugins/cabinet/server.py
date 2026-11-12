@@ -113,7 +113,8 @@ from slife2.libs.host.config import CABINET_SERVER_NAME, Config
 from slife2.libs.host.paths import home
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
-from slife2.libs.store.index import Embedder
+from slife2.libs.store.answer import search_answer
+from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit
 from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet.store import (
     CORPUS_KIND_HINT,
@@ -1765,11 +1766,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many hits this page may hold.
 
         Returns:
-            `results` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `path` and `excerpt` per hit, with `similarity` where meaning ranked
-            it and `matched_in` (`line`, or `rest` for elsewhere in the
-            document) where your words were found — and `browsed`, true when
-            neither was given and the page is simply newest first.
+            The one search answer: `results` — `kind`, `key`, `title`, `time`,
+            `tags`, `summary`, `path` and `excerpt` per hit, with `similarity`
+            where meaning ranked it and `matched_in` (`line`, or `rest` for
+            elsewhere in the document) where your words were found — `best`
+            (the highest meaning score on the page, `null` when nothing was
+            scored by meaning), `confidence` (`sure`, `weak` or `none`; `null`
+            when `browsed`), `browsed` (true when neither input was given and
+            the page is simply newest first) and `limit` (the page size this
+            answer was cut to).
         """
         opened = await cabinet(ctx)
         try:
@@ -1784,7 +1789,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        return _hits(found)
+        return _hits(found, limit=page_limit(limit, MAX_PAGE))
 
     @mcp.tool(name="cabinet_summarize", meta=FOR_THE_MODEL)
     async def cabinet_summarize(
@@ -2523,22 +2528,24 @@ def _document(row: dict[str, Any], *, text: str) -> dict[str, Any]:
     return {**facts(row), "text": text}
 
 
-def _hits(found: dict[str, Any]) -> dict[str, Any]:
+def _hits(found: dict[str, Any], *, limit: int) -> dict[str, Any]:
     """A search answer as the payload a model reads.
+
+    The page is `search_answer`'s — the one envelope all three searches give
+    (`slife2.libs.store.answer`).  `browsed` is given whether or not it is true,
+    because "these are the newest, unranked" and "these are what your words and
+    your sentences found" are the two things a reader of the page has to tell
+    apart; and when it is true the envelope withholds `confidence` rather than
+    calling a browse a miss.
 
     **A search answer that cannot be read is not a search that found nothing.**
     An answer with no `results` list used to render as the same "nothing
     matched" a real miss produces, which is a verdict a model acts on rather
-    than a failure it retries (SDD Appendix C, "a failure is not a verdict"); only a
-    *readable* empty list may say the search found nothing, and anything else
-    fails the call.  The raise is this plugin's to make — the store's shape is
-    the thing that is wrong — and the far end reads it as a failed call rather
-    than as a confident negative.
-
-    `browsed` is given whether or not it is true, because "these are the newest,
-    unranked" and "these are what your words and your sentences found" are the
-    two things a reader of the page has to tell apart, and a key that is only
-    present in one of the two cases is one they have to know to look for.
+    than a failure it retries (SDD Appendix C, "a failure is not a verdict");
+    only a *readable* empty list may say the search found nothing, and anything
+    else fails the call.  The raise is this plugin's to make — the store's shape
+    is the thing that is wrong — and the far end reads it as a failed call
+    rather than as a confident negative.
     """
     rows = found.get("results")
     if not isinstance(rows, list):
@@ -2546,7 +2553,13 @@ def _hits(found: dict[str, Any]) -> dict[str, Any]:
             f"cabinet_search could not read the cabinet's answer — `results` "
             f"came back as {rows!r}"
         )
-    return {"results": rows, "browsed": bool(found.get("browsed"))}
+    return search_answer(
+        rows,
+        scores=[row.get("similarity") for row in rows],
+        worded=any(row.get("matched_in") for row in rows),
+        browsed=bool(found.get("browsed")),
+        limit=limit,
+    )
 
 
 def _today() -> str:

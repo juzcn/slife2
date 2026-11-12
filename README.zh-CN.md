@@ -532,8 +532,13 @@ schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有�
 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list` 按最新优先，每轮一行；
 `since`/`until` 接受 ISO 日期或 `yesterday` 之类的说法，`limit`/`offset` 按
 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的一行外加 `similarity`
-分数；它的 `query` 词把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受
+分数；它的 `keywords` 把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受
 agent 参数：模型只能读取自己的历史。
+
+`turn_search`、`cabinet_search` 和 `tool_search` 共用一套写法：都接受 `keywords`
+和 `sentences`，回答 `results`，并在旁边给出 `best`、`confidence`、`browsed` 和
+`limit`。`confidence` 在排序页上是 `sure`、`weak` 或 `none`，在浏览页上是
+`null`。
 
 每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now` 和 `token-usage`；它是提示文本，不会
 存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和

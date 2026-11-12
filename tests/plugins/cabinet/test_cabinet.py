@@ -1187,6 +1187,10 @@ async def test_the_two_legs_answer_different_questions() -> None:
             client, "cabinet_search", sentences=[f"{WORD} in the body"]
         )
 
+    assert set(by_words) == {"results", "best", "confidence", "browsed", "limit"}
+    assert by_words["best"] == 1.0
+    assert by_words["confidence"] == "sure"
+    assert by_words["browsed"] is False
     assert keys(by_words["results"]) == ["alpha"]
     assert by_words["results"][0]["matched_in"] == "line"
     assert (data_dir() / by_words["results"][0]["path"]).is_file(), (
@@ -1374,6 +1378,9 @@ async def test_a_search_with_neither_input_browses() -> None:
 
     assert keys(browsed["results"]) == ["one"]
     assert browsed["browsed"] is True
+    assert browsed["best"] is None, "a browse measured nothing"
+    assert browsed["confidence"] is None, "and judged nothing"
+    assert browsed["limit"] == 20
 
 
 @pytest.mark.asyncio

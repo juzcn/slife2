@@ -232,6 +232,7 @@ from slife2.libs.plugin.protocol import (
 from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
+from slife2.libs.store.answer import search_answer
 from slife2.libs.store.catalogue import CATEGORIES, ToolStore
 from slife2.libs.store.index import Embedder
 from slife2.libs.store.textindex import terms
@@ -1771,8 +1772,12 @@ TOOL_SEARCH_PARAMETERS: dict[str, Any] = {
 TOOL_SEARCH_DESCRIPTION = (
     "Find a tool by what it does, across the whole catalogue — including MCP, "
     "REST API, CLI and SKILL tools. By default it includes tools already in "
-    "your list; `unloaded_only` narrows it to the rest. The answer's "
-    "`confidence` says whether the page is `sure`, `weak` or `none`."
+    "your list; `unloaded_only` narrows it to the rest. The answer is the one "
+    "search answer: `results` (the tools, best first), `best` (the highest "
+    "meaning score on the page, `null` when nothing was scored by meaning), "
+    "`confidence` (`sure`, `weak` or `none`), `browsed` (always false here; "
+    "`tool_list` is the browse) and `limit` (the page size this answer was cut "
+    "to)."
 )
 
 #: The listing's inputs, and **all four are optional**: unlike a search, every
@@ -2298,22 +2303,6 @@ def _whole(arguments: Mapping[str, Any], key: str) -> int:
         raise ToolError(f"`{key}` is a whole number; {given!r} is not one") from None
 
 
-#: Where "the meaning leg is sure" begins, and where "it found nothing" ends.
-#:
-#: Measured with the real embedder: 36 answerable queries scored 0.477-0.782 and
-#: 10 unanswerable ones 0.389-0.512, so the bands overlap by 0.035 and no cutoff
-#: is exact.  `MATCH_FLOOR` is the conservative end (every unanswerable query
-#: caught, 32 of 36 answerable ones kept); `WEAK_FLOOR` exists to be *said*
-#: rather than decided — the band between them is genuinely undecided, and the
-#: tier is a sentence in the answer, not a row removed.
-#:
-#: **The words override both.**  A row whose text contains every word the caller
-#: gave is certain whatever it scores — `pandoc` scores 0.514 against the row
-#: *named* `mcp-pandoc`.
-MATCH_FLOOR = 0.55
-WEAK_FLOOR = 0.48
-
-
 def _record(row: Mapping[str, Any]) -> dict[str, Any]:
     """One search row, with the same fields every time.
 
@@ -2391,47 +2380,26 @@ def _listing(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _confidence(rows: Sequence[Mapping[str, Any]], best: float) -> str:
-    """How sure this page is, as one of three words.
-
-    **A judgement the model cannot make for itself**, which is why it is here and
-    not left to the numbers: the floors are this system's (`MATCH_FLOOR`,
-    `WEAK_FLOOR`), and a page of the ten nearest rows says nothing about whether
-    any of them is for the thing asked — the same shape came back for a query
-    this catalogue can answer and for one it cannot, and the caller was left to
-    guess which it had.
-
-    `sure` is a row above the match floor, `weak` is one above the weak floor (or
-    a page the caller's own words reached at all — that evidence is certain where
-    a cosine is graded), and `none` is neither.  **And never a count of matches**,
-    because there is no such number to give: the floors label a page and do not
-    cut it — a weak answer still shows its ten rows — so a count would be the
-    page size wearing the word "found".
-    """
-    if best >= MATCH_FLOOR:
-        return "sure"
-    if best >= WEAK_FLOOR or any(row.get("matched_in") for row in rows):
-        return "weak"
-    return "none"
-
-
 def _results(found: Mapping[str, Any]) -> dict[str, Any]:
     """A tool search's rows, as the object a model reads.
 
-    `results` is in the order they are meant to be read — the caller's own words
-    first, then by meaning — and `best` and `confidence` are the verdict about
-    the page as a whole (`_confidence`).  No pointer at `func_tool_load` follows
-    them any more: it is in every model's list from the first turn, its own
-    description says what it does, and a tool's answer that instructs a model
-    about another tool is the cross-reference this surface is trying not to
-    carry.
+    The page is `search_answer`'s — the one envelope all three searches give
+    (`slife2.libs.store.answer`).  `results` is in the order they are meant to be
+    read, the caller's own words first and then by meaning; `best` and
+    `confidence` are the verdict about the page as a whole.  No pointer at
+    `func_tool_load` follows them any more: it is in every model's list from the
+    first turn, its own description says what it does, and a tool's answer that
+    instructs a model about another tool is the cross-reference this surface is
+    trying not to carry.
 
     **A search answer that cannot be read is not a search that found nothing.**
     An empty `results` is a verdict a model acts on rather than a failure it
     retries, so only a *readable* empty list may say it; an answer with no
-    `results` list at all is damage, and it raises (SDD Appendix C, "a failure is not a
-    verdict").  `call_tool` turns the raise into `ok` false, so the model reads
-    the failure instead of the confident negative.
+    `results` list at all is damage, and it raises (SDD Appendix C, "a failure is
+    not a verdict").  `call_tool` turns the raise into `ok` false, so the model
+    reads the failure instead of the confident negative.  The read is this
+    caller's rather than the envelope's because the failure is the catalogue's
+    answer, and each server raises in its own vocabulary.
     """
     rows = found.get("results")
     if not isinstance(rows, list):
@@ -2439,17 +2407,12 @@ def _results(found: Mapping[str, Any]) -> dict[str, Any]:
             f"tool_search could not read the catalogue's answer — `results` came "
             f"back as {rows!r}"
         )
-    scored = [
-        float(row["similarity"])
-        for row in rows
-        if isinstance(row.get("similarity"), float)
-    ]
-    best = max(scored) if scored else 0.0
-    return {
-        "results": [_record(row) for row in rows],
-        "best": best,
-        "confidence": _confidence(rows, best),
-    }
+    return search_answer(
+        [_record(row) for row in rows],
+        scores=[row.get("similarity") for row in rows],
+        worded=any(row.get("matched_in") for row in rows),
+        limit=SEARCH_LIMIT,
+    )
 
 
 def _page_answer(found: Mapping[str, Any]) -> dict[str, Any]:

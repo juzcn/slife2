@@ -46,15 +46,14 @@ from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
+from slife2.libs.store.answer import MATCH_FLOOR, WEAK_FLOOR, confidence
 from slife2.libs.store.catalogue import DEFAULT_TOOL_PAGE, LOADED, UNLOADED, ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
-    MATCH_FLOOR,
     MAX_LOAD_NAMES,
     PLUGIN,
-    WEAK_FLOOR,
+    SEARCH_LIMIT,
     Catalogue,
-    _confidence,
     _page_answer,
     _parameters,
     configured_sources,
@@ -1571,6 +1570,8 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     answer = json.loads(found["text"])
     assert answer["confidence"] == "sure", answer
     assert answer["best"] == 1.0
+    assert answer["browsed"] is False, "a search is not a browse"
+    assert answer["limit"] == SEARCH_LIMIT
 
     assert json.loads(nothing["text"])["confidence"] == "none", nothing["text"]
 
@@ -1757,24 +1758,27 @@ def test_a_listing_that_cannot_be_read_is_not_an_empty_catalogue() -> None:
 def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:
     """Three words, pinned where the floors are.
 
-    `_confidence` is called with the page and its best number, so the verdict can
-    be asserted without a catalogue — and it has to be *this* function's, because
-    the floors are this system's: `best` is a cosine, and what counts as a
-    match is not something a reading model can derive from the number.
+    `confidence` is called with the page's best number and the word evidence, so
+    the verdict can be asserted without a catalogue — and it has to be *this*
+    function's, because the floors are this system's: `best` is a cosine, and
+    what counts as a match is not something a reading model can derive from the
+    number.  The judgement lives in `slife2.libs.store.answer` now, because all
+    three searches present it.
 
     The middle case is the one that is easy to get wrong.  The caller's own words
     reaching a row is evidence — certain, where a cosine is graded — so a page
     whose only evidence is that says `weak` rather than `none`, whatever the
     numbers say.
     """
-    worded = [{"matched_in": "line"}]
-    plain = [{}]
-
-    assert _confidence(plain, 0.7) == "sure"
-    assert _confidence(plain, MATCH_FLOOR) == "sure", "the floor is inclusive"
-    assert _confidence(plain, 0.2) == "none"
-    assert _confidence(worded, 0.2) == "weak", "the words are evidence"
-    assert _confidence(plain, WEAK_FLOOR) == "weak", "and so is a close-ish number"
+    assert confidence(0.7, worded=False) == "sure"
+    assert confidence(MATCH_FLOOR, worded=False) == "sure", "the floor is inclusive"
+    assert confidence(0.2, worded=False) == "none"
+    assert confidence(0.2, worded=True) == "weak", "the words are evidence"
+    assert confidence(WEAK_FLOOR, worded=False) == "weak", (
+        "and so is a close-ish number"
+    )
+    assert confidence(None, worded=True) == "weak", "a word-only page is measured none"
+    assert confidence(None, worded=False) == "none", "not measured is not a zero"
 
 
 @pytest.mark.asyncio
