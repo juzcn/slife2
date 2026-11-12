@@ -223,8 +223,8 @@ async def test_two_concurrent_calls_on_one_client_do_not_mix() -> None:
     process, so the moment a server has two loops — the ordinary case, and
     exactly what a subagent fan-out is — two `stream_chat` calls are in flight on
     one session at once.  Nothing in this project had ever exercised that: the
-    agent server's own tests inject a backend, so `loop_for`'s cache path never
-    ran with anything concurrent.
+    agent server's own tests inject a backend, so the turn runtime's cache path
+    never ran with anything concurrent.
 
     Each request carries its own progress callback, so the chunks should be
     multiplexed rather than mixed.  The streamer yields one character at a time

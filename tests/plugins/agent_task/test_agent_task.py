@@ -106,9 +106,10 @@ class Store:
 class UnreadableStore:
     """A context plugin answering with the shapes this task server refuses.
 
-    `adopt` reads the store's answer as a thing it must be able to trust, and a
-    store this build started never returns one it cannot read — so a test of the
-    refusal hands in the shape a *daemon from another build* does, by name.
+    The turn runtime's `restore` reads the store's answer as a thing it must be
+    able to trust, and a store this build started never returns one it cannot
+    read — so a test of the refusal hands in the shape a *daemon from another
+    build* does, by name.
     """
 
     def __init__(self, **answers: dict[str, Any]) -> None:
@@ -631,7 +632,7 @@ async def test_the_cap_is_read_off_the_config_of_the_call(
     so a limit read off the *daemon's* boot config bounds a call by a number an
     operator wrote in a directory this caller has never heard of, and an edit to
     the file never reaches the call that enforces it.  Every other config read in
-    this server is `live()`'s (`model_for`, `run_loop`), and the sibling agent
+    this server is `runtime.current()`'s (`run_loop`), and the sibling agent
     server reads its own cap the same way.
 
     Two homes' configs in one assertion: the config this process started on says
@@ -1210,12 +1211,12 @@ async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
     `error`, naming the task, because the loaded set is one list for the whole
     system.  Registered as a fallback in SDD Appendix C.
     """
-    import slife2.plugins.agent_task.server as module
+    import slife2.libs.turn.runtime as runtime_module
 
     async def no_hub(_client: Any) -> dict[str, Any]:
         raise ConnectionError("the hub is gone")
 
-    monkeypatch.setattr(module, "unload_tools", no_hub)
+    monkeypatch.setattr(runtime_module, "unload_tools", no_hub)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
@@ -1242,14 +1243,14 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     failure is not a verdict).  The skip is still best-effort and said at
     `error`, naming the task, because the trim is post-turn bookkeeping.
     """
-    import slife2.plugins.agent_task.server as module
+    import slife2.libs.turn.runtime as runtime_module
 
     async def no_names(_client: Any) -> dict[str, Any]:
         # Every key but the one the trim acts on: the same silence an empty list
         # makes, from an answer that says nothing at all.
         return {"refused": [], "not_loaded": [], "text": "the list is fine"}
 
-    monkeypatch.setattr(module, "unload_tools", no_names)
+    monkeypatch.setattr(runtime_module, "unload_tools", no_names)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)

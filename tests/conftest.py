@@ -60,11 +60,13 @@ from slife2.libs.turn import tokens
 #:     `tools.db` behind for the next run to find.  `test_a_turn_over_the_real_stack`
 #:     asks for this one back (`real_dialer`): the servers its launcher probes
 #:     are its own, started on ports it picked.
-#:   * `agent_task_server` — the hub, the context store and the model for a
-#:     task's own turn.  A forgotten `backend=` is a live, paid call.
+#:   * `turn.runtime` — the hub, the context store and the model for a turn,
+#:     for the agent server and the agent-task server alike.  A forgotten
+#:     `backend=` or client is a live, paid call.
 #:   * `schedule_server` — the agent-task plugin it dispatches a run to.
-#:   * `server.server` — the same three, for a turn of the agent's own, which is
-#:     the one leak that would *write* to a developer's real conversation.
+#:   * `server.server` — the cabinet and the subagent network, the peers a turn
+#:     of the agent's own reaches directly; the leak that would *write* to a
+#:     developer's real conversation goes through the runtime.
 #:   * `context_server` — the model its discriminator needs to choose a context.
 #:   * `llm.client` — `open_backend`, which is how anything above reaches a
 #:     model server at all.
@@ -77,9 +79,9 @@ from slife2.libs.turn import tokens
 _DIALERS: dict[str, tuple[str, ...]] = {
     "slife2.libs.harness.handover": ("open_server",),
     "slife2.libs.host.launcher": ("open_server",),
-    "slife2.plugins.agent_task.server": ("open_server", "open_backend"),
+    "slife2.libs.turn.runtime": ("open_server", "open_backend"),
     "slife2.plugins.schedule.server": ("open_server",),
-    "slife2.plugins.agent.server": ("open_server", "open_backend"),
+    "slife2.plugins.agent.server": ("open_server",),
     "slife2.plugins.context.server": ("open_server",),
     "slife2.clients.model": ("open_server",),
     "slife2.clients.embedder": ("open_server",),

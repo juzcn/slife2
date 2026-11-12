@@ -600,7 +600,7 @@ async def run_turn(
     caller with nothing to draw.  `timeout=None` on the call because the turn's
     length is the answer's own business, and `timeout=None` on the *connection*
     because a deadline there is one on every request that crosses it, which for
-    this client is the whole turn (the agent server's own `hub()` says the same
+    this client is the whole turn (the turn runtime's own `hub()` says the same
     thing about the same trap).
 
     **What comes back is the turn's final text, and it is not a reply.**  A

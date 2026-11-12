@@ -356,6 +356,7 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
         CONTEXT_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
+    from slife2.libs.turn import runtime as runtime_module
     from slife2.plugins.agent import server as server_module
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
@@ -397,8 +398,12 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
         closed.append(client)
         await real_close(client)
 
+    # The cabinet is still this server's direct peer; the context and hub
+    # connections are the turn runtime's, so both modules get the same fakes.
     monkeypatch.setattr(server_module, "open_server", open_ours)
     monkeypatch.setattr(server_module, "close_server", close_ours)
+    monkeypatch.setattr(runtime_module, "open_server", open_ours)
+    monkeypatch.setattr(runtime_module, "close_server", close_ours)
     server = build_server(cfg, backend=backend)
 
     # **A session each**, which is what makes the second one a fresh start: the

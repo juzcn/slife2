@@ -1945,6 +1945,25 @@ def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
     }
 
 
+def test_the_turn_prompt_lead_is_one_builder_for_the_clock_and_the_size() -> None:
+    """**Two servers, one marker.**  The agent server and the agent-task server
+    each assembled this lead; a rule that decides whether the figure is shown
+    cannot be two rules, or a task's turn and an agent's would disagree about
+    the same conversation.
+    """
+    from slife2.libs.turn.context import TURN_PROMPT_PREFIX, turn_prompt_lead
+
+    note = turn_prompt_lead(140_127, 1_000_000)
+    assert note.startswith(TURN_PROMPT_PREFIX)
+    payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
+    assert payload["token-usage"] == "140,127 (14.0%)"
+    assert payload["now"], "a turn always knows when it started"
+
+    # No declared window and no tokens: the figure is omitted, not empty.
+    bare = json.loads(turn_prompt_lead(0, 0)[len(TURN_PROMPT_PREFIX) : -1])
+    assert set(bare) == {"now"}
+
+
 def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
     """**The lead's inverse is exact**, so the person's text arrives as written.
 

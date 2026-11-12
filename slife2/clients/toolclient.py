@@ -488,12 +488,12 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
     means a refused answer can never leave the half-written pair every provider
     rejects.
 
-    **Here rather than in the two servers that trim**, which is where it was:
-    the agent server and the agent-task server each carried a byte-identical
-    copy of this function, down to the two messages — which are
-    `slife2.libs.plugin.protocol.unreadable`'s, now one function the five modules
-    that read a peer's answer share.  The rule belongs with the call whose answer
-    it reads.
+    **Here rather than in the servers that trim**, which is where it was: the
+    agent server and the agent-task server each carried a byte-identical copy
+    of this function, and both now read it through the turn runtime.  The two
+    messages are `slife2.libs.plugin.protocol.unreadable`'s — one function the
+    five modules that read a peer's answer share — and the rule belongs with
+    the call whose answer it reads.
     """
     names = found.get("unloaded")
     if not isinstance(names, list):

@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from slife2.helpers.clock import now
 from slife2.helpers.timeutil import can_place
 from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import INTERRUPTED
@@ -580,6 +581,27 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
         f"{json.dumps(dict(facts), ensure_ascii=False)}"
         f"{TURN_SUFFIX}"
     )
+
+
+def turn_prompt_lead(context_tokens: int, context_window: int) -> str:
+    """The `[TURN-PROMPT:{…}]` lead a turn opens with.
+
+    **Two facts, one rule.**  The clock is sampled where the turn starts, and
+    the context figure is `context_usage`'s — the same function the status bar
+    calls — so the marker cannot round differently from the bar it mirrors.  A
+    figure that is empty (no tokens and no declared window) is omitted rather
+    than written as silence: a missing key is silence, not a zero
+    (`turn_prompt_note`).
+
+    The two servers that run turns built this block each; it is here because
+    what a turn is told at its start is prompt content, and this module already
+    owns the marker's vocabulary.
+    """
+    facts: dict[str, Any] = {"now": now()}
+    usage, _used = context_usage(context_tokens, context_window)
+    if usage:
+        facts["token-usage"] = usage
+    return turn_prompt_note(facts)
 
 
 def turn_note(

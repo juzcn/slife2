@@ -704,10 +704,10 @@ async def test_a_window_that_has_never_run_reads_nothing(context, hub) -> None:
 class UnreadableStore:
     """A context plugin answering with the shapes this build refuses.
 
-    `_adopt`, `rebuild_into` and `transcript` read the store's answers as things
-    they must be able to trust, and a store this build started never returns one
-    it cannot read — so a test of the refusals hands in the shape a *daemon from
-    another build* does, by name.
+    The turn runtime's `restore`/`rebuild` and this server's `transcript` read
+    the store's answers as things they must be able to trust, and a store this
+    build started never returns one it cannot read — so a test of the refusals
+    hands in the shape a *daemon from another build* does, by name.
     """
 
     def __init__(self, **answers: dict[str, Any]) -> None:
@@ -2109,7 +2109,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     face of the same bug is `covered`/`turn_ids` left out of step with the list.
     """
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
     from slife2.plugins.context.server import build_server as build_context
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
@@ -2132,7 +2132,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
             await release.wait()
         return {"unloaded": [], "text": ""}
 
-    monkeypatch.setattr(server_module, "unload_tools", slow_unload)
+    monkeypatch.setattr(runtime_module, "unload_tools", slow_unload)
 
     async with Client(
         build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
@@ -2214,7 +2214,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     """
     from slife2.libs.host.config import CONTEXT_SERVER_NAME, TOOLHUB_SERVER_NAME
     from slife2.libs.host.paths import DATA_ENV_VAR
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
     from slife2.plugins.context.server import build_server as build_context
     from slife2.plugins.toolhub.server import build_server as build_hub
     from tests.fakes import plugin_transports
@@ -2243,7 +2243,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
         await client.__aenter__()
         return client
 
-    monkeypatch.setattr(server_module, "open_server", open_ours)
+    monkeypatch.setattr(runtime_module, "open_server", open_ours)
     server = build_server(
         config(), backend=FakeBackend(text_turn("the answer"), text_turn("the answer"))
     )
@@ -2546,14 +2546,14 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     """
     import logging
 
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
 
     async def no_names(_client: Any) -> dict[str, Any]:
         # Every key but the one the trim acts on: the same silence an empty list
         # makes, from an answer that says nothing at all.
         return {"refused": [], "not_loaded": [], "text": "the list is fine"}
 
-    monkeypatch.setattr(server_module, "unload_tools", no_names)
+    monkeypatch.setattr(runtime_module, "unload_tools", no_names)
     caplog.set_level(logging.WARNING, logger="slife2.plugins.agent.server")
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=answering("done")
@@ -2585,7 +2585,7 @@ async def test_opening_a_loop_fails_when_the_context_store_is_gone(
     `no_live_stack` guard refuses every dial a test did not inject, and a test
     that refuses its own subject asserts a sentence the product never wrote.
     """
-    real_dialer("slife2.plugins.agent.server")
+    real_dialer("slife2.libs.turn.runtime")
     base = default_config()
     cfg = replace(
         base,
