@@ -105,6 +105,23 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CANCEL,
+    AGENT_TASK_LIST,
+    AGENT_TASK_START,
+    AGENT_TASK_STATUS,
+    CANCELLED,
+    FAILED,
+    FINISHED,
+    RUNNING,
+    UNKNOWN,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CHANNEL as CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_MARKER as MARKER_PREFIX,
+)
 from slife2.libs.turn.context import context_usage, turn_prompt_note, with_lead
 from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
 from slife2.libs.turn.messages import Message, ToolSpec
@@ -124,8 +141,9 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = AGENT_TASK_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name of the
-#: section that holds its one number.
-CONFIG_KEY = "agent-task"
+#: section that holds its one number.  It is the channel too: the key a plugin
+#: runs under is the channel its answers come back on.
+CONFIG_KEY = CHANNEL
 
 #: **The two tools a task's model must not have.**  They act on a *live*
 #: conversation: `_check_new_input` pops a queued message out of the running
@@ -137,43 +155,10 @@ CONFIG_KEY = "agent-task"
 #: "not here" instead of stealing the main conversation's message or image.
 LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
 
-#: The four tools, named once.  They are the whole surface, and the vocabulary
-#: they share is one: `agent_task_cancel` answers with the same `status` field
-#: `agent_task_status` does, so stopping a task needs no second set of outcomes.
-AGENT_TASK_START = "agent_task_start"
-AGENT_TASK_STATUS = "agent_task_status"
-AGENT_TASK_LIST = "agent_task_list"
-AGENT_TASK_CANCEL = "agent_task_cancel"
-
-#: Every state a task can be in.  `unknown` is not one of them — it is what a
-#: name the registry does not hold answers, and it includes a task the cap has
-#: forgotten, which is honest because this process can no longer tell.
-RUNNING = "running"
-FINISHED = "finished"
-FAILED = "failed"
-CANCELLED = "cancelled"
-UNKNOWN = "unknown"
-
-#: The channel an agent task's answer comes back on, and the first half of the
-#: key its own state is filed under.  A channel is the key a plugin runs under
-#: (`wechat`, `tui`, and this) and a task's answer also wears the task's name —
-#: `agent-task:research` — because a hand-over carries the channel and the words
-#: and nothing else, and the window draws the bubble from the channel alone
-#: (`slife2.tui.widgets.channel_prefix`).
-CHANNEL = "agent-task"
-
-#: What the answer wears, so the model can read the task's id back out of the
-#: row.  It is **content**, not an annotation this build derives: it goes into
-#: the stored message verbatim, which by `SDD` §5.5's convention is what
-#: the word-shaped spelling says and `[TURN:…]`'s capitals do not.
-#:
-#: **`AgentTaskResult`, because that is what the line is**: an agent task's
-#: result, read by the model beside `slife2.libs.harness.async_tasks`'s
-#: `[AgentToolResult:{…}]` — two results, one from a task and one from a tool
-#: call, named so that neither can be taken for the other.  The *bubble* a window
-#: draws is the shorter `AsyncTask(name)> ` (`slife2.tui.widgets.channel_prefix`):
-#: a person is being told which task answered.
-MARKER_PREFIX = "[AgentTaskResult:"
+# The tools, the states, the channel and the marker are
+# `slife2.libs.plugin.vocabulary`'s: each crosses a process boundary — the
+# scheduler starts a task, the window draws its answer, the probe reads the
+# result — so the readers import the names without loading this server.
 
 #: The template a task is opened with.  Asked for by bare name, so it is the
 #: shipped one — this is machinery, the way this system tells a loop that nobody

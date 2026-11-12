@@ -57,20 +57,26 @@ from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
 from slife2.libs.harness.markers import strip as strip_marker
 
-# Imported, never re-spelled.  The module that writes a marker is the one that
-# knows what it looks like, and a prefix typed a second time here is a copy that
-# drifts — into printing the raw marker at somebody, which is the failure these
-# imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
-# the *shape* rather than any one name, so a third channel is a line here and
-# nothing at all in that module.
+# Imported, never re-spelled.  The names are `slife2.libs.plugin.vocabulary`'s,
+# which is where a writer and a reader meet without the reader loading a server;
+# a prefix typed a second time here is a copy that drifts — into printing the raw
+# marker at somebody, which is the failure these imports exist to prevent.
+# Taking one off is `slife2.libs.harness.markers.strip`, which is the *shape*
+# rather than any one name, so a third channel is a line here and nothing at all
+# in that module.
 from slife2.libs.host.config import LOCAL, LOCAL_AGENT, REMOTE
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CHANNEL as ASYNC_TASK_CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_MARKER as ASYNC_TASK_MARKER,
+)
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_CHANNEL,
+    WECHAT_MARKER,
+    WINDOW_CHANNEL,
+)
 from slife2.libs.turn.context import context_usage
-from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
-from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
-from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
-from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
-from slife2.plugins.wechat.server import CONFIG_KEY as WECHAT_CHANNEL
-from slife2.plugins.wechat.server import MARKER_PREFIX as WECHAT_MARKER
 from slife2.tui import notes
 from slife2.tui.i18n import t
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -83,10 +89,10 @@ MARKERS: tuple[str, ...] = (
     WECHAT_MARKER,
     ASYNC_TASK_MARKER,
     ASYNC_CALL_MARKER,
-    PEER_MARKER,
+    REMOTE.marker,
     # **The local network's, which is a second envelope and not a second name
     # for the remote one.**  The one the *config* owns (`LOCAL.marker`,
-    # `[Subagent:`) is not among the plugins' exports, and missing it draws a
+    # `[Subagent:`) is not among the vocabulary's constants, and missing it draws a
     # subagent's handed-over answer with its raw envelope in front of it — the
     # exact failure the imports above exist to prevent: `channel_prefix` already
     # knows this channel and gives it `Subagent(jill)>`.
@@ -124,10 +130,6 @@ APPROVAL_ARG_LINES = 6
 #: it is the model talking to itself — and past a few hundred characters nobody
 #: is reading it, they are skimming for the shape of it.
 THINKING_PREVIEW_CHARS = 500
-
-#: The channel this window's own turns are sent on (`slife2.tui.client`), and
-#: therefore the one whose messages are the person's own words.
-WINDOW_CHANNEL = "tui"
 
 
 def is_own_channel(channel: str) -> bool:
@@ -217,7 +219,7 @@ def channel_prefix(channel: str) -> str:
         # the group vocabulary deliberately does not tell them apart
         # (`slife2.libs.host.config.LOCAL.group_bubble`).
         return _group_bubble(LOCAL.group_bubble, channel)
-    if channel.startswith(f"{PEER_CHANNEL}:"):
+    if channel.startswith(f"{REMOTE.channel}:"):
         # A peer agent.  The name is in the channel because a hand-over carries
         # the channel and the words and nothing else — the marker beside the
         # message is taken back off (it is what a *reply* needs, which nothing a

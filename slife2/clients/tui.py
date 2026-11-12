@@ -25,18 +25,27 @@ from slife2.helpers import timeouts as _T
 from slife2.libs.host.config import Config
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CHANNEL,
+    CANCELLED,
+    FAILED,
+    RUNNING,
+    TRANSCRIPT,
+    UNKNOWN,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_MARKER as MARKER_PREFIX,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_START as START,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_STATUS as STATUS,
+)
 from slife2.libs.store.db import message_text
 
-#: The agent-task plugin's tool names and marker prefix, spelled because they
-#: cross a process boundary: `plugins/agent_task/server.py` registers the tools
-#: and writes the marker.  The agent server's `transcript` is the read.
-START = "agent_task_start"
-STATUS = "agent_task_status"
-TRANSCRIPT = "transcript"
-MARKER_PREFIX = "[AgentTaskResult:"
-
 #: The states in which a task has stopped without an answer to read.
-_ENDED = frozenset({"failed", "cancelled"})
+_ENDED = frozenset({FAILED, CANCELLED})
 
 
 def _answer(turns: list[dict[str, Any]], task_id: str) -> str | None:
@@ -109,7 +118,7 @@ async def probe_tui(
     if timeout is None:
         timeout = _T.timeouts.deliver.probe
     name = f"probe-{uuid.uuid4().hex[:12]}"
-    task_id = f"agent-task:{name}"
+    task_id = f"{AGENT_TASK_CHANNEL}:{name}"
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     meta = conversation_meta(agent)
@@ -137,8 +146,8 @@ async def probe_tui(
                 )
             except Exception as exc:  # noqa: BLE001 - the task's state is the gate
                 raise ProbeError(f"the task's state could not be read: {exc}") from exc
-            status = str(report.get("status") or "unknown")
-            if status != "running":
+            status = str(report.get("status") or UNKNOWN)
+            if status != RUNNING:
                 break
             if loop.time() >= deadline:
                 raise ProbeError(
@@ -146,7 +155,7 @@ async def probe_tui(
                 )
             await asyncio.sleep(_T.timeouts.pacing.probe_poll)
 
-        if status in _ENDED or status == "unknown":
+        if status in _ENDED or status == UNKNOWN:
             raise ProbeError(f"the agent task {name!r} ended {status}")
 
         try:

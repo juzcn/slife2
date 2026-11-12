@@ -27,6 +27,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import TUI_SERVER_NAME
 from slife2.libs.plugin.audience import for_the_model
+from slife2.libs.plugin.vocabulary import Handover, decode, encode
 from slife2.libs.turn.events import TextDelta, TurnFinished
 from slife2.libs.turn.messages import Usage
 from slife2.plugins.tui import server as control
@@ -80,14 +81,14 @@ async def attached(server: Any, agent: str = "jack") -> AsyncGenerator[list]:
     the only thing that proves the server has the session is that a `submit`
     stops being refused, which is exactly the question every caller asks.
     """
-    seen: list[control.Handover] = []
+    seen: list[Handover] = []
 
     async with Client(server) as window:
 
         async def on_progress(
             progress: float, total: float | None, message: str | None
         ) -> None:
-            handover = control.decode(message or "")
+            handover = decode(message or "")
             if handover is not None:
                 seen.append(handover)
 
@@ -147,7 +148,7 @@ async def test_a_handed_over_message_reaches_the_attached_window() -> None:
         await submitted(channel, "jack", text="hi", channel="wechat")
         await until(lambda: seen)
 
-    assert seen == [control.Handover(ticket=1, text="hi", channel="wechat")]
+    assert seen == [Handover(ticket=1, text="hi", channel="wechat")]
 
 
 async def test_submit_answers_once_the_words_are_written() -> None:
@@ -304,15 +305,15 @@ async def test_a_handover_round_trips_and_foreign_lines_are_dropped() -> None:
     a display, and a display that dies on somebody else's notification is worse
     than one that ignores it.
     """
-    handover = control.Handover(ticket=7, text="你好", channel="wechat")
-    assert control.decode(control.encode(handover)) == handover
+    handover = Handover(ticket=7, text="你好", channel="wechat")
+    assert decode(encode(handover)) == handover
     # Non-ASCII survives, which is not free: it is what `ensure_ascii` is for.
-    assert control.encode(handover).isascii()
+    assert encode(handover).isascii()
 
-    assert control.decode("") is None
-    assert control.decode("not json") is None
-    assert control.decode('{"t":"text","d":"hi"}') is None
-    assert control.decode('{"t":"handover","d":"hi"}') is None
+    assert decode("") is None
+    assert decode("not json") is None
+    assert decode('{"t":"text","d":"hi"}') is None
+    assert decode('{"t":"handover","d":"hi"}') is None
 
 
 async def test_a_kind_this_build_has_no_word_for_is_refused_rather_than_run() -> None:
@@ -326,19 +327,17 @@ async def test_a_kind_this_build_has_no_word_for_is_refused_rather_than_run() ->
     build has no word for — `decode` answers None rather than picking the more
     consequential branch.
     """
-    turn = control.Handover(ticket=1, text="hi", channel="wechat")
-    note = control.Handover(
-        ticket=2, text="⚡ jill online", channel="", kind=control.NOTE
-    )
+    turn = Handover(ticket=1, text="hi", channel="wechat")
+    note = Handover(ticket=2, text="⚡ jill online", channel="", kind=control.NOTE)
 
-    assert control.decode(control.encode(turn)) == turn
-    assert control.decode(control.encode(note)) == note
+    assert decode(encode(turn)) == turn
+    assert decode(encode(note)) == note
     assert turn.kind == control.TURN, "the default, for every existing caller"
 
     # No `k` at all: refused, not run as the more consequential branch.
-    assert control.decode('{"t":"handover","id":3,"d":"hi","c":"wechat"}') is None
+    assert decode('{"t":"handover","id":3,"d":"hi","c":"wechat"}') is None
     # A kind from a future build is not a kind this one may act on.
-    assert control.decode('{"t":"handover","id":4,"d":"hi","c":"","k":"shrug"}') is None
+    assert decode('{"t":"handover","id":4,"d":"hi","c":"","k":"shrug"}') is None
 
 
 async def test_a_note_reaches_the_window_as_a_note_and_is_acknowledged() -> None:
@@ -522,7 +521,7 @@ async def test_a_hand_over_with_an_unreadable_ticket_is_dropped_not_raised() -> 
         '{"t":"handover","id":[1],"d":"hi","c":"wechat","k":"note"}',
         '{"t":"handover","id":true,"d":"hi","c":"wechat","k":"note"}',
     ):
-        assert control.decode(payload) is None
+        assert decode(payload) is None
 
-    good = control.decode('{"t":"handover","id":7,"d":"hi","c":"wechat","k":"note"}')
+    good = decode('{"t":"handover","id":7,"d":"hi","c":"wechat","k":"note"}')
     assert good is not None and good.ticket == 7

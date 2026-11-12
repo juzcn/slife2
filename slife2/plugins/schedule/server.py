@@ -92,14 +92,14 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_LIST,
     AGENT_TASK_START,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     FINISHED as TASK_FINISHED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
 from slife2.plugins.schedule import expressions

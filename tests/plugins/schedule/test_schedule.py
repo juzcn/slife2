@@ -50,13 +50,13 @@ from slife2.libs.plugin.audience import (
     for_the_model,
     request_conversation,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     FAILED as TASK_FAILED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     FINISHED as TASK_FINISHED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
 from slife2.plugins.schedule.expressions import latest_fire

@@ -69,6 +69,36 @@ def test_package_import_does_not_pull_in_textual() -> None:
     assert result.stdout.strip() == "False"
 
 
+def test_the_terminal_and_the_agent_loop_do_not_load_plugins() -> None:
+    """The names they share with a server live in `libs/plugin/vocabulary.py`.
+
+    A reader that imports the server for a marker would take the server's whole
+    dependency graph with it — FastMCP's server half, the broker, a tunnel SDK —
+    for a string.  This is the import graph the vocabulary module exists to
+    break, asserted in a fresh interpreter so another import elsewhere cannot
+    hide it.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import slife2.clients.tui, slife2.libs.host.config,"
+            " slife2.libs.harness.handover, slife2.tui.client,"
+            " slife2.tui.widgets, sys;"
+            " print([m for m in sys.modules"
+            " if m == 'slife2.plugins' or m.startswith('slife2.plugins.')])",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]"
+
+
 def test_a_malformed_config_is_reported_not_raised(tmp_path) -> None:
     """A file the user wrote and got wrong is worth naming once."""
     (tmp_path / "slife2.yaml").write_text("agent: [unclosed\n", encoding="utf-8")

@@ -68,6 +68,7 @@ from textual.worker import Worker
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import DEFAULT_AGENT
+from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.events import (
     MessageCutIn,
     ToolApprovalRequested,
@@ -75,7 +76,6 @@ from slife2.libs.turn.events import (
     TurnEvent,
     TurnFinished,
 )
-from slife2.plugins.tui.server import NOTE, Handover
 from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,

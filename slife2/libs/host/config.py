@@ -1897,6 +1897,19 @@ class MediaSettings:
         return provider, entry
 
 
+#: The provider used when the section, or its `active:`, is absent.  A name this
+#: build does not have is a `ConfigError` instead (`_file_tunnel`).
+#:
+#: **The names live here rather than in the provider module**, because this
+#: module is on the import path of the TUI and of the agent loop, and neither
+#: should pull in a tunnel's SDK or `subprocess`.  The provider module imports
+#: them from here, so the loader and the factory cannot disagree.
+DEFAULT_TUNNEL_PROVIDER = "ngrok"
+
+#: Providers this build can actually construct (see `create_provider`).
+KNOWN_TUNNEL_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
+
+
 @dataclass(frozen=True)
 class FileTunnelSettings:
     """How this machine's port becomes a public HTTPS URL, from `file-tunnel:`.
@@ -1921,13 +1934,9 @@ class FileTunnelSettings:
 
     #: Which provider is live.  The others stay configured and inert.
     #:
-    #: Spelled out rather than read off `slife2.plugins.file_tunnel.providers`, by the
-    #: same rule `AGENT_SERVER_NAME` states above: reading it means importing
-    #: it, and this module is imported by the TUI and the agent loop, neither
-    #: of which should pull in a tunnel's SDK or `subprocess`.  `DEFAULT_PROVIDER`
-    #: is the other end of this fact and `tests/libs/host/test_config.py` pins
-    #: the two together.
-    active: str = "ngrok"
+    #: The default is `DEFAULT_TUNNEL_PROVIDER`, which this module owns; the
+    #: provider module imports the name rather than spelling it a second time.
+    active: str = DEFAULT_TUNNEL_PROVIDER
     #: provider name -> its own options, kept as written; `options_for`
     #: resolves the ``${VAR}`` references when a tunnel is about to start.
     providers: dict[str, dict] = field(default_factory=dict)
@@ -2986,22 +2995,16 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     and the module refuses both at load rather than at the call that finds them.
     `active:` cannot degrade to another provider — which tunnel a machine
     publishes through is the operator's decision, not a default to fall back on.
-
-    Imported inside the function because the providers module reaches
-    `subprocess` and an SDK, and this module is on the import path of the TUI
-    and of the agent loop.
     """
-    from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
-
     if raw is None:
         return base
     section = _mapping(raw, "file-tunnel")
-    known = ", ".join(sorted(KNOWN_PROVIDERS))
+    known = ", ".join(sorted(KNOWN_TUNNEL_PROVIDERS))
     providers: dict[str, dict] = {}
     for name, spec in _mapping(
         section.get("providers"), "file-tunnel.providers"
     ).items():
-        if str(name) not in KNOWN_PROVIDERS:
+        if str(name) not in KNOWN_TUNNEL_PROVIDERS:
             raise ConfigError(
                 f"file-tunnel.providers.{name}: not a tunnel provider; known: {known}"
             )
@@ -3020,8 +3023,8 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
             str(key): defer_secret(value) for key, value in spec.items()
         }
 
-    active = str(section.get("active") or DEFAULT_PROVIDER).strip()
-    if active not in KNOWN_PROVIDERS:
+    active = str(section.get("active") or DEFAULT_TUNNEL_PROVIDER).strip()
+    if active not in KNOWN_TUNNEL_PROVIDERS:
         raise ConfigError(
             f"file-tunnel.active: {active!r} is not a tunnel provider; known: {known}"
         )

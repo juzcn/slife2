@@ -22,9 +22,9 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.plugin import protocol as protocol_module
+from slife2.libs.plugin.vocabulary import ATTACH, Handover, encode
 from slife2.libs.turn.watch import Snapshot, TurnStarted
 from slife2.libs.turn.watch import encode as encode_watch
-from slife2.plugins.tui.server import ATTACH, Handover, encode
 from slife2.tui.client import MCPAgentClient, MCPWindowClient
 
 pytestmark = pytest.mark.unit

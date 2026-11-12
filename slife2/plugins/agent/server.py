@@ -170,6 +170,7 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
+from slife2.libs.plugin.vocabulary import FORGET, TRANSCRIPT
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import (
     context_usage,
@@ -236,12 +237,9 @@ MAX_QUEUED = 32
 #: the key is what names which one.
 Compressor = Callable[[ConversationId], Compress]
 
-#: The call the subagent network answers for a member that no longer exists —
-#: `slife2.plugins.a2a.server`'s tool of that name, and **spelled here too**: a
-#: name crossing a process boundary is written in two places, which is what
-#: `JOIN`'s own comment says about the window's call.  It is not a tool the model
-#: has; its only caller is `subagent_remove`, through `leave_the_mesh`.
-FORGET = "forget"
+# The call the subagent network answers for a member that no longer exists is
+# `slife2.libs.plugin.vocabulary.FORGET`, imported above: it is not a tool the
+# model has, and its only caller is `subagent_remove`, through `leave_the_mesh`.
 
 #: The two tools that make and unmake a subagent — the whole of what this adds to
 #: the mesh's vocabulary, and two verbs rather than four (SDD §3.5): a subagent
@@ -4213,7 +4211,7 @@ def build_server(
             raise unreadable("the context store", "return a turn list", payload)
         return turns
 
-    @mcp.tool
+    @mcp.tool(name=TRANSCRIPT)
     async def transcript(agent: str, subagent: str = "") -> dict[str, Any]:
         """What a conversation is made of, for a screen that has just opened.
 

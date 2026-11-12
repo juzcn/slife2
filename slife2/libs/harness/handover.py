@@ -28,8 +28,8 @@ gets the same patience, and none of them has to know why the window was away.
 **Three answers, and the middle one is why this is not a boolean.**  Everything a
 tool handler raises arrives at this end as a `ToolError` (`house_server` pins
 `mask_error_details=False`, which is what keeps the text), so the exception
-*type* cannot tell a refusal from a dropped stream — `slife2.plugins.tui.server.refused`
-has to be asked, and it is the module that writes the refusal that answers.  A
+*type* cannot tell a refusal from a dropped stream — `slife2.libs.plugin.vocabulary.refused`
+has to be asked, and the predicate answers for the sentence the window writes.  A
 refusal is the one failure that proves nothing was written, because the terminal
 looks its session up before it posts anything; everything else means the words
 may already be down the stream.  That distinction decides *what a retry is worth*
@@ -62,8 +62,7 @@ from fastmcp import Client
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
-from slife2.plugins.tui import server as control
-from slife2.plugins.tui.server import NOTE
+from slife2.libs.plugin.vocabulary import ATTACHED, NOTE, SUBMIT, refused
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +76,12 @@ async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool
     """
     try:
         await window.call_tool(
-            "submit",
+            SUBMIT,
             {"agent": agent, "text": text, "channel": channel},
             timeout=_T.timeouts.transport.window,
         )
     except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-        if control.refused(exc):
+        if refused(exc):
             logger.info("no window is showing %s: %s", agent, exc)
             return False
         logger.warning("the hand-over to %s did not come back: %s", agent, exc)
@@ -148,7 +147,7 @@ async def to_window(
         async with _peer(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
-            fallback_tool="submit",
+            fallback_tool=SUBMIT,
             timeout=_T.timeouts.transport.window,
             client=client,
         ) as window:
@@ -196,7 +195,7 @@ async def note_to_window(
                     timeout=_T.timeouts.transport.window,
                 )
             except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-                if control.refused(exc):
+                if refused(exc):
                     logger.debug("no window is showing %s: %s", agent, exc)
                     return False
                 logger.debug("the note to %s did not come back: %s", agent, exc)
@@ -224,7 +223,7 @@ async def window_attached(
     That is `hand_over`'s patience, spent here rather than at the call site: it
     is a fact about the window rather than about the work.
 
-    The question is `slife2.plugins.tui.server`'s `attached`, and it carries the
+    The question is the window plugin's `attached` tool, and it carries the
     ambient home like every call to one of our servers (`Peer`), so a ledger in
     another home is asked about that home's window.
     """
@@ -232,14 +231,14 @@ async def window_attached(
         async with _peer(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
-            fallback_tool=control.ATTACHED,
+            fallback_tool=ATTACHED,
             timeout=_T.timeouts.transport.window,
             client=client,
         ) as window:
             for attempt in range(1, _T.timeouts.stream.handover + 1):
                 try:
                     answer = await window.call_tool(
-                        control.ATTACHED,
+                        ATTACHED,
                         {"agent": agent},
                         timeout=_T.timeouts.transport.window,
                     )

@@ -32,12 +32,11 @@ from slife2.libs.host.config import (
     TUI_SERVER_NAME,
 )
 from slife2.libs.plugin.protocol import close_server, open_server
+from slife2.libs.plugin.vocabulary import ATTACH, JOIN, TRANSCRIPT, Handover
+from slife2.libs.plugin.vocabulary import decode as decode_handover
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.libs.turn.watch import WatchItem
 from slife2.libs.turn.watch import decode as decode_watch
-from slife2.plugins.a2a.server import JOIN
-from slife2.plugins.tui.server import ATTACH, Handover
-from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -395,7 +394,7 @@ class MCPAgentClient:
         answered, and it is the answer this build cannot read.
         """
         result = await self._call_tool(
-            "transcript", {"agent": self._agent, "subagent": self._subagent}
+            TRANSCRIPT, {"agent": self._agent, "subagent": self._subagent}
         )
         payload = result.data
         turns = payload.get("turns") if isinstance(payload, dict) else None

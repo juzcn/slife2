@@ -793,8 +793,10 @@ what the harness adds is a marked address, never a claim of its own.
 `markers.py` defines `[Name:{…}]` as a prefix on a delivered message. A marker is
 content: it is stored with the message and travels into the transcript, and it
 is stripped for display by the reader that knows the vocabulary. A producer and
-its reader share one spelling. Capitals mark a harness annotation, never the
-conversation's own words.
+its reader share one spelling, and the names live in
+`libs/plugin/vocabulary.py`: a server imports its channels, markers, tool names
+and states from there, and a reader imports the same constants rather than the
+server. Capitals mark a harness annotation, never the conversation's own words.
 
 #### 5.2.2 Hand-over
 
@@ -2555,38 +2557,28 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
-   `tui/client.py` import channel names, markers and hand-over words from the
-   a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
-   the tui server; `plugins/schedule/server.py` imports the agent-task server;
-   `libs/host/config.py` imports the file-tunnel providers for their names. The
-   terminal and the agent loop therefore load FastMCP, MQTT and tunnel
-   dependencies they never use, and a rename inside a server breaks its clients
-   at import rather than at the contract. *Resolution would require:* the shared
-   vocabulary — channels, markers, tool and state names, provider names — in
-   `libs/`, imported by both sides.
-3. **The turn pipeline is built twice.** The agent server and the agent-task
+2. **The turn pipeline is built twice.** The agent server and the agent-task
    server each own the same plumbing: model-client caches, the context and hub
    connections, restore, rebuild, trim, and the loop's own construction. They
    differ at the edges — a store, an inbox, a window — but the shared middle is
    maintained twice, so a change to the rebuild or the trim reaches one server
    and not the other. *Resolution would require:* one turn runtime in `libs/`,
    with the two servers supplying their own store, record and delivery policy.
-4. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+3. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
    and four scenarios: a turn, a follow-up, a tool call and a dump. The
    unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
    subagent — are proven only in the fast lane, where the process boundary and
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-5. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+4. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-6. **The tunnel publishes its control surface.** The file tunnel forwards the
+5. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than

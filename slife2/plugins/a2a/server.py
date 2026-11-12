@@ -114,6 +114,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
+from slife2.libs.plugin.vocabulary import FORGET, JOIN
 from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
@@ -170,21 +171,11 @@ PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
 PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
 PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
 
-#: The tool that puts an agent *on* the mesh — and it is not the model's.  A
-#: window calls it and holds it open; see `join` for why the mesh's membership
-#: is a call rather than a state the plugin keeps.  Spelled here because a name
-#: crossing a process boundary is written in two places
-#: (`slife2.tui.client`), like the tui plugin's `attach` and `submit`.
-JOIN = "join"
-
-#: The other call that is not the model's: **give up a member's place on the
-#: mesh** (`forget`).  Its caller is the agent server, in the middle of
-#: `subagent_remove` — a member can stop existing while this process is serving
-#: it, and a directory that is gone cannot unsubscribe anything.  Spelled there
-#: too, for the reason `JOIN` is spelled in `slife2.tui.client`: a name crossing a
-#: process boundary is written in two places, and the pair is held together by
-#: those two comments.
-FORGET = "forget"
+# The two calls that are not the model's, imported from
+# `slife2.libs.plugin.vocabulary`: `join` puts an agent *on* the mesh and is
+# held open by a window (`slife2.tui.client`); `forget` gives up a member's
+# place and is called by the agent server in the middle of `subagent_remove`.
+# A name crossing a process boundary is written once, in the vocabulary module.
 
 #: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
@@ -1724,7 +1715,7 @@ def build_server(
     #  own advice, and the other plugins here make the same choice.
     mcp: FastMCP = house_server(net.server_name, lifespan=lifespan)
 
-    @mcp.tool
+    @mcp.tool(name=JOIN)
     async def join(agent: str, ctx: Context) -> None:
         """Put *agent* on the mesh, and keep it there for as long as this call.
 

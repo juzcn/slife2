@@ -81,6 +81,12 @@ from slife2.libs.host.paths import agent_dir, home_key, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
 from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_MARKER as MARKER_PREFIX,
+)
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat.ilink import Http, IlinkClient
 from slife2.tui import notes
@@ -93,7 +99,7 @@ SERVER_NAME = WECHAT_SERVER_NAME
 #: starts it under and the hub connects to it by.  It owns no section of its
 #: own: the only thing written down about it is an address, and a login is
 #: scanned rather than configured (`slife2.plugins.wechat.ilink`).
-CONFIG_KEY = "wechat"
+CONFIG_KEY = WECHAT_CHANNEL
 
 INSTRUCTIONS = (
     "WeChat, over the iLink bridge: a login per agent, the messages that arrive "
@@ -132,11 +138,9 @@ AGENT_KEY = "agent"
 QR_MAX_ATTEMPTS = 3
 
 
-#: What the marker opens with.  A constant because the marker is *read* as well
-#: as written: stored text carries it into a transcript, and the window takes it
-#: back off by this string (:func:`strip_marker`) rather than by a second copy of
-#: the spelling that could drift from this one.
-MARKER_PREFIX = "[Wechat:"
+# What the marker opens with is `slife2.libs.plugin.vocabulary`'s, imported as
+# this module's `MARKER_PREFIX`: the writer and the window's strip share one
+# spelling, and a reader of either does not load the other's process.
 
 
 def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
@@ -161,9 +165,9 @@ def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
 
 #  Taking the marker back off is `slife2.libs.harness.markers.strip`, which is the shape and
 #  not the name: the window hands in every marker it knows about and this
-#  module's is one of them, exactly as `slife2.plugins.agent_task.server`'s is.  It
-#  lives there rather than here because there are two writers now, and a
-#  function per marker would be two things to keep in step.
+#  module's is one of them, exactly as an agent task's is.  It lives there
+#  rather than here because there are two writers now, and a function per
+#  marker would be two things to keep in step.
 
 
 def render_qr(content: str) -> str:

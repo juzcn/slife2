@@ -28,10 +28,10 @@ from fastmcp.tools import Tool
 
 from slife2.libs.host.config import Config
 from slife2.libs.model.base import Chunk, Stream
+from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
 from slife2.libs.turn.watch import WatchItem
-from slife2.plugins.tui.server import NOTE, Handover
 from slife2.tui.client import TurnReply
 from slife2.tui.widgets import WINDOW_CHANNEL
 

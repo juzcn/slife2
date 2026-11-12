@@ -65,15 +65,21 @@ from typing import Any, Protocol, runtime_checkable
 import httpx2
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.host.config import (
+    DEFAULT_TUNNEL_PROVIDER,
+    KNOWN_TUNNEL_PROVIDERS,
+)
 
 logger = logging.getLogger(__name__)
 
-#: The provider used when the section, or its `active:`, is absent.  A name this
-#: build does not have is a `ConfigError` instead (`_file_tunnel`).
-DEFAULT_PROVIDER = "ngrok"
+#: The provider used when the section, or its `active:`, is absent.  The name
+#: lives in `slife2.libs.host.config`, so the loader that refuses an unknown
+#: `active:` and this factory that builds it share one spelling; it stays
+#: exported here under the providers module's own name.
+DEFAULT_PROVIDER = DEFAULT_TUNNEL_PROVIDER
 
 #: Providers this build can actually construct (see :func:`create_provider`).
-KNOWN_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
+KNOWN_PROVIDERS = KNOWN_TUNNEL_PROVIDERS
 
 #: Environment variable the active tunnel publishes its URL through.  Set on
 #: success, cleared on loss/stop.  Read by another *process* — a subagent
