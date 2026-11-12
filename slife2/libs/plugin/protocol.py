@@ -121,8 +121,11 @@ from slife2.libs.plugin.audience import (
     foreign_home,
     request_conversation,
     request_home,
+    request_meta,
+    turn_of,
     unaddressed,
     with_home,
+    with_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -318,15 +321,22 @@ def agent_or_blank(ctx: Any) -> str:
 
 
 class TraceMiddleware(Middleware):
-    """Name the conversation a tool call names, for every line it writes.
+    """Name the conversation and turn a tool call serves, for every line it writes.
 
-    **The arguments are the one place a call says which conversation it is
-    about.**  Every tool that has one takes `agent`, and most take `subagent`; a
-    call that names neither (`now`, a catalogue read) is about the machine and
-    keeps whatever trace its caller set (`slife2.helpers.logcontext.tracing`).
-    The a2a send tools are the one place `agent` is the *recipient* rather than
-    the caller: their lines are about the message to that agent, which is the
-    question a reader of those lines is asking.
+    **The conversation is in the arguments.**  Every tool that has one takes
+    `agent`, and most take `subagent`; a call that names neither (`now`, a
+    catalogue read) is about the machine and keeps whatever trace its caller set
+    (`slife2.helpers.logcontext.tracing`).  The a2a send tools are the one place
+    `agent` is the *recipient* rather than the caller: their lines are about the
+    message to that agent, which is the question a reader of those lines is
+    asking.
+
+    **The turn is in `_meta`.**  One process serves every turn of every
+    conversation, so a call cannot infer the turn from its connection, and it is
+    not something a model writes — the caller's harness attaches it
+    (`slife2.libs.plugin.audience.TURN`).  Reading it here puts it on the same
+    records as the conversation, which is what joins one turn's lines across
+    processes (`slife2.helpers.logcontext`).
 
     Registered outermost in `house_server`, so the conversation is in hand
     before the masking middleware rebuilds the tool list and before the handler
@@ -348,7 +358,8 @@ class TraceMiddleware(Middleware):
         if isinstance(arguments, dict):
             agent = str(arguments.get("agent") or "")
             subagent = str(arguments.get("subagent") or "")
-        with logcontext.tracing(agent, subagent):
+        meta = request_meta(getattr(context, "fastmcp_context", None))
+        with logcontext.tracing(agent, subagent), logcontext.turning(turn_of(meta)):
             return await call_next(context)
 
 
@@ -593,7 +604,8 @@ class _Ours(ClientTransport):
 
 
 class Peer(Client):
-    """A connection to one of our own servers, which says which home it is for.
+    """A connection to one of our own servers, which says which home and turn it
+    is for.
 
     Every call this makes carries the ambient home
     (`slife2.libs.plugin.audience.with_home`), which is the other half of
@@ -601,6 +613,11 @@ class Peer(Client):
     and it has to pass that on, or the second hop of every chain — the context
     store a turn is remembered in, the cabinet a tool result is saved to, the hub
     a tool is routed through — would resolve the files in its own directory.
+
+    **And the ambient turn** (`slife2.helpers.logcontext.current_turn`), which
+    is the second thing a call says beside its arguments.  The far end prints it
+    on every line it writes, so one turn's hops share a value a reader can grep;
+    a call made outside any turn carries none and changes nothing.
 
     A subclass rather than a wrapper, so that the call sites that hold one of
     these are unchanged and still typed as a `Client`: what changed is what a
@@ -615,7 +632,12 @@ class Peer(Client):
         meta: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        return await super().call_tool(name, arguments, meta=with_home(meta), **kwargs)
+        return await super().call_tool(
+            name,
+            arguments,
+            meta=with_turn(with_home(meta), logcontext.current_turn()),
+            **kwargs,
+        )
 
 
 async def open_server(

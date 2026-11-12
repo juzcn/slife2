@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import shutil
@@ -96,6 +97,7 @@ from fastmcp.exceptions import ToolError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
@@ -559,6 +561,7 @@ def log_turn(
     outcome: Outcome,
     turn_id: int | None,
     failure: BaseException | None,
+    token: str = "",
 ) -> None:
     """One line per turn: what it ran on, what it cost, and how it ended.
 
@@ -568,6 +571,12 @@ def log_turn(
     does not exist until the record lands, and a cancelled turn often never
     reaches that point; the context plugin logs the id when the row does land,
     and the conversation and times are what join the two.
+
+    **`token` is the turn's own id, minted before it started.**  It is the one
+    value every process's lines for this turn carry (`logcontext.new_turn`), so
+    it joins the model and context hops to this line; `turn` is the stored row's
+    rowid, which exists only once the row lands.  A cancelled turn has a token
+    and no rowid, which is why the two are reported side by side.
 
     **The whole bill, on one line.**  Prompt and completion are the two halves,
     and `cache_read`/`cache_creation` are their breakdown — the numbers a
@@ -597,12 +606,13 @@ def log_turn(
     # a cancellation's cost from both the log and the row.
     usage = outcome.usage
     logger.info(
-        "turn_done agent=%s subagent=%s turn=%s model=%s stop=%s iterations=%d "
-        "prompt_tokens=%d completion_tokens=%d cache_read=%d cache_creation=%d "
-        "messages=%d elapsed=%.1fs%s",
+        "turn_done agent=%s subagent=%s turn=%s token=%s model=%s stop=%s "
+        "iterations=%d prompt_tokens=%d completion_tokens=%d cache_read=%d "
+        "cache_creation=%d messages=%d elapsed=%.1fs%s",
         loop.agent,
         loop.subagent or "-",
         turn_id if turn_id is not None else "-",
+        token or "-",
         outcome.model or loop.model or "-",
         ending,
         result.iterations if result is not None else 0,
@@ -3802,6 +3812,12 @@ def build_server(
         # never records (a fork, a refused write) has none to bind.
         failure: BaseException | None = None
         turn_id: int | None = None
+        #: This turn's token and the handle that puts it back when the turn is
+        #: over.  Empty and unset until a turn of this message actually starts:
+        #: a message folded into a running turn runs no turn of its own and has
+        #: no token to report.
+        turn_token = ""
+        turn_handle: contextvars.Token[str] | None = None
         try:
             async with loop.lock:
                 # **A message queued behind a removal does not run.**  It
@@ -3846,6 +3862,12 @@ def build_server(
                 # `run_turn_into`'s own** — a failure before the loop is built,
                 # where `keep_opening` still has to give the row a duration.
                 turn_began = time.monotonic()
+                # **One token for one turn**, minted where the turn starts
+                # rather than where the message arrived: a message folded into
+                # a running turn returned above.  It is on every line this turn
+                # writes — here, in the context store, in the model backend —
+                # and `turn_done` carries it beside the rowid.
+                turn_token, turn_handle = logcontext.begin_turn()
                 # **The turn is opened for watchers here**, before its first
                 # observable step: `rebuild_into` can emit `ContextChosen`, and
                 # a watcher that joined while it ran must find that event in the
@@ -4131,7 +4153,16 @@ def build_server(
             # here rather than at the success return because a failure and a
             # cancellation are turns too — and the log is the only place they
             # are otherwise given a start, a duration and a reason in one place.
-            log_turn(loop, outcome, turn_id, failure)
+            # The turn is over only after its own line is written: the record
+            # this line describes is the last thing the turn does, and a line
+            # without the token would be the one line of the turn that cannot
+            # be joined to the rest.  The `finally` is what makes the reset
+            # survive a handler that raises on the way out.
+            try:
+                log_turn(loop, outcome, turn_id, failure, token=turn_token)
+            finally:
+                if turn_handle is not None:
+                    logcontext.end_turn(turn_handle)
 
         # **One answer, built by `_reply`.**  No `if result` here: every path
         # that leaves a turn with no result has already left — `_injected_reply`

@@ -1,11 +1,13 @@
-"""Who a call is for, and which home it is in.
+"""Who a call is for, which home it is in, and which turn it belongs to.
 
-Both travel out of band — beside the arguments rather than in them — because a
-model must not be able to name somebody else's conversation, and must not be
-able to name somebody else's directory either.  The home is the newer half and
-it rides in the same blob, which is what makes it reach the far end of a chain
-of proxies: `forwarded_conversation` carries the identity on, and the home is part of
-it.
+All three travel out of band — beside the arguments rather than in them —
+because a model must not be able to name somebody else's conversation, and must
+not be able to name somebody else's directory either.  The home is the newer
+half and it rides in the same blob, which is what makes it reach the far end of
+a chain of proxies: `forwarded_conversation` carries the identity on, and the
+home is part of it.  The turn is a key of its own, because it is not part of the
+conversation's identity and must not be carried to a server that has no business
+with it.
 """
 
 from __future__ import annotations
@@ -17,13 +19,16 @@ import pytest
 
 from slife2.libs.host.paths import DATA_ENV_VAR, in_home
 from slife2.libs.plugin.audience import (
+    TURN,
     conversation_key,
     conversation_meta,
     conversation_of,
     foreign_home,
     forwarded_conversation,
     home_of,
+    turn_of,
     with_home,
+    with_turn,
 )
 
 pytestmark = pytest.mark.unit
@@ -44,6 +49,27 @@ def test_a_call_says_which_conversation_and_which_home(
     assert home_of(conversation_meta("jack", "worker")) == str(tmp_path / "mine")
     assert conversation_of(conversation_meta("jack", "worker")) == ("jack", "worker")
     assert home_of(conversation_meta("jack", home="/somewhere")) == "/somewhere"
+
+
+def test_a_turn_travels_beside_the_conversation_without_becoming_part_of_it() -> None:
+    """The token is its own key, so the state key and the forwarding stay clean.
+
+    A turn is not part of who a conversation is: `conversation_of` must not see
+    it, and `forwarded_conversation` must not send it on to a server that only
+    asked which conversation the call was for.
+    """
+    meta = with_turn(conversation_meta("jack"), "t0k")
+
+    assert turn_of(meta) == "t0k"
+    assert conversation_of(meta) == ("jack", "")
+    assert TURN not in forwarded_conversation(meta)
+
+
+def test_a_turn_already_on_a_call_is_not_replaced() -> None:
+    """A forwarded call is about the turn its caller named."""
+    assert with_turn({TURN: "callers"}, "ambient")[TURN] == "callers"
+    assert with_turn(None, "") == {}, "a call outside a turn says nothing about one"
+    assert turn_of(None) == ""
 
 
 def test_a_call_that_names_no_home_is_not_a_call_about_nothing(

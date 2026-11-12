@@ -297,7 +297,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | **Recoverability** | Turns, the live-context list, the cabinet, the schedule ledger, and the loaded tool set are persisted; a restart restores the conversation and the model's list. |
 | **Testability** | The loop is pure; servers run over in-memory transports in tests. |
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
-| **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation. |
+| **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation and the turn. |
 | **Portability** | Tested on Windows, macOS, and Linux; the runtime has no POSIX-only dependency beyond a documented fallback. |
 ## 3. Plugin contract
 
@@ -2302,16 +2302,18 @@ its log. The server's own first line names its address, pid, data directory and
 config, and a line at shutdown closes the run.
 
 **Logs are for tracing, so every line is placed.** The format is
-`time level logger: [agent/subagent] message`. The conversation is established by
-`TraceMiddleware` from the call's `agent`/`subagent` arguments, carried in a
-`contextvar`, and put on every record by `TraceFilter`. A line outside a call has
-no prefix. The prefix names the conversation the call is *about*; for the a2a
-send tools that is the recipient, not the caller.
+`time level logger: [agent/subagent turn=<token>] message`. The conversation is
+established by `TraceMiddleware` from the call's `agent`/`subagent` arguments and
+the turn from the call's `_meta` (`audience.TURN`); both are carried in
+`contextvar`s and put on every record by `TraceFilter`. A line outside a turn has
+no token, and a line outside a call has no prefix. The prefix names the
+conversation the call is *about*; for the a2a send tools that is the recipient,
+not the caller.
 
 One line is written per turn on every ending — success, failure or cancellation:
 
 ```text
-turn_done agent=… subagent=… turn=… model=… stop=… iterations=… \
+turn_done agent=… subagent=… turn=… token=… model=… stop=… iterations=… \
 prompt_tokens=… completion_tokens=… cache_read=… cache_creation=… \
 messages=… elapsed=…
 ```
@@ -2319,6 +2321,13 @@ messages=… elapsed=…
 `prompt_tokens` and `completion_tokens` are the bill's two halves; `cache_read`
 and `cache_creation` are its breakdown, so a cache-hit ratio is read from this
 one line. A cancelled turn reports the model calls that completed before the cut.
+
+`token` is minted when the turn starts, before the turn writes anything, and
+travels on every hop's `_meta`; every process's lines for that turn carry it in
+their prefix. `turn` is the stored row's rowid, which exists only once the row
+lands — a cancelled turn can have `turn=-` and still have a token. Reading one
+turn across the agent, context and model logs is therefore a grep for its token;
+`turn_done` is where the token and the rowid are joined.
 
 One line is written per **foreground** tool call:
 `tool_call name=… ok=… elapsed_ms=… result_chars=…`. Arguments and result text
@@ -2541,16 +2550,13 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **Correlation across processes.** A log line carries `agent/subagent`, and a
-   turn line carries the turn id, but the id is not sent on the model or context
-   hops. *Resolution would require:* the turn id in every hop's `_meta`.
-3. **A daemon from another build answers the identity check.** The server record
+2. **A daemon from another build answers the identity check.** The server record
    carries the build's `version` and the handshake carries the server's, but
    `identifies` compares only the MCP name. A daemon left running by an older
    build is therefore reused, and every turn fails on the first tool whose
    signature moved. *Resolution would require:* comparing the build token on
    reuse, and refusing with `slife2 down` — or replacing the daemon.
-4. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
+3. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
    `tui/client.py` import channel names, markers and hand-over words from the
    a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
    the tui server; `plugins/schedule/server.py` imports the agent-task server;
@@ -2560,28 +2566,28 @@ the field arrives as a test that fails without the fix.
    at import rather than at the contract. *Resolution would require:* the shared
    vocabulary — channels, markers, tool and state names, provider names — in
    `libs/`, imported by both sides.
-5. **The turn pipeline is built twice.** The agent server and the agent-task
+4. **The turn pipeline is built twice.** The agent server and the agent-task
    server each own the same plumbing: model-client caches, the context and hub
    connections, restore, rebuild, trim, and the loop's own construction. They
    differ at the edges — a store, an inbox, a window — but the shared middle is
    maintained twice, so a change to the rebuild or the trim reaches one server
    and not the other. *Resolution would require:* one turn runtime in `libs/`,
    with the two servers supplying their own store, record and delivery policy.
-6. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+5. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
    and four scenarios: a turn, a follow-up, a tool call and a dump. The
    unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
    subagent — are proven only in the fast lane, where the process boundary and
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-7. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+6. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-8. **The tunnel publishes its control surface.** The file tunnel forwards the
+7. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than

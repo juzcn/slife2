@@ -134,6 +134,21 @@ CONVERSATION = "slife2/client"
 #: could name a directory could name somebody else's.
 DATA_DIR = "data_dir"
 
+#: The `_meta` key a call carries to say **which turn** it belongs to.
+#:
+#: **A key of its own rather than a member of `CONVERSATION`.**  That blob is
+#: the conversation's identity — `conversation_of`, `home_of` and the state key
+#: `conversation_key` read it — and a turn is not part of who a conversation is.
+#: A separate key also keeps the token out of `forwarded_conversation`, which
+#: the hub sends on to whichever server runs a tool: a model backend or a
+#: context store needs it to join its lines to the turn, a stranger's server
+#: does not.
+#:
+#: An opaque value, not the store's rowid: the rowid does not exist until the
+#: turn is recorded, and the lines this must join are written before that
+#: (`slife2.helpers.logcontext.new_turn`).
+TURN = "slife2/turn"
+
 
 def conversation_meta(agent: str, subagent: str = "", home: str = "") -> dict[str, Any]:
     """What a harness-side caller attaches to a tool call it makes for one
@@ -243,6 +258,18 @@ def home_of(meta: Mapping[str, Any] | None) -> str:
     return named if isinstance(named, str) else ""
 
 
+def turn_of(meta: Mapping[str, Any] | None) -> str:
+    """The turn token a call carries, or `""` when it names none.
+
+    `""` is the honest answer for a call made outside any turn — a status read,
+    a start-up probe — and the receiving reader treats it as "keep whatever turn
+    the caller is running", the same rule `tracing` states for a call that
+    names no conversation.
+    """
+    found = (meta or {}).get(TURN)
+    return found if isinstance(found, str) else ""
+
+
 #: The refusal for a home spelled on another platform.  Two machines can share a
 #: loopback — Windows and WSL under mirrored networking are the measured case —
 #: and then a call arrives naming its home in the other OS's spelling.
@@ -293,6 +320,20 @@ def with_home(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     merged = dict(blob) if isinstance(blob, Mapping) else {}
     merged[DATA_DIR] = _for_the_wire(paths.home())
     found[CONVERSATION] = merged
+    return found
+
+
+def with_turn(meta: Mapping[str, Any] | None, turn: str) -> dict[str, Any]:
+    """`meta`, with *turn* in it unless it already names one.
+
+    **What every outgoing call to one of our own servers goes through** — the
+    second thing a call says that its arguments do not (`with_home` is the
+    first).  A token already on the call is left alone: a forwarded call is
+    about the turn its caller named, which is the one the far end should print.
+    """
+    found = dict(meta or {})
+    if turn:
+        found.setdefault(TURN, turn)
     return found
 
 

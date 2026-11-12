@@ -866,6 +866,38 @@ async def test_a_turn_leaves_one_line_saying_what_it_cost(
 
 
 @pytest.mark.asyncio
+async def test_every_turn_has_its_own_token(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The value that joins one turn's lines across processes.**
+
+    The stored id is a rowid: it exists only once the row lands, and a cancelled
+    turn often never gets one.  The token is minted before the turn's first step
+    and travels in every hop's `_meta`, so the context store's and the model
+    backend's lines can be read as this turn's.  Two turns of one conversation
+    therefore must not share a token.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("one"), text_turn("two")),
+    )
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+        await send(server, "one")
+        await send(server, "two")
+
+    tokens = [
+        record_.getMessage().split("token=")[1].split()[0]
+        for record_ in caplog.records
+        if record_.getMessage().startswith("turn_done ")
+    ]
+    assert len(tokens) == 2, caplog.text
+    assert tokens[0] != tokens[1], "two turns, two tokens"
+    assert all(len(token) == 32 for token in tokens), tokens
+
+
+@pytest.mark.asyncio
 async def test_a_tool_call_is_logged_when_it_succeeds(
     context, hub, caplog: pytest.LogCaptureFixture
 ) -> None:

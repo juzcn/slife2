@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
@@ -531,6 +531,46 @@ async def test_a_home_spelled_on_another_platform_is_refused(
 
     assert "not an absolute path on this machine" in str(caught.value)
     assert paths.Path(after.data) == mine, "the refusal is this call's, not a wedge"
+
+
+# --- the turn a call belongs to ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_peer_call_carries_the_ambient_turn_and_the_far_side_logs_it() -> None:
+    """**The token is how one turn's lines are joined across processes.**
+
+    The conversation is in the arguments; the turn is not — one process serves
+    every turn of every conversation — so it travels in `_meta`
+    (`slife2.libs.plugin.audience.TURN`), and the receiving `TraceMiddleware`
+    puts it on every line it writes.  Driven through the real `Peer` and the
+    real middleware, so the test proves both halves of the hop rather than a
+    stub agreeing with this end.
+    """
+    from slife2.helpers import logcontext
+    from slife2.libs.plugin.audience import request_meta, turn_of
+    from slife2.libs.plugin.protocol import Peer
+
+    server = house_server("slife2-turn-test")
+
+    @server.tool
+    async def turn_seen(
+        ctx: Context, agent: str = "", subagent: str = ""
+    ) -> dict[str, Any]:
+        return {
+            "carried": turn_of(request_meta(ctx)),
+            "logged": logcontext.current_turn(),
+        }
+
+    async with Peer(server) as client:
+        with logcontext.turning("t0k"):
+            during = await client.call_tool("turn_seen", {"agent": "jack"})
+        after = await client.call_tool("turn_seen", {"agent": "jack"})
+
+    assert during.data == {"carried": "t0k", "logged": "t0k"}
+    assert after.data == {"carried": "", "logged": ""}, (
+        "a call made outside a turn says nothing about one"
+    )
 
 
 # --- the record a server leaves behind ---------------------------------------

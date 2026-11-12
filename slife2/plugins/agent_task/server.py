@@ -68,6 +68,7 @@ from typing import Any
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2.clients.model import MCPBackend, open_backend
 from slife2.clients.toolclient import (
@@ -932,25 +933,35 @@ def build_server(
         """
         try:
             outcome = FINISHED
-            try:
-                result = await run_loop(task)
-                task.text = (
-                    result.text.strip() or "(the task stopped without saying anything)"
-                )
-                task.finished_at = now()
-            except asyncio.CancelledError:
-                # No await anywhere in this path: SDD §5.6 measured that a plain
-                # `await` in a cancelled scope is cancelled again at its next
-                # checkpoint, so anything awaited here would simply not happen.
-                task.status = CANCELLED
-                task.finished_at = now()
-                raise
-            except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
-                logger.warning("agent task %s failed: %s", task.name, exc)
-                task.text = f"The agent task {task.name!r} failed: {exc}"
-                task.status = FAILED
-                task.finished_at = now()
-                outcome = FAILED
+            # **One token for one task turn.**  A task runs a turn of the
+            # agent's own conversation from a process beside the agent
+            # server's, so the conversation alone cannot tell this turn's lines
+            # from that server's; the token is what does.  It covers the turn's
+            # failure line as well as its hops.  The delivery below is outside
+            # it on purpose — the agent server mints the token of the turn that
+            # delivery starts.
+            with logcontext.turning(logcontext.new_turn()):
+                try:
+                    result = await run_loop(task)
+                    task.text = (
+                        result.text.strip()
+                        or "(the task stopped without saying anything)"
+                    )
+                    task.finished_at = now()
+                except asyncio.CancelledError:
+                    # No await anywhere in this path: SDD §5.6 measured that a
+                    # plain `await` in a cancelled scope is cancelled again at
+                    # its next checkpoint, so anything awaited here would simply
+                    # not happen.
+                    task.status = CANCELLED
+                    task.finished_at = now()
+                    raise
+                except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
+                    logger.warning("agent task %s failed: %s", task.name, exc)
+                    task.text = f"The agent task {task.name!r} failed: {exc}"
+                    task.status = FAILED
+                    task.finished_at = now()
+                    outcome = FAILED
             # **The answer is the product, so a task is not `finished` until it
             # has reached a window.**  The loop's status stays `running` while
             # the hand-over runs, so a reader that asks in that moment is not
