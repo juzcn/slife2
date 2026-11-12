@@ -2600,7 +2600,12 @@ async def test_the_waiting_ask_re_asks_a_dial_that_failed_while_it_waited(
     of refusing it, where the hub's dial to `schedule` (made before the
     launcher starts that plugin) is still running when the catalogue is built.
     """
-    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 0.5)
+    # The real bound is five seconds.  It is compressed here so the test does
+    # not spend them, but the third dial still has to finish inside this
+    # window — and a full suite running `-n auto` can spend half a second on
+    # the catalogue write alone.  A second is the compression that stays a
+    # compression without turning scheduling jitter into a failure.
+    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 1.0)
     attempts = 0
 
     class SlowFailure(FakeClient):
