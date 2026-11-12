@@ -314,7 +314,7 @@ mcp:
       - arxiv-mcp-server
     env:
       ARXIV_STORAGE_PATH: C:/Users/juz_c/.arxiv-mcp-server/papers
-    description: arXiv 论文检索与全文阅读 —— blazickjp/arxiv-mcp-server（社区最权威，~3.2k stars，Apache-2.0，最近更新 2026-10）。本地 stdio，直接走 arXiv 公开 API，无需任何 key。14 个工具：search_papers / get_abstract / download_paper / read_paper / list_papers、LaTeX 原文分段读取、BibTeX、主题 watch。论文缓存在 ARXIV_STORAGE_PATH。注意：包只在 PyPI，不要用 npm 同名包。
+    description: arXiv 论文检索与全文阅读 —— blazickjp/arxiv-mcp-server v0.8.2（Apache-2.0），本地 stdio，直接走 arXiv 公开 API，无需任何 key。19 个工具：search_papers / get_abstract / download_paper / read_paper / list_papers、LaTeX 原文分段读取、search_paper_text、export_citations(BibTeX)、watch_topic/check_alerts 主题追踪、semantic_search(需 [pro] extra)、citation_graph(走 Semantic Scholar 匿名配额，易 429；拿到 key 后再把 SEMANTIC_SCHOLAR_API_KEY 加进 env)。论文缓存在 ARXIV_STORAGE_PATH，引文图缓存在其下 citation_graphs/。包只在 PyPI，npm 同名包无关。Python 必须 3.11。
   crossref:
     command: npx
     args:
