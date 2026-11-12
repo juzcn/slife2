@@ -185,6 +185,9 @@ class ServerRecord:
     #: Absolute path of the config the launcher used, so a second config on the
     #: same port is detected rather than silently shared.
     config: str = ""
+    #: The build that wrote this record.  A server advertises the same string
+    #: in its handshake, which is what lets a client tell a daemon left by
+    #: another build apart from this one (`slife2.libs.plugin.protocol.identifies`).
     version: str = ""
     started_at: str = ""
 

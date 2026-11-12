@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import slife2.helpers.timeouts as _T
+from slife2 import __version__
 from slife2.clients.toolclient import LIST_TOOLS, ToolCounts, remote_catalogue
 from slife2.libs.host.config import (
     LOCAL,
@@ -85,7 +86,8 @@ class Status(enum.Enum):
     #: Answering correctly, but started by hand — there is no record of it.
     #: Reused with a warning, because refusing would be pedantry.
     UNMANAGED = "running (external)"
-    #: The port is held by something that is not this server.
+    #: The port is held by something that is not this build's version of this
+    #: server — a stranger, or a daemon left by an earlier build.
     CONFLICT = "port held by something else"
     STARTED = "started"
     STOPPED = "stopped"
@@ -526,10 +528,41 @@ def _reuse(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     return Outcome(spec, Status.RUNNING, record, detail)
 
 
+def _stale_build(spec: ServerSpec) -> str:
+    """The build of our own server holding this endpoint, when it is not this one.
+
+    A daemon left by a previous build answers to the same MCP name, so the
+    probe refuses it (`identifies`) and the port is still taken; the record is
+    what says *why* — it carries the build the daemon wrote about itself, and
+    every server writes it (`serve`).  Only a record whose pid is still the
+    process it names is evidence about what holds the port now; a stale record
+    says nothing (`_live_owner` in `libs/plugin/protocol.py` draws the same
+    line).  An empty version is a record this build cannot read, and is left as
+    the ordinary conflict.
+    """
+    record = read_record(spec.url)
+    if (
+        record is not None
+        and pid_alive(record.pid)
+        and (same_process(record) or not record.start_token)
+        and record.version
+        and record.version != __version__
+    ):
+        return record.version
+    return ""
+
+
 def _conflict_detail(spec: ServerSpec) -> str:
+    stale = _stale_build(spec)
+    if stale:
+        return (
+            f"port {spec.port} is held by {spec.name} from build {stale}, not "
+            f"this build {__version__}; stop it with `slife2 down` and start again"
+        )
     return (
-        f"port {spec.port} is held by something that is not {spec.name} "
-        f"(nothing calling itself {spec.expected_name!r} at {spec.url})"
+        f"port {spec.port} is held by something that is not this build's "
+        f"{spec.name} (nothing calling itself {spec.expected_name!r} from build "
+        f"{__version__} at {spec.url})"
     )
 
 

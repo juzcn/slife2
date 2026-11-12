@@ -26,6 +26,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
 
+from slife2 import __version__
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
@@ -45,8 +46,16 @@ pytestmark = pytest.mark.unit
 class CountingClient:
     """A client that records whether the tool list was asked for."""
 
-    def __init__(self, *, name: str | None, tools: tuple[str, ...] = ()) -> None:
-        self.server_info = SimpleNamespace(name=name) if name else None
+    def __init__(
+        self,
+        *,
+        name: str | None,
+        version: str | None = None,
+        tools: tuple[str, ...] = (),
+    ) -> None:
+        #: `version=None` is a server whose identity carries no build — the
+        #: same unreadable case a name-less identity is, so the name decides.
+        self.server_info = SimpleNamespace(name=name, version=version) if name else None
         self.tools = list(tools)
         self.list_calls = 0
 
@@ -79,7 +88,9 @@ async def test_a_matching_name_is_enough_and_costs_no_round_trip() -> None:
 
     The tool list is deliberately empty — if the name decides, a client that
     exposes nothing still identifies, and `list_tools` is never called.  That
-    `list_calls == 0` is the point of the test, not a detail.
+    `list_calls == 0` is the point of the test, not a detail.  An identity with
+    no version is this test's case on purpose: the build is compared only when
+    the server reports one.
     """
     client = CountingClient(name="slife2-context")
     assert await identifies(client, "slife2-context", fallback_tool="remember")
@@ -97,6 +108,24 @@ async def test_a_server_calling_itself_something_else_is_not_ours() -> None:
     client = CountingClient(name="someone-else", tools=("remember",))
     assert not await identifies(client, "slife2-context", fallback_tool="remember")
     assert client.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_server_from_another_build_is_not_ours() -> None:
+    """The name is half the identity; the build is the other half.
+
+    A daemon left by a previous build advertises the same name and answers MCP
+    correctly, and its old tool signatures then fail every turn.  The handshake
+    carries the build (`house_server` passes this package's version), and a
+    mismatch is the same answer as a foreign name — without asking for the tool
+    list, which would only say what the wrong build happens to expose.
+    """
+    client = CountingClient(name="slife2-context", version="0.3.0")
+    assert not await identifies(client, "slife2-context", fallback_tool="remember")
+    assert client.list_calls == 0
+
+    same_build = CountingClient(name="slife2-context", version=__version__)
+    assert await identifies(same_build, "slife2-context", fallback_tool="remember")
 
 
 @pytest.mark.asyncio
@@ -118,10 +147,14 @@ async def test_a_real_server_reports_the_name_it_was_built_with() -> None:
 
     `identifies` reads `Client.server_info`, which is populated from the
     handshake the client performs as part of connecting.  A fake can be told to
-    report a name; only a real server shows that one is actually there.
+    report a name; only a real server shows that one is actually there — and
+    that the version is this build's rather than FastMCP's own, which would be
+    the same for every build of this system and compare equal across them.
     """
     mcp = house_server("slife2-context", instructions="Keep what was said.")
     async with Client(mcp) as client:
+        assert client.server_info is not None
+        assert client.server_info.version == __version__
         assert await identifies(client, "slife2-context", fallback_tool="remember")
         assert not await identifies(client, "slife2-agent", fallback_tool="remember")
 
@@ -310,8 +343,14 @@ async def test_a_result_with_no_structured_content_is_read_from_its_text() -> No
 class StubTransport:
     """The MCP client `open_server` would have built."""
 
-    def __init__(self, *, name: str | None = None, tools: tuple[str, ...] = ()) -> None:
-        self.server_info = SimpleNamespace(name=name) if name else None
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        version: str | None = None,
+        tools: tuple[str, ...] = (),
+    ) -> None:
+        self.server_info = SimpleNamespace(name=name, version=version) if name else None
         self.tools = list(tools)
         self.closed = False
 
@@ -382,9 +421,30 @@ async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
 
 
 @pytest.mark.asyncio
+async def test_a_server_from_another_build_is_refused_with_the_remedy(
+    monkeypatch,
+) -> None:
+    """The refusal says *which* build answered and what to do about it.
+
+    Reporting this as "not slife2-context" would be false — it is that server,
+    from another build — and would send the reader looking for a stranger on
+    the port instead of running the one command that replaces the daemon.
+    """
+    transport = StubTransport(name="slife2-context", version="0.3.0")
+    stub(monkeypatch, transport)
+
+    with pytest.raises(
+        ConnectionError, match=r"build 0\.3\.0, not this build .*`slife2 down`"
+    ):
+        await open_server("http://test/mcp", name="slife2-context")
+
+    assert transport.closed, "a client we are not keeping has to be released"
+
+
+@pytest.mark.asyncio
 async def test_a_server_we_recognise_is_handed_back_still_open(monkeypatch) -> None:
     """The other half: what comes back is the caller's to keep and to close."""
-    transport = StubTransport(name="slife2-context")
+    transport = StubTransport(name="slife2-context", version=__version__)
     stub(monkeypatch, transport)
 
     client = await open_server("http://test/mcp", name="slife2-context")

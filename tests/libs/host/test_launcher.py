@@ -554,11 +554,15 @@ SPEC = ServerSpec(
 )
 
 
-def _register(spec: ServerSpec, *, config: str = "") -> None:
+def _register(spec: ServerSpec, *, config: str = "", version: str = "") -> None:
     """Stand in for a server that has registered itself."""
     runtime.write_record(
         runtime.ServerRecord(
-            name=spec.name, url=spec.url, pid=os.getpid(), config=config
+            name=spec.name,
+            url=spec.url,
+            pid=os.getpid(),
+            config=config,
+            version=version,
         )
     )
 
@@ -874,6 +878,31 @@ def test_a_held_port_that_is_not_ours_is_a_conflict(
     assert outcome.status is Status.CONFLICT
     assert not outcome.ok
     assert "24001" in outcome.detail
+
+
+def test_a_daemon_from_another_build_is_named_with_its_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The conflict is ours, from an earlier build, and the line has to say so.
+
+    The probe refuses it — the handshake's build is not this one — but the port
+    is held, so the ordinary conflict detail calls it "something that is not
+    {name}" and sends the reader hunting for a stranger.  The record proves the
+    daemon's pid is still live and says which build it is; `slife2 down` is the
+    one command that replaces it, so the line names it.
+    """
+    _register(SPEC, version="0.3.0")
+    monkeypatch.setattr(launcher, "probe", lambda *a, **k: False)
+    monkeypatch.setattr(launcher, "tcp_listening", lambda *a, **k: True)
+
+    def explode(*a, **k):
+        raise AssertionError("should not have spawned onto a held port")
+
+    monkeypatch.setattr(launcher, "spawn", explode)
+    outcome = launcher.ensure(SPEC)
+    assert outcome.status is Status.CONFLICT
+    assert "0.3.0" in outcome.detail
+    assert "slife2 down" in outcome.detail
 
 
 def test_a_missing_server_is_spawned_and_recorded(

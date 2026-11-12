@@ -448,14 +448,19 @@ def house_server(
 ) -> FastMCP:
     """A FastMCP server with this project's conventions applied.
 
-    One convention is a constructor option, and it is worth stating rather than
-    defaulting:
+    Two conventions are constructor options, and they are worth stating rather
+    than defaulting:
 
     * ``mask_error_details=False`` — FastMCP's default replaces an exception's
       message with a generic one.  Every server here listens on loopback and
       serves its own operator, so the detail is worth more than the tidiness:
       "model not found" and "the API key did not resolve" are the two things a
       user actually has to act on, and both arrive as exceptions.
+    * ``version=__version__`` — the build this server came from.  The
+      handshake's ``server_info.version`` is what :func:`identifies` compares
+      before a client believes a server is one of ours, and FastMCP's own
+      default is *its* version, which is the same for every build of this
+      system and says nothing about the tool signatures behind the name.
 
     ``stateless_http`` and ``json_response`` are *not* here: they are
     ``mcp.run(...)`` options rather than constructor options, and :func:`serve`
@@ -477,6 +482,7 @@ def house_server(
     mcp: FastMCP = FastMCP(
         name,
         instructions=instructions or None,
+        version=__version__,
         lifespan=lifespan,
         mask_error_details=False,
     )
@@ -504,6 +510,15 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     here against the installed client, `Client.server_info` is populated from the
     `DiscoverResult`, and the name is the one passed to `FastMCP(...)`.
 
+    **The build is half of that identity.**  A server from another build
+    advertises the same name and answers MCP correctly; what it does not have
+    is this build's tool signatures, so reusing it makes every turn fail on the
+    first tool whose signature moved.  `server_info.version` is compared
+    against this build's `__version__` — which every server built by
+    :func:`house_server` advertises — and a server that reports none is the
+    same unreadable-identity case the name fallback exists for, so the name
+    check stands alone.
+
     The fallback exists because the name is not guaranteed.  A client pinned to
     an exact modern protocol version gets a *synthesized* identity with an empty
     name, and a server from another implementation may report none at all — so
@@ -519,7 +534,14 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     """
     info = client.server_info
     if info is not None and info.name:
-        return info.name == expected_name
+        if info.name != expected_name:
+            return False
+        # `getattr` because a reported identity need not carry a version at all
+        # — `Implementation` has the field, a test double or another
+        # implementation may not — and an absent one is the unreadable case
+        # above, not a mismatch.
+        reported = getattr(info, "version", "")
+        return not reported or reported == __version__
 
     names = {tool.name for tool in await client.list_tools()}
     return fallback_tool in names
@@ -667,6 +689,12 @@ async def open_server(
     nobody configured.  :func:`identifies` explains why the handshake's own
     identity is asked first and the tool list second.
 
+    **A server from another build is refused by name and remedy.**  The
+    handshake says which build answered, and a daemon left running by an older
+    one is the reason the check compares versions at all; the refusal says so,
+    and names the command that stops it, rather than reporting it as a stranger
+    on the port.
+
     The client is *not* closed on success; the caller owns its lifetime, and
     :func:`close_server` is the other half of this pair.
     """
@@ -697,6 +725,15 @@ async def open_server(
     try:
         await client.__aenter__()
         if name and not await identifies(client, name, fallback_tool=fallback_tool):
+            # A name that matches but a build that does not is a different
+            # refusal from a stranger on the port: the server *is* ours, from
+            # an earlier build, and the fix is one command.
+            info = client.server_info
+            if info is not None and info.name == name and getattr(info, "version", ""):
+                raise ConnectionError(
+                    f"{name} is build {info.version}, not this build {__version__}; "
+                    f"stop it with `slife2 down` and start again"
+                )
             names = sorted(tool.name for tool in await client.list_tools())
             raise ConnectionError(f"not {name} (tools: {names or 'none'})")
     except asyncio.CancelledError:

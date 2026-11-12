@@ -440,12 +440,16 @@ lives.
 
 A client MUST prove which server it reached before believing anything the server
 says. `identifies` compares the connected server's `server_info.name` against
-the name the caller expected; when the server reports no name, it falls back to
-the server's own probe tool. `open_server` is the single place a client connects
-to one of our servers; it raises, naming what could not be reached, rather than
-returning a client that will fail later. The check prevents a server on the
-wrong port or an old build from answering MCP correctly and being mistaken for
-the intended server.
+the name the caller expected, and `server_info.version` against this build's;
+when the server reports no name, it falls back to the server's own probe tool.
+Every server built by `house_server` advertises this package's version, so a
+daemon from a previous build fails the check on its build even though it answers
+to the right name. `open_server` is the single place a client connects to one of
+our servers; it raises, naming what could not be reached — or which build
+answered, and the `slife2 down` that replaces it — rather than returning a
+client that will fail later. The check prevents a server on the wrong port or an
+old build from answering MCP correctly and being mistaken for the intended
+server.
 
 ### 3.7 Refusal vocabulary
 
@@ -2469,9 +2473,10 @@ and a registry lookup used as a function-argument default.
 ### 12.5 Daemons outlive builds
 
 Reuse is by identity: the launcher attaches to whatever answers to the expected
-name. A daemon from a previous build can answer the name check and still have the
-old tool signatures, so every turn fails until the stack is restarted. `slife2
-down` is the remedy. A rename of a server or a tool must be accompanied by a
+name and this build's version. A daemon from a previous build answers the name
+and still has the old tool signatures, so the handshake's version is what says
+it is not this build; `ensure` then refuses the port and names `slife2 down`,
+which is the remedy. A rename of a server or a tool must be accompanied by a
 stop.
 
 An internal wire carries no compatibility path for a previous build. A progress
@@ -2550,13 +2555,7 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **A daemon from another build answers the identity check.** The server record
-   carries the build's `version` and the handshake carries the server's, but
-   `identifies` compares only the MCP name. A daemon left running by an older
-   build is therefore reused, and every turn fails on the first tool whose
-   signature moved. *Resolution would require:* comparing the build token on
-   reuse, and refusing with `slife2 down` — or replacing the daemon.
-3. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
+2. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
    `tui/client.py` import channel names, markers and hand-over words from the
    a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
    the tui server; `plugins/schedule/server.py` imports the agent-task server;
@@ -2566,28 +2565,28 @@ the field arrives as a test that fails without the fix.
    at import rather than at the contract. *Resolution would require:* the shared
    vocabulary — channels, markers, tool and state names, provider names — in
    `libs/`, imported by both sides.
-4. **The turn pipeline is built twice.** The agent server and the agent-task
+3. **The turn pipeline is built twice.** The agent server and the agent-task
    server each own the same plumbing: model-client caches, the context and hub
    connections, restore, rebuild, trim, and the loop's own construction. They
    differ at the edges — a store, an inbox, a window — but the shared middle is
    maintained twice, so a change to the rebuild or the trim reaches one server
    and not the other. *Resolution would require:* one turn runtime in `libs/`,
    with the two servers supplying their own store, record and delivery policy.
-5. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+4. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
    and four scenarios: a turn, a follow-up, a tool call and a dump. The
    unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
    subagent — are proven only in the fast lane, where the process boundary and
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-6. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+5. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-7. **The tunnel publishes its control surface.** The file tunnel forwards the
+6. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
