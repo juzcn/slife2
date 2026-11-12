@@ -2513,6 +2513,13 @@ window and mesh clients, and factories (`upstream_server`, `plugin_transports`,
 `config_file`). A test module MUST NOT import another test module for a fixture;
 that is how two lanes end up disagreeing about the shape of a double.
 
+The e2e lane's own edges live in `tests/e2e/edges.py` — the stub provider, the
+iLink bridge, the MQTT broker, and the terminal the stack hands messages to —
+and `tests/e2e/conftest.py` holds the fixture that starts the stack every
+scenario is handed. They are apart from `tests/fakes.py` because they bind
+ports and start threads: a fast-lane test that reached for one would have left
+its lane.
+
 ### 13.3 Test lanes
 
 | Lane | Command | Contents |
@@ -2520,7 +2527,7 @@ that is how two lanes end up disagreeing about the shape of a double.
 | Fast | `uv run pytest` | Unit and integration tests, every module, across cores. Excludes `e2e`. No API key, no running server, no fixed port. |
 | Unit | `uv run pytest -m unit` | Fast, isolated unit tests. |
 | Integration | `uv run pytest -m integration` | Tests that bind a socket or spawn a process. Each binds an ephemeral port. |
-| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: the daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
+| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: the daemons, a real launcher, a configuration on disk, and the three external edges — the model provider, WeChat's iLink bridge and the MQTT broker — stubbed at their own protocols. |
 
 The fast lane drives servers over FastMCP's in-memory transport: real MCP
 messages and real progress notifications, with no port bound.
@@ -2531,10 +2538,19 @@ model's tool call is routed by the hub to the plugin process that owns it, the
 answer arrives both as a result and over the progress channel, and the
 conversation is still there for the next turn.
 
-The model is the only thing faked in either lane, and it is faked at its own
-protocol boundary: a stub backend in the fast lane, a stub HTTP endpoint in the
-e2e lane. A change to what the system does with a model cannot pass unseen by
-changing only the fake.
+**Every way work arrives without a person typing has a scenario there**: a
+WeChat message the bridge serves, a task a peer publishes to the mesh, a
+scheduled fire the clock starts, and a subagent's turn a watch reads while it
+runs. Each starts from the same fixture, the same config and the same data
+directory shape, so the channels are proven against one stack rather than four
+arrangements of it.
+
+The model is faked at its own protocol boundary in both lanes: a stub backend
+in the fast lane, a stub HTTP endpoint in the e2e lane. The e2e lane stubs the
+other two external edges the same way — the iLink bridge at HTTP and the broker
+at MQTT — and nothing in between is faked at all. A change to what the system
+does with a model, a bridge or a broker cannot pass unseen by changing only the
+fake.
 
 ### 13.4 Static checks and CI
 
@@ -2557,27 +2573,20 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
-   and four scenarios: a turn, a follow-up, a tool call and a dump. The
-   unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
-   subagent — are proven only in the fast lane, where the process boundary and
-   the real transport are absent. *Resolution would require:* one scenario per
-   channel across the real stack, with the external edge (iLink, broker) stubbed
-   at its HTTP or MQTT seam.
-3. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
-    host, and every plugin is unauthenticated Streamable HTTP. Binding one to
-    `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
-    `model_set` — arbitrary code and configuration edits — with no credential.
-    The design's "loopback is the boundary" is a default, not a check.
-    *Resolution would require:* refusing a non-loopback host at load, or an
-    explicit opt-in that states the exposure and its authentication.
-4. **The tunnel publishes its control surface.** The file tunnel forwards the
-    whole port, so a stranger who learns the hostname can reach the MCP endpoint
-    and call `expose_local_image` — or any other tool — not only
-    `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
-    the one file the operator meant to share. *Resolution would require:* the
-    tunnel serving only the share route, or an authorization token on the MCP
-    endpoint.
+2. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+   host, and every plugin is unauthenticated Streamable HTTP. Binding one to
+   `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
+   `model_set` — arbitrary code and configuration edits — with no credential.
+   The design's "loopback is the boundary" is a default, not a check.
+   *Resolution would require:* refusing a non-loopback host at load, or an
+   explicit opt-in that states the exposure and its authentication.
+3. **The tunnel publishes its control surface.** The file tunnel forwards the
+   whole port, so a stranger who learns the hostname can reach the MCP endpoint
+   and call `expose_local_image` — or any other tool — not only
+   `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
+   the one file the operator meant to share. *Resolution would require:* the
+   tunnel serving only the share route, or an authorization token on the MCP
+   endpoint.
 
 ### 14.2 Deferred capabilities
 
