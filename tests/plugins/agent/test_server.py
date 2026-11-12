@@ -1635,6 +1635,53 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     )
 
 
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_turn_whose_model_answered_nothing_is_a_failed_turn(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """**An empty answer is a failure, not a verdict.**
+
+    The model call returned a *readable* result with no text and no tool call —
+    the shape a provider that legitimately stops without saying anything
+    produces, and the shape a call that produced nothing has too.  The wire
+    check cannot tell them apart, and the turn's product is its answer, so the
+    loop fails the turn (SDD §5.1).  What this pins is the whole ending: the
+    caller is told, the conversation keeps the user's message, and the row ends
+    with the harness's `[TURN-FAILED:…]` note rather than an empty assistant
+    message that later requests would carry and providers would reject.
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="", stop_reason="stop"))
+    )
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(), backend=backend, context_client=context_client, hub_client=hub
+        )
+        with pytest.raises(Exception, match="no text and no tool call"):
+            await send(server, "one")
+        # The write is detached so that a store which is also gone cannot
+        # replace the failure the caller needs to see; give it a moment.
+        await asyncio.sleep(0.5)
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user", "assistant"]
+    assert stored[0]["content"] == "one"
+    assert "no text and no tool call" in (turn_failed_error(stored[1]["content"]) or "")
+
+
 DEAD_PLUGIN = "a plugin is not answering — peer-agent: MCPError: Connection closed"
 
 

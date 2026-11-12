@@ -483,6 +483,20 @@ class AgentLoop:
             )
 
             if not result.tool_calls:
+                # **An answer with nothing in it is a failed turn, not a
+                # verdict.**  A provider can legitimately stop without saying
+                # anything, and that result has the same shape as a call that
+                # produced nothing at all.  The turn's product is its answer:
+                # an empty one leaves nothing to show, nothing to record, and
+                # no word in the conversation, so it fails and says so rather
+                # than succeeding silently (SDD §5.1, Appendix C).  Whitespace
+                # alone is nothing too — it renders blank.
+                if not result.text.strip():
+                    raise RuntimeError(
+                        f"{self._backend.name} answered with no text and no "
+                        f"tool call (stop reason {result.stop_reason or 'none'!r}), "
+                        "so the turn has no answer to show or record"
+                    )
                 messages.append(answer)
                 await self._emit(
                     observer,

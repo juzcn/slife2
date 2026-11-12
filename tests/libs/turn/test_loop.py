@@ -162,6 +162,32 @@ async def test_the_result_wins_over_the_deltas() -> None:
     assert messages[-1].content == "authoritative"
 
 
+@pytest.mark.parametrize("text", ["", " \n\t"])
+async def test_a_final_call_that_answers_nothing_fails_the_turn(text: str) -> None:
+    """**An empty answer is a failure, not a verdict.**
+
+    A provider can legitimately stop without producing text, and that result is
+    the same shape as a call that produced nothing at all.  Read as a verdict it
+    becomes a turn recorded as finished with no answer in it — a blank screen,
+    and nothing anywhere saying a thing was missing.  The loop is the one place
+    that knows the call ended the turn, so it is where the decision is made,
+    once (SDD §5.1, Appendix C).  Whitespace alone is nothing too: it renders
+    blank.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text=text, stop_reason="length"))
+    )
+    observer = ListObserver()
+    messages: list[Message] = []
+
+    with pytest.raises(RuntimeError, match="no text and no tool call") as raised:
+        await AgentLoop(backend, registry()).run_turn(messages, "hi", observer)
+
+    assert "'length'" in str(raised.value), "the stop reason is part of the account"
+    assert [m.role for m in messages] == ["user"], "no empty answer was written down"
+    assert observer.kinds() == [], "a failed turn announces no end"
+
+
 # --- the tool round trip -----------------------------------------------------
 
 

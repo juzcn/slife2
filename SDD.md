@@ -770,6 +770,14 @@ threw all come back as `ok=False` with text the model can act on. What ends the
 turn is a failure outside that contract — a tool list that cannot be refreshed
 before a model call, or a model call that failed.
 
+**A final model call that answers with no text and no tool call is a failed
+turn.** A provider can legitimately stop without saying anything, but that result
+is the same shape as a call that produced nothing, and the turn's product is its
+answer: there is nothing to show, nothing to record, and no word in the
+conversation. An empty answer — whitespace alone is none — is a failure, not a
+verdict (Appendix C). The loop is the one place that decides this, because it is
+the one place that knows the call ended the turn.
+
 ### 5.2 Harness additions
 
 `libs/harness/` contains what the harness — the system, as distinct from the
@@ -2533,20 +2541,16 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **A model call that ends the turn with an empty answer.** The wire is checked
-   at the hop, but a provider that legitimately answers with nothing has the same
-   shape. *Resolution would require:* deciding whether an empty answer is a
-   verdict or a failure, and stating it once.
-3. **Correlation across processes.** A log line carries `agent/subagent`, and a
+2. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
-4. **A daemon from another build answers the identity check.** The server record
+3. **A daemon from another build answers the identity check.** The server record
    carries the build's `version` and the handshake carries the server's, but
    `identifies` compares only the MCP name. A daemon left running by an older
    build is therefore reused, and every turn fails on the first tool whose
    signature moved. *Resolution would require:* comparing the build token on
    reuse, and refusing with `slife2 down` — or replacing the daemon.
-5. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
+4. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
    `tui/client.py` import channel names, markers and hand-over words from the
    a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
    the tui server; `plugins/schedule/server.py` imports the agent-task server;
@@ -2556,28 +2560,28 @@ the field arrives as a test that fails without the fix.
    at import rather than at the contract. *Resolution would require:* the shared
    vocabulary — channels, markers, tool and state names, provider names — in
    `libs/`, imported by both sides.
-6. **The turn pipeline is built twice.** The agent server and the agent-task
+5. **The turn pipeline is built twice.** The agent server and the agent-task
    server each own the same plumbing: model-client caches, the context and hub
    connections, restore, rebuild, trim, and the loop's own construction. They
    differ at the edges — a store, an inbox, a window — but the shared middle is
    maintained twice, so a change to the rebuild or the trim reaches one server
    and not the other. *Resolution would require:* one turn runtime in `libs/`,
    with the two servers supplying their own store, record and delivery policy.
-7. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+6. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
    and four scenarios: a turn, a follow-up, a tool call and a dump. The
    unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
    subagent — are proven only in the fast lane, where the process boundary and
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-8. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+7. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-9. **The tunnel publishes its control surface.** The file tunnel forwards the
+8. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
