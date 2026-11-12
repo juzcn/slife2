@@ -84,30 +84,19 @@ the hard way, and the fields carry the same meaning here.
 
 Secrets
 -------
-1. ``keyring:<service>/<key>``  -> credstore keyring, then its encrypted backup
-2. ``${VAR}``                   -> os.environ -> credstore keyring -> its
-                                   encrypted backup
-3. ``${VAR:-default}``          -> the same chain, then the literal default
-4. anything else                -> as-is
-
-The encrypted backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) is
-read when the keyring does not answer **and** `CREDSTORE_MASTER_PASSWORD` holds
-the master password the CLI would prompt for.  That is what lets a container,
-whose kernel keyring is blocked, resolve from the cred file `credstore` created
-inside it; without the password the backup stays locked and the chain steps
-past it.
+1. ``${VAR}``        -> os.environ -> credstore's OS keyring
+2. anything else     -> as-is
 
 A missing secret degrades to its literal form (``"${DEEPSEEK_API_KEY}"``),
 which fails loudly at the API call where it is a readable error, rather than at
 startup where it is not.  A store that is *there* and refuses — a locked
-keyring, a seed the master password does not unlock — raises where the secret
-is resolved instead.  Resolution is also *lazy*: the
-provider keeps the raw reference and only touches credstore when `api_key` is
-read, so the TUI process never opens the OS keyring.  A tool server's `env:`
-and `headers:` and a tunnel provider's options are lazy the same way — a
-``${VAR}`` is kept as written and resolved where the child is started — because
-every server process loads this config, and a lookup at load would be paid once
-per process for a credential only one of them uses.
+keyring — raises where the secret is resolved instead.  Resolution is also
+*lazy*: the provider keeps the raw reference and only touches credstore when
+`api_key` is read, so the TUI process never opens the OS keyring.  A tool
+server's `env:` and `headers:` and a tunnel provider's options are lazy the
+same way — a ``${VAR}`` is kept as written and resolved where the child is
+started — because every server process loads this config, and a lookup at load
+would be paid once per process for a credential only one of them uses.
 """
 
 from __future__ import annotations
@@ -164,10 +153,9 @@ class ConfigError(Exception):
 #: and the request names the provider whose credentials to use.
 MODEL_TOOL = "stream_chat"
 
-#: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
-#: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
-#: lookup.
-_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+#: Matches `${VAR}`.  The name is deliberately restricted to shell-safe
+#: identifiers so a literal `${...}` in a prompt does not become a lookup.
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 #: The config file's name inside the data directory.
 DEFAULT_CONFIG_NAME = "slife2.yaml"
@@ -903,106 +891,11 @@ def net_settings(config: Config, net: Net) -> A2ASettings:
 A2A_BROKER_ENV_VAR = "SLIFE2_A2A_BROKER"
 
 
-#: The master password that unlocks credstore's encrypted backup.  The CLI asks
-#: for it (`credstore get KEY -p`); a daemon has no terminal to ask on, so a
-#: container gets it through the environment instead.
-CREDSTORE_PASSWORD_ENV_VAR = "CREDSTORE_MASTER_PASSWORD"
-
-#: What `check_backend()` said about the seed, by `CREDSTORE_FILE` spelling.
-#: Resolved once per process per path because `check_backend()` re-probes the
-#: platform keyring every time, and a container has no keyring to find — the
-#: probe's warnings would otherwise land on every `${VAR}` the config resolves.
-_cryptfile_state: dict[str, tuple[bool, str]] = {}
-
-#: Values already read from the seed, by `(CREDSTORE_FILE, key)`.  Unlocking is
-#: Argon2 at 64 MB and 15 passes, so a config with a dozen `${VAR}` references
-#: would pay that a dozen times; a credential does not change under a running
-#: stack.  A key the seed does not hold is cached as None for the same reason.
-_cryptfile_values: dict[tuple[str, str], str | None] = {}
-
-
-def _cryptfile_ready() -> tuple[bool, str]:
-    """Whether the encrypted backup is there, and where — asked once.
-
-    The key is `CREDSTORE_FILE`'s value, so a test (or a caller) that points the
-    store at another file gets that file's answer rather than the first one's.
-    """
-    from credstore import check_backend
-
-    key = os.environ.get("CREDSTORE_FILE", "")
-    state = _cryptfile_state.get(key)
-    if state is None:
-        info = check_backend()
-        state = (
-            bool(info.get("cryptfile_ready")),
-            str(info.get("cryptfile_path") or ""),
-        )
-        _cryptfile_state[key] = state
-    return state
-
-
-def _cryptfile_lookup(key: str) -> str | None:
-    """Read one credential from credstore's encrypted backup, when unlocked.
-
-    **The half that survives a container.**  credstore's public
-    `get_credential` reads the OS keyring only (`credstore` says so: the Python
-    API "returns None in cryptfile-only mode — it never prompts for the master
-    password").  Its encrypted backup is a file, and a file crosses into a
-    container where a kernel keyring does not: Docker blocks `keyctl`, so the
-    Linux backend reports `available: False` and every lookup answers None.
-    Without this fallback a cred file created inside the container is readable
-    by the CLI and by nobody slife2 runs.
-
-    **The password comes from `CREDSTORE_MASTER_PASSWORD`.**  The backup is
-    Argon2/AES-encrypted; no password is no fallback, because guessing one would
-    turn a missing secret into a wrong one.  A password that is present but does
-    not decrypt the file raises, like a keyring that refused: it is an answer
-    about the store, not an absence (SDD Appendix C).
-
-    **The file's location is credstore's.**  `check_backend()` owns
-    `CREDSTORE_FILE` and the `~/.credstore/credentials.crypt` default, and
-    `read_cryptfile_entry` is the same reader `credstore get -p` uses.  The
-    module is private because the public API deliberately excludes the
-    password-prompting path; duplicating the KDF here would be a second way to
-    read one file.
-    """
-    password = os.environ.get(CREDSTORE_PASSWORD_ENV_VAR)
-    if not password:
-        return None
-    try:
-        from credstore._backend import read_cryptfile_entry
-    except ImportError:
-        return None
-    # The password itself is a credential: keep it out of every surface that
-    # masks resolved values.
-    _secret_registry.register(password)
-    seed = os.environ.get("CREDSTORE_FILE", "")
-    cached = (seed, key)
-    if cached in _cryptfile_values:
-        return _cryptfile_values[cached]
-    ready, path = _cryptfile_ready()
-    if not ready:
-        return None
-    try:
-        value = read_cryptfile_entry(key, password, "credstore")
-    except ValueError as exc:
-        raise ConfigError(
-            f"{CREDSTORE_PASSWORD_ENV_VAR} does not unlock "
-            f"{path or 'the credential backup'}: {exc}"
-        ) from exc
-    _cryptfile_values[cached] = value
-    return value
-
-
 def _credstore_lookup(key: str) -> str | None:
     """Look up an environment-variable name in credstore.
 
     The env var name *is* the credential-store key, so ``DEEPSEEK_API_KEY``
     resolves whether it was exported or stored with ``credstore set``.
-
-    **The keyring first, then the encrypted backup.**  A keyring answers on a
-    desktop and a mounted `credentials.crypt` answers in a container; asking
-    the backup too on the desktop is how a key the keyring lost is still found.
 
     **No backend at all degrades to "not found"; a backend that failed does
     not.**  credstore itself answers None when this host has no keyring — a CI
@@ -1017,10 +910,7 @@ def _credstore_lookup(key: str) -> str | None:
         from credstore import get_credential
     except ImportError:
         return None  # credstore is not installed: there is no backend to consult
-    found = get_credential(key)
-    if found is not None:
-        return found
-    return _cryptfile_lookup(key)
+    return get_credential(key)
 
 
 def resolve_secret(value: object) -> str:
@@ -1030,65 +920,23 @@ def resolve_secret(value: object) -> str:
     and an API key written as a bare number should become a string rather than
     an exception.
 
+    **A missing secret degrades to its literal form.**  The reference is left
+    verbatim by the substitution below, so the failure lands where the value is
+    used, with its own name intact — the API call that returns a `401` naming
+    nothing is the reason (SDD Appendix C).
+
     **A keyring that is not installed degrades; a keyring that failed does
-    not.**  With no `credstore` there is no backend to consult, so a
-    ``keyring:`` reference falls to the `${VAR}` pass below and is left verbatim,
-    which is the declared degrade `_credstore_lookup` also names.  With one
-    installed, a `resolve_uri` that raises — the credential is not stored, the
-    backend is locked — is allowed out: reading it as "not found" would leave
-    the ``keyring:`` text to travel as the secret itself, which is the
-    deformation SDD Appendix C names.  The failure lands where the secret is
-    resolved.
-
-    **A credential that was never stored is a config mistake, and it is said as
-    one.**  credstore answers `KeyError` for that — its documented "not found",
-    as against a store that was asked and refused — and a bare `KeyError` out of
-    `load()` is not something any caller on this path catches: `slife2`'s entry
-    point and `family.py` both answer a bad config with their own one line for
-    `ConfigError` alone, so `env: {TOKEN: 'keyring:slife/a-key-nobody-stored'}`
-    printed a traceback instead of naming the reference, at the one place where
-    naming it is the whole of the fix.  The store that is *there* and refused
-    keeps raising rather than degrading, which is the registered behaviour and
-    the reason this catches the one exception type rather than all of them.
-
-    **Before that refusal, the encrypted backup is asked.**  A container's
-    keyring has no answer for any key; the cred file `credstore` created in it,
-    with `CREDSTORE_MASTER_PASSWORD`, does (`_cryptfile_lookup`), and a
-    `keyring:` URI is the same credential under its `service/key` spelling.
+    not.**  With no `credstore` there is no backend to consult, and the chain
+    steps past it to the reference.  With one installed, a `get_credential`
+    that raises — the backend is locked — is allowed out: reading it as "not
+    found" would leave the `${VAR}` text to travel as the secret itself.  The
+    failure lands where the secret is resolved.
     """
     if not isinstance(value, str):
         return str(value)
 
-    try:
-        from credstore import is_keyring_uri, resolve_uri
-    except ImportError:
-        # no backend to consult, so a `keyring:` reference is left to the
-        # `${VAR}` pass below, which leaves it verbatim — the declared degrade
-        pass
-    else:
-        if is_keyring_uri(value):
-            try:
-                resolved = resolve_uri(value)
-                _secret_registry.register(resolved)
-                return resolved
-            except KeyError as exc:
-                # **The backup is the second half of the same store.**  A
-                # container's keyring answers nothing, so a `keyring:` URI there
-                # has only the seed to read — the same key the CLI would find
-                # under `credstore get -p`.
-                recovered = _cryptfile_lookup(value.removeprefix("keyring:"))
-                if recovered is not None:
-                    _secret_registry.register(recovered)
-                    return recovered
-                raise ConfigError(
-                    f"{value}: this machine's credential store has no such "
-                    f"credential — store it with "
-                    f"`credstore set {value.removeprefix('keyring:')}`, or write "
-                    f"the value itself"
-                ) from exc
-
     def _replace(match: re.Match[str]) -> str:
-        var, default = match.group(1), match.group(2)
+        var = match.group(1)
         found = os.environ.get(var)
         if found:
             return found
@@ -1099,9 +947,9 @@ def resolve_secret(value: object) -> str:
             # shell is not the credential store.
             _secret_registry.register(found)
             return found
-        # Unresolvable and no default: leave the reference verbatim, so the
-        # failure surfaces where the value is used with its own name intact.
-        return default if default is not None else match.group(0)
+        # Unresolvable: leave the reference verbatim, so the failure surfaces
+        # where the value is used with its own name intact.
+        return match.group(0)
 
     return _ENV_PATTERN.sub(_replace, value)
 
@@ -1120,37 +968,26 @@ class _Reference(str):
 
 
 def defer_secret(value: object) -> str:
-    """Resolve *value* now unless it is a ``${VAR}`` reference.
+    """Keep a ``${VAR}`` reference for the process that consumes it.
 
     **A reference belongs to the process that consumes it**, not to the one that
-    read the file, so it is kept for :func:`resolve_deferred`.  A ``keyring:``
-    URI is *not* deferred: it names one credential that either exists or does
-    not, and the `ConfigError` for one that does not is an answer the load owes
-    the operator, not the first connection.
+    read the file, so it is kept for :func:`resolve_deferred`.  A literal is
+    not a lookup and is returned as written.
     """
     if not isinstance(value, str):
         return str(value)
-
-    try:
-        from credstore import is_keyring_uri
-    except ImportError:
-        pass
-    else:
-        if is_keyring_uri(value):
-            return resolve_secret(value)
-
     if _ENV_PATTERN.search(value):
         return _Reference(value)
-    return resolve_secret(value)
+    return value
 
 
 def resolve_deferred(value: object) -> str:
     """What a reference kept by :func:`defer_secret` stands for.
 
-    Anything that was resolved eagerly (a literal, a ``keyring:`` URI) is
-    returned unchanged rather than run through :func:`resolve_secret` a second
-    time: a stored secret is allowed to contain the characters a reference is
-    spelled with, and resolving it twice would read it as one.
+    A literal is returned unchanged rather than run through
+    :func:`resolve_secret` a second time: a stored secret is allowed to contain
+    the characters a reference is spelled with, and resolving it twice would
+    read it as one.
     """
     if isinstance(value, _Reference):
         return resolve_secret(str(value))
@@ -1162,24 +999,20 @@ def unresolved_reference(value: object) -> str:
 
     **The other half of `resolve_secret`'s degrade, and the only place it is
     read.**  A value that could not be resolved is left *verbatim* by the
-    function above — a `${VAR}` neither the environment nor the keyring had, or
-    a `keyring:NAME` with no credstore installed to consult it — and every
-    caller that is about to *use* the value has to answer the same question
-    about it.  Four of them answered it separately, with four different rules:
-    the model servers tested `startswith("${")` (so a bare `keyring:NAME`
-    travelled as the secret), the tunnel and the skills reader had a regex each,
-    and `rest-api`'s note had a third.  A rule that decides whether a credential
-    is real cannot be four rules, because the permissive copy is the one that
-    sends the reference to somebody else's server.
+    function above — a `${VAR}` neither the environment nor the keyring had —
+    and every caller that is about to *use* the value has to answer the same
+    question about it.  Four of them answered it separately, with four different
+    rules: the model servers tested `startswith("${")`, the tunnel and the
+    skills reader had a regex each, and `rest-api`'s note had a third.  A rule
+    that decides whether a credential is real cannot be four rules, because the
+    permissive copy is the one that sends the reference to somebody else's
+    server.
 
     Returning the *reference* rather than a boolean is what lets a caller say
     which one did not resolve, which is the whole of what a person needs to fix
     it; a `401` from the far end says nothing.
     """
-    text = str(value).strip()
-    if text.startswith("keyring:"):
-        return text
-    match = _ENV_PATTERN.search(text)
+    match = _ENV_PATTERN.search(str(value).strip())
     return match.group(0) if match else ""
 
 
@@ -1583,11 +1416,11 @@ class ToolServerSettings:
     resolved by a precedence rule nobody would remember.
 
     `env` and `headers` are where a secret lives, and both go through
-    :func:`defer_secret`: a ``keyring:`` URI resolves at load, while a
-    ``${VAR}`` is kept as written until :meth:`resolved_env` or
-    :meth:`resolved_headers` is called where the connection is made.  Nothing
-    else here is secret: a `command` is a program name and an `args` list is on
-    the command line of a process anyone can inspect.
+    :func:`defer_secret`: a ``${VAR}`` is kept as written until
+    :meth:`resolved_env` or :meth:`resolved_headers` is called where the
+    connection is made.  Nothing else here is secret: a `command` is a program
+    name and an `args` list is on the command line of a process anyone can
+    inspect.
 
     Not frozen-by-accident: this is read-only configuration, and the hub keeps
     its *state* — whether it is connected, what it last listed — in its own
@@ -1622,10 +1455,10 @@ class ToolServerSettings:
     command: str = ""
     args: tuple[str, ...] = ()
     #:
-    #: `repr=False` on this and `headers`, because both can hold a secret that
-    #: was resolved eagerly (`keyring:`); a `${VAR}` stays the reference it was
-    #: written as.  Everything that prints a config goes through `__repr__`, so
-    #: this keeps a live key out of a log line, a traceback, and a REPL.
+    #: `repr=False` on this and `headers`, because both can hold a literal
+    #: secret; a `${VAR}` stays the reference it was written as.  Everything
+    #: that prints a config goes through `__repr__`, so this keeps a live key
+    #: out of a log line, a traceback, and a REPL.
     env: dict[str, str] = field(default_factory=dict, repr=False)
     #: http: the endpoint, either transport.  A URL ending in `/sse` is the
     #: older SSE transport; anything else is Streamable HTTP.
@@ -1852,9 +1685,8 @@ class SkillSettings:
 
     `env` resolves through the same chain as a provider key — shell, then
     credstore — and that is the whole point of having the section at all.  A
-    daemon started days ago never saw the key somebody exported this morning,
-    and `keyring:…` is not an environment variable in the first place; an entry
-    here is what turns either into what a skill's script is handed.
+    daemon started days ago never saw the key somebody exported this morning;
+    an entry here is what turns either into what a skill's script is handed.
 
     A skill with no entry is not misconfigured: the environment alone is a real
     answer, and a playbook that needs nothing is the common case.

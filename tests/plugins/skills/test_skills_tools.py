@@ -31,7 +31,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SKILLS_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000
@@ -370,7 +370,7 @@ async def test_removing_a_skill_takes_the_folder_and_its_entry(
     """
     config_on_disk(
         isolated_runtime,
-        CONFIG + "skills:\n  one:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
+        CONFIG + "skills:\n  one:\n    env:\n      SOME_KEY: x\n",
     )
     skill(isolated_runtime, "one")
 
@@ -399,7 +399,7 @@ async def test_removing_by_the_header_name_removes_its_directory(
     """
     config_on_disk(
         isolated_runtime,
-        CONFIG + "skills:\n  the-name:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
+        CONFIG + "skills:\n  the-name:\n    env:\n      SOME_KEY: x\n",
     )
     folder = isolated_runtime / "skills" / "the-folder"
     folder.mkdir(parents=True)

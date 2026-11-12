@@ -127,12 +127,12 @@ USE_TOOL = "skill_use"
 #: the value is used, with its own name intact.  This is that failure seen from
 #: the other side, and the reason a configured key and a configured *reference*
 #: are not the same thing.
-_REFERENCE = re.compile(r"\$\{[^}]*\}")
+_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def unresolved(value: str) -> bool:
     """Whether a value meant to be a secret is still a reference to one."""
-    return bool(_REFERENCE.fullmatch(value.strip())) or value.startswith("keyring:")
+    return bool(_REFERENCE.fullmatch(value.strip()))
 
 
 class SkillHeaderError(ValueError):

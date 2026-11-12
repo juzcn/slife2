@@ -8,7 +8,6 @@ that are absent rather than defaulted.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -37,7 +36,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: ${SLIFE2_TEST_KEY}
     models:
       - model: big
         context_window: 100000
@@ -1036,11 +1035,10 @@ def test_a_plaintext_value_never_reaches_the_store(
 ) -> None:
     """**A literal written in the file is an answer, not a reference.**
 
-    The chain exists for references — ``${VAR}`` and ``keyring:`` — and a
-    plaintext value resolves by not being looked up at all.  Consulting the
-    store for one would be a lookup nobody asked for, and it would make a
-    config whose keys are written out depend on a store that holds none of
-    them.
+    The chain exists for `${VAR}` references, and a plaintext value resolves
+    by not being looked up at all.  Consulting the store for one would be a
+    lookup nobody asked for, and it would make a config whose keys are written
+    out depend on a store that holds none of them.
     """
     import credstore
 
@@ -1050,11 +1048,6 @@ def test_a_plaintext_value_never_reaches_the_store(
     monkeypatch.setattr(credstore, "get_credential", consulted)
 
     assert resolve_secret("sk-literal") == "sk-literal"
-
-
-def test_default_is_used_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-    assert resolve_secret("${SLIFE2_TEST_KEY:-fallback}") == "fallback"
 
 
 def test_unset_without_default_stays_literal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1097,212 +1090,6 @@ def test_no_keyring_at_all_still_degrades_to_the_reference(
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
 
-def a_seed(path: Path, password: str, entries: dict[str, str]) -> None:
-    """A real encrypted credstore backup at *path*, unlocked by *password*.
-
-    `keyrings.cryptfile` is what credstore writes the seed with; building one
-    here rather than faking the reader keeps the test about the KDF and the
-    public `check_backend()` path, not about a stand-in agreeing with itself.
-    """
-    from keyrings.cryptfile.cryptfile import CryptFileKeyring
-
-    keyring = CryptFileKeyring()
-    keyring.file_path = str(path)
-    keyring.keyring_key = password
-    for key, value in entries.items():
-        keyring.set_password("credstore", key, value)
-
-
-def test_a_mounted_seed_resolves_when_the_keyring_is_silent(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**The container's half of the chain.**
-
-    Docker blocks `keyctl`, so credstore reports no keyring and
-    `get_credential` answers None for every key; the encrypted backup is a file
-    and survives the isolation when it is mounted.  `CREDSTORE_MASTER_PASSWORD`
-    is the non-interactive form of the prompt `credstore get -p` writes, and a
-    value read through it is registered for masking like any other credential.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-    from slife2.libs.host import secrets
-
-    path = tmp_path / "credentials.crypt"
-    password = "correct horse battery"
-    a_seed(path, password, {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    assert resolve_secret("${SLIFE2_TEST_KEY}") == "seed-secret"
-    assert secrets.masked("it is seed-secret") != "it is seed-secret"
-    # The master password unlocks every value, so it is masked like one.
-    assert (
-        secrets.masked(f"the password is {password}") != f"the password is {password}"
-    )
-
-
-def test_a_seed_whose_password_is_absent_stays_unread(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No password is no fallback: the chain still degrades to the reference.
-
-    The backup is Argon2/AES-encrypted; guessing a password would turn a
-    missing secret into a wrong one, and a daemon has no terminal to ask on.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.delenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, raising=False)
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
-
-
-def test_a_master_password_that_does_not_unlock_the_seed_is_a_config_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A seed that is there and refuses is not a seed that is absent.
-
-    `read_cryptfile_entry` raises `ValueError` for a wrong password (the MAC
-    check).  Letting that out of `resolve_secret` would name neither the file
-    nor the variable; the config error names both, which is the one place where
-    naming them is the whole of the fix.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, "wrong password")
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    with pytest.raises(ConfigError) as raised:
-        resolve_secret("${SLIFE2_TEST_KEY}")
-    assert config_module.CREDSTORE_PASSWORD_ENV_VAR in str(raised.value)
-    assert str(path) in str(raised.value)
-
-
-def test_a_keyring_uri_falls_back_to_the_same_seed(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A `keyring:` URI is the same credential under its `service/key` spelling.
-
-    A container has no keyring, so `resolve_uri` raises `KeyError`; the seed's
-    entry is what the person stored with `credstore set slife/deepseek`, and
-    the fallback reads it by exactly that name.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    password = "correct horse battery"
-    a_seed(path, password, {"slife/deepseek": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-
-    def missing(value: str) -> str:
-        raise KeyError("Credential 'slife/deepseek' not found in keyring")
-
-    monkeypatch.setattr(credstore, "resolve_uri", missing)
-
-    assert resolve_secret("keyring:slife/deepseek") == "seed-secret"
-
-
-def test_a_keyring_uri_that_failed_is_not_left_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """**A keyring URI nobody could resolve is not a URI that is absent.**
-
-    The `keyring:` branch swallowed *every* failure into `pass`, so a keyring
-    that exists but is locked, or a credential that was never stored, left the
-    `keyring:service/key` reference to travel as the secret itself.  Only a host
-    with no `credstore` at all degrades to the reference; a backend that is
-    there and refused raises where the secret is resolved.
-
-    A store that was asked and refused is the case this test holds, and it is
-    the one exception type `resolve_secret` deliberately does *not* translate —
-    the machine's keyring being locked is not a mistake in the file.
-    """
-    import credstore
-
-    def locked(value: str) -> str:
-        raise RuntimeError("the keyring is locked")
-
-    monkeypatch.setattr(credstore, "resolve_uri", locked)
-    with pytest.raises(RuntimeError, match="locked"):
-        resolve_secret("keyring:slife/deepseek")
-
-
-def test_a_keyring_uri_nobody_stored_is_a_config_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**credstore's "not found" is a config mistake, and it has to read like one.**
-
-    credstore raises a bare `KeyError` for a credential that was never stored,
-    and `KeyError` is not what anything on the load path catches: `slife2`'s
-    entry point and `family.py` each answer a bad config with their own one
-    sentence for `ConfigError` alone, so
-    `env: {TOKEN: 'keyring:slife/nothing-stored'}` printed a traceback out of the
-    console script instead of the refusal naming the reference — at the one
-    place where naming it is the whole of the fix.  Tested through `load` rather
-    than through `resolve_secret` alone, because "out of `load()`" is the
-    failure as it reaches a person.
-    """
-    import credstore
-
-    def missing(value: str) -> str:
-        raise KeyError("Credential 'slife/nothing-stored' not found in keyring")
-
-    monkeypatch.setattr(credstore, "resolve_uri", missing)
-
-    with pytest.raises(ConfigError) as raised:
-        resolve_secret("keyring:slife/nothing-stored")
-    assert "keyring:slife/nothing-stored" in str(raised.value)
-    assert "credstore set slife/nothing-stored" in str(raised.value), (
-        "the store is named, and so is the way to fill it"
-    )
-
-    text = (
-        "mcp:\n"
-        "  one:\n"
-        "    command: npx\n"
-        "    env:\n"
-        "      TOKEN: keyring:slife/nothing-stored\n"
-    )
-    with pytest.raises(ConfigError, match="nothing-stored"):
-        load(write(tmp_path, text))
-
-
-def test_no_credstore_at_all_leaves_a_keyring_uri_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The declared degrade survives: with no backend, a `keyring:` reference is
-    left exactly as written (SDD Appendix C)."""
-    monkeypatch.setitem(sys.modules, "credstore", None)
-    assert resolve_secret("keyring:slife/deepseek") == "keyring:slife/deepseek"
-
-
 def test_reference_embedded_in_a_larger_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLIFE2_TEST_HOST", "example.test")
     assert resolve_secret("https://${SLIFE2_TEST_HOST}/v1") == "https://example.test/v1"
@@ -1324,7 +1111,7 @@ def test_api_key_is_resolved_lazily(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     """
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved-later")
     provider = load(write(tmp_path, A_PROVIDER)).provider("local")
-    assert provider.api_key_ref == "${SLIFE2_TEST_KEY:-none}"
+    assert provider.api_key_ref == "${SLIFE2_TEST_KEY}"
     assert provider.api_key == "resolved-later"
 
 
@@ -1345,11 +1132,11 @@ mcp:
     command: npx
     args: [-y, serper]
     env:
-      SERPER_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+      SERPER_API_KEY: ${SLIFE2_TEST_KEY}
   arxiv:
     url: https://example.test/mcp
     headers:
-      Authorization: Bearer ${SLIFE2_TEST_KEY:-unset}
+      Authorization: Bearer ${SLIFE2_TEST_KEY}
   off:
     command: npx
     args: [-y, slow-thing]
@@ -1358,7 +1145,7 @@ rest-api:
   registry:
     spec: https://example.test/openapi.json
     base_url: https://api.example.test
-    api_key: ${SLIFE2_TEST_KEY:-unset}
+    api_key: ${SLIFE2_TEST_KEY}
 """
 
 
@@ -1472,7 +1259,7 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
     config = load(write(tmp_path, MCP))
     serper = config.mcp["serper"]
-    assert serper.env["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY:-unset}", (
+    assert serper.env["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY}", (
         "the load keeps the reference; the connection resolves it"
     )
     assert serper.resolved_env()["SERPER_API_KEY"] == "resolved"
@@ -1499,7 +1286,7 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     config = load(write(tmp_path, MCP))
 
     assert calls == []
-    assert config.mcp["serper"].resolved_env()["SERPER_API_KEY"] == "unset"
+    assert config.mcp["serper"].resolved_env()["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY}"
     assert calls == ["SLIFE2_TEST_KEY"]
 
 
@@ -1517,12 +1304,12 @@ def test_a_tunnel_option_is_not_resolved_by_the_load(
         write(
             tmp_path,
             "file-tunnel:\n  providers:\n    localhost.run:\n"
-            "      binary: ${SLIFE2_TEST_BINARY:-ssh}\n",
+            "      binary: ${SLIFE2_TEST_BINARY}\n",
         )
     ).file_tunnel
 
     assert calls == []
-    assert section.options_for("localhost.run")["binary"] == "ssh"
+    assert section.options_for("localhost.run")["binary"] == "${SLIFE2_TEST_BINARY}"
     assert calls == ["SLIFE2_TEST_BINARY"]
 
 
@@ -1540,13 +1327,17 @@ def test_an_unknown_tunnel_providers_entry_is_a_config_error(tmp_path) -> None:
         load(write(tmp_path, "file-tunnel:\n  providers:\n    grok: {}\n"))
 
 
-def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
+def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The config layer is where a declarative entry becomes a runnable command.
 
     The entry becomes an ordinary stdio upstream here, so the plugin that holds
     it — `slife2-restapi-tools` — sees the same shape as one under `mcp:`, and
     the hub sees a source like any other.  Two sections and one mechanism.
     """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
     server = load(write(tmp_path, MCP)).rest_apis["registry"]
     assert server.kind == "rest"
     assert (server.transport, server.command) == ("stdio", "uvx")
@@ -1554,7 +1345,7 @@ def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
     env = server.resolved_env()
     assert env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
     assert env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
-    assert env["API_KEY"] == "unset"  # the ${VAR:-default} form
+    assert env["API_KEY"] == "${SLIFE2_TEST_KEY}"
 
 
 def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
@@ -1703,7 +1494,7 @@ SKILLS = """
 skills:
   baidu-search:
     env:
-      BAIDU_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+      BAIDU_API_KEY: ${SLIFE2_TEST_KEY}
   quiet: {}
 """
 
@@ -1723,14 +1514,18 @@ def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
     assert config.skills["quiet"].env == {}
 
 
-def test_an_unresolved_skill_secret_stays_a_reference(tmp_path) -> None:
+def test_an_unresolved_skill_secret_stays_a_reference(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Which is what `slife2.plugins.skills.playbooks` reads to tell "configured" from "named".
 
     The load does not fail — a missing key is not a config error — so the fact
     has to survive to where somebody can act on it.
     """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
     config = load(write(tmp_path, SKILLS))
-    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "unset"
+    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
 
 
 def test_no_skills_section_is_no_skills(tmp_path) -> None:

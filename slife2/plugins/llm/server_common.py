@@ -503,12 +503,10 @@ def unresolved_key(server_name: str, name: str, provider: Any) -> str:
     what a person needs to fix it.  Handing the literal to the SDK instead
     produces a 401 that says nothing about which name is missing.
 
-    **`unresolved_reference` and not `startswith("${")`**, which is what this
-    was: that test does not recognise `keyring:NAME`, so on a host with no
-    credstore installed the reference itself went out as the bearer token —
-    `Bearer keyring:DEEPSEEK_API_KEY` — which is the exact deformation the
-    config module names (SDD Appendix C) and which the other three readers of
-    this same answer already refused.
+    **`unresolved_reference` and not `startswith("${")`.**  The config module
+    is the single reader of "this is still a reference" (SDD Appendix C);
+    handing the text to the SDK instead produces a `401` that says nothing
+    about which name is missing.
     """
     key = provider.api_key
     if key and not unresolved_reference(key):

@@ -248,7 +248,7 @@ def _import_ngrok() -> Any:
 #: text would be sent as the token and come back as an authentication failure
 #: naming nobody's mistake.  So the unresolved form is recognised here and
 #: reported as the missing credential it is.
-_UNRESOLVED = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-([^}]*))?\}$")
+_UNRESOLVED = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
 def _auth_token(options: dict) -> str | None:
@@ -261,14 +261,8 @@ def _auth_token(options: dict) -> str | None:
     variable the config names, so the two agree when both are present.
     """
     token = str(options.get("token") or "").strip()
-    if token:
-        matched = _UNRESOLVED.match(token)
-        if matched is None:
-            return token
-        # Unresolved: the `:-default` is the only thing that could still answer.
-        token = (matched.group(1) or "").strip()
-        if token:
-            return token
+    if token and not _UNRESOLVED.match(token):
+        return token
     return os.environ.get("NGROK_AUTHTOKEN", "").strip() or None
 
 

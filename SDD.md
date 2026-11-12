@@ -2170,20 +2170,8 @@ a watcher or a lock.
 
 ### 11.2 Secrets
 
-A value may be a literal; `${VAR}`, resolved through the shell environment, then
-the OS keyring, then credstore's encrypted backup; `${VAR:-default}`, with a
-literal default; or `keyring:<service>/<key>`, resolved against the OS keyring
-and then the encrypted backup.
-
-**The encrypted backup is the keyring-less half of the store.** credstore's
-Python API reads the OS keyring only and answers `None` in cryptfile-only mode,
-which is what a container is: Docker blocks `keyctl`. When
-`CREDSTORE_MASTER_PASSWORD` supplies the password, slife2 reads the backup
-directly (`CREDSTORE_FILE`, else `~/.credstore/credentials.crypt`). No password
-is no fallback: the backup stays locked and the chain steps past it. A password
-that does not decrypt the file is a refusal that raises where the secret is
-resolved, not an absent credential. The password is registered for output
-masking.
+A value may be a literal, used as written; or `${VAR}`, resolved through the
+shell environment, then credstore's OS keyring.
 
 **Output protection covers credstore's values, and only those.** A credential
 resolved from credstore is registered in the resolving process and masked in
@@ -2199,8 +2187,7 @@ Resolution is lazy: a process nobody calls never touches the keyring. An
 unresolved reference is left verbatim, so the failure lands where the name can be
 stated. `config.unresolved_reference` is the single reader of "this is still a
 reference"; a reference MUST NOT travel as the secret. A keyring that is
-installed and refuses is an error, not "not found". A credential the store does
-not hold is a `ConfigError` naming the reference and the command that stores it.
+installed and refuses is an error, not "not found".
 
 ### 11.3 Data directory
 

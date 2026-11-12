@@ -4,8 +4,8 @@
 # and name its providers and embedder; a file that does not stops the start
 # and names the mistake.
 #
-# Keep secrets out. `${VAR}`, `${VAR:-default}` and `keyring:<service>/<key>`
-# are resolved from the shell environment, credstore or the OS keyring.
+# Keep secrets out. `${VAR}` is resolved from the shell environment, then
+# credstore's OS keyring; a value that is not a reference is used as written.
 
 # Shift every server port by this much under WSL2 mirrored networking; ignored
 # elsewhere. 0 disables it. The MQTT broker is not shifted.
@@ -452,14 +452,12 @@ file-tunnel:
     ngrok:
       token: ${NGROK_AUTHTOKEN}
     localhost.run:
-      binary: ${SSH_BINARY:-ssh}
       host: localhost.run
       user: nokey
       remote_port: 80
     cloudflare:
-      binary: ${CLOUDFLARED_BINARY:-cloudflared}
       # http2 avoids QUIC failures behind a proxy or TUN adapter.
-      protocol: ${CLOUDFLARED_PROTOCOL:-http2}
+      protocol: http2
 
 peer_agent:
   # Presence enables the peer network. `broker` names another machine's broker;

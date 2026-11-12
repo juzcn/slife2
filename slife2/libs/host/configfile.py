@@ -154,12 +154,11 @@ def read_section(
     """One section as the *file* has it, as plain Python, secrets unresolved.
 
     **The listing tools read this rather than the settings they hold**, and the
-    difference is a leak: `ToolServerSettings.env` may hold a resolved secret —
-    a `keyring:` reference is resolved at load, and `resolved_env` materialises
-    every ``${VAR}`` when a connection is made — so an answer built from the
-    settings could print the operator's credential into the conversation and
-    the transcript.  What a person wrote is `${SERPER_API_KEY}`, and that is
-    what a listing shows.
+    difference is a leak: `ToolServerSettings.env` may hold a literal secret, and
+    `resolved_env` materialises every ``${VAR}`` when a connection is made — so
+    an answer built from the settings could print the operator's credential
+    into the conversation and the transcript.  What a person wrote is
+    `${SERPER_API_KEY}`, and that is what a listing shows.
 
     Plain Python and not a round-trip document because this is a *read*: nothing
     here is written back, and a caller returning it from a tool needs something

@@ -420,9 +420,9 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         rest, use `skill_edit`.
 
         `env` is the `skills:` entry the playbook is given: the names its
-        scripts read, each a `${VAR}` or `keyring:` reference or a literal
-        value. Omit it on a reinstall to keep the operator's entry; pass `{}` to
-        clear it. A switch already on the entry is kept either way.
+        scripts read, each a `${VAR}` reference or a literal value. Omit it on
+        a reinstall to keep the operator's entry; pass `{}` to clear it. A
+        switch already on the entry is kept either way.
 
         Args:
             name: The skill's name — what `skill_use` takes.
@@ -431,8 +431,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 one that leaves it is refused.
             env: What the playbook's scripts are given. A `${VAR}` resolves
                 through the environment and the credential store when the
-                playbook is used; a `keyring:` reference is resolved here, so a
-                credential that is not stored fails this call.
+                playbook is used; one neither answers stays the reference it was
+                written as, and `skill_use` reports it missing.
 
         Returns:
             `name`, `state` (`on`, or `off` when the entry was already switched
@@ -447,19 +447,15 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         # `rest_api_set`), so this is one contract and not two.
         if not name.strip():
             raise ToolError("a skill needs a name")
-        # **Resolved before anything changes.**  A `keyring:` reference with no
-        # credential behind it is a config the next start would refuse, and
-        # resolving it here is what makes that this call's failure rather than
-        # one discovered later.  A `${VAR}` that is not set remains the
-        # reference it was written as, and `skill_use` reports it missing.
-        try:
-            supplied = (
-                {str(key): resolve_secret(value) for key, value in env.items()}
-                if env is not None
-                else None
-            )
-        except ConfigError as exc:
-            raise ToolError(str(exc)) from exc
+        # **Resolved before anything changes.**  A `${VAR}` that is not set
+        # remains the reference it was written as, and `skill_use` reports it
+        # missing; resolving here is what gives the entry the value the write
+        # will hold.
+        supplied = (
+            {str(key): resolve_secret(value) for key, value in env.items()}
+            if env is not None
+            else None
+        )
         try:
             installed = skills.install(name.strip(), files)
         except ValueError as exc:

@@ -37,7 +37,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000

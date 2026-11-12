@@ -100,8 +100,9 @@ def test_resolving_a_credstore_reference_registers_it(
 
     from slife2.libs.host.config import resolve_secret
 
-    monkeypatch.setattr(credstore, "resolve_uri", lambda _uri: LONG)
-    assert resolve_secret("keyring:slife2/test") == LONG
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(credstore, "get_credential", lambda _key: LONG)
+    assert resolve_secret("${SLIFE2_TEST_KEY}") == LONG
     assert secrets.masked(f"x {LONG}") == "x sk-l…7890"
 
 

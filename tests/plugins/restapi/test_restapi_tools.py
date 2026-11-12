@@ -11,7 +11,6 @@ fetched.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000
@@ -250,40 +249,25 @@ async def test_a_credential_that_resolves_is_not_reported(
 
 
 @pytest.mark.asyncio
-async def test_a_keyring_reference_that_does_not_resolve_says_so_as_well(
-    isolated_runtime, monkeypatch: pytest.MonkeyPatch
+async def test_a_literal_key_is_refused_before_it_is_written(
+    isolated_runtime,
 ) -> None:
-    """**The other half of that note, and the half that was a hole.**
+    """**The tool writes a reference, never a secret.**
 
-    A `keyring:NAME` written as an API key is the shape `resolve_secret` leaves
-    verbatim when `credstore` cannot be imported — its declared degrade — and the
-    value then travels to somebody else's API *as the credential*
-    (SDD Appendix C).  The note above is what turns that into a sentence at the
-    moment it is written, and it did not: the `keyring:` shape returned early
-    with nothing to say, so the two halves of one rule disagreed and the leaking
-    half was the silent one.  The rule is
-    `slife2.libs.host.config.unresolved_reference`'s, which counts a keyring
-    reference with no credstore behind it as unresolved.
-
-    `credstore` is made unimportable rather than assumed absent: it is a real
-    dependency and it is installed on the machine this suite runs on, so the
-    degrade has to be stated.
+    A value that is neither `${VAR}` nor a bare name is a literal key, and
+    writing one into the file would put the operator's secret in a file meant to
+    be checked in.  The refusal names the one shape this tool accepts.
     """
-    monkeypatch.setitem(sys.modules, "credstore", None)
-
     async with Client(family(isolated_runtime)) as client:
-        answer = await ask(
-            client,
-            "rest_api_set",
-            name="github",
-            config=rest_config(api_key="keyring:slife2/github"),
-        )
+        with pytest.raises(ToolError, match=r"\$\{VAR\}"):
+            await ask(
+                client,
+                "rest_api_set",
+                name="github",
+                config=rest_config(api_key="sk-live-literal"),
+            )
 
-    # The whole reference, verbatim — and not the `${…}` wrapper's arithmetic,
-    # which would have said `eyring:slife2/gith`.  A keyring URI carries its own
-    # name in its tail, and that name is what a caller stores under.
-    assert answer["unresolved"] == "keyring:slife2/github"
-    assert section(isolated_runtime)["github"]["api_key"] == "keyring:slife2/github"
+    assert "github" not in section(isolated_runtime)
 
 
 @pytest.mark.asyncio

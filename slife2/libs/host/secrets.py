@@ -1,6 +1,6 @@
 """Resolved credentials, and the masked form that keeps them out of output.
 
-The credential chain in `slife2.libs.host.config` turns a ``keyring:`` URI into a
+The credential chain in `slife2.libs.host.config` turns a ``${VAR}`` into a
 plain string.  From that moment the only thing keeping the value out of a tool
 result or a log line is every call site remembering not to print it — and a call
 site that forgets is silent.
@@ -14,10 +14,10 @@ that, or one carrying control characters, becomes ``***``: a mask that reveals
 most of the secret, or that copies a newline or an escape sequence into a log
 line, protects nothing and can forge output.
 
-**Only credstore values are registered.**  A ``keyring:`` URI, or a ``${VAR}``
-that the credential store answered, is in scope.  An environment variable or a
-literal in the config is the operator's own, and protecting it is not this
-layer's job.  The registry is per process, the same scope as the credential.
+**Only credstore values are registered.**  A ``${VAR}`` that the credential
+store answered is in scope.  An environment variable or a literal in the config
+is the operator's own, and protecting it is not this layer's job.  The registry
+is per process, the same scope as the credential.
 
 **Short values are not registered.**  Masking a three-character value would
 mangle every line it appeared in, and a credential that short cannot be

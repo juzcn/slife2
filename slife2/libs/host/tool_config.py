@@ -81,8 +81,7 @@ class RestApiConfig(BaseModel):
         "document names."
     )
     api_key: str = Field(
-        description="A `${VAR}` or `keyring:` reference; empty for an API that "
-        "needs no key."
+        description="A `${VAR}` reference; empty for an API that needs no key."
     )
     args: list[str] | None = Field(description="Extra arguments for the proxy.")
     env: dict[str, str] | None = Field(

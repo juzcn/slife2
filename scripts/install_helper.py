@@ -262,7 +262,7 @@ def _add(
 #: The reference syntax `slife2.libs.host.config` resolves.  Kept here rather
 #: than imported: this reads the file before the project decides whether it is
 #: valid, and the loader's pattern is private.
-_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _record(found: dict[str, list[str]], name: str, origin: str) -> None:
@@ -280,14 +280,8 @@ def _references(value: object, path: str, found: dict[str, list[str]]) -> None:
         for index, item in enumerate(value):
             _references(item, f"{path}[{index}]", found)
     elif isinstance(value, str):
-        if value.startswith("keyring:"):
-            _record(found, value.removeprefix("keyring:"), path)
-            return
         for match in _REFERENCE.finditer(value):
-            # A `:-default` is a value, not a credential — the config supplies
-            # what to use when nothing is stored (`${SSH_BINARY:-ssh}`).
-            if match.group(2) is None:
-                _record(found, match.group(1), path)
+            _record(found, match.group(1), path)
 
 
 def secrets(home: Path) -> int:

@@ -176,37 +176,23 @@ docker build -f docker/Dockerfile -t slife2:local .
 镜像以非 root 用户 `slife2` 运行；源码和数据目录是 `/opt/slife2`，runtime 目录是
 `/home/slife2/.slife2/runtime`。镜像约 3 GB，因为它包含完整配置点名的程序。
 
-镜像没有 OS keyring，所以把 key 放在卷里的 credstore 加密文件中。创建一次，并把
-配置点名的每个 key 存进去：
+镜像没有 OS keyring，所以 key 以环境变量传入。构建运行与宿主机相同的
+`scripts/install.sh`，因此其日志会列出随附配置点名的每个凭据；把它们逐行写进一个
+env 文件，用 `--env-file` 传入——不要用 `-e KEY=...`，那会把值放进进程表：
 
 ```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# 在该 shell 中：
-credstore set-password            # 设置主密码
-credstore set DEEPSEEK_API_KEY    # 然后逐条执行构建日志列出的行
-```
+cat > slife2.env <<'EOF'
+DEEPSEEK_API_KEY=...
+SERPER_API_KEY=...
+EOF
 
-构建运行与宿主机相同的 `scripts/install.sh`，因此其日志会列出随附配置所需的每一条
-`credstore set <KEY>`。跑一次 prompt 然后退出——镜像会询问主密码，配置里的每个
-`${VAR}` 都从文件解析：
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+docker run --rm -it --env-file slife2.env \
   slife2:local 'Use the shell tool to run pwd and report the output.'
 ```
 
-或者以 headless 方式启动并保持运行（同样会询问密码）：
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
-```
-
-key 配置在容器的 credstore 中，而不是命令行上。挂载的、值为字面量的 `slife2.yaml`
-是另一种受支持的来源。如果对话和日志要在容器之外保留，挂载 `/opt/slife2/agents`
-和 `/home/slife2/.slife2`。凭据配置、一次性 prompt 和容器相关说明见
-[docker/README.md](docker/README.md)。
+挂载的、值为字面量的 `slife2.yaml` 是另一种受支持的来源。如果对话和日志要在容器之外
+保留，挂载 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。凭据配置、一次性 prompt
+和容器相关说明见 [docker/README.md](docker/README.md)。
 
 ## 快速开始
 
@@ -409,7 +395,7 @@ system prompt 中；修改后下一个对话即可读到。安装器按配置的
 差异时写 `AGENTS-default.md`。
 
 `slife2.yaml` 可以安全地提交到版本库，它不应包含秘密；每个凭据都是运行时解析的
-`${VAR}` 或 `keyring:` 引用。
+`${VAR}` 引用。
 
 ### 配置节
 
@@ -438,15 +424,13 @@ agent 目录下。文件柜、调度器和终端收件箱由各自的 server 及
 
 ### 秘密
 
-值可以是字面量字符串；`${VAR}`，依次从 shell 环境、
-[credstore](https://pypi.org/project/credstore/)、可选的默认值（`${VAR:-default}`）
-解析；或 `keyring:<service>/<key>`，直接对 OS keyring 解析。
+值可以是字面量字符串，原样使用；或 `${VAR}`，依次从 shell 环境、
+[credstore](https://pypi.org/project/credstore/) 的 OS keyring 解析。
 
-**只有 credstore 管理的秘密会被输出保护。** slife2 从 credstore 解析出的凭据——一个
-`keyring:` 引用，或 store 回答了的一个 `${VAR}`——在工具结果、工具清单和日志行中以
-掩码形式显示（至少各留四个字符时显示前四后四，否则显示 `***`）。短于八个字符的值
-不登记。环境变量或字面量是操作者自己的。把每个秘密都放进 credstore：它是 slife2
-唯一会在各处遮罩的存储。
+**只有 credstore 管理的秘密会被输出保护。** slife2 从 credstore 解析出的凭据——store
+回答了的一个 `${VAR}`——在工具结果、工具清单和日志行中以掩码形式显示（至少各留四个
+字符时显示前四后四，否则显示 `***`）。短于八个字符的值不登记。环境变量或字面量是
+操作者自己的。把每个秘密都放进 credstore：它是 slife2 唯一会在各处遮罩的存储。
 
 解析是惰性且宽松的。未解析的引用原样保留，因此缺失的 key 会在 API 调用处失败并点名
 它。

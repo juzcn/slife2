@@ -29,18 +29,17 @@ installer's programs, not a minimal agent.
 
 ## Run
 
-Set up the credstore volume once (see Credentials), then start the real agent
-headless (the same window, without a display); the entrypoint asks for the
-master password:
+Start the real agent headless (the same window, without a display); the keys
+come from the environment (see Credentials):
 
 ```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+docker run --rm -it --env-file slife2.env slife2:local
 ```
 
-Run one prompt and exit (it asks for the same password):
+Run one prompt and exit:
 
 ```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+docker run --rm -it --env-file slife2.env \
   slife2:local 'Use the shell tool to run `pwd; echo CONTAINER-OK` and report the output.'
 ```
 
@@ -65,31 +64,23 @@ model that never sends `task_response` — fails the run.
 
 ## Credentials
 
-The container has no keyring, but it can create and read credstore's own
-encrypted cred file. A volume keeps it across starts, and one master password
-then resolves every `${VAR}` in the configuration:
+The container has no OS keyring, so a key is an environment variable. The build
+runs `scripts/install.sh`, whose log lists every credential the shipped
+configuration names; write those into a file, one `KEY=value` per line, and
+pass it with `--env-file` — not `-e KEY=...`, which puts the value in the
+process table:
 
 ```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# in that shell:
-credstore set-password            # choose the master password
-credstore set DEEPSEEK_API_KEY    # then every line the build log listed
-```
+cat > slife2.env <<'EOF'
+DEEPSEEK_API_KEY=...
+SERPER_API_KEY=...
+EOF
 
-The build runs `scripts/install.sh`, whose log lists every
-`credstore set <KEY>` line the shipped configuration names; run those in the
-shell above. Start the stack with the same volume; the entrypoint asks for the
-master password you chose:
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+docker run --rm -it --env-file slife2.env slife2:local
 ```
 
 A mounted `slife2.yaml` whose values are literals is the other supported
-source. A launcher with no terminal sets `CREDSTORE_MASTER_PASSWORD` itself
-instead of being prompted.
+source.
 
 Useful environment variables:
 
@@ -98,7 +89,6 @@ Useful environment variables:
 | `SLIFE2_PROMPT` | none | One-shot prompt for a launcher that cannot pass it as the command argument. Omit to keep the stack running. |
 | `SLIFE2_AGENT` | `slife2` | The agent name (the headless window's claim and the probe's target). |
 | `SLIFE2_BENCH_TURN_TIMEOUT` | `3600` | Seconds the probe waits for the task's terminal reply. |
-| `CREDSTORE_MASTER_PASSWORD` | none | For a launcher with no terminal: the master password for the cred file in the volume. The interactive entrypoint asks for it instead. |
 
 The image runs as the non-root user `slife2`. The checkout (and therefore the
 data directory) is `/opt/slife2`; the runtime directory is
@@ -111,10 +101,10 @@ the container.
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
   lazily: the stack starts, and a tool that needs a key fails at the call. Only
   `DEEPSEEK_API_KEY` is needed for the basic model turn.
-- **Keys are configured in the container's credstore** (see Credentials above);
-  a mounted `slife2.yaml` whose values are literals is the other supported
-  source. The build runs `scripts/install.sh`, so credstore is installed and
-  its `credstore set` hints are in the build log.
+- **Keys are passed through the environment** (see Credentials above); a
+  mounted `slife2.yaml` whose values are literals is the other supported
+  source. The build runs `scripts/install.sh`, whose log lists the credential
+  names.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by

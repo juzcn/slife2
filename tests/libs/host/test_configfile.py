@@ -36,7 +36,7 @@ providers:
     api: openai-completions
     base_url: https://example.test/v1
     # The key is a reference; the value is in the credential store.
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'
@@ -640,7 +640,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'
@@ -655,7 +655,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'

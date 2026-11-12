@@ -3367,9 +3367,8 @@ def build_server(
         same object back. `default` says whether the config's `default:` names
         this model.
 
-        `config.provider.api_key` is the `${VAR}`/`keyring:` reference, never
-        the resolved key; empty means the file has a literal key that is not
-        shown. A hand-written typo in the entry is refused here rather than
+        `config.provider.api_key` is the `${VAR}` reference, never the
+        resolved key; empty means the file has a literal key that is not shown. A hand-written typo in the entry is refused here rather than
         answered as if it were the truth.
 
         Args:
@@ -3393,8 +3392,8 @@ def build_server(
 
         `config.provider` is shared with the provider's other models: `api`,
         `base_url` and `api_key` belong to the provider, not this model.
-        `api_key` is a `${VAR}`/`keyring:` reference; empty keeps an existing
-        provider's key, and is refused for a new provider.
+        `api_key` is a `${VAR}` reference; empty keeps an existing provider's
+        key, and is refused for a new provider.
 
         The answer is the entry as written — the same `config` shape
         `model_get` gives — plus `created`/`provider_created`, and

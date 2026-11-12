@@ -17,6 +17,7 @@ implementation.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import urlparse
@@ -106,19 +107,27 @@ WORDS = FamilyWords(
 # knows what the proxy is called.
 
 
+#: The two shapes of a credential this tool accepts: a reference, as the config
+#: writes one, or the bare name a model tends to write instead.
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _reference(value: str) -> str:
     """A credential written the way the config writes one: `${VAR}`.
 
     **The name, not the secret**, which is the whole of what makes this tool
     safe to hand a model.  The stored credential is a *variable name* for the
-    same reason; a value that is already a reference (or a `keyring:` URI) is
-    left exactly as given, so a caller that knows the syntax is not
-    second-guessed.
+    same reason; a value that is already a reference is left exactly as given,
+    and a bare name is wrapped.  Anything else is a literal key, and this tool
+    must not write one into the file.
     """
     credential = value.strip()
-    if credential.startswith("${") or credential.startswith("keyring:"):
+    if _REFERENCE.fullmatch(credential):
         return credential
-    return f"${{{credential}}}"
+    if _ENV_NAME.fullmatch(credential):
+        return f"${{{credential}}}"
+    raise ConfigError("api_key must be a `${VAR}` reference — not the secret itself")
 
 
 def _validate_http_url(url: str, what: str) -> str:
@@ -183,19 +192,19 @@ def _unresolved(api_key: str) -> str:
     otherwise fields.
 
     **And "is this still a reference" is not answered here.**
-    `slife2.libs.host.config.unresolved_reference` is where that question is answered, and
-    its docstring names the four places that used to answer it separately and the
-    leak that came of it.  This was one of them: a `keyring:` value returned
-    `""` — nothing to say — where the rule says *unresolved*, so on a host with
-    no `credstore` (the degrade `resolve_secret` names) a
-    `keyring:slife2/github` did not resolve, was left verbatim, was written into
-    the proxy child's `API_KEY` as the credential, and the person was told
-    nothing while the sibling `${VAR}` case returned the name — two halves of
-    one rule disagreeing.
+    `slife2.libs.host.config.unresolved_reference` is where that question is
+    answered, and its docstring names the four places that used to answer it
+    separately and the leak that came of it.  A literal in the file is not a
+    reference, so there is nothing to report: the value is used as it stands.
     """
     if not api_key:
         return ""
-    reference = _reference(api_key)
+    try:
+        reference = _reference(api_key)
+    except ConfigError:
+        # A literal already in the file is not a reference: there is nothing
+        # to report as unresolved, and the value is used as it stands.
+        return ""
     if not unresolved_reference(resolve_secret(reference)):
         return ""
     return reference
@@ -288,9 +297,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         The answer is the canonical entry — `config` has `spec`, `base_url`,
         `api_key`, `args`, `env`, `cwd`, `description` and `enabled` — so
-        `rest_api_set` takes the same object back. `api_key` is the
-        `${VAR}`/`keyring:` reference, never the resolved key; empty means the
-        file has a literal key that is not shown.
+        `rest_api_set` takes the same object back. `api_key` is the `${VAR}`
+        reference, never the resolved key; empty means the file has a literal key
+        that is not shown.
 
         `state` is the link's read-only word, and `operations` or `error` says
         what it answered when it did. `unresolved` names a reference that
@@ -313,8 +322,8 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         Every field is required; a field left out is a schema error, not a
         silent default. Read `rest_api_get`, change what you mean to change, and
-        pass the whole `config` back. `api_key` is a `${VAR}`/`keyring:`
-        reference; empty means no key.
+        pass the whole `config` back. `api_key` is a `${VAR}` reference; empty
+        means no key.
 
         Every endpoint in the OpenAPI document becomes an operation named
         `{name}__{operation}`, so one spec can be hundreds of them. The answer is

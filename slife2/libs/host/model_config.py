@@ -90,7 +90,7 @@ class ProviderConfig(BaseModel):
         description="The endpoint the provider's models are reached at."
     )
     api_key: str = Field(
-        description="A `${VAR}` or `keyring:` reference, as the file writes it. "
+        description="A `${VAR}` reference, as the file writes it. "
         "Empty keeps an existing provider's key; a new provider needs one."
     )
 
@@ -290,13 +290,13 @@ def model_entry(model: ModelConfig) -> dict[str, Any]:
 def show_api_key(value: str) -> str:
     """The key as a model may see it: the reference, or nothing.
 
-    A `${VAR}`/`keyring:` reference is not the secret and is what a full-set
-    has to restate.  A literal written into the file is the operator's secret,
-    so it is shown as `""`; `model_set` treats `""` as "leave the provider's
-    key alone", which is the one field where that is the safe answer.
+    A `${VAR}` reference is not the secret and is what a full-set has to
+    restate.  A literal written into the file is the operator's secret, so it
+    is shown as `""`; `model_set` treats `""` as "leave the provider's key
+    alone", which is the one field where that is the safe answer.
     """
     value = (value or "").strip()
-    if value.startswith("${") or value.startswith("keyring:"):
+    if value.startswith("${"):
         return value
     return ""
 
@@ -311,10 +311,8 @@ def to_reference(value: str) -> str:
     value = (value or "").strip()
     if not value:
         return ""
-    if value.startswith("${") or value.startswith("keyring:"):
+    if value.startswith("${"):
         return value
     if _ENV_NAME.match(value):
         return f"${{{value}}}"
-    raise ValueError(
-        "api_key must be a `${VAR}` or `keyring:` reference — not the secret itself"
-    )
+    raise ValueError("api_key must be a `${VAR}` reference — not the secret itself")

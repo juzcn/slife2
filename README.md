@@ -192,37 +192,26 @@ are `/opt/slife2`, and its runtime directory is
 `/home/slife2/.slife2/runtime`. It is about 3 GB because it contains the
 programs the full configuration names.
 
-The image has no OS keyring, so it keeps its keys in credstore's encrypted file
-inside a volume. Create it once and store every key the configuration names:
+The image has no OS keyring, so its keys are environment variables. The build
+runs the same `scripts/install.sh` as a host install, so its log lists every
+credential the shipped configuration names; write those into an env file and
+pass it with `--env-file` (not `-e KEY=...`, which puts the value in the process
+table). Run one prompt and exit:
 
 ```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# in that shell:
-credstore set-password            # choose the master password
-credstore set DEEPSEEK_API_KEY    # then every line the build log listed
-```
-
-The build runs the same `scripts/install.sh` as a host install, so its log lists
-every `credstore set <KEY>` line the shipped configuration needs. Run one prompt
-and exit — the image asks for the master password, and every `${VAR}` in the
-configuration resolves from the file:
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+docker run --rm -it --env-file slife2.env \
   slife2:local 'Use the shell tool to run pwd and report the output.'
 ```
 
-Or start the agent headless and keep it running (it prompts the same way):
+Or start the agent headless and keep it running:
 
 ```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+docker run --rm -it --env-file slife2.env slife2:local
 ```
 
-Keys are configured in the container's credstore, not on the command line. A
-mounted `slife2.yaml` whose values are literals is the other supported source.
-Mount `/opt/slife2/agents` and `/home/slife2/.slife2` if conversations and logs
+Keys are environment variables, not command-line arguments. A mounted
+`slife2.yaml` whose values are literals is the other supported source. Mount
+`/opt/slife2/agents` and `/home/slife2/.slife2` if conversations and logs
 should outlive the container. See [docker/README.md](docker/README.md) for the
 credential setup, the one-shot prompt, and the container-specific notes.
 
@@ -454,7 +443,7 @@ opens with; an edit reaches the next conversation. The installer seeds it under
 the configuration's rule, writing `AGENTS-default.md` when your copy differs.
 
 `slife2.yaml` is safe to check in. It should contain no secrets; every credential
-is a `${VAR}` or `keyring:` reference resolved at runtime.
+is a `${VAR}` reference resolved at runtime.
 
 ### Sections
 
@@ -485,15 +474,14 @@ data they hold.
 
 ### Secrets
 
-A value may be a literal string; `${VAR}`, resolved through the shell
-environment, then [credstore](https://pypi.org/project/credstore/), then an
-optional literal default (`${VAR:-default}`); or a `keyring:<service>/<key>`
-reference, resolved against the OS keyring.
+A value may be a literal string, used as written; or `${VAR}`, resolved through
+the shell environment, then [credstore](https://pypi.org/project/credstore/)'s
+OS keyring.
 
 **Only credstore-managed secrets are protected from output.** A credential
-slife2 resolves from credstore — a `keyring:` reference, or a `${VAR}` the store
-answers — is shown masked (first four and last four characters when at least as
-many stay hidden, otherwise `***`) in tool results, tool listings, and log lines.
+slife2 resolves from credstore — a `${VAR}` the store answers — is shown masked
+(first four and last four characters when at least as many stay hidden,
+otherwise `***`) in tool results, tool listings, and log lines.
 A value shorter than eight characters is not registered. An environment variable
 or a literal is the operator's own. Keep every secret in credstore: it is the one
 store whose values slife2 masks everywhere.

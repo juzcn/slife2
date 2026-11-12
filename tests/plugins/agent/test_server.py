@@ -2533,7 +2533,7 @@ async def test_images_reach_the_model_as_content_parts(context, hub, cabinet) ->
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={
                     "deepseek-flash": ModelSettings(
                         model="deepseek-flash", input=("text", "image")
@@ -2587,7 +2587,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
             )
         },
@@ -3072,7 +3072,7 @@ async def test_a_model_that_cannot_read_images_is_refused_by_name(context, hub) 
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
             )
         },
@@ -4144,7 +4144,7 @@ def a_second_model():
             "other": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"slow": ModelSettings(model="slow")},
             ),
         },

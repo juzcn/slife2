@@ -1719,12 +1719,10 @@ def test_the_installers_print_install_hints_without_failing() -> None:
         assert phrase in path.read_text(encoding="utf-8"), path.name
 
 
-def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
+def test_secrets_lists_every_reference(tmp_path: Path) -> None:
     """The installer's hint, read off the file rather than resolved.
 
-    A `:-default` is a value the config already supplies, so `${SSH_BINARY:-ssh}`
-    is not a credential; a `keyring:` value is named the way `credstore set`
-    takes it.  The same credential named twice is one line with both places.
+    The same credential named twice is one line with both places.
     """
     (tmp_path / "slife2.yaml").write_text(
         "providers:\n"
@@ -1734,17 +1732,10 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
         "  serper:\n"
         "    env:\n"
         "      SERPER_API_KEY: ${SERPER_API_KEY}\n"
-        "      OPTIONAL: ${OPTIONAL_KEY:-fallback}\n"
         "skills:\n"
         "  search:\n"
         "    env:\n"
-        "      SERPER_API_KEY: ${SERPER_API_KEY}\n"
-        "file-tunnel:\n"
-        "  providers:\n"
-        "    localhost.run:\n"
-        "      binary: ${SSH_BINARY:-ssh}\n"
-        "    ngrok:\n"
-        "      token: keyring:slife2/ngrok\n",
+        "      SERPER_API_KEY: ${SERPER_API_KEY}\n",
         encoding="utf-8",
     )
 
@@ -1762,8 +1753,6 @@ def test_secrets_lists_references_and_skips_defaults(tmp_path: Path) -> None:
         "SERPER_API_KEY\tmcp.serper.env.SERPER_API_KEY, "
         "skills.search.env.SERPER_API_KEY" in lines
     )
-    assert "slife2/ngrok\tfile-tunnel.providers.ngrok.token" in lines
-    assert not any("OPTIONAL_KEY" in line or "SSH_BINARY" in line for line in lines)
 
 
 def test_requirements_refuse_a_source_with_no_shipped_config(

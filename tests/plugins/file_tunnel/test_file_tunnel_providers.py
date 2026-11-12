@@ -317,13 +317,6 @@ def test_an_unresolved_token_is_reported_as_missing(monkeypatch) -> None:
         tunnel.start(9090)
 
 
-def test_an_unresolved_token_still_honours_its_default(monkeypatch) -> None:
-    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
-    assert providers._auth_token({"token": "${NGROK_AUTHTOKEN:-fallback}"}) == (
-        "fallback"
-    )
-
-
 def test_the_environment_is_the_fallback_for_a_bare_entry(monkeypatch) -> None:
     """`ngrok: {}` on a machine that exports the variable reads it from the
     environment."""
