@@ -1,0 +1,14 @@
+HTTP/1.1 429 
+Content-Type: application/json
+Content-Length: 174
+Connection: keep-alive
+Date: Wed, 11 Nov 2026 07:29:18 GMT
+x-amz-apigw-id: GqjkVHJfPHcEFXw=
+x-amzn-RequestId: 28c7e0b1-bf49-4257-8c9f-baf37c830057
+x-amzn-ErrorType: TooManyRequestsException
+X-Cache: Error from cloudfront
+Via: 1.1 873d5aac2a9ae7dfcc69f53815c929c4.cloudfront.net (CloudFront)
+X-Amz-Cf-Pop: HKG61-P1
+X-Amz-Cf-Id: 1giV75FXRTuSdWgXocr39j2O2DRZfNzkRpEsUaa-80cOMz-h262Haw==
+
+{"message": "Too Many Requests. Please wait and try again or apply for a key for higher rate limits. https://www.semanticscholar.org/product/api#api-key-form", "code": "429"}

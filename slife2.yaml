@@ -305,8 +305,16 @@ mcp:
       - '@aryanbv/pdf-toolkit-mcp'
     description: 'PDF Toolkit MCP — 22-tool PDF suite: create PDFs from Markdown/structured data, render pages as images (for vision models to read scans), fill forms and extract values, split/merge/rotate/crop pages, add text/watermarks/annotations, extract and re-embed attachments.'
   arxiv:
-    url: https://arxiv.mcp.brunosan.de/mcp
-    description: arXiv paper search, download and reading for AI/ML/NLP/CV/robotics — free, no API key, uses the public arXiv API.
+    command: uvx
+    args:
+      - --python
+      - '3.11'
+      - --from
+      - arxiv-mcp-server[pdf]
+      - arxiv-mcp-server
+    env:
+      ARXIV_STORAGE_PATH: C:/Users/juz_c/.arxiv-mcp-server/papers
+    description: arXiv 论文检索与全文阅读 —— blazickjp/arxiv-mcp-server（社区最权威，~3.2k stars，Apache-2.0，最近更新 2026-10）。本地 stdio，直接走 arXiv 公开 API，无需任何 key。14 个工具：search_papers / get_abstract / download_paper / read_paper / list_papers、LaTeX 原文分段读取、BibTeX、主题 watch。论文缓存在 ARXIV_STORAGE_PATH。注意：包只在 PyPI，不要用 npm 同名包。
   crossref:
     command: npx
     args:
