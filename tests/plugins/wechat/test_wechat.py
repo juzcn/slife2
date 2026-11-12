@@ -49,7 +49,8 @@ pytestmark = pytest.mark.unit
 
 #: Less than a real poll and less than a real QR poll.  Every wait in these
 #: tests belongs to a background loop, and this is what the loops are hurried
-#: with — through the module constant, which is where each loop reads it.
+#: with — through the registry value (or the retry policy), which is where each
+#: loop reads it.
 QUICK = 0.01
 
 
@@ -216,7 +217,8 @@ def rig(
     bridge: Bridge | None = None,
 ) -> Rig:
     """A plugin over a fresh bridge, with every loop hurried along."""
-    monkeypatch.setattr(_T.timeouts.pacing, "wechat_poll", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing.wechat_retry, "base", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing.wechat_retry, "cap", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "qr_poll", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "typing_refresh", QUICK)
     made = Bridge() if bridge is None else bridge

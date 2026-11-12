@@ -2440,6 +2440,10 @@ Consumers read values at call time, never into a module constant or a def-time
 default, so a test can patch one. `validate()` asserts the relations that fail
 silently, such as an outer bound shorter than an inner one, and fails at import.
 
+A retry policy is one `Retry` in `pacing`, driven by one `Backoff`: the pause
+grows from `base` to `cap`, and a run of failures is cleared by exactly one
+event — an attempt that did not fail. Nothing else resets a run.
+
 A gate (`tests/test_no_magic_timeouts.py`) rejects a time-style literal anywhere
 in `slife2/` unless it is in the registry or carries a `# timeouts:` note. In
 `tests/` only two rules apply: a module-level constant with a time-style name,
@@ -2529,23 +2533,20 @@ the field arrives as a test that fails without the fix.
    name-derived id, which is not unique across two overlapping runs of one task.
    The poll and `schedule_run_now` settle a finished run before starting another;
    *an id minted per run* is still the deeper fix.
-2. **Where a retry policy lives.** Two channels keep their own backoff and reset
-   it on different events. *Resolution would require:* one policy in
-   `helpers/timeouts.py` and one reason to reset.
-3. **A model call that ends the turn with an empty answer.** The wire is checked
+2. **A model call that ends the turn with an empty answer.** The wire is checked
    at the hop, but a provider that legitimately answers with nothing has the same
    shape. *Resolution would require:* deciding whether an empty answer is a
    verdict or a failure, and stating it once.
-4. **Correlation across processes.** A log line carries `agent/subagent`, and a
+3. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
-5. **A daemon from another build answers the identity check.** The server record
+4. **A daemon from another build answers the identity check.** The server record
    carries the build's `version` and the handshake carries the server's, but
    `identifies` compares only the MCP name. A daemon left running by an older
    build is therefore reused, and every turn fails on the first tool whose
    signature moved. *Resolution would require:* comparing the build token on
    reuse, and refusing with `slife2 down` — or replacing the daemon.
-6. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
+5. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
    `tui/client.py` import channel names, markers and hand-over words from the
    a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
    the tui server; `plugins/schedule/server.py` imports the agent-task server;
@@ -2555,28 +2556,28 @@ the field arrives as a test that fails without the fix.
    at import rather than at the contract. *Resolution would require:* the shared
    vocabulary — channels, markers, tool and state names, provider names — in
    `libs/`, imported by both sides.
-7. **The turn pipeline is built twice.** The agent server and the agent-task
+6. **The turn pipeline is built twice.** The agent server and the agent-task
    server each own the same plumbing: model-client caches, the context and hub
    connections, restore, rebuild, trim, and the loop's own construction. They
    differ at the edges — a store, an inbox, a window — but the shared middle is
    maintained twice, so a change to the rebuild or the trim reaches one server
    and not the other. *Resolution would require:* one turn runtime in `libs/`,
    with the two servers supplying their own store, record and delivery policy.
-8. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+7. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
    and four scenarios: a turn, a follow-up, a tool call and a dump. The
    unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
    subagent — are proven only in the fast lane, where the process boundary and
    the real transport are absent. *Resolution would require:* one scenario per
    channel across the real stack, with the external edge (iLink, broker) stubbed
    at its HTTP or MQTT seam.
-9. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+8. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
     host, and every plugin is unauthenticated Streamable HTTP. Binding one to
     `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
     `model_set` — arbitrary code and configuration edits — with no credential.
     The design's "loopback is the boundary" is a default, not a check.
     *Resolution would require:* refusing a non-loopback host at load, or an
     explicit opt-in that states the exposure and its authentication.
-10. **The tunnel publishes its control surface.** The file tunnel forwards the
+9. **The tunnel publishes its control surface.** The file tunnel forwards the
     whole port, so a stranger who learns the hostname can reach the MCP endpoint
     and call `expose_local_image` — or any other tool — not only
     `/share/{token}`. §12.1 states the gap; the exposed surface is wider than

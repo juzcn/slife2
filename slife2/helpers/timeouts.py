@@ -15,6 +15,13 @@ number and who owns it" beats two:
   heartbeat, a backoff step, a session lifetime.  A cadence never bounds an await
   and a budget never sets a cadence; the role keeps that visible.
 
+**A retry policy is one shape too.**  :class:`Retry` is the schedule a run of
+failed attempts earns; :class:`Backoff` is one loop's run under it.  The rule
+both channels share is :meth:`Backoff.succeeded`: **an attempt that did not
+fail is the only reset** — not a reconnect, not a new message, not a clock.
+Two private backoffs that reset on different events pace one failing loop
+twice as fast as the other and hide how long either has been failing.
+
 CONVENTION (enforced by ``tests/test_no_magic_timeouts.py``):
 
 - consumers do **call-time lookups** — ``_T.timeouts.<role>.<key>`` — and NEVER
@@ -38,11 +45,72 @@ parameter, and otherwise none (``slife2.libs.turn.loop``).
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field, fields
 
 
 class TimeoutConfigError(ValueError):
     """A registry value violates a type / non-negativity / invariant rule."""
+
+
+@dataclass
+class Retry:
+    """One retry policy: the pause a run of failed attempts earns.
+
+    ``base`` is the pause before the first retry, ``factor`` grows it per
+    consecutive failure, and ``cap`` is the ceiling; ``jitter`` is the fraction
+    of the step that may be added or subtracted (0.2 = ±20 %).
+
+    The numbers are registry values like every other cadence — a policy is the
+    *shape* that keeps two channels' schedules comparable, not a second seat for
+    either one's values.
+    """
+
+    base: float
+    factor: float
+    cap: float
+    jitter: float = 0.0
+
+    def delay(self, failures: int) -> float:
+        """The pause after *failures* consecutive failed attempts.
+
+        ``failures`` counts from 1: the first retry waits ``base``, the second
+        ``base * factor``, and so on up to ``cap``.  A count of 0 is not "no
+        failures yet" at a caller that means to retry — it is a caller that did
+        not read this contract, and it fails rather than waiting a fraction of
+        the base step that nobody chose.
+        """
+        if failures < 1:
+            raise ValueError("failures counts consecutive failed attempts from 1")
+        step = min(self.base * self.factor ** (failures - 1), self.cap)
+        if self.jitter:
+            step += step * self.jitter * (2 * random.random() - 1)
+        return step
+
+
+class Backoff:
+    """One loop's run of failures under a :class:`Retry` policy.
+
+    **An attempt that did not fail is the only thing that resets the run.**  Not
+    a reconnect, not a new message, not a clock: a run cleared by anything else
+    paces a failing loop at its base cadence again and makes a long failure look
+    like a fresh one.  So an attempt has exactly two answers —
+    :meth:`failed` (counter, pause) and :meth:`succeeded` (clear) — and their
+    effect on the schedule is stated here, once, for every caller.
+    """
+
+    def __init__(self, policy: Retry) -> None:
+        self.policy = policy
+        self.failures = 0
+
+    def failed(self) -> float:
+        """Count one failed attempt and answer the pause before the next."""
+        self.failures += 1
+        return self.policy.delay(self.failures)
+
+    def succeeded(self) -> None:
+        """Clear the run — the attempt this loop retries has succeeded."""
+        self.failures = 0
 
 
 # ── Role dataclasses — the values themselves (single source of truth) ──
@@ -268,10 +336,15 @@ class Pacing:
     #: The probe's poll of an agent task's state, and then of the conversation
     #: the task's answer is delivered to.
     probe_poll: float = 0.5
-    #: Between polls of the WeChat backend, and how far that poll's backoff
-    #: grows when the backend keeps failing.
-    wechat_poll: float = 3.0
-    wechat_backoff_max: float = 30.0
+    #: The WeChat poll's retry policy.  `base` is the pause between polls — the
+    #: call itself blocks until the bridge has something to say, so it is the
+    #: pause *after* an answer, not the latency — and a link that keeps failing
+    #: grows by `factor` to `cap`: it must not be re-polled every three seconds
+    #: for ever.  A poll that answers clears the run, so a recovered link is
+    #: back on the base cadence at once.
+    wechat_retry: Retry = field(
+        default_factory=lambda: Retry(base=3.0, factor=1.5, cap=30.0)
+    )
     #: How long one WeChat session may live before it is logged in again.
     wechat_session_max_age: float = 82800.0  # 23 h
     #: The QR status check while a login waits for a scan.
@@ -313,6 +386,14 @@ class Pacing:
     #: poll.
     broker_poll: float = 0.1
     mesh_retry_delay: float = 1.0
+    #: The a2a requester ladder's retry policy — the profile's standard
+    #: defaults: 1 s, 2 s, 4 s between attempts, ±20 % jitter.  The attempt
+    #: count is the profile's own (`plugins/a2a/mesh.py`), and a first reply
+    #: ends the ladder rather than resetting it: every rung it runs was earned
+    #: by a failed attempt.
+    requester_retry: Retry = field(
+        default_factory=lambda: Retry(base=1.0, factor=2.0, cap=4.0, jitter=0.2)
+    )
     #: How long an agent may stay `online` after its window's `join` ended.  A
     #: join ends for two reasons — the process is exiting, or the stream dropped
     #: and the window retries it — and only the first is a departure.  Longer
@@ -358,6 +439,30 @@ def _is_number(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _retry_errors(path: str, policy: Retry) -> list[str]:
+    """The violations in one retry policy, named by their registry path."""
+
+    def usable(v: float | int) -> bool:
+        return _is_number(v) and math.isfinite(v) and v > 0
+
+    errs: list[str] = []
+    for name in ("base", "factor", "cap"):
+        value = getattr(policy, name)
+        if not usable(value):
+            errs.append(f"{path}.{name} must be finite and > 0, got {value!r}")
+    jitter = policy.jitter
+    if not (_is_number(jitter) and math.isfinite(jitter) and 0.0 <= jitter < 1.0):
+        errs.append(f"{path}.jitter must be in [0, 1), got {jitter!r}")
+    if usable(policy.base) and usable(policy.factor) and usable(policy.cap):
+        if policy.factor < 1.0:
+            errs.append(
+                f"{path}.factor must be >= 1 (a backoff that cannot grow is not one)"
+            )
+        if policy.cap < policy.base:
+            errs.append(f"{path}.cap must be >= {path}.base")
+    return errs
+
+
 def validate(ts: Timeouts) -> list[str]:
     """Return a list of human-readable violations (empty when valid).
 
@@ -382,6 +487,9 @@ def validate(ts: Timeouts) -> list[str]:
     ):
         for f in fields(obj):
             v = getattr(obj, f.name)
+            if isinstance(v, Retry):
+                errs.extend(_retry_errors(f"timeouts.{role}.{f.name}", v))
+                continue
             if f.name == "retries":
                 if not (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
                     errs.append(
@@ -432,11 +540,6 @@ def validate(ts: Timeouts) -> list[str]:
         errs.append("invariant: transport.media_request <= transport.media_deadline")
     if ts.pacing.typing_max_lifetime < ts.pacing.typing_refresh:
         errs.append("invariant: pacing.typing_max_lifetime >= pacing.typing_refresh")
-    if ts.pacing.wechat_backoff_max < ts.pacing.wechat_poll:
-        errs.append(
-            "invariant: pacing.wechat_backoff_max >= pacing.wechat_poll (a "
-            "backoff that cannot grow is not one)"
-        )
     return errs
 
 

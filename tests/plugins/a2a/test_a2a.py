@@ -87,7 +87,6 @@ from slife2.plugins.a2a.mesh import (
     AgentCard,
     AgentName,
     FIFOCache,
-    _backoff_delay,
     _card_instance,
     _decode_payload,
     _NotConnected,
@@ -178,6 +177,15 @@ def a2a_message_type(text: str, net: Net) -> str | None:
         return None
     mtype = payload.get("type")
     return mtype if mtype in A2A_TYPES else None
+
+
+def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the requester ladder without its pauses — the schedule has its own test."""
+    monkeypatch.setattr(
+        _T.timeouts.pacing,
+        "requester_retry",
+        _T.Retry(base=0.0, factor=1.0, cap=0.0),
+    )
 
 
 # ── the marker: one envelope, written and read ──────────────────────────────
@@ -455,9 +463,10 @@ async def test_a_terminal_reply_outliving_both_caches_is_still_delivered() -> No
 
 def test_the_retry_ladder_is_the_profiles_own_numbers() -> None:
     """1000/2000/4000 ms ± 20 %, and the last rung is the one that repeats."""
-    for attempt in range(6):
-        delay = _backoff_delay(attempt)
-        base = [1.0, 2.0, 4.0][min(attempt, 2)]
+    policy = _T.timeouts.pacing.requester_retry
+    for failures in range(1, 7):
+        delay = policy.delay(failures)
+        base = [1.0, 2.0, 4.0][min(failures - 1, 2)]
         assert base * 0.8 <= delay <= base * 1.2
 
 
@@ -1365,7 +1374,7 @@ async def test_a_publish_that_may_have_left_hands_the_id_over(
 
     monkeypatch.setattr(mesh, "_publish_props", publish)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+    quick_retry(monkeypatch)
 
     task_id = await mesh.send_message(PEER, "hi")
 
@@ -1400,7 +1409,7 @@ async def test_a_retry_cannot_overtake_the_first_publish(
 
     monkeypatch.setattr(mesh, "_publish_props", publish)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.001)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+    quick_retry(monkeypatch)
 
     sending = asyncio.create_task(mesh.send_message(PEER, "hi"))
     await asyncio.sleep(0.05)
@@ -1542,7 +1551,7 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     monkeypatch.setattr(mesh, "_publish_props", lands)
     monkeypatch.setattr(mesh, "_publish_attempt", refuse_the_first)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+    quick_retry(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="slife2.plugins.a2a.mesh"):
         await mesh._deliver(send)
@@ -1579,7 +1588,7 @@ async def test_a_publish_that_never_left_still_spends_an_attempt(
     mesh.on_task_completion = lambda *args: done.append(args)
     monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_drops)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+    quick_retry(monkeypatch)
 
     await mesh._deliver(send)
 

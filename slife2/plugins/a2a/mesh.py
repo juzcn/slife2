@@ -70,7 +70,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import re
 import time
 import uuid
@@ -141,13 +140,13 @@ _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # A2A-over-MQTT requester retry profile (the profile's standard defaults,
 # implemented by the SDK's Requester — mirrored here for the push model):
-# first reply within 15 s, retry with exponential backoff 1000/2000/4000 ms
-# ± 20 % jitter (a list — the SDK's shape, kept verbatim), at most 3 attempts.
-# Retries reuse the same Task.id + context_id (same payload) and generate a
-# fresh Correlation Data.
+# first reply within 15 s, at most 3 attempts, with the pause between them
+# 1000/2000/4000 ms ± 20 % jitter.  The schedule itself is one retry policy in
+# the registry (`timeouts.pacing.requester_retry`); what stays here is the
+# profile's attempt count, a wire shape rather than a cadence.  Retries reuse
+# the same Task.id + context_id (same payload) and generate a fresh
+# Correlation Data.
 _MAX_ATTEMPTS = 3
-_BACKOFF_BASE_S = [1.0, 2.0, 4.0]
-_JITTER_FACTOR = 0.2
 _MAX_TRACKED_SENDS = 500  # delivery-tracking cap (mirrors the task store)
 #: Cap on correlation→task routing entries.  Every correlation a task was
 #: published under stays routed until its TERMINAL reply lands (the peer may
@@ -277,13 +276,6 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     return None
 
 
-def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff with ±20 % jitter for retry attempt (0-indexed)."""
-    base = _BACKOFF_BASE_S[min(attempt, len(_BACKOFF_BASE_S) - 1)]
-    jitter = base * _JITTER_FACTOR * (2 * random.random() - 1)
-    return base + jitter
-
-
 def _decode_payload(msg) -> dict | None:
     """Decode an MQTT payload to JSON; ``None`` when there is nothing to read.
 
@@ -345,7 +337,6 @@ class _OutboundSend:
         "updated",
         "watchdog",
         "attempts",
-        "unsent",
         "delivered",
         "first_landed",
         "loops",
@@ -384,11 +375,6 @@ class _OutboundSend:
         #: One GetTask after a stream stalls past `deliver.stream_idle`.
         self.watchdog: asyncio.Task | None = None
         self.attempts = 1
-        #: How many times in a row the publish has *failed to leave* — the
-        #: attempts the ladder must not count (`_deliver`).  Kept only so the
-        #: retry backs off instead of hammering a dropped link; cleared by the
-        #: first publish that lands.
-        self.unsent = 0
         self.delivered = False
         #: Set by `send_message` once its first publish has returned; `_deliver`
         #: waits on it before its first rung.  The ladder exists (and is in
@@ -1699,12 +1685,12 @@ class A2AMesh:
         retry-eligible conditions include "publish not accepted by the client
         or broker path", counted until ``max_attempts``.  ``_publish_props``
         raises exactly that way whenever the outbound client is mid-reconnect
-        (``_run_outbound`` clears ``_connected`` in its ``finally``).
-        ``unsent`` is only the delay's: it makes repeated failures back off
-        instead of spinning, while ``attempts`` still spends the profile's
-        three-try budget.  A mesh that is only being rebuilt is not a new
-        ladder: the teardown `connect` makes is reviving, and the send rides
-        over it.
+        (``_run_outbound`` clears ``_connected`` in its ``finally``).  A
+        publish that landed but brought no first reply is a failed attempt of
+        the same kind: both earn the next step of `pacing.requester_retry`, and
+        neither resets the run — the success the ladder waits for is the reply,
+        which ends it.  A mesh that is only being rebuilt is not a new ladder:
+        the teardown `connect` makes is reviving, and the send rides over it.
 
         **The ladder waits for the first publish.**  ``after_first`` is how
         `send_message` starts it: its task is created before the send's own
@@ -1723,6 +1709,7 @@ class A2AMesh:
                 await asyncio.sleep(_T.timeouts.deliver.reply_first)
             except asyncio.CancelledError:
                 raise
+            retry = _T.Backoff(_T.timeouts.pacing.requester_retry)
             while not (self._ladder_over or send.delivered):
                 if send.attempts >= _MAX_ATTEMPTS:
                     if send.prev_interrupt[0]:
@@ -1751,16 +1738,14 @@ class A2AMesh:
                         "task" if send.record else "message",
                     )
                     return
-                await asyncio.sleep(_backoff_delay(send.attempts - 1 + send.unsent))
+                await asyncio.sleep(retry.failed())
                 if self._ladder_over or send.delivered:
                     return
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex)
                 except Exception as e:  # noqa: BLE001 - a failed publish is retried, not raised: every client error means the same thing here, and the attempt is still spent
                     # The profile counts a publish the client or broker did
-                    # not accept as a retry-eligible attempt.  `unsent` only
-                    # paces the delay; the budget moves.
-                    send.unsent += 1
+                    # not accept as a retry-eligible attempt.
                     send.attempts += 1
                     logger.warning(
                         "a2a_delivery_retry_failed task=%s attempt=%d err=%s",
@@ -1770,7 +1755,6 @@ class A2AMesh:
                     )
                     continue  # the link may be back before the next attempt
                 send.attempts += 1
-                send.unsent = 0
                 logger.info(
                     "a2a_delivery_retry task=%s attempt=%d",
                     send.task_id,
@@ -1874,7 +1858,6 @@ class A2AMesh:
         send.interrupt = ""
         send.question = ""
         send.attempts = 1
-        send.unsent = 0
         send.delivered = False
         send.first_landed = asyncio.Event()
         send.updated = time.monotonic()

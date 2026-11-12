@@ -103,15 +103,10 @@ INSTRUCTIONS = (
 )
 
 # ── Cadence ─────────────────────────────────────────────────────────────
-# A number is read from the global timeouts registry (`pacing.wechat_*`) at
-# call time, so a test can patch it.  Each value was arrived at against the live
-# bridge, and nothing here changes the bridge.
+# The poll's schedule is `pacing.wechat_retry` in the global timeouts registry,
+# read at call time so a test can patch it.  Each value was arrived at against
+# the live bridge, and nothing here changes the bridge.
 
-#: How long to wait between polls.  The call itself blocks until the bridge has
-#: something to say, so this is the pause *after* an answer, not the latency.
-#: The ceiling a failing link backs off to, and the factor it grows by.  A link
-#: that is down must not be re-polled every three seconds forever.
-BACKOFF_FACTOR = 1.5
 #: How long a message that has already been seen is read as the bridge
 #: re-serving it rather than as somebody typing the same thing twice.
 #: How many messages one person's burst may have in flight before this process
@@ -860,11 +855,12 @@ class Wechat:
         raising, so what is left here is the cadence and the queue.
         """
         client = session.client
-        backoff = _T.timeouts.pacing.wechat_poll
+        policy = _T.timeouts.pacing.wechat_retry
+        backoff = _T.Backoff(policy)
         logger.info(
             "wechat %s: polling every %.1fs",
             session.agent,
-            _T.timeouts.pacing.wechat_poll,
+            policy.base,
         )
         while client.is_logged_in and not client.auth_failed:
             # **First, before the poll blocks on the bridge**: this is where a
@@ -884,12 +880,13 @@ class Wechat:
             except Exception as exc:  # noqa: BLE001 — the loop's job is to keep going
                 client.last_error = str(exc)
                 logger.warning("wechat %s: poll failed: %s", session.agent, exc)
-            backoff = (
-                min(backoff * BACKOFF_FACTOR, _T.timeouts.pacing.wechat_backoff_max)
-                if client.last_error
-                else _T.timeouts.pacing.wechat_poll
-            )
-            await asyncio.sleep(backoff)
+            if client.last_error:
+                await asyncio.sleep(backoff.failed())
+            else:
+                # The attempt succeeded, which is the one event that clears a
+                # run; the pause is the bridge's own cadence again.
+                backoff.succeeded()
+                await asyncio.sleep(policy.base)
         # The loop ended because the link did — a token the far end refused, or
         # an account that expired — and a link that dies on its own is the one
         # transition nobody asked about, so it is said here.  A *deliberate* end

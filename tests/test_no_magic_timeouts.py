@@ -67,7 +67,6 @@ EXEMPT = {"slife2/helpers/timeouts.py", "tests/test_no_magic_timeouts.py"}
 #: that the value is not a time budget OR a cadence — a count, a status code, a
 #: profile shape — and the comment says which.
 ALLOWLIST: dict[str, frozenset[str]] = {
-    "slife2/plugins/wechat/server.py": frozenset({"BACKOFF_FACTOR"}),
     "slife2/libs/host/runtime.py": frozenset({"WAIT_TIMEOUT"}),
     "slife2/libs/store/db.py": frozenset({"MAX_AGENT_NAME"}),
 }
