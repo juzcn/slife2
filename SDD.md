@@ -401,8 +401,11 @@ An entry has one `state` field, read from the file before the link is consulted.
 A switched-off entry is `off`, not the `idle` of a connection nobody started. An
 entry that answered with no tools is `ready` with zero tools; it is not silent.
 The vocabulary matches the hub's `servers()` answer. A credential that did not
-resolve is refused before use; `libs/host/config.py:unresolved_reference` is the
-single reader of "this value is still a reference".
+resolve never travels: a provider or media call refuses before use, while a tool
+server's `env:`/`headers:` entry still holding its reference is **omitted** and
+warned about, so the child's own missing-key policy decides — `tavily-mcp` runs
+keyless, `serper` refuses in its own words. `libs/host/config.py:unresolved_reference`
+is the single reader of "this value is still a reference".
 
 ### 3.5 Plugin registry
 
@@ -2184,10 +2187,12 @@ operator's; protecting every secret was attempted, and the variety of shapes mad
 it a maintenance burden.
 
 Resolution is lazy: a process nobody calls never touches the keyring. An
-unresolved reference is left verbatim, so the failure lands where the name can be
-stated. `config.unresolved_reference` is the single reader of "this is still a
-reference"; a reference MUST NOT travel as the secret. A keyring that is
-installed and refuses is an error, not "not found".
+unresolved reference is left verbatim, and the consumer decides: a provider or
+media call refuses before use; a tool server's `env:`/`headers:` entry is left
+out of the connection with a warning, so an absent variable reaches a child that
+knows how to handle one. `config.unresolved_reference` is the single reader of
+"this is still a reference"; a reference MUST NOT travel as the secret. A
+keyring that is installed and refuses is an error, not "not found".
 
 ### 11.3 Data directory
 

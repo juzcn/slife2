@@ -1269,7 +1269,7 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
 
 
 def test_a_tool_servers_reference_is_not_resolved_by_the_load(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Every server loads this config; one makes the connection.
 
@@ -1277,6 +1277,7 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     store once per reference — on WSL that is a `powershell.exe` per lookup, and
     the whole stack paid it for keys only the hub uses.
     """
+    caplog.set_level("WARNING")
     calls: list[str] = []
     monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
     monkeypatch.setattr(
@@ -1286,8 +1287,31 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     config = load(write(tmp_path, MCP))
 
     assert calls == []
-    assert config.mcp["serper"].resolved_env()["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY}"
+    assert "SERPER_API_KEY" not in config.mcp["serper"].resolved_env(), (
+        "an unresolved reference is left out, so the server sees an absent key"
+    )
     assert calls == ["SLIFE2_TEST_KEY"]
+    assert "SERPER_API_KEY" in caplog.text, (
+        "the omission is warned about rather than raised"
+    )
+
+
+def test_a_literal_tool_setting_is_passed_through(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only references are withheld; a literal is the operator's value."""
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
+    text = (
+        "mcp:\n"
+        "  one:\n"
+        "    command: npx\n"
+        "    env:\n"
+        "      MODE: fast\n"
+        "      TOKEN: ${SLIFE2_TEST_KEY}\n"
+    )
+    server = load(write(tmp_path, text)).mcp["one"]
+    assert server.resolved_env() == {"MODE": "fast"}
 
 
 def test_a_tunnel_option_is_not_resolved_by_the_load(
@@ -1345,7 +1369,10 @@ def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(
     env = server.resolved_env()
     assert env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
     assert env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
-    assert env["API_KEY"] == "${SLIFE2_TEST_KEY}"
+    assert "API_KEY" not in env, (
+        "an unresolved reference is left out; the proxy runs without it rather "
+        "than sending the reference as the key"
+    )
 
 
 def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:

@@ -1418,9 +1418,11 @@ class ToolServerSettings:
     `env` and `headers` are where a secret lives, and both go through
     :func:`defer_secret`: a ``${VAR}`` is kept as written until
     :meth:`resolved_env` or :meth:`resolved_headers` is called where the
-    connection is made.  Nothing else here is secret: a `command` is a program
-    name and an `args` list is on the command line of a process anyone can
-    inspect.
+    connection is made.  An entry still holding its reference at that point is
+    **omitted and warned about**, never handed on: each child has its own
+    missing-key policy, and the reference text would read as a key to it.
+    Nothing else here is secret: a `command` is a program name and an `args`
+    list is on the command line of a process anyone can inspect.
 
     Not frozen-by-accident: this is read-only configuration, and the hub keeps
     its *state* — whether it is connected, what it last listed — in its own
@@ -1491,12 +1493,52 @@ class ToolServerSettings:
         Called where the connection is made (`slife2.clients.gateway.mcp_config`),
         never at load: every server in the stack loads this config, and only
         the process that starts this child needs its environment.
+
+        **An entry that is still a reference is left out, not passed on.**  A
+        child decides for itself what a missing key means — `tavily-mcp` runs
+        keyless when `TAVILY_API_KEY` is absent, while `serper` and
+        `deepseek-websearch` refuse to start in their own words.  The literal
+        ``"${TAVILY_API_KEY}"`` is truthy, so passing it silently defeats both:
+        the child believes it has a key and sends the reference as one.  An
+        absent variable is the answer each of them already knows how to read,
+        and the omission is warned about with the name rather than raised.
         """
-        return {key: resolve_deferred(value) for key, value in self.env.items()}
+        found: dict[str, str] = {}
+        for key, value in self.env.items():
+            one = resolve_deferred(value)
+            if reference := unresolved_reference(one):
+                logger.warning(
+                    "%s: %s is still %s — left out of the environment, so the "
+                    "server starts without it",
+                    self.name,
+                    key,
+                    reference,
+                )
+                continue
+            found[key] = one
+        return found
 
     def resolved_headers(self) -> dict[str, str]:
-        """The headers to send, resolved for :meth:`resolved_env`'s reason."""
-        return {key: resolve_deferred(value) for key, value in self.headers.items()}
+        """The headers to send, resolved for :meth:`resolved_env`'s reason.
+
+        An unresolved header is omitted too: asking the endpoint without the
+        credential is the honest "not configured" request, and the reference
+        text would be sent as the credential if it stayed in.
+        """
+        found: dict[str, str] = {}
+        for key, value in self.headers.items():
+            one = resolve_deferred(value)
+            if reference := unresolved_reference(one):
+                logger.warning(
+                    "%s: %s is still %s — left out of the headers, so the "
+                    "server is asked without it",
+                    self.name,
+                    key,
+                    reference,
+                )
+                continue
+            found[key] = one
+        return found
 
 
 #: How many function tools the model's list may hold before the least recently
