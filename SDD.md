@@ -2525,6 +2525,58 @@ the field arrives as a test that fails without the fix.
 4. **Correlation across processes.** A log line carries `agent/subagent`, and a
    turn line carries the turn id, but the id is not sent on the model or context
    hops. *Resolution would require:* the turn id in every hop's `_meta`.
+5. **A daemon from another build answers the identity check.** The server record
+   carries the build's `version` and the handshake carries the server's, but
+   `identifies` compares only the MCP name. A daemon left running by an older
+   build is therefore reused, and every turn fails on the first tool whose
+   signature moved. *Resolution would require:* comparing the build token on
+   reuse, and refusing with `slife2 down` — or replacing the daemon.
+6. **A server module is the vocabulary of other layers.** `tui/widgets.py` and
+   `tui/client.py` import channel names, markers and hand-over words from the
+   a2a, agent-task, wechat and tui servers; `libs/harness/handover.py` imports
+   the tui server; `plugins/schedule/server.py` imports the agent-task server;
+   `libs/host/config.py` imports the file-tunnel providers for their names. The
+   terminal and the agent loop therefore load FastMCP, MQTT and tunnel
+   dependencies they never use, and a rename inside a server breaks its clients
+   at import rather than at the contract. *Resolution would require:* the shared
+   vocabulary — channels, markers, tool and state names, provider names — in
+   `libs/`, imported by both sides.
+7. **The turn pipeline is built twice.** The agent server and the agent-task
+   server each own the same plumbing: model-client caches, the context and hub
+   connections, restore, rebuild, trim, and the loop's own construction. They
+   differ at the edges — a store, an inbox, a window — but the shared middle is
+   maintained twice, so a change to the rebuild or the trim reaches one server
+   and not the other. *Resolution would require:* one turn runtime in `libs/`,
+   with the two servers supplying their own store, record and delivery policy.
+8. **The end-to-end lane proves one happy path.** `tests/e2e/` holds one module
+   and four scenarios: a turn, a follow-up, a tool call and a dump. The
+   unattended paths — WeChat inbound, an A2A task, a scheduled fire, a watched
+   subagent — are proven only in the fast lane, where the process boundary and
+   the real transport are absent. *Resolution would require:* one scenario per
+   channel across the real stack, with the external edge (iLink, broker) stubbed
+   at its HTTP or MQTT seam.
+9. **The sibling searches do not share their spelling.** `tool_search` and
+   `cabinet_search` take `keywords: list[str]` and `sentences`; `turn_search`
+   takes `query: str` and `sentences`. Their answers are three shapes —
+   `{"results": …, "best": …, "confidence": …}`,
+   `{"results": …, "browsed": …}` and `{"entries": …, "limit": …}` — so a model
+   that has learned one search has to relearn the other two.
+   *Resolution would require:* one input vocabulary and one answer envelope for
+   the three searches, or a stated reason for the exception.
+10. **A server may be bound beyond loopback.** `servers.<name>.host` accepts any
+    host, and every plugin is unauthenticated Streamable HTTP. Binding one to
+    `0.0.0.0` therefore lets the network call `job_set`, `mcp_set` and
+    `model_set` — arbitrary code and configuration edits — with no credential.
+    The design's "loopback is the boundary" is a default, not a check.
+    *Resolution would require:* refusing a non-loopback host at load, or an
+    explicit opt-in that states the exposure and its authentication.
+11. **The tunnel publishes its control surface.** The file tunnel forwards the
+    whole port, so a stranger who learns the hostname can reach the MCP endpoint
+    and call `expose_local_image` — or any other tool — not only
+    `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
+    the one file the operator meant to share. *Resolution would require:* the
+    tunnel serving only the share route, or an authorization token on the MCP
+    endpoint.
 
 ### 14.2 Deferred capabilities
 
@@ -2535,7 +2587,6 @@ The following are not implemented in this version:
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
-| The pass behind the context ceiling | The selection is bounded by construction. | A very large turn can exceed the ceiling until the next selection. |
 | A cap on total agent-task work | `max_running` bounds concurrency; a rate or depth is the missing number. | Total work over time is unbounded. |
 | A cap on the number of conversations | The inbox is capped; the number of loops is not. | A client can create conversations without a machine-wide limit. |
 | A visible agent-task progress line | The four tools are the model's; the window has no line for a running task. | A person's only lever is to ask the model. |
@@ -2544,13 +2595,32 @@ The following are not implemented in this version:
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
 | Background work inside an agent task | A task runs one turn and has no second turn for a result. | `_async` is refused with an explanation. |
 | A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
-| The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
 | A cross-encoder rerank for the catalogue and cabinet searches | The context recall is the one whose bad candidate persists into every later turn; both searches are one-shot reads the model can repeat, and their pages order words-first on purpose. | Both use RRF and keep that page order; the cross-encoder (`rerank_model`) is wired to the context recall only. |
 | A policy that forces approval | The model-driven `_approve` exists; a named list does not. | `skill_set` and `mcp_set` rely on model judgment. |
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
 | A bound on tool-call arguments | Arguments are the model's own words; shortening them is a different problem. | A model can write an unbounded argument into the conversation. |
+
+### 14.3 Candidate capabilities
+
+The following are not scheduled. Each is a capability a mature agent harness
+carries, and the row says what it would add and what the system does without it.
+The order is a suggested priority.
+
+| Candidate | What it would add | Why it is worth doing |
+|---|---|---|
+| A question the person answers | An `ask_user` tool, and `_approve` routed to every channel that has a person: the window, WeChat, a peer. | Only the TUI can answer today; a WeChat or peer turn that asks is granted silently. Human-in-the-loop is the difference between an agent that checks a destructive step and one that performs it. |
+| WeChat media | Inbound image, voice note and file become an attachment, a transcription or a cabinet document; an outbound reply can carry an image or a file. | The bridge is text-only in both directions. The media server already transcribes and the cabinet already stores images, so the missing half is the bridge, not the capability. |
+| A plan the model maintains | A per-conversation plan/todo tool, drawn in the window, with per-item status. | Long-horizon work needs an explicit plan; a plan also survives a context rebuild better than the prose that described it. |
+| A spend budget | A `budget:` section (per turn, day or conversation), a usage ledger, and a hard stop. | Usage is measured per turn and logged, but nothing bounds it. On a paid model an unbounded loop is a bill. |
+| Scheduled catch-up | A per-task policy for fires missed while no instance ran, instead of a manual `schedule_run_now`. | Cron users expect anacron-like backfill; a laptop asleep at the due moment currently loses the run. |
+| Compact inside a turn | Rebuild or trim at an iteration boundary when the live context approaches the ceiling. | The context decision runs only before a turn, so one long tool loop can exceed the window before the next decision that could shorten it. Bounded context is the core discipline of a long-running agent. |
+| Retrieval over files and dumps | Chunk and embed saved files and dumps so a search reaches their contents. | §8.3 leaves this out on purpose; documents are the largest corpus an agent saves and the one it cannot search by meaning. |
+| Sandboxed jobs | Run `jobs/` code in a child process with declared filesystem and network limits. | Jobs are arbitrary code with the caller's identity. Least privilege is the standard answer, and the plugin boundary already exists to carry it. |
+| Tool progress and cancellation | A long tool reports progress down its call; the window draws it and can cancel that call without ending the turn. | A long media or shell call is a spinner today, and the only lever is `Esc`, which ends the whole turn. |
+| Branch from a turn | Start a new conversation or fork from any stored turn id, leaving the original intact. | Checkpoints are the standard undo an agent user expects; exploration and retry become possible without resetting the conversation, and the fork machinery already knows how to copy one. |
+| An eval lane | Recorded conversations, a provider fixture, and metrics for tool choice, recall and cost, run when a prompt, a tool schema or a model changes. | A stub model cannot catch a regression in what a real model chooses; eval-driven development is how the prompt and tool surfaces are changed safely. |
 
 ## Appendix A. Invariants
 

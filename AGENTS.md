@@ -38,7 +38,7 @@ The names the shipped `slife2.yaml` configures.
 - **MCP** (`{server}__{tool}`): serper, fetch, tavily-mcp, duckduckgo-search,
   amap-maps, playwright, context7, chrome-devtools, citecheck, mcp-pandoc,
   markitdown, office-word-mcp, excel-mcp, pdf-toolkit, arxiv, crossref,
-  google-scholar, desktop-commander, deepseek-search, baidu-search.
+  google-scholar, desktop-commander, deepseek-search, baidu-search, gitee.
 - **REST API** (`{server}__{operation}`): github, mcp-registry.
 - **CLI** (`cli:<name>`): yt-dlp, browser-harness, rg.
 - **Skills** (`skill:<name>`): baidu-search, browser-harness,

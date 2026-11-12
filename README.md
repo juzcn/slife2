@@ -486,8 +486,10 @@ A value shorter than eight characters is not registered. An environment variable
 or a literal is the operator's own. Keep every secret in credstore: it is the one
 store whose values slife2 masks everywhere.
 
-Resolution is lazy and lenient. An unresolved reference is left verbatim, so a
-missing key fails at the API call where the error can name it.
+Resolution is lazy and lenient. A provider or media call refuses before use when
+its credential did not resolve. A tool server's `env:` or `headers:` entry that
+still holds its reference is omitted with a warning, so the child's own missing-key
+policy decides: some servers run keyless, others refuse in their own words.
 
 ### Example
 
@@ -662,7 +664,7 @@ advertised schema and stripped before dispatch.
 
 | Parameter | Effect |
 |---|---|
-| `_timeout` | Seconds for this call. It overrides the tool's default. `0` or a negative value means "use the default", never "no limit". A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. |
+| `_timeout` | Seconds for this call. It overrides the tool's default. Any value that is not a positive, finite number — `0`, a negative, text — fails the call; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. |
 | `_async` | Run the call in the background. The model receives a `task_id`; the result arrives with an `[AgentToolResult:{…}]` marker on the `async-tool:<tool>` channel. `check_async` reports the state; `cancel_async` abandons it. The result budget still applies. An agent task's loop has no `_async`. |
 | `_approve` | Ask the user before running. The terminal draws an inline row (`y` approves, `n` or `Esc` denies) and answers with `answer_approval`. If the channel has no person behind it, the call runs without asking. A caller that can answer says so with `watched=true`. |
 
