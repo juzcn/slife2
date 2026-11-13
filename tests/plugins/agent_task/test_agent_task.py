@@ -326,8 +326,18 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
     budget depend on how fast each poll is answered, and a loaded CI runner
     spent 400 of them before a turn of two one-second sleeps had finished.  A
     deadline asks the question the test means: has the task stopped by now.
+
+    **And the wall clock has to outlast the runner's stalls, not the task's
+    work.**  A task's first two calls — `restore` and `rebuild` — carry no
+    timeout of their own (the context store is a peer of the turn, not a
+    probe), and a Windows CI worker has been measured taking 43 s to set up a
+    neighbouring test and 35 s to run a hub listing.  Thirty seconds was less
+    than one such stall: the task was still working when `settle` gave up, and
+    the teardown then reported its interrupted call.  Two minutes leaves room
+    for the stall and still fails a real hang inside the suite's own
+    `faulthandler_timeout`.
     """
-    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    deadline = time.monotonic() + 120.0  # timeouts: a test's patience
     async with Client(built.mcp) as client:
         while time.monotonic() < deadline:
             answer = await ask(client, AGENT_TASK_STATUS, {"name": name})
