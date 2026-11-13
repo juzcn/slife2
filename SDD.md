@@ -2596,6 +2596,25 @@ the field arrives as a test that fails without the fix.
    the one file the operator meant to share. *Resolution would require:* the
    tunnel serving only the share route, or an authorization token on the MCP
    endpoint.
+4. **A cabinet mirror can disagree with its row.** The document's file is
+   written after the row's transaction, so a mirror the filesystem refuses — an
+   editor holding it open on Windows — leaves the row, its keyword text and its
+   vectors committed while the file is the old one or absent. A `CREATE` cannot
+   be retried either, because the row now exists. *Resolution would require:*
+   staging the mirror and committing the row only once the file is in place, or
+   rolling the row back when the mirror write fails.
+5. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
+   committed in turn, so a later URL that cannot be fetched leaves the earlier
+   files and rows stored while the call reports failure; a retry stores those
+   documents again under `-1` names. *Resolution would require:* resolving and
+   fetching every entry before the first write, or answering with the saved and
+   the failed parts instead of raising.
+6. **A scheduled run can be recorded `missed` while its task runs.** `dispatch`
+   records the run `pending` and writes `agent_task_id` only after
+   `agent_task_start` returns; a crash in that window makes the sweep classify a
+   live task as one that never started, and a manual backfill can run the same
+   work a second time. *Resolution would require:* a dispatching marker written
+   before the peer call and resolved against `agent_task_list` by name.
 
 ### 14.2 Deferred capabilities
 
