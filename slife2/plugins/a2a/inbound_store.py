@@ -31,15 +31,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-WORKING = "working"
-INTERRUPTED = "interrupted"
-COMPLETED = "completed"
-FAILED = "failed"
-CANCELLED = "cancelled"
-REJECTED = "rejected"
-
-#: A task cannot leave these.  The same four words `task_store` writes.
-TERMINAL_STATUSES = (COMPLETED, FAILED, CANCELLED, REJECTED)
+from slife2.plugins.a2a.states import INTERRUPTED, TERMINAL_STATUSES, WORKING
 
 #: One mesh's inbound table is bounded; terminal records go first.
 MAX_INBOUND = 500

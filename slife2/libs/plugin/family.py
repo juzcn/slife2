@@ -57,6 +57,7 @@ from slife2.libs.host.config import (
     for_the_call,
 )
 from slife2.libs.host.paths import home_key
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import forwarded_conversation, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -100,8 +101,7 @@ def page_of[T](
     number the caller will add its page to, and a negative one would make the
     next page overlap this one.
     """
-    size = cap if limit <= 0 else min(int(limit), cap)
-    start = max(0, int(offset))
+    size, start = page_window(limit, offset, unset=cap, cap=cap)
     return rows[start : start + size], size, start
 
 
@@ -900,6 +900,29 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
         # nothing, which is `usable` with a count of zero.
         report["error"] = one.error
     return report
+
+
+async def report_entry(
+    homes: Homes[Family],
+    name: str,
+    raw: Mapping[str, Any],
+    *,
+    words: FamilyWords,
+) -> dict[str, Any]:
+    """One entry's read-only report, against the home this call is for.
+
+    The `*_get` half of both connection families: settle this home's link once,
+    then answer `entry_report`'s facts — or the one fact that remains when the
+    process does not hold the name.  Here rather than in each family because the
+    two differ in the entry and in nothing this function reads.
+    """
+    family = homes.current()
+    family.connecting()
+    await family.settle()
+    one = family.held(name)
+    if one is None:
+        return {"name": name, "state": state_word(raw, None)}
+    return entry_report(one, name, words=words)
 
 
 async def apply_and_report(

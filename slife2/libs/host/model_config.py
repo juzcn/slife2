@@ -32,6 +32,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from slife2.libs.host.validation import validation_refusal
+
 #: The wire protocols a provider may name.  `slife2.libs.host.config.API_BACKENDS`
 #: is derived from the plugins, and a test holds the two sets equal; this module
 #: cannot import it without a cycle (`config` imports this one to parse).
@@ -168,35 +170,11 @@ PROVIDER_DEFAULTS: dict[str, Any] = {"api_key": ""}
 #: same courtesy `rest_api_set` already extends.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_MISSING = object()
-
 #: Model fields whose `null` in YAML means "the field was not written", which
 #: the loader turns into the canonical default.  `reasoning`, `max_tokens`,
 #: `temperature` and `top_p` are absent here deliberately: a written `null`
 #: there is either refused (the switch) or a real value (the numbers).
 _NULL_IS_ABSENT = ("name", "input", "compat", "context_window")
-
-
-def _error(where: str, exc: ValidationError) -> ValueError:
-    """The first validation failure, in the config's own sentence.
-
-    **The field path is the part a model acts on**, so it is always there, and
-    the offending value is appended when Pydantic kept it — a refusal that says
-    `providers.p.api: Input should be ...` is one the caller can fix without
-    opening the file.
-    """
-    first = exc.errors()[0]
-    path = ".".join(str(part) for part in first.get("loc", ()))
-    # **Only an enum or a switch echoes its value.**  Pydantic puts the whole
-    # parent mapping in `input` for a missing field, and that can carry a
-    # literal API key; an unknown key's value can be one too.  The field path
-    # plus the message is enough to fix either, and a literal error's value is
-    # a protocol, a modality or a quirk — never a credential.
-    got = first.get("input", _MISSING)
-    shown = first.get("type") in ("literal_error", "bool_type") and got is not _MISSING
-    suffix = f" (got {got!r})" if shown else ""
-    where = f"{where}.{path}" if path else where
-    return ValueError(f"{where}: {first['msg']}{suffix}")
 
 
 def load_provider(raw: Any, *, where: str) -> ProviderConfig:
@@ -216,7 +194,7 @@ def load_provider(raw: Any, *, where: str) -> ProviderConfig:
     try:
         return ProviderConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_model(raw: Any, *, where: str) -> ModelConfig:
@@ -251,7 +229,7 @@ def load_model(raw: Any, *, where: str) -> ModelConfig:
     try:
         return ModelConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def model_entry(model: ModelConfig) -> dict[str, Any]:

@@ -64,7 +64,6 @@ class MCPBackend:
         *,
         provider: str = "",
         name: str = "mcp",
-        timeout: float | None = None,
         key: tuple[str, str] = ("", ""),
     ) -> None:
         self.name = name
@@ -74,7 +73,6 @@ class MCPBackend:
         #: wire format for every provider that uses it, so this is what picks
         #: whose credentials and model list the call uses.
         self._provider = provider
-        self._timeout = timeout
         #: Whose conversation this call is being made for — the same
         #: `(agent, subagent)` every other server in this system keys its own
         #: state by.  It is not state here and nothing is keyed on it: it travels
@@ -95,7 +93,6 @@ class MCPBackend:
             self._model,
             provider=self._provider,
             name=self.name,
-            timeout=self._timeout,
             key=(agent, subagent),
         )
 
@@ -138,7 +135,6 @@ class MCPBackend:
                     "tools": [t.to_wire() for t in tools],
                 },
                 progress_handler=on_progress,
-                timeout=self._timeout,
             )
             # **An answer this build cannot read is refused, not read as an
             # empty one.**  FastMCP leaves `CallToolResult.data` as None
@@ -217,7 +213,6 @@ async def open_backend(
     provider: str = "",
     name: str = "mcp",
     server_name: str = "",
-    timeout: float | None = None,
 ) -> tuple[Client, MCPBackend]:
     """Connect to an LLM server and return `(client, backend)`.
 
@@ -233,14 +228,9 @@ async def open_backend(
     `slife2.libs.plugin.protocol.open_server`'s; what is left here is the LLM half, which
     is wrapping the client in the backend that speaks this wire format.
 
-    `timeout` is None by default, which means **no clock on one model call** —
-    the bound is the stall watchdog in the drain (`_T.timeouts.work.stall`), and a total
-    would be the thing that cuts a slow-but-live answer.  A caller that wants one
-    anyway says so here; nothing in this build does.
+    **No clock is put on one model call.**  The bound is the stall watchdog in
+    the drain (`_T.timeouts.work.stall`), and a total would be the thing that
+    cuts a slow-but-live answer.
     """
-    client = await open_server(
-        url, name=server_name, fallback_tool="stream_chat", timeout=timeout
-    )
-    return client, MCPBackend(
-        client, model, provider=provider, name=name, timeout=timeout
-    )
+    client = await open_server(url, name=server_name, fallback_tool="stream_chat")
+    return client, MCPBackend(client, model, provider=provider, name=name)

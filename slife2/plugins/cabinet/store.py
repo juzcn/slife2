@@ -135,6 +135,7 @@ from typing import Any
 import sqlite_vec
 
 from slife2.helpers.clock import now
+from slife2.helpers.fs import confined
 from slife2.helpers.timeutil import normalize_bound
 from slife2.libs.host.paths import home, work_dir
 from slife2.libs.store import textindex
@@ -577,8 +578,8 @@ def resolve(root: Path, relative: str) -> Path:
     Raises:
         ValueError: If the path leaves the cabinet.
     """
-    candidate = (root / relative).resolve()
-    if candidate != root.resolve() and root.resolve() not in candidate.parents:
+    candidate = confined(root, relative)
+    if candidate is None:
         raise ValueError(f"{relative!r} is not inside the cabinet")
     return candidate
 

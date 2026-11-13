@@ -98,6 +98,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from slife2.helpers.fs import confined
 from slife2.libs.host.paths import skills_dir
 
 logger = logging.getLogger(__name__)
@@ -601,9 +602,8 @@ def _within(base: Path, name: str) -> Path:
     once it has been resolved — a check on the string would pass it, and the
     resolution is what the filesystem will actually open.
     """
-    root = base.resolve()
-    target = (root / name).resolve()
-    if target != root and root not in target.parents:
+    target = confined(base, name)
+    if target is None:
         raise ValueError(f"{name!r} is outside {base.name}/, and a skill is not")
     return target
 

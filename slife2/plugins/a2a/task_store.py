@@ -24,18 +24,15 @@ from __future__ import annotations
 import time as _time
 from dataclasses import dataclass, field
 
-# ── Status vocabulary ───────────────────────────────────────────────────
-
-PENDING = "pending"
-INTERRUPTED = "interrupted"
-COMPLETED = "completed"
-FAILED = "failed"
-CANCELLED = "cancelled"
-REJECTED = "rejected"
-
-#: A task cannot leave these.  One tuple so a guard, the prune order and the
-#: display cannot drift from one another.
-TERMINAL_STATUSES = (COMPLETED, FAILED, CANCELLED, REJECTED)
+from slife2.plugins.a2a.states import (
+    CANCELLED,
+    COMPLETED,
+    FAILED,
+    INTERRUPTED,
+    PENDING,
+    REJECTED,
+    TERMINAL_STATUSES,
+)
 
 # ── Task record ─────────────────────────────────────────────────────────
 

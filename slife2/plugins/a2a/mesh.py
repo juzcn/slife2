@@ -99,23 +99,23 @@ from paho.mqtt.subscribeoptions import SubscribeOptions
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings
 from slife2.plugins.a2a import groups
-from slife2.plugins.a2a.inbound_store import (
-    INTERRUPTED,
-    TERMINAL_STATUSES,
-    InboundStore,
-    iso_now,
-)
+from slife2.plugins.a2a.inbound_store import InboundStore, iso_now
 from slife2.plugins.a2a.responder import (
     AUTH_REQUIRED,
-    CANCELLED,
-    COMPLETED,
-    FAILED,
     INPUT_REQUIRED,
-    REJECTED,
     Responder,
     RoundOutcome,
 )
-from slife2.plugins.a2a.task_store import PENDING, get_store
+from slife2.plugins.a2a.states import (
+    CANCELLED,
+    COMPLETED,
+    FAILED,
+    INTERRUPTED,
+    PENDING,
+    REJECTED,
+    TERMINAL_STATUSES,
+)
+from slife2.plugins.a2a.task_store import get_store
 from slife2.tui import notes
 
 logger = logging.getLogger(__name__)

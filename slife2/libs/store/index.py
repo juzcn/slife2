@@ -68,6 +68,7 @@ import sqlite_vec
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at
 from slife2.helpers.timeutil import normalize_bound
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 
 # --- the page, and how far past it a leg looks --------------------------------
@@ -86,8 +87,11 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
     caller pages by `offset`, so a response echoing the `limit` *asked* for —
     1000, say, for a 200-row cap — is a response that makes the caller's own
     arithmetic skip the rows in between.
+
+    A non-positive request is one row here rather than a default page: the
+    caller is a SQL `LIMIT`, which has to be at least 1.
     """
-    return max(1, min(int(limit), cap))
+    return page_window(limit, 0, unset=1, cap=cap)[0]
 
 
 #: How many candidates each leg of a search brings to the fusion, as a multiple

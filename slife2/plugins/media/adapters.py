@@ -40,6 +40,7 @@ from typing import Any, Protocol, runtime_checkable
 import httpx2
 
 import slife2.helpers.timeouts as _T
+from slife2.helpers.fs import confined
 from slife2.libs.host.config import unresolved_reference
 from slife2.libs.host.paths import work_dir
 from slife2.libs.turn.attachments import MEDIA_TYPES
@@ -65,14 +66,14 @@ def media_dir(agent: str, subagent: str = "", folder: str = "") -> Path:
     choosing where on this machine to write a file.  Resolved before it is
     compared, refused rather than rewritten — a silently corrected path is a
     file somewhere other than where the model said
-    (`slife2.plugins.cabinet.store.resolve` draws the same line).
+    (`slife2.helpers.fs.confined` is that line, for this directory too).
     """
     root = work_dir(agent, subagent) / MEDIA_DIR
     if not folder.strip():
         root.mkdir(parents=True, exist_ok=True)
         return root
-    candidate = (root / folder).resolve()
-    if candidate != root.resolve() and root.resolve() not in candidate.parents:
+    candidate = confined(root, folder)
+    if candidate is None:
         raise MediaAdapterError(
             f"{folder!r} is not a folder inside the media directory"
         )

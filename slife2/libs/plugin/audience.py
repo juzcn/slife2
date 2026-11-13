@@ -162,8 +162,9 @@ def conversation_meta(agent: str, subagent: str = "", home: str = "") -> dict[st
     it there).
 
     An explicit argument is for the case the ambient answer is the wrong one —
-    a caller acting for a home it is not itself in — and there is no such caller
-    today.  It travels exactly as written, because a caller that names a
+    a caller acting for a home it is not itself in.  No production caller does
+    that today; the suite uses it to prove the multi-home paths, which is why it
+    stays.  It travels exactly as written, because a caller that names a
     directory is stating something about a home this process is not in, and
     rewriting it would be this module overruling the one party that knows.
 

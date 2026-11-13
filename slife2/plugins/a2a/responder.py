@@ -62,7 +62,8 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 import slife2.helpers.timeouts as _T
-from slife2.plugins.a2a.inbound_store import (
+from slife2.plugins.a2a.inbound_store import InboundStore, InboundTask
+from slife2.plugins.a2a.states import (
     CANCELLED,
     COMPLETED,
     FAILED,
@@ -70,8 +71,6 @@ from slife2.plugins.a2a.inbound_store import (
     REJECTED,
     TERMINAL_STATUSES,
     WORKING,
-    InboundStore,
-    InboundTask,
 )
 
 log = logging.getLogger("slife2.plugins.a2a.responder")

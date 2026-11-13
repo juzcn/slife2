@@ -83,6 +83,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import home_key, in_home, schedule_dbs
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.protocol import (
     agent_reader,
@@ -166,24 +167,6 @@ RUNS_MAX = 200
 #: or `dump_grep` (`tool_result.tokens`).
 TASKS_LIMIT = 50
 TASKS_MAX = 200
-
-
-def page_of(limit: int, offset: int, default: int, cap: int) -> tuple[int, int]:
-    """One listing's page size and where it starts, from what a model asked.
-
-    **A limit that is not a positive number means "nobody said"**, and it is
-    "unset" rather than "no bound": a *negative* must not reach SQLite, where
-    `LIMIT -1` means **no limit at all** — so a model passing `-1` would walk
-    past the ceiling these tools exist to keep, and the ceiling is the answer to
-    a model asking for ten thousand rows.  A negative `offset` is folded to the
-    first page for the same reason: it is nothing but a way to be out of range.
-
-    One function because the two listings of this section are one shape — the
-    numbers they answer with are the numbers the page was cut to, and a caller
-    paging by `offset` cannot compute its next page from a number the tool
-    interpreted differently than it reported.
-    """
-    return (min(limit, cap) if limit > 0 else default), max(0, int(offset))
 
 
 # ── the clock's decision ─────────────────────────────────────────────────────
@@ -1051,7 +1034,9 @@ def build_server(
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        bounded, skipped = page_of(limit, offset, TASKS_LIMIT, TASKS_MAX)
+        bounded, skipped = page_window(
+            limit, offset, unset=TASKS_LIMIT, cap=TASKS_MAX
+        )
         found, total = store.tasks(limit=bounded, offset=skipped)
         return {
             "tasks": [row(task) for task in found],
@@ -1097,7 +1082,9 @@ def build_server(
             raise ToolError(
                 f"{wanted!r} is not a run state; they are {', '.join(STATUSES)}."
             )
-        bounded, skipped = page_of(limit, offset, RUNS_LIMIT, RUNS_MAX)
+        bounded, skipped = page_window(
+            limit, offset, unset=RUNS_LIMIT, cap=RUNS_MAX
+        )
         found, total = store.runs(name.strip(), wanted, bounded, skipped)
         return {
             "runs": [run.row() for run in found],

@@ -47,10 +47,10 @@ from slife2.libs.plugin.family import (
     Homes,
     apply_and_report,
     build_family_server,
-    entry_report,
     list_entries,
     prepare_entry,
     remove_entry,
+    report_entry,
     state_word,
     switch_entry,
 )
@@ -258,16 +258,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             raise ToolError(str(exc)) from exc
         return raw, config.model_copy(update={"api_key": show_api_key(config.api_key)})
 
-    async def report_of(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-        """The read-only half: the link's state and, when it answered, its count."""
-        family = homes.current()
-        family.connecting()
-        await family.settle()
-        one = family.held(name)
-        if one is None:
-            return {"name": name, "state": state_word(raw, None)}
-        return entry_report(one, name, words=WORDS)
-
     @mcp.tool(name="rest_api_list", meta=FOR_THE_MODEL)
     async def rest_api_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the REST APIs configured under `rest-api:`, with their state.
@@ -309,7 +299,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             name: The API's name — the key it is written under.
         """
         raw, config = entry_of(name)
-        report = await report_of(name, raw)
+        report = await report_entry(homes, name, raw, words=WORDS)
         report.pop("enabled", None)  # the writable field is in `config`
         answer = {**report, "config": config.model_dump()}
         if unresolved := _unresolved(config.api_key):

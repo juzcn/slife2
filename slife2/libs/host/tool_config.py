@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from slife2.libs.host.validation import validation_refusal
+
 Transport = Literal["stdio", "http"]
 
 
@@ -156,9 +158,6 @@ CLI_DEFAULTS: dict[str, Any] = {
     "enabled": True,
 }
 
-_MISSING = object()
-
-
 def _check_enabled(data: Mapping[str, Any], where: str) -> None:
     """The switch is a real YAML boolean, and absence means on.
 
@@ -176,21 +175,6 @@ def _check_enabled(data: Mapping[str, Any], where: str) -> None:
         )
 
 
-def _error(where: str, exc: ValidationError) -> ValueError:
-    """The first validation failure, in the config's own sentence.
-
-    The path is what a caller acts on; an enum or switch also names the value it
-    got.  Everything else does not echo its input, because Pydantic puts the
-    whole parent mapping in `input` for a missing field and that can carry a
-    literal credential.
-    """
-    first = exc.errors()[0]
-    path = ".".join(str(part) for part in first.get("loc", ()))
-    got = first.get("input", _MISSING)
-    shown = first.get("type") in ("literal_error", "bool_type") and got is not _MISSING
-    suffix = f" (got {got!r})" if shown else ""
-    where = f"{where}.{path}" if path else where
-    return ValueError(f"{where}: {first['msg']}{suffix}")
 
 
 def load_mcp(raw: Any, *, where: str) -> McpConfig:
@@ -225,7 +209,7 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
     try:
         return McpConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
@@ -255,7 +239,7 @@ def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
     try:
         return RestApiConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_cli(raw: Any, *, where: str) -> CliConfig:
@@ -285,7 +269,7 @@ def load_cli(raw: Any, *, where: str) -> CliConfig:
     try:
         return CliConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def mcp_entry(config: McpConfig) -> dict[str, Any]:
