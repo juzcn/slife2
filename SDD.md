@@ -2412,10 +2412,12 @@ a heal window before being respawned. A stop that lands while a start is
 establishing the transport invalidates that attempt: the worker releases whatever
 it established instead of publishing after `stop` returned.
 
-The tunnel publishes the MCP endpoint as well as `/share/{token}`. Any caller who
-knows the hostname can call `expose_local_image` and read any file the process
-can read. What stands between that and a stranger is the hostname's entropy;
-closing it properly requires an authorization story MCP does not carry here.
+The tunnel is pointed at a loopback listener that serves `GET /share/{token}`
+and nothing else, on a port of its own; the MCP endpoint keeps
+`servers.file-tunnel.port` and is not on the public hostname. A tunnel forwards
+a port, not a path, so this is what makes the published surface the one route:
+`/mcp` on the tunnel's URL is a 404. The 30-hex-character token is the whole
+capability.
 
 ### 12.2 Media
 
@@ -2589,27 +2591,20 @@ the field arrives as a test that fails without the fix.
    The design's "loopback is the boundary" is a default, not a check.
    *Resolution would require:* refusing a non-loopback host at load, or an
    explicit opt-in that states the exposure and its authentication.
-3. **The tunnel publishes its control surface.** The file tunnel forwards the
-   whole port, so a stranger who learns the hostname can reach the MCP endpoint
-   and call `expose_local_image` — or any other tool — not only
-   `/share/{token}`. §12.1 states the gap; the exposed surface is wider than
-   the one file the operator meant to share. *Resolution would require:* the
-   tunnel serving only the share route, or an authorization token on the MCP
-   endpoint.
-4. **A cabinet mirror can disagree with its row.** The document's file is
+3. **A cabinet mirror can disagree with its row.** The document's file is
    written after the row's transaction, so a mirror the filesystem refuses — an
    editor holding it open on Windows — leaves the row, its keyword text and its
    vectors committed while the file is the old one or absent. A `CREATE` cannot
    be retried either, because the row now exists. *Resolution would require:*
    staging the mirror and committing the row only once the file is in place, or
    rolling the row back when the mirror write fails.
-5. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
+4. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
    committed in turn, so a later URL that cannot be fetched leaves the earlier
    files and rows stored while the call reports failure; a retry stores those
    documents again under `-1` names. *Resolution would require:* resolving and
    fetching every entry before the first write, or answering with the saved and
    the failed parts instead of raising.
-6. **A scheduled run can be recorded `missed` while its task runs.** `dispatch`
+5. **A scheduled run can be recorded `missed` while its task runs.** `dispatch`
    records the run `pending` and writes `agent_task_id` only after
    `agent_task_start` returns; a crash in that window makes the sweep classify a
    live task as one that never started, and a manual backfill can run the same

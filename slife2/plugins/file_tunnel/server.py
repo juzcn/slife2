@@ -5,24 +5,26 @@ about `D:\\pictures\\cat.png`, or a chat API that takes a URL and nothing else,
 cannot read this machine's disk.  So the plugin does three things and they are
 the whole of it:
 
-* it holds a **tunnel** — this machine's port, published as an HTTPS URL
+* it holds a **tunnel** — a loopback port, published as an HTTPS URL
   (`providers.py`, and the `file-tunnel:` section says which one),
 * it holds a **registry** of what has been exposed: a token per file, pinned to
   the exact file it was minted for,
-* it serves the bytes at ``GET /share/{token}``, on the same port, because the
-  far end fetches that path *through the tunnel*.
+* it serves the bytes at ``GET /share/{token}``, on a listener of its own that
+  is the *only* thing the tunnel forwards to.
 
 **A plugin, by SDD §2.4's test.**  It holds somebody else's connection — a
 tunnel process, or an SDK holding an account — so it is a process rather than a
 library, for the same reason the model backends are: a library would put the
 tunnel in every importer.
 
-**And it is the first plugin here with a second HTTP route.**  Every other one
-serves a single MCP endpoint at `servers.<name>.path`; this one answers
-`/share/{token}` beside it, on the same port, registered with FastMCP's
-`custom_route` and served by the same `mcp.run(...)` the house `serve()` makes.
-Nothing about `house_server` changes for it — but it is a real difference, and
-it is why this plugin cannot be reached by a client that only speaks MCP.
+**The tunnel is pointed at the share listener, not at the MCP app.**  A tunnel
+forwards a port, and every provider here — ngrok, localhost.run, cloudflared —
+forwards the whole of it.  A route registered beside the MCP endpoint would
+therefore publish the endpoint as well: a stranger who learned the hostname
+could call every tool, not only fetch the one file.  So the public port is a
+server that answers `/share/{token}` and nothing else, and the MCP app keeps
+`servers.file-tunnel.port` to itself.  That is the one structural difference
+from every other plugin here.
 
 LLM-visible tools: ``expose_local_image``, ``unexpose_local_image``.
 Internal tools (no ``meta``, so the hub withholds them): ``tunnel_status``.
@@ -38,16 +40,20 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import uvicorn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
@@ -363,6 +369,145 @@ async def serve_exposed(exposure: Exposure) -> Response:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# The listener the tunnel is pointed at
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def share_app(exposed: Exposed) -> Starlette:
+    """The whole public surface: ``GET /share/{token}`` and nothing else.
+
+    **An app of its own rather than a route on the MCP app.**  A tunnel
+    forwards a port, so whatever that port answers is what the hostname
+    publishes; mounting this route beside the MCP endpoint would publish the
+    endpoint too.  The tunnel is pointed here instead, and the MCP app is not
+    reachable through it at all.
+
+    Split from the listener for the same reason `serve_exposed` is split from
+    the route: the interesting answers are decisions about *what* to serve,
+    and they cost nothing to test without a socket.
+    """
+
+    async def share(request: Request) -> Response:
+        """Serve an exposed file to whoever holds its token."""
+        token = request.path_params["token"]
+        found = exposed.lookup(token)
+        if found is None:
+            return Response("Unknown share link.", status_code=403)
+        return await serve_exposed(found)
+
+    return Starlette(routes=[Route("/share/{token}", share, methods=["GET"])])
+
+
+class ShareListener:
+    """A loopback HTTP server for :func:`share_app`, on an ephemeral port.
+
+    The tunnel needs a port, and it must not be the MCP server's.  Binding
+    ``127.0.0.1:0`` lets the OS pick one; this app is the only thing that port
+    ever answers, so "the tunnel publishes the share route only" is a property
+    of what is listening rather than of a filter that would have to keep pace
+    with every route the MCP app grows.
+
+    It runs as a task in the plugin's loop, the way the MCP server's uvicorn
+    does, so no second thread and no second event loop are involved.  Uvicorn
+    logs through the root handler (`log_config=None`), which is where the
+    house formatter masks credentials; a served file is already named by
+    `share_served`, and the house pins `uvicorn.access` above DEBUG, so no
+    per-request line is added.
+    """
+
+    def __init__(self, app: Starlette) -> None:
+        self._app = app
+        self._server: uvicorn.Server | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._sock: socket.socket | None = None
+        self._port: int | None = None
+
+    @property
+    def port(self) -> int:
+        """The bound port — the address the tunnel is pointed at."""
+        if self._port is None:
+            raise RuntimeError("the share listener is not running")
+        return self._port
+
+    async def start(self) -> int:
+        """Bind the loopback port, serve on it, and answer with the port.
+
+        The socket is bound and listening here rather than by uvicorn, so the
+        port is known before the server starts — the tunnel is handed an
+        address that is already accepting connections, not one that will
+        exist momentarily.
+        """
+        if self._port is not None:
+            return self._port
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        port = int(sock.getsockname()[1])
+        config = uvicorn.Config(
+            self._app,
+            host="127.0.0.1",
+            port=port,
+            log_config=None,  # the root handler is the masking point
+            lifespan="off",  # this app has nothing to start or stop
+            # **No `access_log=False`.**  That flag mutates the process-wide
+            # `uvicorn.access` logger (handlers and propagation), which is the
+            # MCP server's too.  The house already pins that logger above
+            # DEBUG, so a share request leaves `share_served` as its line and
+            # nothing here changes the logger the host runs on.
+        )
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(
+            server.serve(sockets=[sock]), name="file-tunnel-share"
+        )
+
+        deadline = time.monotonic() + _T.timeouts.ready.connect_ours
+        while not server.started:
+            if task.done():
+                sock.close()
+                error = task.exception()
+                raise RuntimeError(
+                    f"the share listener could not start: {error!r}"
+                ) from error
+            if time.monotonic() >= deadline:
+                task.cancel()
+                sock.close()
+                raise RuntimeError(
+                    "the share listener did not start within "
+                    f"{_T.timeouts.ready.connect_ours:.0f}s"
+                )
+            await asyncio.sleep(_T.timeouts.pacing.lock_poll)
+
+        self._server, self._task, self._sock, self._port = server, task, sock, port
+        logger.info("share_listener_started url=http://127.0.0.1:%d", port)
+        return port
+
+    async def stop(self) -> None:
+        """Ask the listener to exit and wait for it, bounded at every step."""
+        server, task, sock = self._server, self._task, self._sock
+        self._server = self._task = self._sock = None
+        self._port = None
+        if server is None or task is None:
+            if sock is not None:
+                sock.close()
+            return
+
+        server.should_exit = True
+        _, pending = await asyncio.wait({task}, timeout=_T.timeouts.grace.drain)
+        if pending:
+            # Uvicorn's own graceful window did not end it — a connection it
+            # was waiting on, or a shutdown that was never woken.
+            server.force_exit = True
+            _, pending = await asyncio.wait({task}, timeout=_T.timeouts.grace.drain)
+        if pending:
+            task.cancel()
+            logger.warning("share_listener_stop_timeout")
+        if sock is not None:
+            sock.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # The plugin
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -377,30 +522,36 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     against fake subprocesses in
     `tests/plugins/file_tunnel/test_file_tunnel_providers.py`.
 
-    **The port comes from the config, not from a bound socket.**
-    `serve_plugin` already knows the address, and the tunnel is pointed at the
-    port it says.  What that costs is the `--port` override on *this* plugin:
-    it moves the MCP server and leaves the tunnel forwarding to the configured
-    port.  Nothing calls it that way, and a tunnel needs an address that is
-    written down somewhere either way.
+    **The tunnel is pointed at the share listener, not at this server.**  The
+    MCP address from `servers:` is where slife2's own clients connect; it must
+    not be what the public hostname forwards to.  The listener binds a
+    loopback port of its own when the plugin starts, and the tunnel takes that
+    port — so `/mcp` is not on the public surface, and the `--port` override
+    moves the MCP server without moving the tunnel.
     """
     exposed = Exposed()
     tunnel = provider or create_provider(
         config.file_tunnel.active,
         config.file_tunnel.options_for(config.file_tunnel.active),
     )
-    port = config.server(CONFIG_KEY).port
+    share = ShareListener(share_app(exposed))
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP):
-        """Start the tunnel at startup, and keep it up; stop it on the way out.
+        """Start the share listener and the tunnel; stop both on the way out.
 
-        The start is a task and is never awaited here.  A tunnel takes seconds
-        (an ngrok session, an SSH handshake, a cloudflared registration) and
-        the plugin must not be slower to load for it — the monitor that
-        follows picks up anything the eager attempt did not finish, so a
-        failed start costs a log line rather than the plugin.
+        **The listener comes first, because the tunnel is pointed at it.**
+        It is local and must come up: a listener that cannot bind fails the
+        plugin's start rather than letting a tunnel publish a wider surface
+        than the one file an exposure means.
+
+        The tunnel's start is a task and is never awaited here.  A tunnel
+        takes seconds (an ngrok session, an SSH handshake, a cloudflared
+        registration) and the plugin must not be slower to load for it — the
+        monitor that follows picks up anything the eager attempt did not
+        finish, so a failed start costs a log line rather than the plugin.
         """
+        port = await share.start()
         eager = asyncio.create_task(_start(tunnel, port, why="eager"))
         tunnel.start_monitor(port)
         try:
@@ -408,21 +559,17 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         finally:
             tunnel.stop_monitor()
             eager.cancel()
-            # `stop` kills a child and waits for it — up to the kill timeout.
-            await asyncio.to_thread(tunnel.stop)
+            try:
+                # `stop` kills a child and waits for it — up to the kill timeout.
+                await asyncio.to_thread(tunnel.stop)
+            finally:
+                # The listener goes even if the tunnel's stop was cancelled:
+                # a socket left bound would outlive the state that explains it.
+                await share.stop()
 
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
-
-    @mcp.custom_route("/share/{token}", methods=["GET"])
-    async def share(request: Request) -> Response:
-        """Serve an exposed file to whoever holds its token."""
-        token = request.path_params["token"]
-        found = exposed.lookup(token)
-        if found is None:
-            return Response("Unknown share link.", status_code=403)
-        return await serve_exposed(found)
 
     # ── For the model ────────────────────────────────────────────────────
 
@@ -470,7 +617,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 f"while the tunnel is up, so this would publish it."
             )
 
-        await _ensure(tunnel, port)
+        await _ensure(tunnel, share.port)
         if not tunnel.is_active:
             raise ToolError(
                 "the tunnel is not up, so there is no public URL to "

@@ -782,6 +782,10 @@ changes, when `unexpose_local_image` is called, or when the process exits. A sha
 outlives the turn that created it. Private keys, `.env` files, and saved
 passwords are refused by name.
 
+The tunnel is pointed at a loopback listener that serves only
+`/share/<token>`; the MCP endpoint is not published, so knowing the hostname
+does not let a caller run tools.
+
 Three providers are supported. Exactly one is active; the others may stay
 configured and inert.
 

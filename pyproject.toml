@@ -15,6 +15,9 @@ dependencies = [
     # does not accept.
     "fastmcp>=4.1.1",
     "starlette>=1.7.0",
+    # The file tunnel's share listener is its own loopback server; the MCP
+    # servers' uvicorn is FastMCP's private copy.  Declared for that reason.
+    "uvicorn>=0.54.0",
     "textual>=8.2.8",
     "httpx2>=2.13.1",
     "qrcode>=8.0",

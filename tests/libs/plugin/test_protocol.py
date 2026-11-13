@@ -11,6 +11,7 @@ report anything).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import logging
@@ -963,6 +964,56 @@ def test_a_server_that_never_served_takes_its_own_record_back() -> None:
     assert read_record(URL) is None
 
 
+#: The three calls a hand-rolled `main` makes — the scaffold's own steps.
+_START_CALLS = frozenset({"parse_serve_args", "configure_logging", "serve"})
+
+
+def _start_call_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The names under which this file can reach the scaffold's three steps.
+
+    Returns the **bare** names (the three, plus any alias a
+    `from ...protocol import serve as s` bound) and the **module** names an
+    attribute call may spell (`protocol`, `p`, or the full dotted path after
+    `import slife2.libs.plugin.protocol`).  A method on another object is
+    neither, which is the distinction the gate needs.
+    """
+    bare = set(_START_CALLS)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "slife2.libs.plugin.protocol"
+        ):
+            for alias in node.names:
+                if alias.name in _START_CALLS:
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "slife2.libs.plugin.protocol":
+                    # `import a.b.c` binds `a`; `import a.b.c as p` binds `p`.
+                    modules.add(alias.asname or alias.name.split(".")[0])
+                    if alias.asname is None:
+                        modules.add(alias.name)
+    return bare, modules
+
+
+def _start_call(node: ast.Call, bare: set[str], modules: set[str]) -> str:
+    """The scaffold call *node* names, or `""` when it is some other `serve`.
+
+    A bare name is the hand-rolled `main`'s shape; an attribute call is the
+    scaffold only through the module this file imported it from.  Everything
+    else named `serve` is somebody's method, which is not this gate's business.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id if func.id in bare else ""
+    if not isinstance(func, ast.Attribute) or func.attr not in _START_CALLS:
+        return ""
+    if isinstance(func.value, ast.Name):
+        return func.attr if func.value.id in modules else ""
+    return func.attr if ast.unparse(func.value) in modules else ""
+
+
 def test_no_server_starts_itself() -> None:
     """**The gate: `serve_plugin` is the only way a server in this system starts.**
 
@@ -975,10 +1026,17 @@ def test_no_server_starts_itself() -> None:
     the count of *shapes* was one, held together by nothing.
 
     What this refuses is the next copy.  The three names below are the ones a
-    hand-rolled `main` needs and nothing else in the tree has any use for, so a
-    plugin module that reaches for one is a server that has started spelling the
-    eleven lines out again.  Scanning imports would not do: the copy that
-    existed imported exactly these and the test that would have caught it did not.
+    hand-rolled `main` needs, so a plugin module that reaches for one **by its
+    own name** is a server that has started spelling the eleven lines out
+    again.  Scanning imports would not do: the copy that existed imported
+    exactly these and the test that would have caught it did not.
+
+    **A method that happens to share the name is not this call.**  The file
+    tunnel runs a second uvicorn listener, and `uvicorn.Server.serve` is a
+    method on that object rather than the scaffold's `serve` — so an attribute
+    call is read as the copy only when its receiver is the protocol module
+    (bare calls, the shape the two hand-rolled servers had, are always the
+    copy).
 
     **The one exemption is `protocol.py` itself**, which is where the single
     implementation lives — and the three model backends, which go through
@@ -986,22 +1044,18 @@ def test_no_server_starts_itself() -> None:
     same function and not a second copy of it, which is why it names none of
     these either.
     """
-    import ast
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
     offenders: list[str] = []
     for path in sorted((root / "slife2" / "plugins").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        bare, modules = _start_call_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = (
-                node.func.id
-                if isinstance(node.func, ast.Name)
-                else getattr(node.func, "attr", "")
-            )
-            if name in ("parse_serve_args", "configure_logging", "serve"):
+            name = _start_call(node, bare, modules)
+            if name:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno} calls {name}")
 
     assert not offenders, (

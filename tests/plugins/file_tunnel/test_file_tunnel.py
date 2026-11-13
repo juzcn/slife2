@@ -1,16 +1,17 @@
-"""`slife2-file-tunnel`: the registry, the two tools, and the one route.
+"""`slife2-file-tunnel`: the registry, the two tools, and the one public route.
 
-Three halves, each driven where it can be reached without a tunnel.
+Three halves, each driven where it can be reached without a real tunnel.
 
 The *tools* run over the in-memory transport with a fake tunnel injected, so
 what is under test is which file, which token and what the far end is told —
 an injected provider makes that a contract rather than a patched module global.
-The *route* is driven through the real ASGI app
-(`FastMCP.http_app()`), which is the half worth being hardest about: it is the
-one thing about this plugin that is new to slife2, and a URL handed to a vision
-model is worthless if `/share/<token>` does not answer.  The *guards* — the
-credential denylist, the stat pin, the RFC 5987 filename — each one was a bug
-before it was a test.
+The *public surface* is the share listener: a URL handed to a vision model is
+worthless if `/share/<token>` does not answer, and dangerous if anything else
+on the same hostname does.  The app is driven through ASGI for its answers,
+and through a real loopback socket for the one property that matters — the
+port the tunnel is given answers `/share/{token}` and nothing else.  The
+*guards* — the credential denylist, the stat pin, the RFC 5987 filename — each
+one was a bug before it was a test.
 """
 
 from __future__ import annotations
@@ -32,11 +33,13 @@ from slife2.plugins.file_tunnel.server import (
     Exposed,
     Exposure,
     Revoked,
+    ShareListener,
     _ensure,
     build_server,
     content_disposition,
     is_credential_path,
     serve_exposed,
+    share_app,
 )
 
 pytestmark = pytest.mark.unit
@@ -185,6 +188,12 @@ async def fetch(app: Any, path: str) -> httpx2.Response:
     """One GET against the real ASGI app — no socket, no tunnel."""
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url="http://t") as http:
+        return await http.get(path)
+
+
+async def fetch_live(port: int, path: str) -> httpx2.Response:
+    """One GET against the loopback port the tunnel is pointed at."""
+    async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
         return await http.get(path)
 
 
@@ -426,18 +435,22 @@ async def test_a_tunnel_that_died_mid_call_is_a_failure(tmp_path: Path) -> None:
 # --- withdrawing --------------------------------------------------------------
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_unexposing_stops_the_link(tmp_path: Path) -> None:
     picture = tmp_path / "photo.png"
     picture.write_bytes(b"png-bytes")
-    server = server_for()
-    app = server.http_app()
+    tunnel = FakeTunnel(active=False)
+    server = build_server(load(), provider=tunnel)
 
     async with Client(server) as client:
         token = (await ask_json(client, "expose_local_image", path=str(picture)))[
             "token"
         ]
-        assert (await fetch(app, f"/share/{token}")).status_code == 200
+        # The tunnel's target is the share listener, so this is the URL a
+        # remote fetcher would reach — the same bytes, one hop of loopback.
+        port = tunnel.started[-1]
+        assert (await fetch_live(port, f"/share/{token}")).status_code == 200
 
         # A whole share URL works as well as the token, and the answer names the
         # token it actually withdrew rather than what it was handed.
@@ -446,7 +459,7 @@ async def test_unexposing_stops_the_link(tmp_path: Path) -> None:
         )
         assert answer == {"token": token}
 
-    assert (await fetch(app, f"/share/{token}")).status_code == 403
+        assert (await fetch_live(port, f"/share/{token}")).status_code == 403
 
 
 @pytest.mark.asyncio
@@ -609,29 +622,70 @@ async def test_a_start_that_outlives_its_budget_is_left_alone(
 
 @pytest.mark.asyncio
 async def test_an_unknown_token_is_403() -> None:
-    response = await fetch(server_for().http_app(), "/share/deadbeef")
+    response = await fetch(share_app(Exposed()), "/share/deadbeef")
     assert response.status_code == 403
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_the_route_serves_what_the_tool_exposed(tmp_path: Path) -> None:
-    """The whole feature in one test: a tool call, a token, and the bytes a
-    third party gets by fetching the URL it was handed."""
+async def test_the_share_listener_answers_one_route_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """**The security property, at the listener.**  A tunnel forwards a port,
+    so the public surface is whatever that port answers.  This one answers the
+    share route and refuses every other path — in particular the MCP endpoint
+    that shares the process and the hostname's would-be port.
+    """
     payload = b"file-content-bytes"
     picture = tmp_path / "data.bin"
     picture.write_bytes(payload)
-    server = server_for()
-    app = server.http_app()
+    exposed = Exposed()
+    exposure = exposed.register(str(picture), None)
+    listener = ShareListener(share_app(exposed))
+    port = await listener.start()
+    try:
+        served = await fetch_live(port, f"/share/{exposure.token}")
+        assert served.status_code == 200
+        assert served.content == payload
+        assert served.headers["Content-Type"].startswith("application/octet-stream")
+        assert served.headers["Content-Length"] == str(len(payload))
+        assert served.headers["Content-Disposition"] == 'inline; filename="data.bin"'
+
+        assert (await fetch_live(port, "/mcp")).status_code == 404
+        assert (await fetch_live(port, "/")).status_code == 404
+        # The route exists but has no POST; Starlette answers 405, not 404.
+        async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+            assert (await http.post(f"/share/{exposure.token}")).status_code == 405
+    finally:
+        await listener.stop()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_tunnel_is_pointed_at_the_share_listener(tmp_path: Path) -> None:
+    """The whole feature, and the boundary, in one test: a tool call, a token,
+    the bytes a third party gets from the port the tunnel was actually given —
+    and a 404 for the MCP endpoint on that same port.
+
+    The port comes from the injected tunnel rather than from the config,
+    because that is the claim: the tunnel is handed the listener's address,
+    not the MCP server's.
+    """
+    payload = b"file-content-bytes"
+    picture = tmp_path / "data.bin"
+    picture.write_bytes(payload)
+    tunnel = FakeTunnel(active=False)
+    server = build_server(load(), provider=tunnel)
 
     async with Client(server) as client:
         answer = await ask_json(client, "expose_local_image", path=str(picture))
+        port = tunnel.started[-1]
+        served = await fetch_live(port, f"/share/{answer['token']}")
+        mcp = await fetch_live(port, "/mcp")
 
-    response = await fetch(app, f"/share/{answer['token']}")
-    assert response.status_code == 200
-    assert response.content == payload
-    assert response.headers["Content-Type"].startswith("application/octet-stream")
-    assert response.headers["Content-Length"] == str(len(payload))
-    assert response.headers["Content-Disposition"] == 'inline; filename="data.bin"'
+    assert served.status_code == 200
+    assert served.content == payload
+    assert mcp.status_code == 404, "the MCP endpoint is on the public port"
 
 
 @pytest.mark.asyncio
