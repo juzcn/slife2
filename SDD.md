@@ -2005,6 +2005,12 @@ timezone; a repeated local hour is the same fire only if its wall-clock reading
 equals the anchor's, because comparing instants alone would fire twice in a
 fall-back hour.
 
+The anchor is a compare-and-set in the ledger's own update: a fire whose instant
+is not later than the stored `last_due` leaves it alone, so two concurrent fires
+cannot move it backwards. A stored anchor that is not a time
+(`julianday(last_due)` is NULL, from a hand-edited ledger) is replaced by the
+next fire rather than raising, because nothing else could ever move it again.
+
 The ledger is one file per agent. The shared process finds agents by walking
 `agents/*/schedule.db` across every known home; a ledger carries the home it came
 from, because the home is a property of the request, never of the process.
@@ -2742,6 +2748,7 @@ The four shapes an undeclared fallback takes:
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
 | An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | A programming error, which propagates; bad rows, handled per pass | The error naming the path |
+| A stored anchor is not a time | Replace it with the next fire's instant | The damage itself — the old value is gone | A ledger that cannot be opened, which is skipped and logged | The new anchor; the damage is not reported |
 | A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
 | A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start | A warning naming the path |
