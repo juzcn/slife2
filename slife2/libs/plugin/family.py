@@ -37,7 +37,7 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -664,8 +664,8 @@ class Family:
             and previous.link is one.link
         )
         if shared:
-            assert one.link is not None  # `previous.link is one.link` is not None
-            await one.link.reconfigure(
+            link = cast(Link, one.link)
+            await link.reconfigure(
                 settings,
                 directory=self._directory,
                 transport=self._transports.get(settings.name),

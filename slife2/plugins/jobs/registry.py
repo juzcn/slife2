@@ -60,7 +60,7 @@ class Job:
     @property
     def ok(self) -> bool:
         """Whether this job can be called at all."""
-        return not self.error and self.tool is not None
+        return self.tool is not None
 
 
 def load_module(path: Path, name: str) -> types.ModuleType:

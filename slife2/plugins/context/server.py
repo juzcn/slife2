@@ -1411,7 +1411,7 @@ def build_server(
             return order, "empty"
         kept: list[int] = []
         for index, score in scored:
-            if 0 <= index < len(ids) and score >= policy.rerank_min_score:
+            if score >= policy.rerank_min_score:
                 turn_id = ids[index]
                 if turn_id not in kept:
                     kept.append(turn_id)

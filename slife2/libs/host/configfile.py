@@ -332,9 +332,7 @@ def upsert(
         values = _without_empties(entry)
         if values.get("enabled") is True:
             values.pop("enabled")
-        current = _section(document, section)
-        if current is None:  # unreachable while `create=True`; kept honest
-            return
+        current = cast(CommentedMap, _section(document, section))
         # A fresh mapping rather than an update of the one that is there: what
         # is written is exactly what was handed in, and nothing the caller did
         # not name survives from whatever the entry used to say.
@@ -637,9 +635,7 @@ def update_entry(
 
     def mutate(document: CommentedMap) -> None:
         nonlocal existed
-        values = _section(document, section)
-        if values is None:  # unreachable while `create=True`; kept honest
-            return
+        values = cast(CommentedMap, _section(document, section))
         existed = name in values
         raw = values.get(name)
         if raw is not None and not isinstance(raw, dict):

@@ -1115,7 +1115,9 @@ def serve(
             uvicorn_config={"log_config": None},
         )
     finally:
-        if owner is None and read_record(url) == record:
+        # A live owner returned above, before the server was started, so this
+        # process is the one that wrote the record.
+        if read_record(url) == record:
             clear_record(url)
 
 

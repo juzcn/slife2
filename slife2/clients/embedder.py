@@ -234,10 +234,12 @@ class EmbedderConnection:
         self._opening = asyncio.Lock()
 
     async def get(self) -> Embedder:
-        if self._embedder is not None:
-            return self._embedder
+        embedder = self._embedder
+        if embedder is not None:
+            return embedder
         async with self._opening:
-            if self._embedder is None:
+            embedder = self._embedder
+            if embedder is None:
                 client: Client = await open_server(
                     self._config.server(EMBEDDINGS_KEY).url,
                     name=EMBEDDINGS_SERVER_NAME,
@@ -246,14 +248,14 @@ class EmbedderConnection:
                 )
                 self._client = client
                 described = tool_payload(await client.call_tool("describe", {}))
-                self._embedder = RemoteEmbedder(client, described)
+                embedder = RemoteEmbedder(client, described)
+                self._embedder = embedder
                 logger.info(
                     "embedding with %s (%s wide)",
-                    self._embedder.identity,
-                    self._embedder.dimension,
+                    embedder.identity,
+                    embedder.dimension,
                 )
-            assert self._embedder is not None
-            return self._embedder
+            return embedder
 
     async def rerank(
         self, query: str, documents: list[str], top_n: int | None = None

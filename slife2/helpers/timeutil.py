@@ -99,9 +99,9 @@ def _period_start(day: date, period: str) -> date:
         return day.replace(day=1)
     if period == "quarter":
         return date(day.year, 3 * ((day.month - 1) // 3) + 1, 1)
-    if period == "year":
-        return date(day.year, 1, 1)
-    raise InvalidTimeBound(_bound_error("since", period))
+    # `_PERIOD_RE` is the only source of `period`, and it names the four words
+    # above; the year is the remaining one.
+    return date(day.year, 1, 1)
 
 
 def _resolve_period(which: str, period: str, role: str, today: date) -> date:
@@ -258,7 +258,9 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # — but it raises rather than returning the bound un-normalised:
             # skipping the local-offset rewrite is the one thing this module
             # guarantees, so a value that reached here unparseable is a bound it
-            # cannot place (SDD Appendix C).
+            # cannot place (SDD Appendix C).  The test suite drives this with a
+            # `_canonical` that answers garbage, which is what keeps the
+            # invariant guarded against a future edit rather than trusted.
             raise InvalidTimeBound(_bound_error(role, value)) from None
         try:
             resolved = at(moment)

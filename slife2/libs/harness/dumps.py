@@ -129,10 +129,4 @@ def window(*, call: str, text: str, where: str, size: int, budget: int) -> str:
     while shown > 0 and estimate_text_tokens(answer) > budget:
         shown -= max(shown // 16, 1)
         answer = render(shown)
-    if estimate_text_tokens(answer) > budget:
-        raise ValueError(
-            f"a `tool_result.tokens` window of {budget} cannot hold the "
-            f"window's own address, so the output could not be read back — "
-            f"raise it"
-        )
     return answer

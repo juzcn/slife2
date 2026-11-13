@@ -1042,7 +1042,7 @@ def build_server(
                     timeout=_T.timeouts.work.hub,
                 )
                 payload = tool_payload(answer)
-                url = payload.get("url") if isinstance(payload, dict) else None
+                url = payload.get("url")
             except Exception:  # noqa: BLE001 - one source's refusal, not the batch's
                 refusals.append(refusal)
                 continue
@@ -1672,8 +1672,8 @@ def build_server(
                     timeout=_T.timeouts.work.hub,
                 )
                 kept = tool_payload(answer)
-                key = kept.get("key") if isinstance(kept, dict) else None
-                remote = kept.get("source") if isinstance(kept, dict) else None
+                key = kept.get("key")
+                remote = kept.get("source")
                 if not (isinstance(key, str) and key) and not (
                     isinstance(remote, str) and remote
                 ):

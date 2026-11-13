@@ -1386,14 +1386,11 @@ class Upstream:
             type(exc).__name__,
             exc,
         )
-        try:
-            verdict = asyncio.get_running_loop().create_task(
-                self._catalogue.source_state(self.settings.name, "error")
-            )
-        except RuntimeError:  # pragma: no cover - a failure is reached from an await
-            # No loop to write on.  The verdict is the catalogue's next-start
-            # problem, and nothing here may replace the reason this failed.
-            return
+        # A failure is reached from an await (`Connection.fail` is called from
+        # the connect and listing paths), so the loop is running.
+        verdict = asyncio.get_running_loop().create_task(
+            self._catalogue.source_state(self.settings.name, "error")
+        )
         self._verdicts.add(verdict)
         verdict.add_done_callback(self._verdict_written)
 
