@@ -22,7 +22,11 @@ from typing import Any
 
 from slife2.clients.a2a import ProbeError, ProbeResult
 from slife2.helpers import timeouts as _T
-from slife2.libs.host.config import Config
+from slife2.libs.host.config import (
+    AGENT_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
+    Config,
+)
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.plugin.vocabulary import (
@@ -128,6 +132,7 @@ async def probe_tui(
         try:
             task_server = await open_server(
                 config.server("agent-task").url,
+                name=AGENT_TASK_SERVER_NAME,
                 fallback_tool=START,
                 timeout=_T.timeouts.transport.window,
             )
@@ -161,6 +166,7 @@ async def probe_tui(
         try:
             agent_server = await open_server(
                 config.server("agent").url,
+                name=AGENT_SERVER_NAME,
                 fallback_tool=TRANSCRIPT,
                 timeout=_T.timeouts.transport.window,
             )

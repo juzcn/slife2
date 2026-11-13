@@ -406,13 +406,21 @@ class AgentLoop:
                 before = injected() if injected is not None else 0
                 text, _ok = await self._tools.execute(call)
                 took = injected is None or injected() > before
+                # **The cut-in's result is fitted like every other tool
+                # result.**  This is the road a message typed mid-turn travels,
+                # and without the fit a large paste entered the conversation,
+                # its record and every later request whole — while the same
+                # tool called by the model itself went through `_one` and was
+                # bounded (SDD §5.2.4, §7.6).  `text` stays the event's own
+                # copy below, so the live line still shows the person's words.
+                fitted = await self._fit(call, text)
                 messages.append(
                     Message(role="assistant", content=None, tool_calls=[call])
                 )
                 messages.append(
                     Message(
                         role="tool",
-                        content=text,
+                        content=fitted,
                         tool_call_id=call.id,
                         # Display metadata, persisted with the turn and never
                         # sent to a provider (`Message.to_record`): the line a

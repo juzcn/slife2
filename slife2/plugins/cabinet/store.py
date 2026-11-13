@@ -1377,7 +1377,13 @@ class CabinetStore:
                 "DELETE FROM cabinet_doc WHERE id = ?", (int(row["id"]),)
             )
         if mirror := str(row.get("mirror") or ""):
-            (self.root / mirror).unlink(missing_ok=True)
+            # **The row is already gone by this line**, so a file that cannot be
+            # removed must not turn a successful delete into a failed one.  The
+            # bytes branch below already says this with `discard_file`; a mirror
+            # held open by an editor is the same accident (Windows refuses the
+            # unlink), and raising here would report failure for a document that
+            # no longer exists — then every retry answers "there is no note".
+            discard_file(self.root / mirror)
         if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
             discard_file(self.root / saved)
         return row
@@ -1702,17 +1708,28 @@ class CabinetStore:
                 "browsed": True,
             }
 
-        # **The words are a sentence when they are all there is.**  The keyword
-        # leg asks for every word at once, so a word form the text does not
-        # carry finds nothing; the meaning leg reads the same joined words.
-        # `ToolStore.search` measured the difference (23/36 to 34-36).
-        if keywords and not any(sentence.strip() for sentence in sentences):
+        # **The words are a sentence when they are all there is**, but a keyword
+        # list with no term in it is no keyword leg.  The two are different
+        # inputs to the two searches, and reading the first as the second would
+        # make `keywords=[""]` beside a real sentence throw away the sentence
+        # (`textindex.EmptyQuery` out of `match_expression`), which is exactly
+        # what the turn store refuses to do.  With no sentence beside it there
+        # is nothing to search with at all, and the refusal is the answer.
+        expression = ""
+        if keywords:
+            try:
+                expression = textindex.match_expression(list(keywords))
+            except textindex.EmptyQuery:
+                if not any(sentence.strip() for sentence in sentences):
+                    raise
+        if expression and not any(sentence.strip() for sentence in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
         over = limit * _OVERFETCH
-        expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits = (
-            self._keyword_hits(expression, over, clauses, values) if keywords else None
+            self._keyword_hits(expression, over, clauses, values)
+            if expression
+            else None
         )
 
         # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,

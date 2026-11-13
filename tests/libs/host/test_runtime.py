@@ -1002,3 +1002,20 @@ async def test_the_close_survives_the_cancellation_it_exists_for(
 
     await asyncio.wait_for(closed.wait(), timeout=1)
     assert closed.is_set()
+
+
+def test_one_config_file_gets_one_write_lock_however_it_is_spelled(
+    tmp_path: Path,
+) -> None:
+    """**A lock keyed by the spelling does not lock.**
+
+    Two clients can reach one home through a symlink, a junction, a `..` or a
+    different case.  A digest of the string would be two locks for one file, so
+    two `mcp_set`/`cli_set` edits could read-modify-write at once and one would
+    vanish — exactly what the lock exists to prevent.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text("providers: {}\n", encoding="utf-8")
+    alias = tmp_path / ".." / tmp_path.name / "slife2.yaml"
+
+    assert runtime.config_key(path) == runtime.config_key(alias)

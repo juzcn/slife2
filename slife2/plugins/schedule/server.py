@@ -1142,6 +1142,12 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         name = name.strip()
+        # **The address is read now, not when this server was built.**  The
+        # clock reads `live()` on every pass for exactly this reason: an edited
+        # file can move `servers.agent-task`, and a manual run that kept
+        # dialling the old address would fail while the clock's fires succeeded
+        # (or the reverse after a partial restart).
+        live_config = live()
         # **One decision at a time for this task** (`RunLocks`).  Everything
         # below is the run's state, and the same three steps are reached by a
         # maker, its subagent, the poll's fire and the model's own call.
@@ -1155,7 +1161,7 @@ def build_server(
             # name is its id, so a still-`pending` predecessor would share the
             # id with this run.  The poll does the same before its fires; this
             # is the manual path, and it owes the same order.
-            await _reconcile_one(config, store, tasks_client=tasks_client)
+            await _reconcile_one(live_config, store, tasks_client=tasks_client)
             stamp = due_at.strip()
             if stamp:
                 stamp = _key_of(store, task.name, stamp)
@@ -1182,7 +1188,9 @@ def build_server(
                 )
                 return found.row()
             return (
-                await dispatch(config, store, task, stamp, tasks_client=tasks_client)
+                await dispatch(
+                    live_config, store, task, stamp, tasks_client=tasks_client
+                )
             ).row()
 
     @mcp.tool(name=SCHEDULE_RUN_SKIP, meta=FOR_THE_MODEL)

@@ -484,7 +484,18 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
         return _reuse(spec, config_path=config_path)
 
     try:
-        with start_lock(spec.url):
+        # **The wait is the starter's whole budget, not the lock's own short
+        # default.**  `exclusive` resolves `timeout=None` to `grace.lock` (30 s),
+        # while the process holding this lock is inside `_wait_ready`, whose
+        # bound is `ready.plugin_start` (300 s).  A second instance arriving at
+        # a cold, slow server would give up after 30 s and report a failed
+        # start even though the first was bringing the same server up
+        # correctly — the opposite of "the one that waits re-probes once it
+        # gets in".
+        with start_lock(
+            spec.url,
+            timeout=_T.timeouts.ready.plugin_start + _T.timeouts.ready.probe,
+        ):
             if probe(spec):
                 return _reuse(spec, config_path=config_path)
             if tcp_listening(spec.host, spec.port):
@@ -903,7 +914,6 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         return Outcome(spec, status, detail="no record; not started by slife2")
 
     if not same_process(record):
-        clear_record(spec.url)
         # `same_process` is False for three situations, and they are not the
         # same sentence.  A pid that is simply gone is the common one — a
         # launcher that killed a server which never became ready leaves exactly
@@ -914,12 +924,21 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         # two without evidence "pid reused" asserts something nobody checked,
         # in the one line a reader gets when a server did not stop; the third
         # says what it knows (SDD Appendix C).
+        #
+        # **Only proven evidence clears the record.**  A record dropped because
+        # ownership could not be proven leaves a live daemon with no record at
+        # all: every later `status` says "running (external)" and every later
+        # `down` refuses to touch it, so the one process this command exists to
+        # stop can never be stopped again.  The record is kept in that case,
+        # exactly as it is when a pid outlives `terminate` below.
         if not pid_alive(record.pid):
+            clear_record(spec.url)
             detail = (
                 f"record points at pid {record.pid}, which is no longer "
                 f"{spec.name} (the process is gone); left alone"
             )
         elif record.start_token and process_start_token(record.pid) is not None:
+            clear_record(spec.url)
             detail = (
                 f"record points at pid {record.pid}, which is no longer "
                 f"{spec.name} (pid reused); left alone"
@@ -927,7 +946,7 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         else:
             detail = (
                 f"record points at pid {record.pid}, but its ownership could "
-                f"not be proven; left alone"
+                f"not be proven; the record is kept so `down` can find it again"
             )
         return Outcome(spec, Status.STOPPED, detail=detail)
 

@@ -312,6 +312,48 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     ] == ["c1"]
 
 
+async def test_a_large_cut_in_is_fitted_like_any_other_result() -> None:
+    """**The harness's own pair is a tool result too** (SDD §5.2.4).
+
+    A message typed while a turn runs arrives through `auto`, and the pair the
+    loop writes carries its text.  That road used to skip `_fit` entirely while
+    the same tool called by the model went through it — so a large paste entered
+    the conversation, its row and every later request whole, and the dump the
+    window exists for was never written.  The event still carries the person's
+    words for the live line; only the conversation's copy is bounded.
+    """
+    big = "a log line\n" * 900
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        return big
+
+    backend = FakeBackend(text_turn("done"))
+    harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
+    observer = ListObserver()
+    messages: list[Message] = []
+    asked = 0
+
+    def auto() -> AutoCall | None:
+        nonlocal asked
+        asked += 1
+        if asked == 1:
+            return AutoCall("_check_new_input", channel="tui", receipt="s-1")
+        return None
+
+    async def compress(_call: ToolCall, _text: str) -> str:
+        return "the fitted head"
+
+    await AgentLoop(backend, ToolRegistry(harness_tools), compress=compress).run_turn(
+        messages, "one", observer, auto=auto
+    )
+
+    answered = [m for m in messages if m.role == "tool" and m.channel == "tui"]
+    assert [m.content for m in answered] == ["the fitted head"]
+    assert [e for e in observer.events if isinstance(e, MessageCutIn)] == [
+        MessageCutIn(text=big, channel="tui", receipt="s-1")
+    ]
+
+
 async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
     """The delivery verdict is the inbox's, not the gate's optimism.
 

@@ -404,14 +404,18 @@ def read_timeout(
     """
     if value is None:
         return None, None
-    seconds: float | None = None
-    if not isinstance(value, bool):
-        # `float(True)` is 1.0; a boolean is not a number of seconds.
-        try:
-            seconds = float(value)
-        except (TypeError, ValueError):
-            seconds = None
-    if seconds is None or not math.isfinite(seconds) or seconds <= 0:
+    # **A number, and nothing that merely spells one.**  `float("5")` is 5.0,
+    # but text is not a duration: SDD §7.7 says a `_timeout` written as text
+    # fails the call, and accepting the numeric strings too would make the
+    # contract's spelling the only thing it rejects.  JSON has one number type,
+    # so anything else reaching here is a caller that wrote the wrong shape.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return (
+            None,
+            f"`{name}` must be a positive, finite number of seconds; got {value!r}",
+        )
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
         return (
             None,
             f"`{name}` must be a positive, finite number of seconds; got {value!r}",

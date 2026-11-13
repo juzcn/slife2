@@ -268,12 +268,19 @@ def begin_rebuild(connection: sqlite3.Connection) -> None:
     it compares is the one that was written.
 
     An explicit `BEGIN` puts the DDL inside the transaction, so the caller's
-    `with` commits or rolls back the whole rebuild as one unit.  Four rebuilds
-    call it — a turn index, a catalogue, a cabinet and the catalogue's
+    `with` commits or rolls back the whole rebuild as one unit.  **`IMMEDIATE`,
+    because the decision the rebuild makes is a read**: `rebuild_vector_index`
+    compares the recorded identity with this build's and rebuilds only when it
+    moved.  A deferred transaction takes the write lock at its first write — the
+    `DROP` — so a save in another process can commit new vectors between the
+    comparison and the drop, and the rebuild then erases them while its caller
+    believes the index was already current.  `BEGIN IMMEDIATE` makes the
+    comparison and the rebuild one serialized write decision (SDD §8.2).  Four
+    rebuilds call it — a turn index, a catalogue, a cabinet and the catalogue's
     stale-file rebuild — and each of them leads with a `DROP`, which is what
     makes one helper worth having rather than a `BEGIN` line at each site.
     """
-    connection.execute("BEGIN")
+    connection.execute("BEGIN IMMEDIATE")
 
 
 def table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -561,9 +568,12 @@ def rebuild_vector_index(
     an old id would be read as one the vector pass had already finished with.
     `meta_table` is the catalogue's, which renamed the table `meta`.
     """
+    # **The comparison is inside the transaction too.**  It is a read, and what
+    # it decides is whether to delete the vectors a concurrent save may be
+    # committing right now (`begin_rebuild` is `BEGIN IMMEDIATE` for this).
+    begin_rebuild(connection)
     if index_meta(connection, meta_table).get("vector_identity", "") == identity:
         return False
-    begin_rebuild(connection)
     connection.execute(f"DROP TABLE IF EXISTS {vec_table}")
     connection.execute(f"DELETE FROM {chunk_table}")
     for table in also_delete:

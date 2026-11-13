@@ -2544,10 +2544,13 @@ def build_server(
                 # The number the status bar will show, and the one the next
                 # turn's marker reports — the last call this turn made, not a
                 # sum over the turn (`TurnRecord.context_tokens`).  Only a loop
-                # that opened made one; a failed pre-turn leaves the last known
-                # figure standing.
-                if agent_loop is not None:
-                    loop.context_tokens = outcome.last_usage.total_tokens
+                # whose call actually completed made one: a loop that opened and
+                # then failed or was cancelled before any call returned holds
+                # `Usage()` (all zero), and writing that would make a failed
+                # turn look like an empty conversation.  The last measured
+                # figure stands instead.
+                if agent_loop is not None and agent_loop.last_usage.total_tokens:
+                    loop.context_tokens = agent_loop.last_usage.total_tokens
 
     def keep_opening(
         loop: Loop, item: Pending, outcome: Outcome, elapsed: float
@@ -4151,6 +4154,15 @@ def build_server(
         request with a different blast radius: `turn_list` still finds every one
         of them, they are simply no longer what this conversation is made of.
 
+        **A turn in flight is waited for, and the loop is then retired.**  A
+        reset that dropped the loop while a turn still held it would be undone
+        by that turn's own record: the save appends its turn id to the live
+        context list this call just cleared, and the next message restores the
+        conversation the reset was meant to end.  So the lock is taken first
+        (bounded, like `subagent_remove`), the loop is marked removed so a
+        message queued behind this one cannot run on it, and only then is the
+        stored list cleared and the loop dropped.
+
         Args:
             agent: Whose conversation.
             subagent: Which of that agent's conversations; empty for its own.
@@ -4158,14 +4170,33 @@ def build_server(
         Returns:
             `reset`: whether there was a conversation there to forget.
         """
-        await forget_context(agent, subagent)
-        forgotten = loops.pop(conversation_key(agent, subagent), None) is not None
-        logger.debug(
-            "reset: %s %s",
-            describe((agent, subagent)),
-            "forgotten" if forgotten else "was not running",
-        )
-        return {"reset": forgotten}
+        key = conversation_key(agent, subagent)
+        loop = loops.get(key)
+        if loop is None:
+            await forget_context(agent, subagent)
+            logger.debug("reset: %s was not running", describe((agent, subagent)))
+            return {"reset": False}
+        try:
+            async with asyncio.timeout(_T.timeouts.grace.turn):
+                await loop.lock.acquire()
+        except TimeoutError:
+            raise ToolError(
+                f"{describe((agent, subagent))} is still running a turn; wait for "
+                f"it, then reset the conversation."
+            ) from None
+        try:
+            if loops.get(key) is not loop:
+                raise ToolError(
+                    f"{describe((agent, subagent))} changed while it was being "
+                    f"reset; try again."
+                )
+            await forget_context(agent, subagent)
+            loop.removed = True
+            loops.pop(key, None)
+        finally:
+            loop.lock.release()
+        logger.debug("reset: %s forgotten", describe((agent, subagent)))
+        return {"reset": True}
 
     @mcp.tool(name=SUBAGENT_SET, meta=FOR_THE_MODEL)
     async def subagent_set(

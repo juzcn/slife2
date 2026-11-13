@@ -108,9 +108,9 @@ from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
     pid_alive,
+    process_start_token,
     read_record,
     record_lock,
-    same_process,
     tcp_listening,
     write_record,
 )
@@ -947,7 +947,19 @@ def _live_owner(url: str) -> ServerRecord | None:
     record = read_record(url)
     if record is None or not pid_alive(record.pid):
         return None
-    if same_process(record) or not record.start_token:
+    if not record.start_token:
+        # The platform has no token, so a live pid is the whole of the evidence
+        # there is.
+        return record
+    current = process_start_token(record.pid)
+    # **An unreadable token is not a mismatch.**  `same_process` answers False
+    # for both, deliberately, because it is the question "may I signal this
+    # process?" and erring towards leaving it alone is safe there.  Here the
+    # question is "may I overwrite its record?", and the safe answer is the
+    # opposite: reading "could not prove" as "not ours" lets a second start
+    # overwrite and then delete a live daemon's record, orphaning it.  A token
+    # that exists and differs is the only proof of a recycled pid.
+    if current is None or current == record.start_token:
         return record
     return None
 

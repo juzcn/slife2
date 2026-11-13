@@ -44,8 +44,8 @@ root of its own rather than a copy per home.
       locks/        the per-endpoint start lock two launchers race on
       agents/       the claims: which process is running under an agent name
       clients/      who is using the shared servers, so the last one out can
-                    take them down — and `home`, which names the home it is
-                    working in
+                    take them down — with the pid, agent and start token that
+                    say whether it still is
       homes/       every data directory this machine has run an agent in
 
 **Which root a path comes from is the whole of the design.**  `runtime/` holds
@@ -522,6 +522,12 @@ def _write_atomically(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+            # **The bytes reach the disk before the name does.**  `os.replace`
+            # publishes whatever the file holds, and a crash in the window can
+            # leave a zero-length record that `known_homes` refuses as damage —
+            # the same failure `statefile.write` flushes and fsyncs to prevent.
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

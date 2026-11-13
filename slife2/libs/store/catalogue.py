@@ -1515,25 +1515,39 @@ class ToolStore:
                 wanted = sorted(self.autoload)
                 protected = f"name IN ({_marks(wanted)})"
                 values.extend(wanted)
-            # `MAX` of the two stamps: the newer event wins, so a call outranks
-            # a later load and a load outranks an earlier one.  Both columns are
-            # `''` for "never", which sorts below every timestamp — so a row
-            # with neither is the first to go, which is the right answer for a
-            # row nothing has ever happened to.
+            # `MAX` of the two **instants**: the newer event wins, so a call outranks
+            # a later load and a load outranks an earlier one.  The strings are
+            # local-offset ISO stamps, so comparing them as text is wrong in the
+            # one case the format exists for — two writers in different offsets,
+            # or the same machine in a fold — and the least-recently-used tool
+            # would be the one the model used most recently (SDD §12.3).  Both
+            # columns are `''` for "never", which `julianday` answers NULL for;
+            # the coalesce makes that the oldest value rather than an
+            # incomparable one.
             victims = [
                 str(row["name"])
                 for row in connection.execute(
                     f"SELECT name FROM tool WHERE {where} AND NOT ({protected})"
-                    " ORDER BY MAX(last_used, last_loaded) ASC, name LIMIT ?",
+                    " ORDER BY MAX("
+                    "COALESCE(julianday(last_used), 0), "
+                    "COALESCE(julianday(last_loaded), 0)"
+                    ") ASC, name LIMIT ?",
                     (*values, excess),
                 )
             ]
             if not victims:
                 return []
-            connection.execute(
-                f"UPDATE tool SET load_status = ? WHERE name IN ({_marks(victims)})",
-                (UNLOADED, *victims),
-            )
+            # **The victim list is caller-sized**, because it is however far
+            # over the budget the loaded set grew — a model loading its way
+            # past a lowered threshold can put more than one statement's worth
+            # of names here, and SQLite's bound parameter limit is not a
+            # property of this query.  `chunks` is the same rule the other
+            # list-binders in this store follow (SDD Appendix A rule 12).
+            for piece in chunks(victims):
+                connection.execute(
+                    f"UPDATE tool SET load_status = ? WHERE name IN ({_marks(piece)})",
+                    (UNLOADED, *piece),
+                )
         logger.info(
             "%d tool(s) unloaded to stay under %d: %s",
             len(victims),

@@ -1384,6 +1384,28 @@ async def test_a_search_with_neither_input_browses() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_blank_keyword_does_not_throw_away_the_sentence() -> None:
+    """**Two legs, and one having no term is not the other being absent.**
+
+    `keywords: [""]` beside a real sentence used to raise `EmptyQuery` out of
+    `match_expression`, which the tool answered as a refusal — so the meaning
+    leg never ran.  The turn store already reads its two inputs this way; the
+    cabinet now does too.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_write", subject="one", content="the migration plan")
+        found = await payload(
+            client,
+            "cabinet_search",
+            keywords=[""],
+            sentences=["the migration plan"],
+        )
+
+    assert keys(found["results"]) == ["one"]
+    assert found["browsed"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_search_can_name_one_kind() -> None:
     """A filter narrows what is shown and never what is ranked."""
     async with Client(cabinet()) as client:
@@ -2090,6 +2112,37 @@ async def test_a_grep_match_answers_both_addresses() -> None:
     }
     assert by_char["text"] == "marker"
     assert by_line["text"].endswith("beta marker")
+
+
+@pytest.mark.asyncio
+async def test_a_casefold_that_changes_width_still_answers_the_original_address():
+    """**A folded match is not an original offset.**
+
+    `ß` casefolds to two characters, so a match found in the folded line sits
+    one place later in the real one.  The character address is what the caller
+    passes to `dump_read mode="char"`, so a late offset makes the reader start
+    inside the word it was sent to — the quiet kind of wrong this address
+    exists to prevent.
+    """
+    body = "Straße ALPHA\n"
+    await save_dump("call_casefold", body)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_casefold", pattern="alpha"
+        )
+        at = found["matches"][0]["char"]
+        read = await payload(
+            client,
+            "dump_read",
+            call="call_casefold",
+            mode="char",
+            offset=at,
+            limit=5,
+        )
+
+    assert at == body.index("ALPHA")
+    assert read["text"] == "ALPHA"
 
 
 @pytest.mark.asyncio

@@ -1384,14 +1384,13 @@ class ContextSettings:
     #: in 0–1.  **A filter, not an ordering**: what the ranker returned below it
     #: is dropped; its order is used only by the token budget.  `0.0` keeps
     #: whatever the reranker returned (it still reorders, and the order only
-    #: matters where the token budget cuts); the shipped `0.1` drops the
-    #: incidentals a keyword leg finds — measured at 0.0007–0.006 on this
-    #: project's log — while keeping the real turns (0.69–0.81).  The scale
-    #: belongs to the reranker, so calibrate it like `min_similarity` rather
-    #: than copying a number from another model.  Every candidate in the fused
-    #: recall pool (each leg's `recall_page_limit`, 80 by default) is reranked,
-    #: so a hit RRF put low is still judged.
-    rerank_min_score: float = 0.1
+    #: matters where the token budget cuts); the shipped `0.3` keeps the turns a
+    #: recall needs (0.37–1.0 on this project's log) and drops the incidental
+    #: tail (0.00–0.24).  The scale belongs to the reranker, so calibrate it like
+    #: `min_similarity` rather than copying a number from another model.  Every
+    #: candidate in the fused recall pool (each leg's `recall_page_limit`, 80 by
+    #: default) is reranked, so a hit RRF put low is still judged.
+    rerank_min_score: float = 0.3
     #: How long the discriminator call may take before the turn runs on the
     #: context it already has.  Generous for a remote model, because the answer is
     #: optional by design: a slow one only makes the turn late.
@@ -2543,11 +2542,20 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         # (SDD Appendix C).  `load` reports an unreadable file the same way.
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
-    cached = _latest.get(path)
+    # **The key is the canonical spelling.**  Two clients may reach one home
+    # through a symlink, a junction, a `..` or a different case, and this cache
+    # is read by identity (`config is not self._config` in
+    # `slife2.plugins.llm.server_common.LiveProviders`).  Keyed by the spelling,
+    # one home alternating between two spellings would hand back a different
+    # object on every call, and the caller would rebuild and retire its SDK
+    # client pool for an edit that never happened.  `paths.home_key` is the same
+    # rule the conversation key uses.
+    key = path.resolve()
+    cached = _latest.get(key)
     if cached is not None and cached[0] == stamp:
         return cached[1]
     config = load(path)
-    _latest[path] = (stamp, config)
+    _latest[key] = (stamp, config)
     return config
 
 
@@ -3386,6 +3394,31 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
             env=env,
             cwd=cfg.cwd,
             enabled=cfg.enabled,
+        )
+
+    # **A key this form does not read is refused, not ignored.**  The `command:`
+    # branch builds its environment by hand, so a misspelt `base-url` or
+    # `api_key` would load cleanly and then let the proxy call the host or key
+    # the spec names — a mistake nothing reports.  The declarative branch gets
+    # this from `load_rest_api`'s own model; this is the same judgement for the
+    # spelling that has no model.  `spec` is the declarative form's and is not
+    # read here: a command entry carries its spec in `args:` or `env:`.
+    allowed = {
+        "command",
+        "args",
+        "env",
+        "base_url",
+        "api_key",
+        "cwd",
+        "description",
+        "enabled",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"rest-api.{name}: unknown key(s) {', '.join(unknown)} for a "
+            f"`command:` entry — known keys are {', '.join(sorted(allowed))}; "
+            f"`spec:` belongs to the declarative form"
         )
 
     env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")

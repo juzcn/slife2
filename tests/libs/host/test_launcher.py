@@ -1212,6 +1212,10 @@ def test_stop_says_ownership_is_unproven_rather_than_calling_it_reuse(
     assert killed == []
     assert any("could not be proven" in o.detail for o in outcomes)
     assert not any("pid reused" in o.detail for o in outcomes)
+    # **And the record stays**, because no evidence cleared it.  Dropping it
+    # here left a live daemon nothing could find: `status` said "external" and
+    # every later `down` refused to touch it.
+    assert runtime.read_record(SPEC.url) is not None
 
 
 def test_stop_calls_a_record_whose_process_is_gone_gone(

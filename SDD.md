@@ -237,12 +237,12 @@ Each plugin has one job:
 | `toolhub` | The tool set |
 | `slife2-llm-*` | One wire protocol each |
 | `mcp-tools`, `restapi-tools` | Outward connections for `mcp:` and `rest-api:` |
-| `skills`, `cli` | Playbooks and the command registry |
-| `jobs` | The home's Python functions as tools |
+| `skills-server`, `cli-server` | Playbooks and the command registry |
+| `job-server` | The home's Python functions as tools |
 | `cabinet`, `media` | Documents and dumps; images, video, speech, transcription |
 | `file-tunnel`, `wechat` | A public file URL; one WeChat login per agent |
 | `agent-task`, `schedule` | Background loops; timers and the run ledger |
-| `a2a` | The peer and local networks |
+| `peer-agent`, `subagent` | The peer and local networks |
 | `tui` | The terminal inbox |
 
 A provider is a configuration row rather than a process, which is why one
@@ -430,11 +430,12 @@ it startable by name. The table is data, not imports: every module field is a
 string, because importing a server to read its name would pull provider SDKs
 into the terminal and the agent loop.
 
-Two rows may share a module. `peer_agent` and `subagent` are served by
-`plugins/a2a/server.py`; the second row is a three-line entry point. They are
-separate processes because they are separate networks, and they have different
-MCP names so a probe can tell them apart. Appendix B says where the registry
-lives.
+The two network rows share one implementation but have two entry modules: the
+`peer-agent` row runs `slife2.plugins.a2a.server`, and the `subagent` row runs
+`slife2.plugins.a2a.local_server`, a thin entry point that delegates to it. They
+are separate processes because they are separate networks, and they have
+different MCP names so a probe can tell them apart. Appendix B says where the
+registry lives.
 
 ### 3.6 Identity verification
 
@@ -638,7 +639,10 @@ message — while a subagent's identity is already the conversation id.
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
 After creation it is reached over the local network under `subagent_*` names:
-the direct five, and the six group tools (`subagent_group_set`,
+the direct seven (`subagent_send_message`, `subagent_task_response`,
+`subagent_continue_task`, `subagent_cancel_task`, `subagent_list`,
+`subagent_task_list`, `subagent_broadcast`), and the six group tools
+(`subagent_group_set`,
 `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`,
 `subagent_group_leave`, `subagent_group_send_message`).
 
@@ -763,10 +767,12 @@ coalesce display events without affecting the conversation, and optionally the
 harness's `auto` callback, which names a tool the harness wants called mid-turn.
 
 The loop is a pure function over a message list. It owns no conversation,
-socket, or clock. The iteration cap is `agent.max_iterations`, read per turn
-from the current configuration. `0` or an absent key means no cap: a number
-nobody wrote is a bound nobody chose. A turn that reaches a stated cap ends
-normally with `stop_reason: "max_iterations"`, not with an exception.
+socket, or clock. The iteration cap is `agent.max_iterations`, read when the
+conversation starts — the same moment its model and system prompt are read — so
+an edit reaches the next conversation, not the one already capped by the old
+value. `0` or an absent key means no cap: a number nobody wrote is a bound
+nobody chose. A turn that reaches a stated cap ends normally with
+`stop_reason: "max_iterations"`, not with an exception.
 
 A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
 `(text, ok)` and never raises: a peer's refusal, a dead transport and a tool that
@@ -931,10 +937,13 @@ inbox.
 
 ### 5.5 Context decision and memory selection
 
-The agent server owns one loop per conversation key, created on first use. It
-reads the configuration per turn for everything a conversation can see: the
-system prompt, the model, and the iteration cap. An edit to `slife2.yaml`
-reaches the next turn, not the next restart.
+The agent server owns one loop per conversation key, created on first use. The
+model, the system prompt and the iteration cap are **properties of that loop**,
+read when it is created: an edit reaches the next conversation, and a running
+one moves model only through `model_switch`. What a turn re-reads per call is
+everything else the configuration supplies — the tool list, the context
+decision's parameters, the timeout — so an edit to those reaches the next turn,
+not the next restart.
 
 Before each turn, the context plugin answers one question: what will this turn
 run on?
@@ -1013,7 +1022,7 @@ The context parameters are in `context:`:
 | `recall_page_limit` | Candidates each leg retrieves; fusion returns their union uncut, and the floors and the token budget decide membership from there. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
-| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.1` drops keyword incidentals, `0.0` keeps everything it returned. |
+| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.3` drops keyword incidentals, `0.0` keeps everything it returned. |
 | `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
 
 **One budget, and it is the ceiling's.** The kept turns are estimated first;
@@ -1021,12 +1030,12 @@ a recall may spend what they leave below `ceiling`, so keeping less leaves it
 more and a kept context at the ceiling leaves it nothing. There is no separate
 per-recall fraction. `min_similarity` and `rerank_min_score` are floors whose
 scale belongs to the model in use (bge-m3 scores unrelated same-domain text
-near 0.5), so both are calibrated per home: the shipped 0.52 and 0.1 are those
+near 0.5), so both are calibrated per home: the shipped 0.52 and 0.3 are those
 calibrations. **Both are filters, not ranking rules**: they decide whether a
 candidate stays, and the reranker's order is used only where the token budget
 cuts. On the live log an unrelated query still passed
 `min_similarity` with three neighbours at 0.52–0.54, and the reranker scored
-them 0.002–0.036 — below the shipped 0.1 — which is the floor doing the work
+them 0.002–0.036 — below the shipped 0.3 — which is the floor doing the work
 the cosine gate could not. A provider with no `rerank_model` simply omits the
 rerank stage.
 
@@ -2252,7 +2261,7 @@ It contains:
                 external stdio entry (plus a rotated <log>.1)
   locks/        per-endpoint start locks
   agents/       agent-name claims
-  clients/      which clients use the shared servers, and their home
+  clients/      which clients use the shared servers (pid, agent, start token)
   homes/        data directories this machine has used
 ```
 

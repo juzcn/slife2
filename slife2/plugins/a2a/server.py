@@ -1110,13 +1110,16 @@ async def _drain(
                 session.settle(task_id, mesh.REJECTED, exc.reason)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - one bad turn must not end the writer
+            except Exception as exc:  # noqa: BLE001 - one bad turn must not end the writer
                 # **Not fatal, and the difference is this agent's whole mesh.**
                 # A turn that failed is one message dropped, and the round is
                 # settled so the peer learns it — the acknowledgment stopped
-                # its ladder, so nothing else would tell it.  The connection
-                # is replaced too, because the failure may have been the
-                # connection's and the next turn is what finds out.
+                # its ladder, so nothing else would tell it.  A *transport*
+                # failure replaces the connection too, because the next turn is
+                # what finds out whether it healed.  A `ToolError` is the agent
+                # server answering — the turn ran and failed — and the link is
+                # fine: dropping it here closes the connection every other
+                # in-flight member turn on this session is still using.
                 logger.exception(
                     "a2a_delivery_failed agent=%s peer=%s — that message dropped",
                     describe((session.agent, session.subagent)),
@@ -1127,7 +1130,8 @@ async def _drain(
                     mesh.REJECTED,
                     "the agent's harness failed before the turn could run",
                 )
-                await drop_member_client()
+                if not isinstance(exc, ToolError):
+                    await drop_member_client()
         finally:
             member_turns.discard(asyncio.current_task())
 

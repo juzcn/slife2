@@ -303,8 +303,8 @@ prompt、工具 schema 和日志行保持英文。外部文本（工具结果、
 | `slife2-schedule` | 定时任务及其账本 | 24039 |
 | `slife2-a2a` | 基于 MQTT 的 peer-agent 网络 | 24040 |
 
-subagent 网络由同一模块在 24041 端口提供，以
-`python -m slife2.plugins.a2a.local_server` 启动，没有单独的控制台脚本。
+subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_server`
+运行同一实现，端口 24041，没有单独的控制台脚本。
 
 **WSL2 使用 `networkingMode=mirrored` 时，WSL 实例把端口整体偏移 100**（agent
 24100、toolhub 24120）。本地 MQTT broker 不偏移：两套栈共享它。镜像模式让 Windows
@@ -456,7 +456,7 @@ context:
   recall_page_limit: 80       # 每路召回的候选数；融合结果不再截断
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
-  rerank_min_score: 0.1      # cross-encoder 的分数下限，0-1；0 表示全保留
+  rerank_min_score: 0.3      # cross-encoder 的分数下限，0-1；0 表示全保留
   timeout: 20.0              # 判别调用的秒数
 
 tool_load:

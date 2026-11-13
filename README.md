@@ -334,9 +334,9 @@ one server.
 | `slife2-schedule` | Scheduled tasks and their ledger | 24039 |
 | `slife2-a2a` | Peer-agent network over MQTT | 24040 |
 
-The subagent network is served by the same module on port 24041 and is started
-as `python -m slife2.plugins.a2a.local_server`; it has no separate console
-script.
+The subagent network runs the same implementation through its own entry module,
+`python -m slife2.plugins.a2a.local_server`, on port 24041; it has no separate
+console script.
 
 **On WSL2 with `networkingMode=mirrored`, the WSL instance shifts these ports by
 100** (agent 24100, toolhub 24120). The local MQTT broker is not shifted: both
@@ -511,7 +511,7 @@ context:
   recall_page_limit: 80       # candidates per recall leg; fusion is uncut
   min_similarity: 0.52       # above the embedding model's noise floor
   keyword_weight: 1.0        # weighted RRF; the meaning leg is always 1.0
-  rerank_min_score: 0.1      # its score floor, 0-1; 0 keeps all it returned
+  rerank_min_score: 0.3      # its score floor, 0-1; 0 keeps all it returned
   timeout: 20.0              # seconds for the discriminator call
 
 tool_load:
@@ -1083,8 +1083,9 @@ message. `subagent_set` and `subagent_remove` refuse a subagent caller.
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations as
 a peer agent, under `subagent_*` names: `subagent_send_message`,
-`subagent_cancel_task`, `subagent_list`, `subagent_task_list`,
-`subagent_broadcast`, and the six group tools. Membership is the directory set,
+`subagent_task_response`, `subagent_continue_task`, `subagent_cancel_task`,
+`subagent_list`, `subagent_task_list`, `subagent_broadcast`, and the six group
+tools. Membership is the directory set,
 so a send naming anything that is not a member is refused before it is published.
 Group traffic on this network wears `[SubagentGroup:…]` and the
 `subagent_group:<group>:<sender>` channel, whether the sender is the maker or a

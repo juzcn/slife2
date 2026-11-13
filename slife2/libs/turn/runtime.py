@@ -137,10 +137,14 @@ class TurnRuntime:
         #: whoever handed it in.
         self._context_client = context_client
         self._hub_client = hub_client
-        self._context: Client | None = None
-        self._hub: Client | None = None
-        self._context_owned = context_client is None
-        self._hub_owned = hub_client is None
+        #: One connection per **endpoint**, not one per runtime.  The config is
+        #: read per call (a shared server serves several homes, and each names
+        #: its own `servers:` block), so two homes may point these peers at two
+        #: different daemons — and one cached client would file the second
+        #: home's turns under the first one's store.  Keyed by URL for the same
+        #: reason `model()` keys its clients that way.
+        self._contexts: dict[str, Client] = {}
+        self._hubs: dict[str, Client] = {}
         #: One client per model *server* — a server speaks one wire format for
         #: every provider that uses it — and one backend per model reference,
         #: because the reference is what the backend must match.
@@ -167,27 +171,33 @@ class TurnRuntime:
     async def memory(self) -> Client:
         """The context plugin, opened on first use.
 
-        Opened once and kept for the process, like every peer here: a handshake
-        per turn would be a handshake per turn.  A context plugin that is not
-        there **raises** — a turn whose context cannot be restored is a turn
-        that should not run — and this is the peer whose absence is felt
-        soonest.
+        Opened once per endpoint and kept for the process, like every peer
+        here: a handshake per turn would be a handshake per turn.  A context
+        plugin that is not there **raises** — a turn whose context cannot be
+        restored is a turn that should not run — and this is the peer whose
+        absence is felt soonest.
+
+        **The address is read per call**, from the config the call is served
+        from (`current`), because this process may serve several homes and
+        each may name a different context daemon.  The connection is kept per
+        address, so the common one-home case still opens once.
         """
         if self._context_client is not None:
             return self._context_client
-        held = self._context
+        url = self.current().server("context").url
+        held = self._contexts.get(url)
         if held is not None:
             return held
         async with self._opening:
-            held = self._context
+            held = self._contexts.get(url)
             if held is None:
                 held = await open_server(
-                    self._config.server("context").url,
+                    url,
                     name=CONTEXT_SERVER_NAME,
                     fallback_tool="remember",
                     timeout=_T.timeouts.work.context,
                 )
-                self._context = held
+                self._contexts[url] = held
             return held
 
     async def hub(self) -> Client:
@@ -200,6 +210,9 @@ class TurnRuntime:
         whose *upstreams* are not is the operator's configuration and is not an
         error at all.
 
+        **The address is read per call** for `memory`'s reason, and the
+        connection is kept per address.
+
         **No request deadline on the connection**: `timeout=` on the
         connection is a clock on every request that crosses it, so a listing's
         patience would become the deadline for a tool call.  The asks made of
@@ -207,18 +220,19 @@ class TurnRuntime:
         """
         if self._hub_client is not None:
             return self._hub_client
-        held = self._hub
+        url = self.current().server("toolhub").url
+        held = self._hubs.get(url)
         if held is not None:
             return held
         async with self._opening:
-            held = self._hub
+            held = self._hubs.get(url)
             if held is None:
                 held = await open_server(
-                    self._config.server("toolhub").url,
+                    url,
                     name=TOOLHUB_SERVER_NAME,
                     fallback_tool="list_tools",
                 )
-                self._hub = held
+                self._hubs[url] = held
             return held
 
     async def model(self, identity: ConversationId, model: ModelRef) -> LLMBackend:
@@ -490,9 +504,9 @@ class TurnRuntime:
             await close_server(client)
         self._clients.clear()
         self._backends.clear()
-        if self._context_owned and self._context is not None:
-            await close_server(self._context)
-        self._context = None
-        if self._hub_owned and self._hub is not None:
-            await close_server(self._hub)
-        self._hub = None
+        for client in self._contexts.values():
+            await close_server(client)
+        self._contexts.clear()
+        for client in self._hubs.values():
+            await close_server(client)
+        self._hubs.clear()

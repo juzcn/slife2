@@ -345,6 +345,58 @@ async def test_an_injected_backend_is_returned_as_it_is(
 # ── the peers, and the loop's construction ───────────────────────────────────
 
 
+async def test_each_endpoint_gets_its_own_context_and_hub_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The address is read per call, and the cache is keyed by it.**
+
+    A shared server may serve two homes whose `servers:` blocks name different
+    context or hub daemons.  One cached client would send the second home's
+    turns into the first home's store; the model path already keys its clients
+    by URL, and these two follow it.
+    """
+    import slife2.libs.turn.runtime as runtime_module
+
+    opened: list[tuple[str, str]] = []
+
+    async def fake_open(url: str, *, name: str, **_kwargs: Any) -> Any:
+        opened.append((url, name))
+        return SimpleNamespace(name=name, url=url)
+
+    monkeypatch.setattr(runtime_module, "open_server", fake_open)
+
+    def home(port: int) -> Any:
+        return SimpleNamespace(
+            server=lambda name: SimpleNamespace(url=f"http://127.0.0.1:{port}/{name}")
+        )
+
+    current = [home(1)]
+    runtime = TurnRuntime(default_config(), source=lambda: current[0])
+
+    first = await runtime.memory()
+    assert first is await runtime.memory()
+    first_hub = await runtime.hub()
+
+    current[0] = home(2)
+    second = await runtime.memory()
+    second_hub = await runtime.hub()
+
+    assert first is not second
+    assert first_hub is not second_hub
+    assert [url for url, _name in opened] == [
+        "http://127.0.0.1:1/context",
+        "http://127.0.0.1:1/toolhub",
+        "http://127.0.0.1:2/context",
+        "http://127.0.0.1:2/toolhub",
+    ]
+    assert [name for _url, name in opened] == [
+        CONTEXT_SERVER_NAME,
+        TOOLHUB_SERVER_NAME,
+        CONTEXT_SERVER_NAME,
+        TOOLHUB_SERVER_NAME,
+    ]
+
+
 async def test_close_lets_its_peers_reopen_and_leaves_injected_ones_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

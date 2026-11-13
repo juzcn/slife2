@@ -747,6 +747,16 @@ def _write(
         # The swap: the live one moves aside, the new one takes its place, and a
         # failure puts the old one back.  `os.replace` cannot do this for a
         # non-empty directory — a rename onto one is refused rather than merged.
+        #
+        # **A crash between the two renames leaves the only copy in
+        # `previous`.**  The swap moves the live directory aside and then moves
+        # the staged one in; a process killed in that gap leaves `previous` as
+        # the whole skill, while `scan` skips the reserved name and the next
+        # write would `rmtree(previous)` — destroying the playbook it was about
+        # to replace.  So `previous` is recovered first: if the live directory
+        # is absent and the parked one is there, the parked one is the skill.
+        if previous.exists() and not final.exists():
+            os.rename(previous, final)
         shutil.rmtree(previous, ignore_errors=True)
         if final.exists():
             os.rename(final, previous)

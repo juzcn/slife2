@@ -730,9 +730,31 @@ def without_lead(content: Any, note: str) -> Any:
         lead = f"{note} "
         return content[len(lead) :] if content.startswith(lead) else content
     if isinstance(content, list):
-        if content and content[0] == {"type": "text", "text": note}:
+        if not content:
+            return content
+        first = content[0]
+        if not isinstance(first, dict) or first.get("type") != "text":
+            return content
+        text = first.get("text")
+        if not isinstance(text, str):
+            return content
+        if text == note:
             return content[1:]
-        return content
+        # **A lead that was merged into the first part is still the lead.**  A
+        # string content becomes the person's text joined to the note, and a
+        # mid-turn `attach_image` turns that string into parts — so the first
+        # part is `"<note> <prompt>"`, not the note alone.  Requiring an exact
+        # match left the marker in the row, the index and every rebuild, which
+        # is the one place SDD §5.5 says it never reaches.
+        joined = f"{note} "
+        if not text.startswith(joined):
+            return content
+        rest = text[len(joined) :]
+        if not rest:
+            return content[1:]
+        trimmed = dict(first)
+        trimmed["text"] = rest
+        return [trimmed, *content[1:]]
     return content
 
 

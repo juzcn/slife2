@@ -2044,18 +2044,36 @@ def _grep_hits(
     cannot say which occurrence on that line.
 
     **The matching is the same for a dump and a file.**  It reads a line source,
-    not a body: both readers feed lines as they are read from the file.  The
-    folded index can be larger than
-    the line's when casefolding expands a character (`ß` -> `ss`); clamping keeps
-    the address inside the line whose text it belongs to.
+    not a body: both readers feed lines as they are read from the file.
+
+    **A folded index is not an original one.**  `ß` casefolds to `ss`, and `İ`
+    to `i` plus a combining dot, so the folded line can be longer than the line
+    — and the old `min(found, len(line))` clamp only kept the answer inside the
+    line while pointing at the wrong character.  The caller passes that offset
+    back to `dump_read`/`file_read mode="char"`, so the match started late (or
+    early), and the reader the address exists for read the wrong text.  Each
+    folded character therefore remembers the original character it came from:
+    one pass per line, and the address is the line's own offset.
     """
     for number, offset, line in lines:
         if number < start:
             continue
         folded = line.casefold()
+        if len(folded) == len(line):
+            # The common case: casefolding changed no character's width, so the
+            # folded index is the original index.
+            positions: list[int] | None = None
+        else:
+            positions = []
+            pieces: list[str] = []
+            for index, character in enumerate(line):
+                piece = character.casefold()
+                pieces.append(piece)
+                positions.extend([index] * len(piece))
+            folded = "".join(pieces)
         found = folded.find(wanted)
         while found >= 0:
-            at = offset + min(found, len(line))
+            at = offset + (found if positions is None else positions[found])
             if at >= after:
                 yield number, at, line
             found = folded.find(wanted, found + len(wanted))

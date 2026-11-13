@@ -79,7 +79,7 @@ class GradedReranker(StubEmbedder):
 
     The live log's real turns scored 0.69–0.81 and the keyword incidentals
     0.0007–0.006; `0.8` and `0.05` are those bands, so the default
-    `rerank_min_score` (0.1) keeps one and drops the other.
+    `rerank_min_score` (0.3) keeps one and drops the other.
     """
 
     def __init__(self) -> None:
@@ -988,7 +988,7 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
 
     Both turns contain the query word, so both reach the pool.  The ranker
     separates the real exchange (0.8) from the incidental one (0.05), and the
-    shipped floor of 0.1 is what turns that separation into a smaller context.
+    shipped floor of 0.3 is what turns that separation into a smaller context.
     A floor of 0.0 — which this test would pass under — would keep both and
     make the stage a reorderer with no membership effect.
     """
@@ -1004,7 +1004,7 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
         await _seed(client, "jack", ("trump real", "1"), ("trump noise", "2"))
         answer = await _rebuild(client, "", turn_ids=[])
 
-    assert default_config().context.rerank_min_score == 0.1
+    assert default_config().context.rerank_min_score == 0.3
     assert answer.data["recalled"] == 1
     assert answer.data["turn_ids"] == [1]
     assert answer.data["rerank"] == "", "the ranker ran"
@@ -1992,6 +1992,17 @@ def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
     # have been folded or repaired before the strip runs.
     assert without_lead("no marker here", note) == "no marker here"
     assert without_lead(parts, note) == parts
+
+    # **A lead merged into the first part is still the lead.**  The turn opens
+    # with a string; a mid-turn `attach_image` turns that string into content
+    # parts, with the note joined to the person's text in one part.  Requiring
+    # an exact match left the marker in the row, the index and every rebuild —
+    # the one place SDD §5.5 says it never reaches.
+    merged = [
+        {"type": "text", "text": f"{note} what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+    ]
+    assert without_lead(merged, note) == parts
 
 
 def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:

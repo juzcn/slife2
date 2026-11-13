@@ -1386,6 +1386,21 @@ def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
     assert config.rest_apis["mine"].args == ("--from", "my-proxy", "run")
 
 
+def test_a_command_entry_refuses_a_key_it_does_not_read(tmp_path) -> None:
+    """**The command form has no Pydantic model to be strict for it.**
+
+    Its environment is built by hand, so a misspelt `base_url` — here as
+    `base-url` — would load cleanly and leave the proxy calling the host the
+    OpenAPI document names, or no key at all, with nothing said.  The
+    declarative form refuses the same typo through `load_rest_api`.
+    """
+    text = (
+        "rest-api:\n  mine:\n    command: uvx\n    base-url: https://api.example.test\n"
+    )
+    with pytest.raises(ConfigError, match="unknown key.*base-url"):
+        load(write(tmp_path, text))
+
+
 def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
     with pytest.raises(ConfigError, match="needs `command`"):
         load(write(tmp_path, "mcp:\n  nothing:\n    args: [x]\n"))
@@ -1774,6 +1789,22 @@ def test_load_cached_answers_the_same_object_until_the_file_moves(tmp_path) -> N
     second = load_cached(str(path))
     assert second is not first, "an edit is a new object"
     assert second.default == "local/big"
+
+
+def test_load_cached_keys_by_the_canonical_path(tmp_path) -> None:
+    """**One file, two spellings, one cached object.**
+
+    A symlink, a junction, a `..` or a different case reaches the same
+    `slife2.yaml`, and the readers of this cache test it by identity.  Keyed by
+    the spelling, one home alternating spellings would hand back a new object
+    every call, which `LiveProviders` reads as an edit and answers by rebuilding
+    and retiring its SDK client pool.
+    """
+    path = write(tmp_path, A_PROVIDER)
+    alias = tmp_path / ".." / tmp_path.name / "slife2.yaml"
+
+    first = load_cached(str(path))
+    assert load_cached(str(alias)) is first, "one file, one cached object"
 
 
 def test_load_cached_does_not_answer_one_file_for_another(tmp_path) -> None:

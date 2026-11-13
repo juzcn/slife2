@@ -13,7 +13,11 @@ import pytest
 
 from slife2.clients import tui
 from slife2.clients.a2a import ProbeError
-from slife2.libs.host.config import default_config
+from slife2.libs.host.config import (
+    AGENT_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
+    default_config,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -63,10 +67,15 @@ def install(monkeypatch, task: FakeTask, *, malformed: bool = False) -> FakeAgen
     agent = FakeAgent(task, malformed=malformed)
     config = default_config()
 
-    async def fake_open(url, *, fallback_tool="", timeout=None):
+    async def fake_open(url, *, name="", fallback_tool="", timeout=None):
+        # **The probe proves which server it reached**, like every other hop;
+        # an empty name skips the identity check and would believe a stranger
+        # on a stale port (SDD §3.6).
         if url == config.server("agent-task").url:
+            assert name == AGENT_TASK_SERVER_NAME
             return task
         if url == config.server("agent").url:
+            assert name == AGENT_SERVER_NAME
             return agent
         raise AssertionError(url)
 

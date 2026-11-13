@@ -753,6 +753,27 @@ def test_the_two_tools_keep_the_names_the_prompt_uses() -> None:
     assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")
 
 
+def test_a_timeout_written_as_text_is_refused_too() -> None:
+    """**A number-shaped string is still text**, and the contract says text
+    fails (SDD §7.7).
+
+    `float("5")` succeeds, so the old reading honoured `_timeout: "5"` as five
+    seconds while refusing `_timeout: "soon"` — the same wrong shape answered
+    two ways.  A model that wrote an object's spelling of a number is a call
+    the harness cannot know it meant, and the refusal is the answer.
+    """
+    for value in ("5", "1.5", " 5 ", "soon"):
+        seconds, error = read_timeout(value)
+        assert seconds is None
+        assert error is not None and "positive, finite" in error
+
+    spec = ToolSpec(name="render", description="", parameters={"properties": {}})
+    arguments: dict[str, Any] = {"timeout": "5"}
+    bound, error = bind_timeout(arguments, spec, None)
+    assert bound is None and error is not None
+    assert "timeout" not in arguments
+
+
 def test_an_endless_timeout_is_refused_like_any_other_bad_number() -> None:
     """**`1e999` is valid JSON and is not a duration anyone can honour.**
 

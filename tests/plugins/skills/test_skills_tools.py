@@ -10,6 +10,7 @@ the truth about whether anybody wants it.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.plugin.protocol import LIST_SOURCES
+from slife2.plugins.skills import playbooks
 from slife2.plugins.skills.playbooks import USE_TOOL
 from slife2.plugins.skills.server import build_server
 from tests.fakes import config_file
@@ -347,6 +349,41 @@ async def test_replacing_a_skill_leaves_no_half_written_one(
     assert folders == {"one"}, "no staging or replaced directory left behind"
     assert "The old body." not in read, "the manifest is the one just written"
     assert (isolated_runtime / "skills" / "one" / "scripts" / "new.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_skill_parked_by_an_interrupted_swap_is_recovered(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old copy is the skill when the live directory is gone.**
+
+    The swap is two renames: live → `.name.replacing`, then staged → live.  A
+    process killed between them leaves the only copy in the parked directory.
+    The next write used to delete that directory before looking, so the playbook
+    it was about to replace — the only one left — was destroyed.  This is that
+    state, and a renamed-in write that fails afterwards: the old body must still
+    be the installed skill.
+    """
+    folder = skill(isolated_runtime, "one", body="The old body.")
+    parked = isolated_runtime / "skills" / ".one.replacing"
+    os.rename(folder, parked)
+    assert not folder.exists()
+
+    real_rename = os.rename
+
+    def fail_the_swap(source: Any, target: Any) -> None:
+        # The recovery's rename (`.one.replacing` → live) is allowed; the final
+        # swap of the staged directory is the one that "crashes".
+        if Path(source).name == ".one.installing" and Path(target) == folder:
+            raise OSError("simulated stop between the swap's two renames")
+        real_rename(source, target)
+
+    monkeypatch.setattr(playbooks.os, "rename", fail_the_swap)
+    with pytest.raises(OSError):
+        playbooks.install("one", files(manifest("one", body="The new body.")))
+
+    assert folder.is_dir(), "the parked copy was not recovered"
+    assert "The old body." in (folder / "SKILL.md").read_text(encoding="utf-8")
 
 
 # --- removing and switching ---------------------------------------------------

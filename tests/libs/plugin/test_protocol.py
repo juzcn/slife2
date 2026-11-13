@@ -687,6 +687,30 @@ def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
     assert read_record(URL) == live, "the running server's record is not ours"
 
 
+def test_a_token_that_cannot_be_read_now_is_not_a_recycled_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**"Could not prove" is not "not ours"** on the record-claiming side.
+
+    `same_process` answers False for an unreadable token on purpose, because
+    the question there is "may I signal it?" and leaving it alone is safe.  The
+    question here is "may I overwrite its record?", and the safe answer is the
+    opposite: treating an unreadable token as a mismatch let a second start
+    overwrite, then delete, a live daemon's record — leaving the daemon running
+    with nothing that could find or stop it.
+    """
+    live = ServerRecord.now(
+        name="slife2-agent", url=URL, pid=os.getpid(), config="", version=""
+    )
+    assert live.start_token, "the platform this runs on has no start token to test"
+    write_record(live)
+    monkeypatch.setattr(protocol_module, "process_start_token", lambda _pid: None)
+
+    serve_once()
+
+    assert read_record(URL) == live, "the running server's record is not ours"
+
+
 def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
     """Uvicorn's default logging config installs handlers of its own.
 

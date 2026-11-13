@@ -94,8 +94,14 @@ def config_key(path: Path) -> str:
     a key reaches the OS as a file name (POSIX) or a mutex name (Windows), and a
     path is neither.  Prefixed so a config file called like an endpoint cannot
     share a lock with it — the same collision `agent_key` is spelled out against.
+
+    **Resolved before it is digested.**  Two clients can name one home through a
+    symlink, a junction, a `..` or a different case; those are one file and two
+    strings, and a lock keyed by the string lets both edit at once.  The
+    resolution is what `conversation_key` and `home_key` use for the same
+    reason.
     """
-    return digest(f"config:{path}")
+    return digest(f"config:{Path(path).resolve()}")
 
 
 def log_path(url: str) -> Path:
