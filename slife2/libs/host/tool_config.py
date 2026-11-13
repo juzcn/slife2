@@ -158,6 +158,7 @@ CLI_DEFAULTS: dict[str, Any] = {
     "enabled": True,
 }
 
+
 def _check_enabled(data: Mapping[str, Any], where: str) -> None:
     """The switch is a real YAML boolean, and absence means on.
 
@@ -173,8 +174,6 @@ def _check_enabled(data: Mapping[str, Any], where: str) -> None:
             f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
             f"strings; leave the key out for true"
         )
-
-
 
 
 def load_mcp(raw: Any, *, where: str) -> McpConfig:

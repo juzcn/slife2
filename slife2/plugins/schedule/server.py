@@ -1034,9 +1034,7 @@ def build_server(
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        bounded, skipped = page_window(
-            limit, offset, unset=TASKS_LIMIT, cap=TASKS_MAX
-        )
+        bounded, skipped = page_window(limit, offset, unset=TASKS_LIMIT, cap=TASKS_MAX)
         found, total = store.tasks(limit=bounded, offset=skipped)
         return {
             "tasks": [row(task) for task in found],
@@ -1082,9 +1080,7 @@ def build_server(
             raise ToolError(
                 f"{wanted!r} is not a run state; they are {', '.join(STATUSES)}."
             )
-        bounded, skipped = page_window(
-            limit, offset, unset=RUNS_LIMIT, cap=RUNS_MAX
-        )
+        bounded, skipped = page_window(limit, offset, unset=RUNS_LIMIT, cap=RUNS_MAX)
         found, total = store.runs(name.strip(), wanted, bounded, skipped)
         return {
             "runs": [run.row() for run in found],
