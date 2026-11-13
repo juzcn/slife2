@@ -502,10 +502,10 @@ async def test_an_older_fire_does_not_move_the_anchor_backwards() -> None:
     Two fires of one task can be recorded at once — a maker and its subagent
     share a ledger, and `schedule_run_now` is a call either of them can make.
     Both read the same `last_due`; the older one then writes after the newer
-    one.  The check in front of the update compares against the *caller's*
-    snapshot, so it passes, and the anchor moves backwards: the poll
-    re-considers a fire that has already been recorded, which on a fall-back
-    hour is a fire that can happen twice.
+    one.  If the update compared against the *caller's* snapshot it would pass,
+    and the anchor would move backwards: the poll re-considers a fire that has
+    already been recorded, which on a fall-back hour is a fire that can happen
+    twice.
 
     A stale `Task` value is what a second caller holds, so that is what this
     passes.  The update's own `WHERE` is the thing that decides.
@@ -520,13 +520,41 @@ async def test_an_older_fire_does_not_move_the_anchor_backwards() -> None:
     newer = (moment + timedelta(hours=2)).isoformat()
     older = (moment + timedelta(hours=1)).isoformat()
     store.advance(stale, newer)
-    # The same snapshot, with the older fire: the Python check passes because
-    # the caller never saw the newer write.
+    # The same snapshot, with the older fire: the update's own WHERE is what
+    # keeps the newer anchor.
     store.advance(stale, older)
 
     after = store.task("daily")
     assert after is not None
     assert after.last_due == newer
+
+
+async def test_a_damaged_anchor_is_replaced_by_the_next_fire() -> None:
+    """**The update repairs an anchor the parser refuses.**
+
+    `moment_of` raises on a stamp that is not a time — a hand-edited ledger —
+    and the Python check that used to sit in front of the update called it on
+    the caller's snapshot first.  A damaged anchor therefore raised before the
+    SQL that is designed to replace it (`julianday(last_due) IS NULL`), and the
+    repair the docstring promises could never happen.  The database makes the
+    decision, and it can read a stamp the parser cannot.
+    """
+    async with Client(build()) as client:
+        await write(client)
+
+    connection = sqlite3.connect(paths.schedule_db(AGENT))
+    connection.execute("UPDATE scheduled_tasks SET last_due = 'not-a-time'")
+    connection.commit()
+    connection.close()
+
+    store = ledger()
+    damaged = store.task("daily")
+    assert damaged is not None and damaged.last_due == "not-a-time"
+    repaired = (datetime.fromisoformat(now()) + timedelta(minutes=1)).isoformat()
+    store.advance(damaged, repaired)
+
+    after = store.task("daily")
+    assert after is not None and after.last_due == repaired
 
 
 async def test_a_cron_that_can_never_fire_is_refused() -> None:

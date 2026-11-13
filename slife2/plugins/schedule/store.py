@@ -432,8 +432,6 @@ class ScheduleStore:
         """
         if not due_at:
             return
-        if task.last_due and moment_of(due_at) <= moment_of(task.last_due):
-            return
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_tasks SET last_due = ? WHERE id = ?"
