@@ -295,6 +295,27 @@ def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
     assert path.stat().st_mtime_ns == stamp.st_mtime_ns
 
 
+def test_an_edit_whose_judge_raises_a_non_config_error_is_rolled_back(tmp_path) -> None:
+    """The judge can refuse with more than `ConfigError`: `load` resolves a
+    `skills:` entry's environment eagerly, and a keyring that refuses mid-session
+    raises its own error.  Whatever the refusal, an edit that did not validate is
+    not an edit that happened — the file is restored, not left holding the write
+    while the tool reports failure."""
+    path = tmp_path / "slife2.yaml"
+    path.write_text(REQUIRED, encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    def refuses(config):
+        raise RuntimeError("keyring locked")
+
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        set_scalar("default", "local/big", check=refuses, path=path)
+
+    assert path.read_text(encoding="utf-8") == before, (
+        "the unvalidated edit was rolled back"
+    )
+
+
 def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     tmp_path,
 ) -> None:

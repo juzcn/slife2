@@ -414,7 +414,13 @@ def read_timeout(
             None,
             f"`{name}` must be a positive, finite number of seconds; got {value!r}",
         )
-    seconds = float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        # An int beyond float range is the integer spelling of the `1e999`
+        # above: valid JSON, but not a duration anyone can honour.  Refuse it
+        # through the same gate rather than letting the cast die the turn.
+        seconds = math.inf
     if not math.isfinite(seconds) or seconds <= 0:
         return (
             None,
@@ -484,6 +490,10 @@ def bind_timeout(
             # this module's guess.
             try:
                 bare = float(arguments["timeout"])
+            except OverflowError:
+                # An int beyond float range keeps its sign; the tool reads the
+                # original argument, this only decides whether to drop it.
+                bare = math.inf if arguments["timeout"] > 0 else -math.inf
             except (TypeError, ValueError):
                 bare = 1.0
             if bare <= 0:

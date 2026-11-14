@@ -230,7 +230,9 @@ OTHER = "other"
 #: `file_list(category="notes")` would list both as one thing.  `pictures` is
 #: the `image` kind's directory: a file saved there would be indistinguishable
 #: from a picture a turn's `[Image:…]` reference points at.
-RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports", "pictures"})
+#: `dumps` is the dump mirror: a file saved there is silently overwritten by a
+#: later `dump_save` whose mirror stem matches its name.
+RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports", "pictures", "dumps"})
 
 
 def category_for(name: str) -> str:
@@ -1019,6 +1021,11 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 name = source.name
                 mime = mimetypes.guess_type(name)[0] or ""
             chosen = category.strip() or category_for(name)
+            # Windows strips trailing dots and spaces from a path component, so
+            # `notes.` is the notes directory; normalize to the component that
+            # would actually be created before the guard, or the reserved names
+            # are reachable through that spelling.
+            chosen = chosen.rstrip(". ")
             # **Two questions, and the first is the one the second depends on.**
             # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
             # an absolute path all name something else once a filesystem has
@@ -2034,7 +2041,7 @@ def _grep_pattern(pattern: str) -> str:
 
 def _grep_hits(
     lines: Iterable[tuple[int, int, str]], wanted: str, start: int, after: int
-) -> Iterator[tuple[int, int, str]]:
+) -> Iterator[tuple[int, int, str, int]]:
     """Every occurrence in *lines* at or after line *start* and character *after*.
 
     **Every occurrence, not the first one in a line.**  A minified JSON dump is
@@ -2075,7 +2082,7 @@ def _grep_hits(
         while found >= 0:
             at = offset + (found if positions is None else positions[found])
             if at >= after:
-                yield number, at, line
+                yield number, at, line, offset
             found = folded.find(wanted, found + len(wanted))
 
 
@@ -2092,7 +2099,12 @@ def _grep_payload(
         "lines": total_lines,
         "chars": total_chars,
         "matched": matched,
-        "matches": list(shown),
+        # `start` is the line's own offset, carried for the window math and not
+        # part of the answer the model reads.
+        "matches": [
+            {key: value for key, value in match.items() if key != "start"}
+            for match in shown
+        ],
         "path": where,
     }
     if first_unshown is not None:
@@ -2136,7 +2148,7 @@ def _grep_finalize(
             if not match.get("cut"):
                 match["cut"] = True
                 match["text"], match["text_char"] = _fit_match_text(
-                    page, match["text"], wanted, budget
+                    page, match["text"], wanted, budget, match["start"]
                 )
                 continue
             first_unshown = match["char"]
@@ -2149,7 +2161,7 @@ def _grep_finalize(
 
 
 def _grep_answer(
-    hits: Iterable[tuple[int, int, str]],
+    hits: Iterable[tuple[int, int, str, int]],
     *,
     wanted: str,
     total_lines: int,
@@ -2179,18 +2191,18 @@ def _grep_answer(
     def page() -> dict[str, Any]:
         return _grep_payload(total_lines, total_chars, matched, shown, None, where)
 
-    for number, at, line in hits:
+    for number, at, line, line_start in hits:
         matched += 1
         if full or (limit and len(shown) >= limit):
             if first_unshown is None:
                 first_unshown = at
             continue
-        shown.append({"line": number, "char": at, "text": line})
+        shown.append({"line": number, "char": at, "text": line, "start": line_start})
         match = shown[-1]
         if len(line) > window:
             try:
                 match["text"], match["text_char"] = _fit_match_text(
-                    page(), line, wanted, budget
+                    page(), line, wanted, budget, line_start
                 )
             except ToolError:
                 # There is no room for even an address on this page; the match
@@ -2450,7 +2462,7 @@ GREP_AFTER_CHARS = 300
 
 
 def _fit_match_text(
-    page: dict[str, Any], line: str, wanted: str, budget: int
+    page: dict[str, Any], line: str, wanted: str, budget: int, line_start: int
 ) -> tuple[str, int]:
     """A window of a very long matched line, and where it starts.
 
@@ -2467,13 +2479,16 @@ def _fit_match_text(
     budget keeps its two addresses and as much of itself as fits, marked `cut`;
     only a window with not one character of room is refused.
 
-    Returns `(text, text_char)`.  The match's `char` is its absolute offset;
-    its line starts at `char - found`, so the window starts at that plus
-    `start`.
+    Returns `(text, text_char)`.  `found` is *this* match's offset within the
+    line — `char - line_start`, the address `_grep_hits` already mapped through
+    the casefold positions — not the first occurrence `find` would return, which
+    on a line with several matches windows the wrong one and mis-addresses the
+    window.  The line starts at `char - found`, so the window starts at that
+    plus `start`.
     """
-    found = min(max(line.casefold().find(wanted), 0), len(line))
-    length = len(wanted)
     char = int(page["matches"][-1]["char"])
+    found = min(max(char - line_start, 0), len(line))
+    length = len(wanted)
 
     def candidate(start: int, end: int) -> dict[str, Any]:
         match = {

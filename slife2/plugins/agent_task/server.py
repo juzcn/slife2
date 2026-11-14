@@ -752,7 +752,7 @@ def build_server(
         """
         try:
             await hand_over(
-                config,
+                current(),
                 task.agent,
                 f"{marker(task, status=status)} {task.text}",
                 channel_for(task),

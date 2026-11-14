@@ -1853,6 +1853,15 @@ class A2AMesh:
             )
         restore = (send.interrupt, send.question)
         self._disarm_watchdog(send)
+        # End the previous round's ladder before resetting the shared send.  A
+        # ladder still asleep in its reply window would wake to the reset
+        # `delivered=False` and retry alongside the new one, spending one shared
+        # attempt budget and reporting exhaustion twice for a single send.
+        prior = [loop for loop in send.loops if not loop.done()]
+        for loop in prior:
+            loop.cancel()
+        if prior:
+            await asyncio.gather(*prior, return_exceptions=True)
         send.round += 1
         send.prev_interrupt = restore
         send.interrupt = ""

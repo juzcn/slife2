@@ -112,7 +112,14 @@ def is_valid(expression: str, *, strict: bool = True) -> bool:
     somebody writing a task is actually asking.  `0 9 31 2 *` parses and never
     fires, and a tool that accepted it would have stored a task whose only
     symptom is silence.
+
+    **Five fields, the minute granularity the poll assumes.**  croniter also
+    accepts six- and seven-field (seconds/year) forms, but `latest_fire` nudges
+    its reference by one second — a step a seconds cron can cross into a
+    future-dated fire.  Those forms are refused here rather than mis-fired.
     """
+    if len(expression.split()) != 5:
+        return False
     return croniter.is_valid(expression, strict=strict)
 
 

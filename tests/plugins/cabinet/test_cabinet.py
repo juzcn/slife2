@@ -1685,6 +1685,21 @@ async def test_a_category_is_one_folder_name() -> None:
     assert not (bag() / "notes").exists() or not list((bag() / "notes").glob("*.txt"))
 
 
+@pytest.mark.asyncio
+async def test_a_reserved_category_cannot_be_reached_by_another_spelling() -> None:
+    """`dumps` is a cabinet mirror like `notes`, and a trailing dot is the notes
+    directory once Windows normalises the component.  Both must be refused, or a
+    saved file lands among the mirrors — and a file filed under `dumps` is silently
+    overwritten by the next `dump_save` whose mirror stem matches its name."""
+    source = data_dir() / "report.txt"
+    source.write_bytes(b"x")
+    async with Client(cabinet()) as client:
+        for category in ("dumps", "notes.", "DIARY."):
+            with pytest.raises(ToolError) as refused:
+                await ask(client, "file_save", paths=[str(source)], category=category)
+            assert "cannot be filed under it" in str(refused.value), category
+
+
 # --- the rules the store keeps when nobody is watching ------------------------
 
 
@@ -2405,6 +2420,38 @@ async def test_a_mid_line_match_gets_a_window_around_it() -> None:
         "`text_char` is the address the same window is read back from"
     )
     assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+
+
+@pytest.mark.asyncio
+async def test_a_second_match_on_a_long_line_windows_its_own_occurrence() -> None:
+    """Two matches on one long line: the second's window must surround the second
+    occurrence and read back from its own `text_char`.
+
+    `_fit_match_text` used to window the *first* occurrence while addressing it as
+    the current match, so the second hit showed the first's surroundings under the
+    second's address — the model read the wrong text at the wrong place.
+    """
+    body = "x" * 60000 + " marker " + "y" * 60000 + " marker " + "z" * 60000
+    await save_dump("call_two_matches", body)
+    second_at = body.index("marker", body.index("marker") + 1)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_two_matches", pattern="marker"
+        )
+        assert found["matched"] == 2
+        second = next(m for m in found["matches"] if m["char"] == second_at)
+        window = await payload(
+            client,
+            "dump_read",
+            call="call_two_matches",
+            mode="char",
+            offset=second["text_char"],
+            limit=len(second["text"]),
+        )
+
+    assert "marker z" in second["text"], "the window is around the second occurrence"
+    assert window["text"] == second["text"], "and reads back from its own address"
 
 
 @pytest.mark.asyncio

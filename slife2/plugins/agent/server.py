@@ -4190,6 +4190,23 @@ def build_server(
                     f"{describe((agent, subagent))} changed while it was being "
                     f"reset; try again."
                 )
+            pending = loop.record_pending
+            if pending is not None:
+                # **A cancelled turn's detached write is already on its way to
+                # the context store.**  Clearing the live list before it lands
+                # lets it append the turn back and resurrect the conversation
+                # reset was asked to end — the same hazard `subagent_remove`
+                # drains for.  Wait for it first; a refused write writes nothing.
+                try:
+                    async with asyncio.timeout(_T.timeouts.grace.drain):
+                        await asyncio.shield(pending.written)
+                except TimeoutError:
+                    raise ToolError(
+                        f"{describe((agent, subagent))} is still recording its "
+                        f"last turn; try again in a moment."
+                    ) from None
+                except Exception:  # noqa: BLE001 — a refused write writes nothing
+                    pass
             await forget_context(agent, subagent)
             loop.removed = True
             loops.pop(key, None)

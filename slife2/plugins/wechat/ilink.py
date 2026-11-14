@@ -186,7 +186,7 @@ ENVELOPE_ERROR_KEYS = ("errno", "error", "retcode", "errcode")
 
 #: Where that "no"'s own words are read off, most specific first — `errmsg`
 #: before the numeric codes because a `-14` is a number nobody can act on.
-ENVELOPE_TEXT_KEYS = ("error", "errno", "retcode", "errmsg", "errcode")
+ENVELOPE_TEXT_KEYS = ("error", "errmsg", "errno", "retcode", "errcode")
 
 
 def error_envelope(result: Mapping[str, Any]) -> bool:

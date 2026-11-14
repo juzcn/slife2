@@ -565,6 +565,16 @@ async def test_a_cron_that_can_never_fire_is_refused() -> None:
             await write(client, cron="0 9 31 2 *")
 
 
+async def test_a_seconds_cron_is_refused_the_poll_cannot_fire_it() -> None:
+    """croniter accepts six-field (seconds) forms, but the poll's fire window
+    nudges its reference by one second — a step a seconds cron can cross into a
+    future-dated fire.  Five fields is the contract the poll assumes; a sixth is
+    refused at the write rather than mis-fired."""
+    async with Client(build()) as client:
+        with pytest.raises(ToolError, match="can fire"):
+            await write(client, cron="*/5 * * * * *")
+
+
 async def test_an_unknown_timezone_is_refused_at_the_write() -> None:
     """Asked up front rather than at the first fire, which would be three in the
     morning with nobody watching."""

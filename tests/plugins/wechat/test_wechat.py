@@ -924,6 +924,28 @@ async def test_a_reply_carries_the_peer_and_the_conversation(
     assert 2 in made.bridge.typing
 
 
+def test_envelope_error_prefers_the_text_to_the_numeric_code() -> None:
+    """`errmsg` is the bridge's own words; a numeric `errno`/`retcode` is a number
+    nobody can act on.  The text keys are read most-specific-first, so an envelope
+    carrying both answers with the text — not the code that happened to be listed
+    before it."""
+    assert (
+        ilink.envelope_error({"errno": -14, "errmsg": "session timeout"})
+        == "session timeout"
+    )
+    assert (
+        ilink.envelope_error({"retcode": -1, "errmsg": "rate limited"})
+        == "rate limited"
+    )
+    assert (
+        ilink.envelope_error({"errcode": -14, "errmsg": "session timeout"})
+        == "session timeout"
+    )
+    # A numbers-only envelope still answers tersely, and silence stays silence.
+    assert ilink.envelope_error({"errno": -14}) == "-14"
+    assert ilink.envelope_error({}) == ""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "envelope",

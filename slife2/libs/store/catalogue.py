@@ -1745,8 +1745,11 @@ class ToolStore:
         # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
         # so the cabinet puts its page together by the same rule this one does.
         queries, lists = await self._semantic_lists(sentences, embedder, over)
-        ordered, meaning, worded = fuse_shortlist(
-            lists, keyword_hits, queries, self._meaning_of
+        # `fuse_shortlist` scores the shortlist through `_meaning_of`, which
+        # opens a connection and computes cosines in Python — blocking work that
+        # belongs off the hub's shared loop, like every other DB call here.
+        ordered, meaning, worded = await asyncio.to_thread(
+            fuse_shortlist, lists, keyword_hits, queries, self._meaning_of
         )
         rows = await asyncio.to_thread(
             self._rows_in_order, ordered, clauses, values, limit

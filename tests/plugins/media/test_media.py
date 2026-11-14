@@ -914,6 +914,45 @@ async def test_an_openai_image_size_is_written_with_its_own_separator(
 
 
 @pytest.mark.asyncio
+async def test_an_openai_image_size_survives_the_servers_extra_params(
+    monkeypatch, tmp_path
+) -> None:
+    """The server merges the caller's raw size into `extra_params`, so the
+    adapter's normalization must be the last word on `size`.
+
+    Applied before the merge, the documented `WIDTH*HEIGHT` was overwritten by
+    the raw spelling and reached the vendor verbatim — a 400 for every `*`-spelled
+    size, the very failure `_size_for` exists to prevent.
+    """
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        size="1024*1024",
+        outputs_dir=tmp_path,
+        extra_params={"size": "1024*1024"},
+    )
+
+    assert seen["size"] == "1024x1024"
+
+
+@pytest.mark.asyncio
 async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> None:
     adapter = OpenAICompatAdapter(settings().providers["test"])
     encoded = base64.b64encode(b"\x89PNG").decode()

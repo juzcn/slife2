@@ -796,6 +796,44 @@ def test_an_endless_timeout_is_refused_like_any_other_bad_number() -> None:
     assert "timeout" not in arguments
 
 
+def test_a_timeout_beyond_float_range_is_refused_not_crashed() -> None:
+    """**A 310-digit integer is valid JSON and overflows `float`.**
+
+    `1e999` arrives as `inf`, but an integer literal past float range arrives as
+    an `int`, and `float(int)` raises `OverflowError` — which used to escape the
+    refusal path and die the turn.  It is the same unreadable duration in the
+    integer spelling, refused like every other.
+    """
+    huge = 10**309
+    for value in (huge, -huge):
+        seconds, error = read_timeout(value)
+        assert seconds is None
+        assert error is not None and "positive, finite" in error
+
+    # The bare key on a tool that does not declare one.
+    spec = ToolSpec(name="render", description="", parameters={"properties": {}})
+    arguments: dict[str, Any] = {"timeout": huge}
+    bound, error = bind_timeout(arguments, spec, None)
+    assert bound is None and error is not None
+    assert "timeout" not in arguments
+
+    # And on a tool that declares its own `timeout`: the binder reads the bare
+    # value only to decide whether to drop it.  A huge positive one is kept (the
+    # tool reads the original argument); a huge negative one is dropped.  Neither
+    # may crash the turn.
+    declaring = ToolSpec(
+        name="render", description="", parameters={"properties": {"timeout": {}}}
+    )
+    kept: dict[str, Any] = {"timeout": huge}
+    bound, error = bind_timeout(kept, declaring, None)
+    assert bound is None and error is None
+    assert kept["timeout"] == huge
+    dropped: dict[str, Any] = {"timeout": -huge}
+    bound, error = bind_timeout(dropped, declaring, None)
+    assert bound is None and error is None
+    assert "timeout" not in dropped
+
+
 @pytest.mark.asyncio
 async def test_a_finished_call_whose_delivery_is_in_flight_is_not_settled() -> None:
     """**Final status is not a finished delivery**, and the window between them

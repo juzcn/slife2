@@ -178,10 +178,16 @@ class WatchScreen(Screen[None]):
                 # **The message the turn is answering**, which its caller sent
                 # and a watcher never saw.  `add_user` also closes any turn left
                 # open by a previous one that failed without a `TurnFinished`;
-                # `begin_assistant` opens this one for the deltas below.
+                # `begin_assistant` opens this one for the deltas below.  Settle
+                # first: a new turn proves the prior one ended, and `add_user`
+                # clears the tool map without closing the panels it held.
+                chat.settle_tools()
                 chat.add_user(text, channel=channel)
                 chat.begin_assistant()
             case Closed(reason=reason):
+                # The watched turn is gone (cancelled, failed, link dropped);
+                # whatever it left running has no ending coming.
+                chat.settle_tools()
                 chat.add_note(
                     t("watch_closed", reason=reason)
                     if reason
@@ -191,6 +197,9 @@ class WatchScreen(Screen[None]):
             case TurnFinished(text=text):
                 # The answer is authoritative and replaces what the deltas
                 # built — the reconciliation `finish_assistant` documents.
+                # Every ending settles, as the main window does; on a success
+                # the panels are already complete and this is a no-op.
+                chat.settle_tools()
                 chat.finish_assistant(text)
             case ToolApprovalRequested():
                 # A watched turn runs unattended (`watched=False`), so the loop

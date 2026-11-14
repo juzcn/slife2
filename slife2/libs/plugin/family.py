@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -1320,17 +1321,27 @@ class Homes[T]:
         self._injected = injected
         self._on_build = on_build
         self._held: dict[str, T] = {}
+        self._lock = threading.Lock()
 
     def current(self) -> T:
-        """This home's, built and started on the way out of the first ask."""
+        """This home's, built and started on the way out of the first ask.
+
+        **Under a lock, because the first ask can come from two threads.**  The
+        document and job families serve `list_sources` synchronously, which
+        FastMCP runs in a worker thread, while their management tools run on the
+        loop; without the lock both can see an unbuilt home and build it, and the
+        thread's mirror — scanned before a management edit landed — overwrites
+        the loop's, losing the edit until the process restarts.
+        """
         key = home_key()
-        held = self._held.get(key)
-        if held is None:
-            held = self._build(for_the_call(self._source, self._injected))
-            self._held[key] = held
-            if self._on_build is not None:
-                self._on_build(held)
-        return held
+        with self._lock:
+            held = self._held.get(key)
+            if held is None:
+                held = self._build(for_the_call(self._source, self._injected))
+                self._held[key] = held
+                if self._on_build is not None:
+                    self._on_build(held)
+            return held
 
     def every(self) -> list[T]:
         """Every home's, for the two ends of this process's life."""

@@ -246,9 +246,17 @@ class EmbedderConnection:
                     fallback_tool="embed",
                     timeout=_T.timeouts.transport.embed,
                 )
+                try:
+                    described = tool_payload(await client.call_tool("describe", {}))
+                    embedder = RemoteEmbedder(client, described)
+                except BaseException:
+                    # A describe that fails (an unreachable provider) must not
+                    # leave the entered client behind: the next get() would open
+                    # another and overwrite this one, leaking it for the life of
+                    # the process.  Close it and let the failure stand.
+                    await close_server(client)
+                    raise
                 self._client = client
-                described = tool_payload(await client.call_tool("describe", {}))
-                embedder = RemoteEmbedder(client, described)
                 self._embedder = embedder
                 logger.info(
                     "embedding with %s (%s wide)",

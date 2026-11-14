@@ -788,9 +788,14 @@ class OpenAICompatAdapter(_HttpClientMixin):
                 "an image to work from (this adapter draws from text alone)"
             )
         body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
-        if size:
-            body["size"] = _size_for(size, "x")
         body.update(extra_params or {})
+        if size:
+            body["size"] = size
+        # The vendor's spelling is the last word on size, whichever side
+        # supplied it: extra_params carries the caller's raw WIDTH*HEIGHT
+        # (the server merges it in) and a config params.size may use it too.
+        if isinstance(body.get("size"), str):
+            body["size"] = _size_for(body["size"], "x")
         client = await self._ensure_client()
         try:
             response = await client.post(

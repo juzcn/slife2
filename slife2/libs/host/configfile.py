@@ -279,12 +279,18 @@ def _edit(
             config = load(path)
             if check is not None:
                 check(config)
-        except ConfigError as exc:
+        except Exception as exc:
+            # The judge can refuse with more than `ConfigError`: `load` resolves
+            # a `skills:` entry's environment eagerly, and a keyring that refuses
+            # mid-session raises its own error.  Whatever the refusal, an edit
+            # that did not validate is not an edit that happened — roll it back.
             if existed:
                 _swap(path, before)
             else:
                 path.unlink(missing_ok=True)
-            raise ConfigError(f"refused, so nothing was written: {exc}") from exc
+            if isinstance(exc, ConfigError):
+                raise ConfigError(f"refused, so nothing was written: {exc}") from exc
+            raise
 
 
 def _without_empties(entry: Mapping[str, Any]) -> dict[str, Any]:
