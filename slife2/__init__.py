@@ -61,7 +61,7 @@ from __future__ import annotations
 #: daemon is.  Defined after the imports below, that read depends on nothing
 #: imported while this module's body ran ever reaching `protocol.py`; defined
 #: first, there is no order to get wrong.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import argparse
 import json
