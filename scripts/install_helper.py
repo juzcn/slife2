@@ -11,13 +11,14 @@ and prints every external program it names, with the place that names it — and
 for a `cli:` entry, the line that installs it.  The home's `slife2.yaml` is the
 server's file and may lag a release; it is never the installer's source of
 requirements.  The installer maps those names to packages and installs them;
-nothing here installs anything.  `secrets` reads the home's configuration for
-the credentials it cannot resolve, so the installer can say which
-`credstore set` commands would make it work.
+nothing here installs anything.  `secrets` reads the *shipped* configuration
+for the credentials it references, so the installer can say which
+`credstore set` commands would make it work — the same source as `require`, so
+a credential the release dropped stops being suggested.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --source <repo> --home <dir>
-    python install_helper.py secrets --home <dir>
+    python install_helper.py secrets --source <repo>
 
 `seed` is stdlib-only and can run on any Python 3.  `require` and `secrets`
 import slife2, so they run with the project virtualenv's interpreter after
@@ -284,8 +285,12 @@ def _references(value: object, path: str, found: dict[str, list[str]]) -> None:
             _record(found, match.group(1), path)
 
 
-def secrets(home: Path) -> int:
-    """Print the credentials the configuration references, and where.
+def secrets(source: Path) -> int:
+    """Print the credentials the shipped configuration references, and where.
+
+    **The shipped configuration, not the home's**, for the reason `require`
+    reads it: the hints describe what the release being placed needs, and the
+    home's file may still name a credential this release dropped.
 
     **A hint, not a check.**  Whether a key is already in the environment or
     in credstore is deliberately not asked: resolving every reference would
@@ -295,7 +300,7 @@ def secrets(home: Path) -> int:
     One line per credential, in the order the file first names it:
     ``<credential><TAB><origin>, <origin>``.
     """
-    path = home / CONFIG_NAME
+    path = source / CONFIG_NAME
     if not path.is_file():
         _warn(f"no {CONFIG_NAME} at {path}; nothing to suggest.")
         return 0
@@ -440,14 +445,14 @@ def main(argv: list[str] | None = None) -> int:
     secrets_parser = commands.add_parser(
         "secrets", help="list the credentials the configuration references"
     )
-    secrets_parser.add_argument("--home", required=True)
+    secrets_parser.add_argument("--source", required=True)
 
     args = parser.parse_args(argv)
     if args.command == "seed":
         return seed(Path(args.source), Path(args.home), args.dry_run)
     if args.command == "require":
         return require(Path(args.source), Path(args.home))
-    return secrets(Path(args.home))
+    return secrets(Path(args.source))
 
 
 if __name__ == "__main__":

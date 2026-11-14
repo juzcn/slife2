@@ -8,11 +8,14 @@ installs a package, elevates, or touches a real home.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -545,6 +548,253 @@ echo "cloudflared version $INSTALLED (built now)"
 
     assert current("2026.10.1") == 0
     assert current("2026.9.0") == 1
+
+
+def _node_archive(tmp_path: Path) -> tuple[Path, Path]:
+    """A Node 24 archive and its SHASUMS, for a stubbed download.
+
+    The inner directory name is irrelevant — `install_node` extracts with
+    `--strip-components=1` — and one archive serves every platform line, so the
+    test runs on whichever POSIX host CI provides.
+    """
+    tgz = tmp_path / "node.tgz"
+    body = b'#!/bin/sh\necho "v24.99.0"\n'
+    with tarfile.open(tgz, "w:gz") as tar:
+        for name in ("node", "npm", "npx"):
+            info = tarfile.TarInfo(f"node-v24.99.0/bin/{name}")
+            info.size = len(body)
+            info.mode = 0o755
+            tar.addfile(info, io.BytesIO(body))
+    sha = hashlib.sha256(tgz.read_bytes()).hexdigest()
+    sums = tmp_path / "SHASUMS256.txt"
+    sums.write_text(
+        "\n".join(
+            f"{sha}  node-v24.99.0-{os_name}-{arch}.tar.gz"
+            for os_name, arch in (
+                ("linux", "x64"),
+                ("linux", "arm64"),
+                ("darwin", "x64"),
+                ("darwin", "arm64"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return tgz, sums
+
+
+def test_an_old_node_is_replaced_not_a_failed_install(tmp_path: Path) -> None:
+    """**Node 24 is the requirement; an older copy is the missing case.**
+
+    The first WSL install had Node 22 on PATH and ended with "install Node 24
+    or newer" although the installer already knew how to place its own Node 24
+    under ~/.local — the same remedy as a missing Node, because ~/.local/bin
+    leads the PATH and shadows the system copy.
+    """
+    if sys.platform == "win32":
+        pytest.skip("the shell installer is POSIX-only")
+    bash = _bash()
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    tgz, sums = _node_archive(tmp_path)
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(stub_bin / "node", '#!/bin/sh\necho "v22.1.0"\n')
+    _write_executable(stub_bin / "npx", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        stub_bin / "curl",
+        """\
+#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ -n "$out" ]; then cp "$NODE_TGZ" "$out"; else cat "$SHASUMS_FILE"; fi
+""",
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(
+        _shell_functions(
+            SHELL.read_text(encoding="utf-8"),
+            "curl_retry",
+            "fetch",
+            "hash_file",
+            "install_node",
+            "ensure_tool",
+        ),
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+say() { printf '%s\\n' "$*"; }
+fail() { printf 'error: %s\\n' "$*" >&2; FAILED=1; }
+refresh_path() {
+    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+    export PATH
+}
+record_owned() { printf '%s\\t%s\\t%s\\n' "$1" "$2" "$3" >> "$OWNED_LOG"; }
+. "$FUNCTION_FILE"
+ensure_tool node "mcp:test"
+printf 'NOW=%s\\n' "$(node --version 2>/dev/null)"
+printf 'FAILED=%s\\n' "${FAILED:-0}"
+""",
+        encoding="utf-8",
+    )
+    owned = tmp_path / "owned.tsv"
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{stub_bin}:{os.environ.get('PATH', '')}",
+            "FUNCTION_FILE": str(function_file),
+            "NODE_TGZ": str(tgz),
+            "SHASUMS_FILE": str(sums),
+            "OWNED_LOG": str(owned),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FAILED=0" in result.stdout, result.stdout + result.stderr
+    assert "installed node v24.99.0" in result.stdout, result.stdout
+    assert "NOW=v24.99.0" in result.stdout, result.stdout
+    assert (home / ".local" / "bin" / "node").is_symlink()
+    assert "node" in owned.read_text(encoding="utf-8")
+
+
+def test_a_current_node_is_left_alone(tmp_path: Path) -> None:
+    """A Node that answers the requirement starts no download on a re-run."""
+    if sys.platform == "win32":
+        pytest.skip("the shell installer is POSIX-only")
+    bash = _bash()
+    if bash is None:
+        pytest.skip("bash is not available")
+
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    _write_executable(stub_bin / "node", '#!/bin/sh\necho "v24.1.0"\n')
+    _write_executable(stub_bin / "npx", "#!/bin/sh\nexit 0\n")
+    # Any download attempt is a failure: a current Node must start none.
+    _write_executable(stub_bin / "curl", "#!/bin/sh\nexit 1\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    function_file = tmp_path / "function.sh"
+    function_file.write_text(
+        _shell_functions(SHELL.read_text(encoding="utf-8"), "ensure_tool"),
+        encoding="utf-8",
+    )
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        """\
+set -u
+say() { printf '%s\\n' "$*"; }
+fail() { printf 'error: %s\\n' "$*" >&2; FAILED=1; }
+refresh_path() { :; }
+record_owned() { :; }
+. "$FUNCTION_FILE"
+ensure_tool node "mcp:test"
+printf 'FAILED=%s\\n' "${FAILED:-0}"
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(harness)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{stub_bin}:{os.environ.get('PATH', '')}",
+            "FUNCTION_FILE": str(function_file),
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FAILED=0" in result.stdout, result.stdout + result.stderr
+    assert "installed node" not in result.stdout, result.stdout
+
+
+def test_the_powershell_installer_replaces_an_old_node(tmp_path: Path) -> None:
+    """The Windows half of the same rule: too old falls through to the install.
+
+    `Test-NodeVersion` is a predicate now — it no longer fails the run itself —
+    so an old Node reaches `Install-Node` exactly as a missing one does, while a
+    current Node with no managed copy is left alone.
+    """
+    if sys.platform != "win32":
+        pytest.skip("the installer's PowerShell host is Windows")
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is not available")
+
+    old_bin = tmp_path / "old-bin"
+    old_bin.mkdir()
+    (old_bin / "node.cmd").write_text("@echo off\r\necho v22.1.0\r\n", encoding="utf-8")
+    (old_bin / "npx.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    new_bin = tmp_path / "new-bin"
+    new_bin.mkdir()
+    (new_bin / "node.cmd").write_text("@echo off\r\necho v24.1.0\r\n", encoding="utf-8")
+    (new_bin / "npx.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+    text = POWERSHELL.read_text(encoding="utf-8")
+    function_file = tmp_path / "function.ps1"
+    function_file.write_text(
+        _powershell_function(text, "Test-NodeVersion")
+        + "\n"
+        + _powershell_function(text, "Ensure-Node")
+        + "\n",
+        encoding="utf-8",
+    )
+    local = tmp_path / "LocalAppData"
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Say([string]$Message) { Write-Output $Message }\n"
+        "function Fail([string]$Message) { throw $Message }\n"
+        "function Add-Owned([string]$Manager, [string]$Package, [string]$Tool) { }\n"
+        "function Get-NodeLts { [pscustomobject]@{ Version = '24.99.0'; "
+        "File = 'node-v24.99.0-win-x64.zip'; Sha = 'stub' } }\n"
+        "function Install-Node { $script:Installed = $true; return $true }\n"
+        f". '{function_file}'\n"
+        f"$env:LOCALAPPDATA = '{local}'\n"
+        f"$env:PATH = '{old_bin};' + $env:PATH\n"
+        'Write-Output ("OLD=" + (Test-NodeVersion))\n'
+        "Ensure-Node\n"
+        'Write-Output ("INSTALLED_OLD=" + [bool]$script:Installed)\n'
+        "$script:Installed = $false\n"
+        f"$env:PATH = '{new_bin};' + $env:PATH\n"
+        'Write-Output ("NEW=" + (Test-NodeVersion))\n'
+        "Ensure-Node\n"
+        'Write-Output ("INSTALLED_NEW=" + [bool]$script:Installed)\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OLD=False" in result.stdout, result.stdout + result.stderr
+    assert "INSTALLED_OLD=True" in result.stdout, result.stdout + result.stderr
+    assert "installed node 24.99.0" in result.stdout, result.stdout + result.stderr
+    assert "NEW=True" in result.stdout, result.stdout + result.stderr
+    assert "INSTALLED_NEW=False" in result.stdout, result.stdout + result.stderr
 
 
 def test_fetch_turns_a_stalled_connection_into_a_retry(tmp_path: Path) -> None:
@@ -1740,7 +1990,7 @@ def test_secrets_lists_every_reference(tmp_path: Path) -> None:
     )
 
     result = subprocess.run(
-        [sys.executable, str(HELPER), "secrets", "--home", str(tmp_path)],
+        [sys.executable, str(HELPER), "secrets", "--source", str(tmp_path)],
         capture_output=True,
         encoding="utf-8",
         cwd=ROOT,
@@ -1753,6 +2003,44 @@ def test_secrets_lists_every_reference(tmp_path: Path) -> None:
         "SERPER_API_KEY\tmcp.serper.env.SERPER_API_KEY, "
         "skills.search.env.SERPER_API_KEY" in lines
     )
+
+
+def test_secrets_reads_the_shipped_source_not_the_home(tmp_path: Path) -> None:
+    """**The credential hints are the shipped release's, not the home's.**
+
+    The home's `slife2.yaml` may still name a credential the release dropped;
+    suggesting `credstore set` for it would chase a key nothing reads anymore.
+    The hints come from the same shipped source as the requirements.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "slife2.yaml").write_text(
+        "providers:\n  main:\n    api_key: ${OLD_KEY}\n", encoding="utf-8"
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "slife2.yaml").write_text(
+        "providers:\n  main:\n    api_key: ${NEW_KEY}\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(HELPER), "secrets", "--source", str(source)],
+        capture_output=True,
+        encoding="utf-8",
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "NEW_KEY\tproviders.main.api_key" in result.stdout
+    assert "OLD_KEY" not in result.stdout
+
+
+def test_both_installers_take_credentials_from_the_shipped_source() -> None:
+    """The credential hints read the shipped source, like the requirements."""
+    for path in (SHELL, POWERSHELL):
+        text = path.read_text(encoding="utf-8")
+        assert "secrets --source" in text, path.name
+        assert "secrets --home" not in text, path.name
 
 
 def test_requirements_refuse_a_source_with_no_shipped_config(

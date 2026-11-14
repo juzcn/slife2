@@ -486,15 +486,8 @@ function Get-Requirements {
 function Test-NodeVersion {
     $version = (& node --version) -replace '^v', ''
     $major = 0
-    if (-not [int]::TryParse($version.Split('.')[0], [ref]$major)) {
-        Fail 'could not read the Node version'
-        return $false
-    }
-    if ($major -lt 24) {
-        Fail "Node $major is too old; install Node 24 or newer"
-        return $false
-    }
-    return $true
+    if (-not [int]::TryParse($version.Split('.')[0], [ref]$major)) { return $false }
+    return ($major -ge 24)
 }
 
 function Get-NodeLts {
@@ -549,15 +542,19 @@ function Install-Node {
 
 function Ensure-Node {
     $nodeDir = Join-Path $env:LOCALAPPDATA 'slife2\tools\node'
+    # **Too old is the same gap as missing.**  The requirement is Node 24; a
+    # copy that cannot answer it falls through to the user-level install,
+    # whose directory leads the user PATH.
     if ((Get-Command node -ErrorAction SilentlyContinue) -and (Get-Command npx -ErrorAction SilentlyContinue)) {
-        if (-not (Test-NodeVersion)) { return }
-        if (Test-Path $nodeDir) {
-            $info = Get-NodeLts
-            if ($info -and ((& node --version) -replace '^v', '') -ne $info.Version) {
-                if (Install-Node) { Say "  upgraded node $($info.Version)" }
+        if (Test-NodeVersion) {
+            if (Test-Path $nodeDir) {
+                $info = Get-NodeLts
+                if ($info -and ((& node --version) -replace '^v', '') -ne $info.Version) {
+                    if (Install-Node) { Say "  upgraded node $($info.Version)" }
+                }
             }
+            return
         }
-        return
     }
     $info = Get-NodeLts
     if ($info -and (Install-Node)) {
@@ -702,7 +699,7 @@ function Show-ProgramHints {
 
 function Show-Credentials {
     if (-not $script:Py -or -not $script:Helper) { return }
-    $lines = & $script:Py $script:Helper secrets --home $script:HomeDir 2>$null
+    $lines = & $script:Py $script:Helper secrets --source $script:SourceDir 2>$null
     if ($LASTEXITCODE -ne 0) { return }
     $needs = @($lines | Where-Object { $_ })
     if ($needs.Count -eq 0) { return }
