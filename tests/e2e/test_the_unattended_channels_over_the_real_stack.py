@@ -267,9 +267,9 @@ async def test_a_scheduled_fire_runs_the_task_and_the_answer_reaches_the_window(
     The task is set through the real tool on the real plugin; the fire is the
     daemon's own poll, gated on this test's window being attached, and the work
     is an ordinary agent task in the agent-task process.  What the window
-    receives is that task's answer on the `agent-task:<name>` channel, which is
-    the delivery the ledger calls `ran`.  No `schedule_run_now` anywhere: the
-    cron and the poll are the subject.
+    receives is that task's answer on the `agent-task:<task>@<due time>`
+    channel, which is the delivery the ledger calls `ran`.  No
+    `schedule_run_now` anywhere: the cron and the poll are the subject.
     """
     config = stack["config"]
     provider = stack["provider"]
@@ -299,7 +299,8 @@ async def test_a_scheduled_fire_runs_the_task_and_the_answer_reaches_the_window(
 
         # A minute's cron and a 30 s poll: the fire is at most a poll and a
         # minute away, and the ledger closes on the poll after the task ends.
-        handover = await window.wait_handover(channel=f"agent-task:{TASK}", timeout=210)
+        handover = await window.wait_handover(timeout=210)
+        assert handover.channel.startswith(f"agent-task:{TASK}@"), handover.channel
         assert TASK_ANSWER in handover.text, handover.text
 
         async def settled() -> object:

@@ -460,14 +460,14 @@ _TURN_COLUMNS = frozenset(
 
 
 class StaleSchema(RuntimeError):
-    """A file whose `turn` table is missing a column this build declares.
+    """A store file whose table is missing a column this build declares.
 
     **A refusal, not a report.**  There is no migration layer (SDD §8.1), so a
     file this build cannot write is a file it must not serve.  Served anyway, it
     fails per row at the first lookup of the absent column, as SQLite's `No item
     with that key` — an `IndexError` from a row, naming neither the file nor the
     remedy.  The caller gets the sentence instead, and the operator deletes the
-    file, whose turns are then recorded afresh.
+    file, whose rows are then recorded afresh.
     """
 
 

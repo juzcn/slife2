@@ -816,8 +816,10 @@ agent-task:
 
 定时任务是模型写下的名字、描述和 cron 表达式。`slife2-schedule` 在 slife2 运行期间
 触发它。任务到期时，调度器先问是否有窗口正在显示该 agent：没有窗口就把这次运行记为
-`missed`——结果将无处送达——有窗口则直接以 agent task 启动工作。不会打开一轮对话，
-也不消耗模型调用。终端无法询问或派发失败时，运行记为 `failed` 并记录原因。
+`missed`——结果将无处送达——有窗口则直接以 agent task 启动工作。每次运行的工作以
+`<任务名>@<到期时间>` 命名，因此同一任务两次重叠的运行是两个任务，而不是一个名字同时
+代表两者。不会打开一轮对话，也不消耗模型调用。终端无法询问或派发失败时，运行记为
+`failed` 并记录原因。
 
 | 工具 | 用途 |
 |---|---|
@@ -836,8 +838,10 @@ agent-task:
 
 任务只在 slife2 运行时触发。启动时，扫描会关闭被停止的进程遗留的运行——从未启动的
 记为 `missed`，已经命名了 task 的记为 `failed`——轮询为每个任务记录最新的错过触发。
-`schedule_runs(status="missed")` 和 `status="failed"` 列出它们；两者都可以用
-`schedule_run_now(name, due_at)` 重跑，或用 `schedule_run_skip` 关闭。
+停在派发过程中的运行按名字向 agent-task 插件核对：还在跑的任务接管到账本，已经结束的
+按它的结局关闭，插件不持有的记为 `failed`。`schedule_runs(status="missed")` 和
+`status="failed"` 列出它们；两者都可以用 `schedule_run_now(name, due_at)` 重跑，或用
+`schedule_run_skip` 关闭。
 
 账本是 `<data>/agents/<agent>/schedule.db`。没有配置节。任务的 `timezone` 是 IANA
 名字；省略时使用机器当前时钟，不跟随夏令时变化。

@@ -2026,11 +2026,15 @@ nowhere to go, and the instance that comes up later decides whether to backfill
 the run with `schedule_run_now(name, due_at)` or close it with
 `schedule_run_skip`. One that is there is started directly as an ordinary agent
 task (`agent_task_start`); the schedule plugin is the caller, so it receives the
-task id and its poll can close the run when the task ends. No turn is opened and
-no model call is spent — a trigger turn would ask a model to press a button the
-plugin can press itself, and a model that did not press it would leave the run
-`pending`. An agent-task plugin that cannot come up is a scheduler that cannot
-run, and the launch order reflects that dependency.
+task id and its poll can close the run when the task ends. The task is named for
+the run — `<schedule task>@<due time>` — because the agent-task plugin files a
+task by its name: the due time is the ledger's own identity for the run, so two
+overlapping runs of one task are two tasks rather than one name answering for
+both endings. No turn is opened and no model call is spent — a trigger turn
+would ask a model to press a button the plugin can press itself, and a model
+that did not press it would leave the run `pending`. An agent-task plugin that
+cannot come up is a scheduler that cannot run, and the launch order reflects
+that dependency.
 
 The clock is a poll, not a timer: a fire is noticed on the next pass — up to
 `pacing.schedule_poll` (30 s) after its due moment — and a finished run is closed
@@ -2040,7 +2044,12 @@ on the next pass after its task ends.  `ran_at` is still the task's own
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run with no task was never started and is
 `missed`; one that names a task is `failed` — and the poll records the newest
-missed fire for each task. A missed or failed run can be re-run with
+missed fire for each task. A run caught inside the dispatch round trip carries a
+dispatching marker written before the peer call; the sweep resolves it against
+the agent-task plugin by the run's name (`<schedule task>@<due time>`): a
+running task is adopted, an ended one supplies the ending, and one the plugin
+does not hold is `failed`, because the call was reached and the ledger cannot
+say what came of it. A missed or failed run can be re-run with
 `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`. Nothing
 announces it; the ledger holds the answer.
 
@@ -2598,37 +2607,27 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **A scheduled run and the task that runs it.** A run is tied to its task by a
-   name-derived id, which is not unique across two overlapping runs of one task.
-   The poll and `schedule_run_now` settle a finished run before starting another;
-   *an id minted per run* is still the deeper fix.
-2. **A cabinet mirror can disagree with its row.** The document's file is
+1. **A cabinet mirror can disagree with its row.** The document's file is
    written after the row's transaction, so a mirror the filesystem refuses — an
    editor holding it open on Windows — leaves the row, its keyword text and its
    vectors committed while the file is the old one or absent. A `CREATE` cannot
    be retried either, because the row now exists. *Resolution would require:*
    staging the mirror and committing the row only once the file is in place, or
    rolling the row back when the mirror write fails.
-3. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
+2. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
    committed in turn, so a later URL that cannot be fetched leaves the earlier
    files and rows stored while the call reports failure; a retry stores those
    documents again under `-1` names. *Resolution would require:* resolving and
    fetching every entry before the first write, or answering with the saved and
    the failed parts instead of raising.
-4. **A scheduled run can be recorded `missed` while its task runs.** `dispatch`
-   records the run `pending` and writes `agent_task_id` only after
-   `agent_task_start` returns; a crash in that window makes the sweep classify a
-   live task as one that never started, and a manual backfill can run the same
-   work a second time. *Resolution would require:* a dispatching marker written
-   before the peer call and resolved against `agent_task_list` by name.
-5. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
+3. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
    synchronous and reached from deep in the greps and the compress; its first
    call fetches the tiktoken vocabulary over the network with no timeout, so a
    cold cache behind a blocked route stalls every conversation the daemon serves
    until the OS TCP timeout — the registered script fallback engages only after
    the fetch raises. *Resolution would require:* pre-warming the encoding
    off-loop, or an async measure seam the callers await.
-6. **A section's introduction and its first entry's comment share one slot.**
+4. **A section's introduction and its first entry's comment share one slot.**
    ruamel keeps the comment above a mapping's first key as the mapping's pending
    comment, so removing the first entry cannot tell the section's explanation
    (the shipped `slife2.yaml` style, which should survive) from the entry's own
@@ -2636,7 +2635,7 @@ the field arrives as a test that fails without the fix.
    and a checked-in test encodes the entry-comment reading. *Resolution would
    require:* a convention that puts the section explanation above the section key
    (a distinct slot), or a marker that tells the two apart.
-7. **A read recreates a removed subagent's directory.** `transcript`/`watch`
+5. **A read recreates a removed subagent's directory.** `transcript`/`watch`
    restore the conversation, and `restore` creates the store file and its
    directory for any name; after `subagent_remove`, a read of the stale name
    leaves a directory with no `subagent.yaml`, which `subagent_set` and
@@ -2644,45 +2643,45 @@ the field arrives as a test that fails without the fix.
    conversation is created lazily, so the record's absence is not an existence
    guard. *Resolution would require:* a tombstone for a removed name, or a
    read-only restore that creates nothing.
-8. **`schedule_set` runs outside the run lock.** The poll decides from a task
+6. **`schedule_set` runs outside the run lock.** The poll decides from a task
    snapshot read once per pass; a `schedule_set` that disables or re-crons a task
    mid-pass leaves the snapshot stale and the task fires once on its old
    definition. `schedule_remove` takes the lock for exactly this race; `set` does
    not. *Resolution would require:* the run lock around `schedule_set`, or
    re-reading the task under the lock before firing.
-9. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
+7. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
     store prunes a non-terminal record past its cap, a profile retry of the same
     task id builds a fresh record and cancels the old round, whose cancel handler
     reads the *new* record and publishes a terminal `cancelled`; the new round
     then finishes into a terminal state and drops its answer. *Resolution would
     require:* the cancel handler keying off its own round's record or generation.
-10. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
-    id, then awaits the vector step; a concurrent remove+create of the same key
-    replaces the row and the update returns the old id, so the keyword text and
-    chunks land under a rowid no live row has — the updated document is invisible
-    to both search legs until a rebuild. *Resolution would require:* re-reading
-    the rowid after the await, or indexing inside the write's transaction.
-11. **A share token is reused across conversations.** `expose_local_image`
-    returns an existing exposure when the pin matches without comparing owner, so
-    a second conversation is handed a token owned by the first: it cannot revoke
-    its own link, and the first conversation's revoke kills the second's —
-    defeating the owner field's stated purpose. *Resolution would require:*
-    comparing owner on reuse, or minting a per-owner token.
-12. **A late approval outlives its turn.** The cancel/failure flush applies a
+8. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
+   id, then awaits the vector step; a concurrent remove+create of the same key
+   replaces the row and the update returns the old id, so the keyword text and
+   chunks land under a rowid no live row has — the updated document is invisible
+   to both search legs until a rebuild. *Resolution would require:* re-reading
+   the rowid after the await, or indexing inside the write's transaction.
+9. **A share token is reused across conversations.** `expose_local_image`
+   returns an existing exposure when the pin matches without comparing owner, so
+   a second conversation is handed a token owned by the first: it cannot revoke
+   its own link, and the first conversation's revoke kills the second's —
+   defeating the owner field's stated purpose. *Resolution would require:*
+   comparing owner on reuse, or minting a per-owner token.
+10. **A late approval outlives its turn.** The cancel/failure flush applies a
     queued `ToolApprovalRequested` after the turn is gone, mounting a prompt
     nobody will answer; and the approval row's y/n/Esc are focus-scoped priority
     bindings, so a keystroke that moves focus to the input leaves them inert and
     Esc cancels the whole turn instead of refusing the one call. *Resolution would
     require:* a turn-liveness guard on the approval event, and answering bindings
     that survive blur.
-13. **A tool-list change during the handover is un-believed.** The gateway's
+11. **A tool-list change during the handover is un-believed.** The gateway's
     `_refresh` awaits `on_listed`; an `invalidate()` in that window is overwritten
     when the refresh recomputes readiness from the pre-notification listing, so a
     tool added or removed during the merge stays wrong for up to `relist_after`.
     Only external legacy servers that send the notification reach it (ours
     advertise `listChanged: false`). *Resolution would require:* honouring an
     invalidate that lands during the merge.
-14. **A folded cut-in is delivered twice when its turn is cancelled.** The
+12. **A folded cut-in is delivered twice when its turn is cancelled.** The
     repaired batch keeps the cut-in pair and records it, but the cancelled turn's
     result stays `None`, so the parked caller runs its own turn with the same
     prompt — the message sits in the conversation twice and the model answers it

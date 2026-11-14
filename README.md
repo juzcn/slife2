@@ -956,9 +956,11 @@ A scheduled task is a name, a description, and a cron expression written by the
 model. `slife2-schedule` fires it while slife2 is running. When a task comes due,
 the scheduler asks whether a window is showing that agent: a window that is not
 there ends the run as `missed` — the answer would have nowhere to go — and a
-window that is there starts the work directly as an agent task. No turn is
-opened and no model call is spent. A terminal that cannot be asked, or a dispatch
-that fails, ends the run as `failed` with the reason recorded.
+window that is there starts the work directly as an agent task. Each run's work
+is an agent task named `<task>@<due time>`, so two overlapping runs of one task
+are two tasks rather than one name answering for both. No turn is opened and no
+model call is spent. A terminal that cannot be asked, or a dispatch that fails,
+ends the run as `failed` with the reason recorded.
 
 | Tool | Purpose |
 |---|---|
@@ -980,8 +982,11 @@ to 30 seconds after its due moment, and a finished run closes on the next pass;
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run that never started is `missed`, one that names
 a task is `failed` — and the poll records the newest missed fire for each task.
-`schedule_runs(status="missed")` and `status="failed"` list them; either can be
-re-run with `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
+A run caught inside the dispatch is resolved against the agent-task plugin by
+its name: a running task is adopted, an ended one supplies the ending, and one
+the plugin does not hold is `failed`. `schedule_runs(status="missed")` and
+`status="failed"` list them; either can be re-run with
+`schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
 
 The ledger is `<data>/agents/<agent>/schedule.db`. There is no configuration
 section. A task's `timezone` is an IANA name; leaving it out uses the machine's

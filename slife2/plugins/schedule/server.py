@@ -67,6 +67,7 @@ import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastmcp import Client, Context, FastMCP
@@ -103,6 +104,7 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
+from slife2.libs.store.db import StaleSchema
 from slife2.plugins.schedule import expressions
 from slife2.plugins.schedule.store import (
     FAILED,
@@ -120,6 +122,11 @@ from slife2.plugins.schedule.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Ledger files this process has already reported as older than this build's
+#: columns.  The clock opens every ledger every pass, and the sentence is worth
+#: saying once; `ledgers` is the only reader that walks them all.
+_stale_reported: set[Path] = set()
 
 SERVER_NAME = SCHEDULE_SERVER_NAME
 
@@ -291,12 +298,25 @@ def ledgers() -> list[ScheduleStore]:
     A broad `except Exception` would make a bug in `adopt` — or a schema this
     build wrote and then cannot read — look like an operator's damaged file, and
     the skip is the one shape that hides the clock's own defect.  A `TypeError`
-    is the clock's and propagates; SQLite's and the filesystem's are the file's.
+    is the clock's and propagates; SQLite's, the filesystem's and a stale
+    ledger's are the file's.
     """
     found: list[ScheduleStore] = []
     for ledger in schedule_dbs():
         try:
             store = ScheduleStore.adopt(ledger.path, ledger.home)
+        except StaleSchema:
+            # **Said once per file, and skipped every pass.**  The clock walks
+            # every ledger every poll, and a sentence per pass is a log that
+            # buries the operator's one action — deleting the file.
+            if ledger.path not in _stale_reported:
+                _stale_reported.add(ledger.path)
+                logger.error(
+                    "%s predates this build's schedule columns, so nothing in "
+                    "it will be fired until it is deleted",
+                    ledger.path,
+                )
+            continue
         except (OSError, sqlite3.DatabaseError):
             logger.error(
                 "%s could not be opened, so nothing in it will be fired until "
@@ -423,6 +443,31 @@ async def tasks_server(
     )
 
 
+def agent_task_name(task_name: str, due_at: str) -> str:
+    """The name one run's work is started under: the task, and the run.
+
+    **The agent-task plugin files a task by its name, and this plugin starts one
+    task per run** — so the name has to say *which* run, or two overlapping runs
+    of one schedule task are two tasks the ledger cannot tell apart.  `reconcile`
+    looks a run up by the id it was handed, and a shared id would answer both
+    runs with whichever task the registry held last.
+
+    **`due_at` is the run's identity in this ledger** (`UNIQUE(task_id, due_at)`)
+    and its own spelling is what the row holds, so the name is derived from a
+    fact already written down rather than minted and kept beside it.  It also
+    means a retry of the same run lands on the same name — the agent-task
+    plugin's "already running" refusal is still the backstop for a second
+    dispatch of one run.
+
+    **The whole timestamp, offset included.**  The ledger's two runs either side
+    of a daylight-saving change can share a wall-clock reading
+    (`2026-10-25T01:30:00+01:00` and `2026-10-25T01:30:00+00:00` are different
+    instants), so trimming the offset or the seconds would make them one name.
+    """
+
+    return f"{task_name}@{due_at}"
+
+
 async def dispatch(
     config: Config,
     store: ScheduleStore,
@@ -439,6 +484,10 @@ async def dispatch(
     would leave the id in a conversation and the run's fate to that model's
     memory (SDD §9.4).
 
+    **The task is named after the run** (`agent_task_name`), not only after the
+    schedule task: the name is the agent-task plugin's id and registry key, so
+    two runs sharing one name is one name answering for both endings.
+
     The work is an ordinary agent task: it runs as the agent, on the agent's own
     context, with the agent's prompt and tools, and its answer is delivered back
     to the conversation by `slife2-agent-task` — this plugin never hands the
@@ -454,6 +503,12 @@ async def dispatch(
     # something to record the failure against — and so that the anchor moves
     # whether or not the work ever starts.
     store.record(task, due_at)
+    # **And it says the call was reached before it is made.**  The start is a
+    # peer round trip whose answer is written down afterwards, so a process
+    # that stops inside it leaves a row with no task and no way to tell "never
+    # started" from "may be running".  This marker is that distinction; the
+    # startup sweep resolves the marked ones by name (`_resolve_dispatching`).
+    store.begin_dispatch(task.name, due_at)
     # **Opening the peer is part of the dispatch.**  A `tasks_server` call sits
     # outside the `try` at the caller's peril: a failure to reach the agent-task
     # plugin — a port that is not listening, a peer that answers as somebody else
@@ -468,7 +523,10 @@ async def dispatch(
         client, owned = await tasks_server(config, tasks_client)
         answer = await client.call_tool(
             AGENT_TASK_START,
-            {"name": task.name, "description": task.description},
+            {
+                "name": agent_task_name(task.name, due_at),
+                "description": task.description,
+            },
             # The identity rides in `_meta` because a task is *an agent's*, and
             # this process serves every agent: without it the peer would have to
             # guess whose loop to start, and would refuse with its own
@@ -667,12 +725,13 @@ async def poll_once(
     """
     did: list[str] = []
     # **Before the fires, not after them.**  A run whose task has finished but
-    # whose row is still `pending` is settled first; otherwise the next fire of
-    # the same task starts a new agent task under the same name, and
-    # `agent-task:<name>` — the id both runs then carry — names only the newer
-    # one.  The old run would be settled from the new task's ending, or stay
-    # pending for its lifetime.  Asking after a just-started task would only
-    # record `running`, so nothing is lost by asking before starting.
+    # whose row is still `pending` is settled first.  The ids no longer alias —
+    # each run's task is named after its due time (`agent_task_name`) — but a
+    # finished predecessor would stay `pending` for another pass, and the
+    # agent-task registry keeps only the most recently ended tasks: one evicted
+    # before it is settled is a run the ledger can only close `failed`.  Asking
+    # after a just-started task would only record `running`, so nothing is lost
+    # by asking before starting.
     did.extend(await reconcile(config, tasks_client=tasks_client))
     for store in ledgers():
         # **One bad ledger is one ledger skipped, not a pass abandoned.**  A row
@@ -739,16 +798,85 @@ async def poll_once(
     return did
 
 
-async def sweep_once() -> list[str]:
-    """Close what a stopped process left open, and say nothing about it.
+async def _resolve_dispatching(
+    config: Config, store: ScheduleStore, tasks_client: Client | None
+) -> int:
+    """Resolve the runs a stopped process left inside a dispatch.
+
+    **By name, because the name is the run.**  `agent_task_name` spells the
+    schedule task and its due time together, and a due time is unique per task
+    (`UNIQUE(task_id, due_at)`), so a task carrying that name is this run's
+    task and no other's.  A running one is adopted (`attach`), an ended one
+    closes the run with its own ending, and one the peer does not hold is
+    `failed` — the work may have happened and the ledger cannot say, which is
+    exactly what `failed` means here.  `missed` is not an option: the start call
+    was reached.
+
+    **Only the startup sweep asks this.**  In a live process a marker can belong
+    to a dispatch in progress, and a list fetched in that window says "nothing"
+    about a task that is about to exist.  At startup the process that wrote the
+    marker is gone, so it is stale by construction and the peer's answer is
+    final.
+
+    The peer is asked once for the whole ledger, in the ledger's own home, for
+    the reason `_reconcile_one` gives: a task is an agent's in a home, and a
+    shared clock asking in its own home reads another home's registry.
+    """
+    waiting = store.dispatching()
+    if not waiting:
+        return 0
+    with in_home(store.home):
+        listed = await _tasks_of(config, store.agent, tasks_client)
+    by_name = {str(row.get("name") or ""): row for row in listed.values()}
+    resolved = 0
+    for run in waiting:
+        found = by_name.get(agent_task_name(run.name, run.due_at))
+        if found is None:
+            store.settle(
+                run.name,
+                run.due_at,
+                FAILED,
+                error=(
+                    "the process stopped while this run was being dispatched, "
+                    "and the agent-task plugin holds no task for it"
+                ),
+            )
+        elif found["status"] == TASK_RUNNING:
+            # The work is being done: put its id on the row and let the next
+            # poll's reconcile close it from the task's own ending.
+            store.attach(run.name, run.due_at, str(found["task_id"]))
+        elif found["status"] == TASK_FINISHED:
+            store.settle(
+                run.name,
+                run.due_at,
+                RAN,
+                when=str(found.get("finished_at") or ""),
+            )
+        else:
+            store.settle(
+                run.name,
+                run.due_at,
+                FAILED,
+                error=f"the background task ended as {found['status']}",
+            )
+        resolved += 1
+    return resolved
+
+
+async def sweep_once(
+    config: Config, *, tasks_client: Client | None = None
+) -> list[str]:
+    """Close what a stopped process left open, and resolve its dispatches.
 
     The ledger half of "tasks fire only while slife2 is running".  A `pending`
     run is one that was written and whose process died before anything closed
-    it: one with no task was never started and is **missed**, and one that names
-    a task started but had its ending lost and is **failed**.  Recording which
-    is what lets an agent that looks decide whether to run it again.  Nothing
-    else is settled here: a `missed` or `failed` run from before is still a
-    decision, and a decision is not this process's to make.
+    it: one with no task was never started and is **missed**, one that names a
+    task started but had its ending lost and is **failed**, and one marked as
+    dispatching was inside the start call and is resolved against the agent-task
+    plugin by name (`_resolve_dispatching`).  Recording which is what lets an
+    agent that looks decide whether to run it again.  Nothing else is settled
+    here: a `missed` or `failed` run from before is still a decision, and a
+    decision is not this process's to make.
 
     **Nothing is announced.**  A note to the window would announce one, and it
     is deferred rather than half-built (SDD §14.2) because the ledger already
@@ -759,12 +887,28 @@ async def sweep_once() -> list[str]:
     did: list[str] = []
     for store in ledgers():
         try:
-            failed = store.sweep()
+            closed = store.sweep()
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
             logger.exception("%s: this ledger was skipped for this sweep", store.path)
             continue
-        if failed:
-            did.append(f"{store.agent}: {failed} run(s) never settled")
+        if closed:
+            did.append(f"{store.agent}: {closed} run(s) never settled")
+        try:
+            resolved = await _resolve_dispatching(config, store, tasks_client)
+        except Exception as exc:  # noqa: BLE001 - a peer that is not there
+            # Nothing is settled: this says nothing about the runs, only about
+            # this process's view of them, and the next start asks again.  The
+            # same rule `_reconcile_one` follows for a list it cannot get.
+            logger.warning(
+                "%s: the runs left in a stopped dispatch were not checked: %s",
+                store.agent,
+                exc,
+            )
+            continue
+        if resolved:
+            did.append(
+                f"{store.agent}: {resolved} run(s) resolved from a stopped dispatch"
+            )
     return did
 
 
@@ -792,7 +936,7 @@ async def poll_forever(
     cancellation ends the loop.
     """
     try:
-        for line in await sweep_once():
+        for line in await sweep_once(config(), tasks_client=tasks_client):
             logger.info("%s", line)
     except asyncio.CancelledError:
         # The ordinary way this ends.  Re-raised because the sweep of a
@@ -1140,10 +1284,12 @@ def build_server(
         async with RunLocks.held(locks, store, name):
             task = task_of(store, name)
             # **A finished run of this task is settled before another starts.**
-            # `agent_task_start` names a task after the schedule task, and that
-            # name is its id, so a still-`pending` predecessor would share the
-            # id with this run.  The poll does the same before its fires; this
-            # is the manual path, and it owes the same order.
+            # The run's task is named after its due time now, so a predecessor
+            # and this run no longer share an id — but a finished predecessor
+            # left `pending` would go on looking in flight, and the agent-task
+            # registry forgets ended tasks past its cap.  The poll does the same
+            # before its fires; this is the manual path, and it owes the same
+            # order.
             await _reconcile_one(live_config, store, tasks_client=tasks_client)
             stamp = due_at.strip()
             if stamp:

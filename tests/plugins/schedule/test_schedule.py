@@ -59,6 +59,7 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
+from slife2.libs.store.db import StaleSchema
 from slife2.plugins.schedule.expressions import latest_fire
 from slife2.plugins.schedule.server import (
     SCHEDULE_LIST,
@@ -67,6 +68,7 @@ from slife2.plugins.schedule.server import (
     SCHEDULE_RUN_SKIP,
     SCHEDULE_RUNS,
     SCHEDULE_SET,
+    agent_task_name,
     build_server,
     due,
     poll_forever,
@@ -616,16 +618,16 @@ async def test_a_task_that_has_come_due_starts_the_work_as_an_agent_task(
     )
 
     assert [one["agent"] for one in window.asked] == [AGENT]
-    assert [
-        (one["agent"], one["name"], one["description"]) for one in tasks.started
-    ] == [(AGENT, "daily", DESCRIPTION)]
-    assert [Path(one["home"]).resolve() for one in tasks.started] == [
-        paths.home().resolve()
-    ]
 
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING
-    assert run.agent_task_id == "agent-task:daily"
+    assert [
+        (one["agent"], one["name"], one["description"]) for one in tasks.started
+    ] == [(AGENT, f"daily@{run.due_at}", DESCRIPTION)]
+    assert [Path(one["home"]).resolve() for one in tasks.started] == [
+        paths.home().resolve()
+    ]
+    assert run.agent_task_id == f"agent-task:daily@{run.due_at}"
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
 
 
@@ -675,13 +677,13 @@ async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
 async def test_the_poll_settles_finished_runs_before_it_fires_again(
     window: Window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two pending runs of one task would share `agent-task:<name>`.
+    """A finished run is settled before the next fire starts.
 
-    The agent-task id is derived from the name, so a second start while the
-    first run's row is still `pending` aliases the two: `in_flight` returns
-    both, the newer task's ending is used for both, and the older run is never
-    settled from its own.  Reconciling before the fires closes the finished one
-    first.
+    The ids no longer alias — each run's task is named after its due time
+    (`agent_task_name`) — but a finished run left `pending` is one the ledger
+    cannot close until it asks again, and the agent-task registry keeps only
+    the most recently ended tasks.  Reconciling before the fires closes the
+    finished one while its task is still answerable.
     """
     async with Client(build(window)) as client:
         await write(client, cron=EVERY_MINUTE)
@@ -883,13 +885,13 @@ async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
         run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
 
     assert run["status"] == PENDING
-    assert run["agent_task_id"] == "agent-task:daily"
-    # Handed over as the agent, under the task's own name, with the description
+    assert run["agent_task_id"] == f"agent-task:daily@{run['due_at']}"
+    # Handed over as the agent, under the run's own name, with the description
     # as the whole of what the work is told — and in this home, which is the
     # caller's and is read here rather than assumed.
     assert [
         (one["agent"], one["name"], one["description"]) for one in tasks.started
-    ] == [(AGENT, "daily", DESCRIPTION)]
+    ] == [(AGENT, f"daily@{run['due_at']}", DESCRIPTION)]
     assert [Path(one["home"]).resolve() for one in tasks.started] == [
         paths.home().resolve()
     ]
@@ -907,6 +909,37 @@ async def test_a_run_already_in_flight_is_not_started_twice(tasks: Tasks) -> Non
 
     assert again["agent_task_id"] == first["agent_task_id"]
     assert len(tasks.started) == 1
+
+
+async def test_two_runs_of_one_task_are_named_apart(tasks: Tasks) -> None:
+    """Each run's work is an agent task named after the run, not only after the
+    schedule task: two runs of one task have two ids, so the ledger can ask
+    after each ending without the newer task answering for the older run."""
+    first_due = "2026-11-14T09:00:00+08:00"
+    second_due = "2026-11-14T09:05:00+08:00"
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        # The two runs are written the way the poll would have left them: two
+        # fires of one task, each with its own due time.
+        store.record(task, first_due)
+        store.record(task, second_due)
+        first = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": first_due}
+        )
+        second = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": second_due}
+        )
+
+    assert first["agent_task_id"] == f"agent-task:daily@{first_due}"
+    assert second["agent_task_id"] == f"agent-task:daily@{second_due}"
+    assert first["agent_task_id"] != second["agent_task_id"]
+    assert [one["name"] for one in tasks.started] == [
+        f"daily@{first_due}",
+        f"daily@{second_due}",
+    ]
 
 
 async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
@@ -950,7 +983,7 @@ async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
     assert answered[0]["agent_task_id"] == answered[1]["agent_task_id"]
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING, "the work in flight was closed"
-    assert run.agent_task_id == "agent-task:daily"
+    assert run.agent_task_id == f"agent-task:daily@{run.due_at}"
 
 
 async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(
@@ -1108,7 +1141,7 @@ async def test_run_now_backfills_the_run_that_was_missed(
 
     assert started["due_at"] == missed.due_at
     assert started["status"] == PENDING
-    assert started["agent_task_id"] == "agent-task:daily"
+    assert started["agent_task_id"] == f"agent-task:daily@{missed.due_at}"
 
 
 async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> None:
@@ -1292,7 +1325,7 @@ async def test_the_sweep_calls_a_run_that_never_started_missed() -> None:
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     run = ledger().run("daily", "2026-10-12T09:00:00+08:00")
     assert run is not None and run.status == MISSED
@@ -1311,14 +1344,117 @@ async def test_the_sweep_calls_a_run_that_had_started_failed() -> None:
     assert task is not None
     stamp = "2026-10-12T09:00:00+08:00"
     store.record(task, stamp)
-    store.attach("daily", stamp, "agent-task:daily")
+    store.begin_dispatch("daily", stamp)
+    store.attach("daily", stamp, f"agent-task:daily@{stamp}")
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     run = ledger().run("daily", stamp)
     assert run is not None and run.status == FAILED
     assert "process stopped" in run.error
     assert any("never settled" in line for line in did)
+
+
+async def test_the_sweep_adopts_a_task_a_stopped_dispatch_had_started(
+    tasks: Tasks,
+) -> None:
+    """The crash window the marker exists for.
+
+    The process wrote the run, marked the dispatch and called the peer, then
+    stopped before the id was written down.  The task is running; the sweep
+    finds it by the run's own name and puts the id on the row, so the run is
+    in flight rather than `missed`, and the next poll closes it from its own
+    ending.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    # What the peer holds: the task the stopped process started, under the
+    # name the run was dispatched with.
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == PENDING
+    assert run.agent_task_id == f"agent-task:daily@{stamp}"
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_the_sweep_closes_a_stopped_dispatch_whose_task_ended(
+    tasks: Tasks,
+) -> None:
+    """The task got as far as an ending before the process stopped: the run
+    takes that ending, `ran_at` included, rather than being run again."""
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+    tasks.status = TASK_FINISHED
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == RAN
+    assert run.ran_at == FINISHED_AT
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_the_sweep_closes_a_stopped_dispatch_the_peer_does_not_hold(
+    tasks: Tasks,
+) -> None:
+    """The call was reached and the peer has nothing to show for it — a peer
+    that restarted, or a call that never arrived.  `failed` is the honest
+    answer: the work may have happened and the ledger cannot say."""
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == FAILED
+    assert "holds no task" in run.error
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_a_ledger_from_another_build_is_refused_not_migrated() -> None:
+    """**There is no migration layer, and the ledger is the reason it cannot
+    have one.**  A file whose `scheduled_runs` predates this build's columns is
+    refused by name, before any DDL touches it — served, every read of a run
+    would raise SQLite's `No item with that key` instead.  The clock skips it,
+    as it skips any file it cannot open, and the rest of the machine keeps its
+    schedules."""
+    path = paths.schedule_db(AGENT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY, task_id INTEGER, "
+        "due_at TEXT, status TEXT, ran_at TEXT, note TEXT, error TEXT, "
+        "agent_task_id TEXT)"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(StaleSchema, match="dispatching"):
+        ScheduleStore.open(AGENT)
+
+    assert await sweep_once(default_config()) == []
 
 
 async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look() -> (
@@ -1336,7 +1472,7 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    await sweep_once()
+    await sweep_once(default_config())
 
     # …and the run is findable, which is the whole of the answer it needs.
     async with Client(build()) as client:
@@ -1348,7 +1484,7 @@ async def test_a_sweep_with_nothing_to_do_is_quiet() -> None:
     async with Client(build()) as client:
         await write(client)
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     assert did == []
 
@@ -1483,7 +1619,8 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
         assert task is not None
         stamp = now()
         store.record(task, stamp)
-        store.attach("daily", stamp, "agent-task:daily")
+        store.begin_dispatch("daily", stamp)
+        store.attach("daily", stamp, f"agent-task:daily@{stamp}")
 
     did = await poll_once(
         default_config(),
@@ -1609,7 +1746,7 @@ async def test_run_now_backfills_a_run_that_failed_after_its_task_started(
         )
 
     assert started["status"] == PENDING
-    assert started["agent_task_id"] == "agent-task:daily"
+    assert started["agent_task_id"] == f"agent-task:daily@{run['due_at']}"
     assert len(tasks.started) == 1, "the backfill really started the work"
 
 
