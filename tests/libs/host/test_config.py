@@ -542,6 +542,24 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     )
 
 
+def test_a_server_host_beyond_loopback_is_refused(tmp_path) -> None:
+    """**Loopback is the security boundary, so a bind beyond it is refused.**
+
+    Every plugin is unauthenticated Streamable HTTP (SDD §3.2): `host: 0.0.0.0`
+    reads as "make it reachable" and lets the network call `job_set`, `mcp_set`
+    and `model_set` with no credential.  The whole `127.0.0.0/8` is loopback,
+    not just its first address; `localhost` is the one name allowed, without a
+    resolver — a boundary must not move with the hosts file.
+    """
+    for written in ("0.0.0.0", "192.168.1.5", "example.com"):
+        with pytest.raises(ConfigError, match=r"servers\.context\.host"):
+            load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
+
+    for written in ("127.0.0.1", "127.0.0.2", "localhost", "LOCALHOST"):
+        one = load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
+        assert one.server("context").host == written
+
+
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     """**A typo has to read like every other typo.**
 

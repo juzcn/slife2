@@ -102,6 +102,7 @@ would be paid once per process for a credential only one of them uses.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import math
 import os
@@ -1028,6 +1029,35 @@ class ServerSettings:
     def url(self) -> str:
         """The streamable-HTTP endpoint, as a client should address it."""
         return f"http://{self.host}:{self.port}{self.path}"
+
+
+#: Why a non-loopback host is refused, said once so the refusal at load and the
+#: refusal at the bind cannot drift apart.
+LOOPBACK_BOUNDARY = (
+    "every server here is unauthenticated Streamable HTTP, so a bind beyond "
+    "this machine would let the network call its tools with no credential"
+)
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether *host* keeps a listener on this machine.
+
+    ``localhost`` by name, or a loopback address literal — the whole
+    ``127.0.0.0/8``, not just its first address.  **Deliberately no resolver:**
+    what a name answers depends on the hosts file and the DNS, and a security
+    boundary must not move with them; the one name allowed is the conventional
+    one, the same choice `slife2.plugins.a2a.broker.LOCAL_HOSTS` makes.
+
+    Every plugin is unauthenticated Streamable HTTP (SDD §3.2), so this is the
+    question "may a server bind here" — asked at load for `servers.<name>.host`
+    and again at the bind for a hand-started `--host`.
+    """
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -3626,6 +3656,18 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
             f"`host:port` with no brackets, so an IPv6 address needs the path "
             f"spelt out another way, and a `/` belongs in `path:`; leave it out "
             f"for the default ({default.host})"
+        )
+    if not is_loopback_host(host):
+        # **Loopback is the security boundary, not a default.**  A bind on
+        # `0.0.0.0` reads as "make it reachable" and lets the network call
+        # `job_set`, `mcp_set`, `model_set` — arbitrary code and configuration
+        # edits — with no credential.  The broker refuses wildcards for its
+        # own listener (`slife2.plugins.a2a.broker`); this is the same rule
+        # for every server.
+        raise ConfigError(
+            f"{where}.host: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"use `localhost` or a loopback address, or leave it out for the "
+            f"default ({default.host})"
         )
     port = _int_or(raw.get("port"), default.port, f"{where}.port")
     if not 0 < port < 65536:

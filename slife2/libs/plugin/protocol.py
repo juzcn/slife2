@@ -92,10 +92,12 @@ import slife2.helpers.timeouts as _T
 from slife2 import __version__
 from slife2.helpers.proactor import tolerate_reset_on_close
 from slife2.libs.host.config import (
+    LOOPBACK_BOUNDARY,
     Config,
     ConfigError,
     ServerSettings,
     find_config_path,
+    is_loopback_host,
     load,
 )
 from slife2.libs.host.paths import (
@@ -879,7 +881,9 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
         prog=description, description=description, allow_abbrev=False
     )
     add_data_dir_argument(parser)
-    parser.add_argument("--host", default=None, help="override the listen address")
+    parser.add_argument(
+        "--host", default=None, help="override the listen address (loopback only)"
+    )
     parser.add_argument("--port", default=None, type=int, help="override the port")
     args = parser.parse_args(argv)
     apply_data_dir(args)
@@ -1047,12 +1051,20 @@ def serve(
       between two of them.  The agent server does keep its loops, but it names
       them with an ordinary tool argument rather than a transport session, so it
       is stateless in the sense this flag means.  See `slife2.plugins.agent.server`.
+
+    **A non-loopback host is refused before anything is written.**  The config
+    field is refused at load (`config.is_loopback_host`), but `--host` overrides
+    it after the load — so the bind itself is the last place the boundary can
+    be held, and a refusal leaves no record behind.
     """
-    url = ServerSettings(
-        host=args.host or server.host,
-        port=args.port or server.port,
-        path=server.path,
-    ).url
+    host = args.host or server.host
+    port = args.port or server.port
+    if not is_loopback_host(host):
+        raise ConfigError(
+            f"{name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"`--host` takes `localhost` or a loopback address only"
+        )
+    url = ServerSettings(host=host, port=port, path=server.path).url
     record = ServerRecord.now(
         name=name,
         url=url,
@@ -1092,8 +1104,8 @@ def serve(
         _fastmcp_http.FastMCPStreamableHTTPSessionManager = _OwnedSessionManager
         mcp.run(
             transport="http",
-            host=args.host or server.host,
-            port=args.port or server.port,
+            host=host,
+            port=port,
             path=server.path,
             # **No banner, for two reasons.**  It is ~20 lines of ASCII art at
             # every server start, in a file whose first useful line is ours; and
@@ -1281,11 +1293,13 @@ def serve_plugin(
     a half-formatted line.  `logger` is the caller's, so a line still lands
     under the name of the server that wrote it rather than this module's.
 
-    **Two things stop a start here, and both are configuration answers.**  The
+    **Three things stop a start here, and all are configuration answers.**  The
     config itself may be missing or unusable (`ConfigError` from `find_config_path`
-    or `load`), and `require` may say what this server cannot serve without —
-    a model protocol no provider in the config speaks is the whole of that.
-    Both are written as `"<server>: <sentence>"` to **stderr**, returning 2 —
+    or `load`), `require` may say what this server cannot serve without —
+    a model protocol no provider in the config speaks is the whole of that —
+    and a `--host` beyond loopback is refused, because every server here is
+    unauthenticated (`config.is_loopback_host`).
+    All three are written as `"<server>: <sentence>"` to **stderr**, returning 2 —
     the same answer `slife2` gives a server that would not come up: two lines
     and no stack, because nothing has been drawn yet and the fix is an edit to
     the file the sentence names.  Said rather than raised, and the reason is
@@ -1317,6 +1331,18 @@ def serve_plugin(
     if require is not None and (missing := require(config)):
         print(f"{server_name}: {missing}", file=sys.stderr)
         return 2
+    host = args.host or address.host
+    if not is_loopback_host(host):
+        # Refused before the start-up line: a log must not say "serving" about
+        # a server that refused to start.  The config field is refused at load,
+        # so what reaches here is `--host` — the same answer as every other
+        # configuration refusal, one sentence and exit 2.
+        print(
+            f"{server_name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"`--host` takes `localhost` or a loopback address only",
+            file=sys.stderr,
+        )
+        return 2
 
     # **A start-up line has to say which run it is.**  Logs are appended across
     # restarts, and a person reading one has no other way to tell one instance
@@ -1326,7 +1352,7 @@ def serve_plugin(
     logger.info(
         "serving %s on http://%s:%d%s%s (pid %d, data-dir %s%s)",
         server_name,
-        args.host or address.host,
+        host,
         args.port or address.port,
         address.path,
         f" ({note(config)})" if note is not None else "",

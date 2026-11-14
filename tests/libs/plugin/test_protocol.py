@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,7 +30,7 @@ from mcp.types import TextContent
 
 from slife2 import __version__
 from slife2.libs.host import paths
-from slife2.libs.host.config import ServerSettings
+from slife2.libs.host.config import ConfigError, ServerSettings, default_config
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import conversation_meta
@@ -962,6 +963,60 @@ def test_a_server_that_never_served_takes_its_own_record_back() -> None:
         serve_once()
 
     assert read_record(URL) is None
+
+
+def test_serve_refuses_a_host_beyond_loopback() -> None:
+    """**The bind is the last place the boundary can be held.**
+
+    The config field is refused at load, but `--host` overrides it after the
+    load — so `serve` itself refuses a non-loopback address, before it writes a
+    record or binds: every server here is unauthenticated, and a bind on
+    `0.0.0.0` would let the network call its tools with no credential.
+    """
+    with pytest.raises(ConfigError, match="loopback"):
+        protocol_module.serve(
+            RefusingMCP(),
+            ServerSettings(port=24000),
+            SimpleNamespace(host="0.0.0.0", port=None),
+            name="slife2-agent",
+        )
+
+    assert read_record("http://0.0.0.0:24000/mcp") is None, (
+        "the refusal is before the record, not after the bind"
+    )
+
+
+def test_a_hand_started_server_refuses_a_host_beyond_loopback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--host 0.0.0.0` is a configuration answer, not a bind.
+
+    `serve_plugin` is the one main every server shares, so the refusal is said
+    here once: a sentence on stderr and exit 2, the same shape as a missing
+    config — and before the start-up line, which must not say "serving" about
+    a server that refused to start.
+    """
+    monkeypatch.setattr(
+        protocol_module, "find_config_path", lambda: Path("slife2.yaml")
+    )
+    monkeypatch.setattr(protocol_module, "load", default_config)
+    # The subject is the refusal, not the logging setup — and installing a
+    # logging configuration over the test process is what `_root_handler`
+    # exists to avoid.
+    monkeypatch.setattr(protocol_module, "configure_logging", lambda: None)
+
+    code = protocol_module.serve_plugin(
+        ["--host", "0.0.0.0"],
+        server_name="slife2-agent",
+        config_key="agent",
+        build=lambda _config: house_server("slife2-agent"),
+        logger=logging.getLogger("slife2-test"),
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "loopback" in err and "0.0.0.0" in err
+    assert "serving" not in err, "a refusal must not log a start-up line"
 
 
 #: The three calls a hand-rolled `main` makes — the scaffold's own steps.
