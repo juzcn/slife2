@@ -22,7 +22,10 @@ dependencies = [
     "httpx2>=2.13.1",
     "qrcode>=8.0",
     "ruamel.yaml>=0.19.0",
-    "credstore>=0.10.5",
+    # 0.11.3 is the floor: it stores every credential under one
+    # `service:key` target; earlier versions use the WinVault two-layout
+    # scheme, which cannot read those entries.
+    "credstore>=0.11.3",
     # Injects the OS trust store over certifi at package import.
     "truststore>=0.10.5",
     "openai>=2.46.0",

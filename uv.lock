@@ -2052,7 +2052,7 @@ requires-dist = [
     { name = "a2a-over-mqtt", specifier = ">=0.1.0" },
     { name = "aiomqtt", specifier = ">=2.5.0" },
     { name = "anthropic", specifier = ">=1.2.0" },
-    { name = "credstore", specifier = ">=0.10.5" },
+    { name = "credstore", specifier = ">=0.11.3" },
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "fastmcp", specifier = ">=4.1.1" },
     { name = "griffelib", specifier = ">=2.0.0" },
