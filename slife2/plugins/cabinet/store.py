@@ -531,9 +531,10 @@ def mirror_path(spec: Spec, key: str) -> str:
 
 #: One mirror is written at a time.  **Not for the temp name** — that is
 #: unique per write — but for the destination: on Windows two threads replacing
-#: onto one path at the same moment can make the second `os.replace` fail after
-#: its row has already committed, which reports a failed write for a document
-#: that was stored.  The writes are small, and the cabinet is one process.
+#: onto one path at the same moment can make one `os.replace` fail.  A write
+#: that fails there now rolls its row back with it, but a caller that did
+#: nothing wrong would still be reporting a race it could not see.  The writes
+#: are small, and the cabinet is one process.
 _MIRROR_LOCK = threading.Lock()
 
 
@@ -542,7 +543,9 @@ def _write_mirror(root: Path, relative: str, text: str) -> None:
 
     **The mirror is the document**, for every mirrored kind: the row holds the
     metadata and the address, and this file is the one copy of the text.  A
-    temp file and `os.replace`, so a reader never sees half a document.
+    temp file and `os.replace`, so a reader never sees half a document — and
+    the staged temp is what lets `CabinetStore.write` put the file in place
+    before its row's transaction commits.
     """
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1180,11 +1183,10 @@ class CabinetStore:
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
         # **The body is normalised before anything is written.**  A lone
         # surrogate arrives from the same model answer the turn store handles,
-        # and the mirror is written *after* the row's transaction: a body the
-        # file could not encode failed there — a call reporting failure over a
-        # row, index and vector already committed, so every retry answered
-        # "already a note" and an update left the old text beside the new row.
-        # `storable` makes the row's derived text and the file one text.
+        # and neither copy can hold it: the file refuses to encode it, and the
+        # row's derived text and the file would not be the one text.  `storable`
+        # is what makes the mirror and the keyword text agree, and what lets a
+        # body the turn store stores be stored here.
         body = storable(body)
         spec = SPECS.get(kind)
         if spec is None:
@@ -1254,13 +1256,17 @@ class CabinetStore:
                 self._index(connection, index_row)
             if spec.vectorized:
                 self.place(connection, placed, vectors)
-        if spec.mirror:
-            # Last, because a file cannot be inside the database's transaction.
-            # The row is written first; a mirror that fails leaves an address
-            # with no text, and the next write of the same key writes it.  (A
-            # file written before the row would leave a document nothing can
-            # find, which is the worse of the two failures.)
-            _write_mirror(self.root, str(row["mirror"]), body)
+            if spec.mirror:
+                # **The file is in place before the row's transaction commits.**
+                # A file cannot be committed with the database, so one of the
+                # two orders is a window; this is the one whose failure can be
+                # undone.  A mirror the filesystem refuses — an editor holding
+                # it open on Windows — raises here and takes the row, its
+                # keyword text and its vectors back with it, so a create can be
+                # retried and an update leaves the old document whole.  The
+                # other order left the row committed over a file that was
+                # absent or the old one, which nothing afterwards could repair.
+                _write_mirror(self.root, str(row["mirror"]), body)
         return self._with_path(row)
 
     def _store(

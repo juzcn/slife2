@@ -1601,11 +1601,12 @@ cabinet one); until then a file is found by its words.
 The cabinet is per conversation: an agent's own conversation has
 `agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
 a fork uses the maker's. **The file is the document.** For every mirrored kind —
-note, diary, report, dump — the text is written to its file in the same
-operation as its row, and **there is no body column**: the row is metadata and
-the address, not a second copy. The file holds the text exactly as the caller
-gave it; a note's subject, a day's date and a report's title are the row's and
-are never prepended to it. **Every answer about a document carries `path`** —
+note, diary, report, dump — the text is written to its file and the file put in
+place before the row's transaction commits, so a filesystem that refuses the
+file takes the row, its keyword text and its vectors back with it, and **there
+is no body column**: the row is metadata and the address, not a second copy.
+The file holds the text exactly as the caller gave it; a note's subject, a day's
+date and a report's title are the row's and are never prepended to it. **Every answer about a document carries `path`** —
 the file relative to the data directory, where the agent's own tools run — so a
 model can hand the same file to `pandoc`, `rg` or a shell; the internal `mirror`
 and `file_path` stay out of the answer, and the readers carry `path` too. A
@@ -2607,27 +2608,20 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **A cabinet mirror can disagree with its row.** The document's file is
-   written after the row's transaction, so a mirror the filesystem refuses — an
-   editor holding it open on Windows — leaves the row, its keyword text and its
-   vectors committed while the file is the old one or absent. A `CREATE` cannot
-   be retried either, because the row now exists. *Resolution would require:*
-   staging the mirror and committing the row only once the file is in place, or
-   rolling the row back when the mirror write fails.
-2. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
+1. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
    committed in turn, so a later URL that cannot be fetched leaves the earlier
    files and rows stored while the call reports failure; a retry stores those
    documents again under `-1` names. *Resolution would require:* resolving and
    fetching every entry before the first write, or answering with the saved and
    the failed parts instead of raising.
-3. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
+2. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
    synchronous and reached from deep in the greps and the compress; its first
    call fetches the tiktoken vocabulary over the network with no timeout, so a
    cold cache behind a blocked route stalls every conversation the daemon serves
    until the OS TCP timeout — the registered script fallback engages only after
    the fetch raises. *Resolution would require:* pre-warming the encoding
    off-loop, or an async measure seam the callers await.
-4. **A section's introduction and its first entry's comment share one slot.**
+3. **A section's introduction and its first entry's comment share one slot.**
    ruamel keeps the comment above a mapping's first key as the mapping's pending
    comment, so removing the first entry cannot tell the section's explanation
    (the shipped `slife2.yaml` style, which should survive) from the entry's own
@@ -2635,7 +2629,7 @@ the field arrives as a test that fails without the fix.
    and a checked-in test encodes the entry-comment reading. *Resolution would
    require:* a convention that puts the section explanation above the section key
    (a distinct slot), or a marker that tells the two apart.
-5. **A read recreates a removed subagent's directory.** `transcript`/`watch`
+4. **A read recreates a removed subagent's directory.** `transcript`/`watch`
    restore the conversation, and `restore` creates the store file and its
    directory for any name; after `subagent_remove`, a read of the stale name
    leaves a directory with no `subagent.yaml`, which `subagent_set` and
@@ -2643,45 +2637,45 @@ the field arrives as a test that fails without the fix.
    conversation is created lazily, so the record's absence is not an existence
    guard. *Resolution would require:* a tombstone for a removed name, or a
    read-only restore that creates nothing.
-6. **`schedule_set` runs outside the run lock.** The poll decides from a task
+5. **`schedule_set` runs outside the run lock.** The poll decides from a task
    snapshot read once per pass; a `schedule_set` that disables or re-crons a task
    mid-pass leaves the snapshot stale and the task fires once on its old
    definition. `schedule_remove` takes the lock for exactly this race; `set` does
    not. *Resolution would require:* the run lock around `schedule_set`, or
    re-reading the task under the lock before firing.
-7. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
+6. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
     store prunes a non-terminal record past its cap, a profile retry of the same
     task id builds a fresh record and cancels the old round, whose cancel handler
     reads the *new* record and publishes a terminal `cancelled`; the new round
     then finishes into a terminal state and drops its answer. *Resolution would
     require:* the cancel handler keying off its own round's record or generation.
-8. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
+7. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
    id, then awaits the vector step; a concurrent remove+create of the same key
    replaces the row and the update returns the old id, so the keyword text and
    chunks land under a rowid no live row has — the updated document is invisible
    to both search legs until a rebuild. *Resolution would require:* re-reading
    the rowid after the await, or indexing inside the write's transaction.
-9. **A share token is reused across conversations.** `expose_local_image`
+8. **A share token is reused across conversations.** `expose_local_image`
    returns an existing exposure when the pin matches without comparing owner, so
    a second conversation is handed a token owned by the first: it cannot revoke
    its own link, and the first conversation's revoke kills the second's —
    defeating the owner field's stated purpose. *Resolution would require:*
    comparing owner on reuse, or minting a per-owner token.
-10. **A late approval outlives its turn.** The cancel/failure flush applies a
+9. **A late approval outlives its turn.** The cancel/failure flush applies a
     queued `ToolApprovalRequested` after the turn is gone, mounting a prompt
     nobody will answer; and the approval row's y/n/Esc are focus-scoped priority
     bindings, so a keystroke that moves focus to the input leaves them inert and
     Esc cancels the whole turn instead of refusing the one call. *Resolution would
     require:* a turn-liveness guard on the approval event, and answering bindings
     that survive blur.
-11. **A tool-list change during the handover is un-believed.** The gateway's
+10. **A tool-list change during the handover is un-believed.** The gateway's
     `_refresh` awaits `on_listed`; an `invalidate()` in that window is overwritten
     when the refresh recomputes readiness from the pre-notification listing, so a
     tool added or removed during the merge stays wrong for up to `relist_after`.
     Only external legacy servers that send the notification reach it (ours
     advertise `listChanged: false`). *Resolution would require:* honouring an
     invalidate that lands during the merge.
-12. **A folded cut-in is delivered twice when its turn is cancelled.** The
+11. **A folded cut-in is delivered twice when its turn is cancelled.** The
     repaired batch keeps the cut-in pair and records it, but the cancelled turn's
     result stays `None`, so the parked caller runs its own turn with the same
     prompt — the message sits in the conversation twice and the model answers it

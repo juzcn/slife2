@@ -56,6 +56,7 @@ from slife2.plugins.cabinet.store import (
     FILE,
     IMAGE,
     NOTE,
+    REPLACE,
     REPORT,
     UPSERT,
     CabinetStore,
@@ -243,15 +244,12 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 async def test_a_body_that_cannot_be_encoded_is_normalised_before_anything_writes() -> (
     None
 ):
-    """**The mirror is written after the row's transaction, so the body has to
-    be storable before either.**
+    """**The body is made storable before either copy is written.**
 
     A lone surrogate — the exact shape the project documents as an ordinary
-    model answer (`index.storable`) — failed the file write *after* the row,
-    keyword index and vector were committed: the call reported failure over a
-    note that existed, every retry was refused "already a note", and an update
-    left the old mirror beside the new row.  The U+FFFD the turn store writes
-    is what both copies carry here.
+    model answer (`index.storable`) — is one the file cannot encode and the
+    keyword text would spell differently.  The U+FFFD the turn store writes is
+    what both copies carry here, so the mirror and the index describe one text.
     """
     async with Client(cabinet()) as client:
         await payload(client, "note_write", subject="half", content="half \ud83d")
@@ -1784,6 +1782,79 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
 
     assert not (bag() / first["mirror"]).exists()
     assert (bag() / second["mirror"]).exists(), "the other note's file is not the one"
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_the_filesystem_refuses_rolls_the_create_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The row commits only after its file is in place.**
+
+    A mirror held open by an editor (Windows refuses the replace) used to fail
+    after the row, its keyword text and its vectors had committed — a call that
+    reported failure over a note that existed, and every retry refused with
+    "already a note".  The mirror is written inside the row's transaction now,
+    so the refusal takes the whole write back and the create can be retried.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    real = cabinet_store._write_mirror
+
+    def held_open(root: Path, relative: str, text: str) -> None:
+        raise PermissionError(relative)
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
+    with pytest.raises(PermissionError):
+        await store.write(NOTE, "locked", body="first", embedder=embedder)
+
+    assert store.get(NOTE, "locked") is None, "the row went back with the file"
+    with store._connect() as connection:
+        for table in ("cabinet_doc", "cabinet_fts", "cabinet_chunk"):
+            count = connection.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            assert int(count["n"]) == 0, f"no {table} row survived the refused mirror"
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", real)
+    written = await store.write(NOTE, "locked", body="second", embedder=embedder)
+    assert written is not None, "the create is not lost to a retry"
+    assert (bag() / str(written["mirror"])).read_text(encoding="utf-8") == "second"
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_the_filesystem_refuses_keeps_the_update_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A refused replacement leaves the old document, row, index and file.**
+
+    The update replaces the row, the keyword text and the vectors before the
+    mirror is written; rolling it all back is what keeps the old row from
+    naming the new file or the new row from naming the old one — the two
+    disagreements the failure used to leave behind.  A create has no old
+    document to keep, which is why this half is a test of its own.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    first = await store.write(NOTE, "mutable", body="first", embedder=embedder)
+    assert first is not None
+
+    def held_open(root: Path, relative: str, text: str) -> None:
+        raise PermissionError(relative)
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
+    with pytest.raises(PermissionError):
+        await store.write(
+            NOTE, "mutable", mode=REPLACE, body="second", embedder=embedder
+        )
+
+    kept = store.get(NOTE, "mutable")
+    assert kept is not None
+    assert store.body_of(kept) == "first", "the old text is still the document"
+    with store._connect() as connection:
+        indexed = connection.execute(
+            "SELECT search FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
+        ).fetchone()["search"]
+    assert "first" in indexed and "second" not in indexed, "the index rolled back too"
 
 
 @pytest.mark.asyncio
