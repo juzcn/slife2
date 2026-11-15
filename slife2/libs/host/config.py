@@ -1301,13 +1301,13 @@ class AgentTaskSettings:
     #: How many tasks one agent may have running at once.
     #:
     #: A cap rather than a preference, and the only bound this feature has: a
-    #: model can start tasks without limit, and each runs as the agent.  A task
-    #: cannot start another — it is one turn, and a task result would arrive
-    #: after it — so the cap is about the work the conversation asks for, not
-    #: recursion.  What it does not bound is how much work happens over *time*;
-    #: SDD §14.2 holds that one open, and `agent_task_list` with
-    #: `agent_task_cancel` is what makes it visible and stoppable in the
-    #: meantime.
+    #: model can start tasks without limit, and each runs as the agent.  A
+    #: task's prompt tells it not to start another — it is one turn — but
+    #: nothing in the harness stops one that does, so the cap is about the
+    #: concurrent work a conversation asks for.  What it does not bound is how
+    #: much work happens over *time*; SDD §14.2 holds that one open, and
+    #: `agent_task_list` with `agent_task_cancel` is what makes it visible and
+    #: stoppable in the meantime.
     #:
     #: **The number lives here and nowhere else**, and `slife2-agent-task` reads
     #: it off the config at the call that enforces it rather than keeping a

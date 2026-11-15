@@ -38,12 +38,10 @@ import pytest
 import pytest_asyncio
 from fakes import (
     FakeBackend,
-    ScriptedTurn,
     StubEmbedder,
     a_home,
     plugin_transports,
     text_turn,
-    wait_until_settled,
 )
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -51,10 +49,8 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
-from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta, for_the_model
+from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
-from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import CHECK_NEW_INPUT
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -419,146 +415,19 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     assert opening.startswith("▸ Agent task: research")
     assert DESCRIPTION in opening
     assert "nobody can answer a question" in opening
+    # The prompt is the one place the exclusions are stated, now that the
+    # registry does not filter them.
+    assert "do not use `_async`" in opening
 
     # **The hub's own list, by name** — compared against what the hub
     # advertises rather than against two names, because there is no per-caller
-    # *tool set* here: a task gets the names its agent does.  The tools it must
-    # not run keep their declarations but are backed by a refusal
-    # (`WITHHELD_FROM_A_TASK`).
+    # *tool set* here: a task gets the names its agent does.  The opening
+    # template is what tells it what not to call; the registry does not filter.
     from slife2.clients.toolclient import remote_tools
 
     assert {spec.name for spec in built.backend.calls[0][1]} == {
         tool.spec.name for tool in await remote_tools(hub)
     }
-
-
-async def test_a_task_cannot_take_the_live_conversations_cut_in(
-    hub: Client, store: Store, window: Window
-) -> None:
-    """**The identity is shared; the live loop is not.**
-
-    A task runs as the agent, so the agent server cannot tell a task's
-    `_check_new_input` call from the main conversation's.  The task server keeps
-    the hub's declaration but backs it with a refusal: the call must not pop a
-    queued message out of the main loop's inbox and hand it to this task's
-    model — the peer the message was from would be answered by a turn that never
-    saw it, and its line would be marked drawn.
-    """
-    calling = ScriptedTurn(
-        result=StreamChatResult(
-            text="",
-            usage=Usage(),
-            tool_calls=(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),),
-            stop_reason="tool_calls",
-        )
-    )
-    built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
-
-    await start(built)
-    await settle(built)
-
-    results = [
-        str(message.content)
-        for message in built.messages()
-        if getattr(message, "role", "") == "tool"
-    ]
-    assert any("not available in an agent task" in text for text in results), results
-
-
-async def test_a_task_cannot_start_another_task(
-    hub: Client, store: Store, window: Window
-) -> None:
-    """**One turn has no second turn for a task result.**
-
-    Starting another task is the same nesting `_async` is refused for: the
-    child's answer would arrive after this turn has ended.  The refusal is the
-    same shape as the live-conversation pair's — the declaration stays, the call
-    is answered with a sentence — and no child task exists afterwards.
-    """
-    calling = ScriptedTurn(
-        result=StreamChatResult(
-            text="",
-            usage=Usage(),
-            tool_calls=(
-                ToolCall(
-                    id="c1",
-                    name=AGENT_TASK_START,
-                    arguments={"name": "child", "description": "more work"},
-                ),
-            ),
-            stop_reason="tool_calls",
-        )
-    )
-    built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
-
-    await start(built)
-    await settle(built)
-
-    results = [
-        str(message.content)
-        for message in built.messages()
-        if getattr(message, "role", "") == "tool"
-    ]
-    assert any("cannot start another task" in text for text in results), results
-    async with Client(built.mcp) as client:
-        listed = await ask(client, AGENT_TASK_LIST)
-    assert [row["name"] for row in listed["tasks"]] == ["research"]
-
-
-async def test_the_task_start_declaration_stays_when_the_hub_offers_it(
-    store: Store, window: Window
-) -> None:
-    """**The declaration stays, the behaviour goes.**  In a real home the hub
-    advertises `agent_task_start` to every model, so the task's list must keep
-    the name — a model that knows it would otherwise go through
-    `tool_search`/`func_tool_load` for ever — and answer the call with a refusal.
-    """
-    from slife2.plugins.toolhub.server import build_server as build_hub
-
-    stub = FastMCP("agent-task")
-
-    @stub.tool(name=AGENT_TASK_START, meta=FOR_THE_MODEL)
-    async def offered(name: str, description: str) -> dict[str, Any]:
-        return {"started": name}
-
-    base = default_config()
-    hub = Client(
-        build_hub(
-            base,
-            transports=plugin_transports(base, {"agent-task": lambda _settings: stub}),
-            embedder=StubEmbedder(),
-        )
-    )
-    calling = ScriptedTurn(
-        result=StreamChatResult(
-            text="",
-            usage=Usage(),
-            tool_calls=(
-                ToolCall(
-                    id="c1",
-                    name=AGENT_TASK_START,
-                    arguments={"name": "child", "description": "more work"},
-                ),
-            ),
-            stop_reason="tool_calls",
-        )
-    )
-    async with hub:
-        await wait_until_settled(hub)
-        # The list the task inherits is the hub's *loaded* set; a name the model
-        # knows is one it loaded, and that is the case this test is about.
-        await hub.call_tool("tool_load", {"name": AGENT_TASK_START})
-        built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
-        await start(built)
-        await settle(built)
-
-    assert AGENT_TASK_START in {spec.name for spec in built.backend.calls[0][1]}
-    results = [
-        str(message.content)
-        for message in built.messages()
-        if getattr(message, "role", "") == "tool"
-    ]
-    assert any("cannot start another task" in text for text in results), results
 
 
 async def test_the_context_is_rebuilt_exactly_once(

@@ -40,7 +40,6 @@ from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
     HARNESS_PREFIX,
     INTERRUPTED,
-    LIVE_CONVERSATION_TOOLS,
     ToolRegistry,
     bind_timeout,
     split_meta,
@@ -53,18 +52,6 @@ logger = logging.getLogger(__name__)
 #: the transcript rather than as a result that happens to be discouraging
 #: (`slife2.libs.turn.tools` states the same rule for a tool's own failures).
 DENIED = "Error: Tool execution was denied by user."
-
-#: What the model reads when it asks for a background call in a loop that has
-#: nowhere to hand the result back to — today that is an agent task's own loop
-#: (`slife2.plugins.agent_task.server`), which runs one turn and has no second one for an
-#: answer to arrive in.  **Actionable rather than merely true**: the model can fix
-#: this in one step, and a mode that quietly ran the call here instead would have
-#: taught it that `_async` does nothing.
-BACKGROUND_UNAVAILABLE = (
-    "Error: a background call is not available here. "
-    "Call the tool again without `_async`."
-)
-
 
 def timed_out(name: str, bound: float) -> str:
     """What a call that ran past the bound somebody set is answered with.
@@ -354,10 +341,10 @@ class AgentLoop:
         * `_async` — the call is handed to the background and the model is
           answered with a task id (`slife2.libs.harness.async_tasks`).  It still passes
           through the approval gate first, and it is still announced as started.
-          **A loop with nowhere to hand the result back is the one that refuses
-          it** (`self._deliver is None`): an agent task's loop is that case
-          today, and it says so in a sentence the model can act on rather than
-          running the call quietly.
+          A loop with nowhere to hand the result back (`self._deliver is None`)
+          keeps the result in the async registry for `check_async`; an agent
+          task's prompt tells its model not to use the mode, and the loop does
+          not refuse it.
         * `_approve` — the harness is asked before the call runs, through
           `self._approve`.  A caller with nobody to ask passes None, and then the
           call simply runs: refusing would be answering a request for a check
@@ -716,37 +703,6 @@ class AgentLoop:
         if timeout_error is not None:
             return await self._tools.execute(_not_run(call, timeout_error))
         dispatch = replace(call, arguments=arguments)
-
-        if meta.background and self._deliver is None:
-            # **A background call needs somewhere for its result to go**, and a
-            # loop with no way back has none: the call would run, the model would
-            # be handed a task id, and the answer would sit in a registry nobody
-            # can ask — `check_async` is not in a registry whose loop has no
-            # `deliver` at all, because the transport that builds one builds both
-            # (`slife2.plugins.agent.server.registry`).
-            #
-            # So the mode is refused, and *before* the approval gate: asking an
-            # operator to confirm a call that is not going to run would be
-            # spending somebody's attention on nothing.
-            logger.info("tool_background_unsupported name=%s", call.name)
-            return BACKGROUND_UNAVAILABLE, False
-
-        if meta.background and call.name in LIVE_CONVERSATION_TOOLS:
-            # **A tool that acts on the live conversation cannot leave it.**
-            # `_check_new_input` pops a queued message off the running loop's
-            # inbox; `attach_image` injects pixels into its last user message.
-            # A background call is detached and runs after this turn has moved
-            # on, so it would take the message out of band — the parked sender
-            # answered by a turn that never read it, the words arriving later as
-            # an async result — or attach to a message the turn has finished.
-            # The agent-task server withholds both from its model for the same
-            # reason; this is the loop's half of the same rule.
-            logger.info("tool_background_refused name=%s", call.name)
-            return (
-                f"Error: {call.name} acts on the conversation this turn is "
-                "running and cannot be sent to the background. Call it without "
-                "`_async`."
-            ), False
 
         if meta.approve and self._approve is not None and not await self._approve(call):
             logger.info("tool_denied name=%s", call.name)

@@ -4,9 +4,9 @@ You are running one background turn as yourself: the same conversation, context
 and tools. Nobody is waiting, and nobody can answer a question — what you send
 when you stop is the whole answer, handed back to the conversation on its own.
 
-This task is one turn, so it cannot receive a result that arrives later: `_async`
-and starting another task are both refused. Call the tools you need in the
-ordinary way and wait for them.
+This task is one turn, so do not use `_async` or start another task: a result
+arriving later would have nowhere to go. Call the tools you need in the ordinary
+way and wait for them.
 
 {{ description }}
 

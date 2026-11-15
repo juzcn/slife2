@@ -592,7 +592,7 @@ catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变
 | 参数 | 效果 |
 |---|---|
 | `_timeout` | 本次调用的秒数，覆盖工具默认值。任何不是正有限数的值——`0`、负数、文本——都会使本次调用失败；该值绝不会被读作"不限时"或"默认值"。工具自己声明了 `timeout` 参数时由它自己执行。两者都没有时，调用一直运行到结束。 |
-| `_async` | 后台运行。模型收到 `task_id`；结果带 `[AgentToolResult:{…}]` marker 从 `async-tool:<tool>` channel 回来。`check_async` 报告状态；`cancel_async` 放弃它。结果预算仍然适用。agent task 的循环没有 `_async`。 |
+| `_async` | 后台运行。模型收到 `task_id`；结果带 `[AgentToolResult:{…}]` marker 从 `async-tool:<tool>` channel 回来。`check_async` 报告状态；`cancel_async` 放弃它。结果预算仍然适用。agent task 只有一个 turn：提示词告诉模型不要使用 `_async` 或再启动一个任务。 |
 | `_approve` | 运行前询问用户。终端画一行（`y` 批准，`n` 或 `Esc` 拒绝）并通过 `answer_approval` 回答。channel 背后没有人时直接运行。能回答的调用方用 `watched=true` 声明。 |
 
 #### skill 与命令
@@ -792,8 +792,9 @@ note、diary、report 的文件全文；保存的文件只按词匹配；dump �
 
 ### Agent 任务
 
-agent task 是同一个 agent 的另一条循环，用名字和描述启动，稍后以消息形式在同一对话中
-回答。
+agent task 是同一个 agent 的另一个 turn，用名字和描述启动，稍后以消息形式在同一对话中
+回答。它只有一个 turn：提示词告诉它不要使用 `_async` 或再启动任务，因为结果到达时
+已经没有下一轮可以接收。
 
 | 工具 | 用途 |
 |---|---|
@@ -812,8 +813,9 @@ agent-task:
   max_running: 4
 ```
 
-`max_running` 是该节唯一的键；其余来自 `agent:`。任务可以再启动任务，因此
-`max_running` 限制的是并发，不是一段时间内的总工作量。
+`max_running` 是该节唯一的键；其余来自 `agent:`。任务的提示词告诉它不要启动另一个
+任务——它只有一个 turn，和 `_async` 一样。`max_running` 限制的是并发，不是一段时间
+内的总工作量。
 
 ### 定时任务
 
@@ -1063,8 +1065,7 @@ Windows 上 `uv run pytest` 不能在活栈旁边运行：`uv` 每次运行都�
   点。
 - 配置编辑之前没有审批关卡，包括带 `command:` 的 `mcp_set`——它记录的是 slife2 将
   启动的程序。
-- agent task 可以再启动 agent task；`agent-task.max_running` 限制并发，不限制一段
-  时间内的总工作量。
+- `agent-task.max_running` 限制并发任务数，不限制一段时间内的总工作量。
 
 ## 许可证
 

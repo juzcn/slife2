@@ -166,6 +166,15 @@ the agent loop is a client of the tool hub and of the model backends.
 5. **Testability without a stack.** The turn loop is a pure function over a
    message list. Servers can be driven over an in-memory MCP transport without
    binding a port.
+6. **Minimum harness; trust the agent.** The model chooses what to call; the
+   harness enforces the invariants that hold for every choice — identity,
+   isolation, budgets, delivery — and never a tool-choice preference.
+7. **Schema over prompt.** A tool's arguments, types and required fields are
+   its JSON schema, sent with the tool and checked on the call. Prose carries
+   intent; a constraint that fits a schema is not a prompt sentence.
+8. **No arbitrary fallback.** A fallback is a designed behaviour, registered in
+   Appendix C with what it does, what it gives up, and what it does not cover.
+   A failure read as a success is a bug.
 
 ### 2.4 Constraints
 
@@ -1520,7 +1529,7 @@ advertised schema and stripped before dispatch, so no tool server sees them.
 | Parameter | Semantics |
 |---|---|
 | `_timeout` | Seconds for this call: a positive, finite number, overriding the tool's default. Any other value — `0`, negative, text, `inf` — fails the call with an error the model reads; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
-| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task is one turn, so it refuses `_async` and starting another task. |
+| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task is one turn: its prompt tells the model not to use `_async` or start another task. |
 | `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
 
 The loop reads these parameters off the call and strips them before dispatch.
@@ -2010,10 +2019,10 @@ Properties:
    answer, which the agent server records as a message.
 3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
-4. **Background work and a nested task are refused.** A task runs one turn and
-   has no second turn to receive a result from `_async` or from a task it
-   started; `agent_task_start` keeps its declaration and answers with a
-   refusal.
+4. **Background work and a nested task are the prompt's rule.** A task runs one
+   turn and has no second turn to receive a result from `_async` or from another
+   task; the opening template tells the model not to use either, and the tool
+   list is not filtered.
 5. **`finished` means delivered.** A task's answer is its product and no copy is
    kept (§9.3), so a task whose answer reached no window is `failed`; the status
    can be trusted to mean what it says.
@@ -2022,15 +2031,15 @@ A task runs one turn, so it makes one rebuild; zero would make it the one turn i
 the system whose context nobody decided. It runs with the agent's system prompt,
 model, tools, and context decision. Its opening message is the shipped
 `agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
-message sent when the task stops is the whole of what comes back, and `_async`
-or a nested task is refused because there is no later turn to receive the
-result. It does not have the turn that started it, because `restore` reads the
-stored turn list and a turn is written only when it ends; the description must
-restate the last exchange.
+message sent when the task stops is the whole of what comes back, and it tells
+the model not to use `_async` or start another task because there is no later
+turn to receive the result. It does not have the turn that started it, because
+`restore` reads the stored turn list and a turn is written only when it ends;
+the description must restate the last exchange.
 
-A task cannot start another task — the same one-turn rule that refuses
-`_async`. `agent-task.max_running` bounds concurrency, not total work over
-time.
+A task's prompt tells it not to start another task — the same one-turn rule
+that makes `_async` pointless. `agent-task.max_running` bounds concurrency, not
+total work over time.
 
 The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. **A task is `finished` only when its answer
@@ -2729,7 +2738,7 @@ The following are not implemented in this version:
 | A word to the model about the loaded set | The tool descriptions explain themselves. | A model may not use loading unless it reads them. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
-| Background work inside an agent task | A task runs one turn and has no second turn to receive a result. | `_async` and `agent_task_start` are refused with an explanation. |
+| Background work inside an agent task | A task runs one turn and has no second turn to receive a result. | The opening template tells the model not to use `_async` or start another task. |
 | A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |

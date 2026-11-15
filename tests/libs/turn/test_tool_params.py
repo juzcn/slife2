@@ -33,10 +33,9 @@ from slife2.libs.harness.async_tasks import (
     marker,
 )
 from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
-from slife2.libs.turn.loop import BACKGROUND_UNAVAILABLE, DENIED, AgentLoop
+from slife2.libs.turn.loop import DENIED, AgentLoop
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolCall, ToolSpec
 from slife2.libs.turn.tools import (
-    CHECK_NEW_INPUT,
     Tool,
     ToolFailed,
     ToolRegistry,
@@ -517,60 +516,6 @@ async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
     assert handed, "the timed-out call was never handed back"
     assert "Error: Tool 'hangs' timed out (0.05s)." in handed[0]
     assert "TimeoutError" not in handed[0]
-
-
-@pytest.mark.asyncio
-async def test_a_tool_that_acts_on_the_live_conversation_cannot_be_backgrounded() -> (
-    None
-):
-    """**A background call is detached, and these tools act on the live turn.**
-
-    `_check_new_input` pops a queued message off the running loop's inbox and
-    `attach_image` injects pixels into its last user message.  Run in the
-    background, the first would take a person's message after this turn has
-    moved on — its sender answered by a turn that never read it, the words
-    arriving later as an async result — and the second would attach to a message
-    the turn has finished.  The loop refuses the mode before the tool runs; the
-    agent-task server withholds the same names from a detached loop.
-    """
-    ran = False
-
-    async def check(_arguments: dict[str, Any]) -> str:
-        nonlocal ran
-        ran = True
-        return "a message"
-
-    call = ToolCall(id="call-live", name=CHECK_NEW_INPUT, arguments={"_async": True})
-    loop = one(call, [a_tool(CHECK_NEW_INPUT, check)], deliver=collected)
-
-    messages: list[Message] = []
-    result = await loop.run_turn(messages, "go")
-
-    assert result.text == "done"
-    assert not ran, "the tool ran although the loop refused the background"
-    assert "cannot be sent to the background" in tool_message(messages)
-
-
-@pytest.mark.asyncio
-async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
-    """No `deliver` means the mode is refused, in a sentence that can be acted on.
-
-    An agent task's turn is that case (SDD §14.2): it runs one turn and has no
-    second one for a result to arrive in, so a task id would be a promise nothing
-    could keep.  The refusal says which one line fixes it.
-    """
-    seen: list[str] = []
-
-    async def slow(_arguments: dict[str, Any]) -> str:
-        seen.append("ran")
-        return "the answer"
-
-    call = ToolCall(id="1", name="slow", arguments={"_async": True})
-    messages: list[Message] = []
-    await one(call, [a_tool("slow", slow)]).run_turn(messages, "hi")
-
-    assert tool_message(messages) == BACKGROUND_UNAVAILABLE
-    assert seen == []
 
 
 @pytest.mark.asyncio

@@ -203,25 +203,9 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 
-#: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT`
-#: because a second party has to know which tools act on a *live* conversation:
-#: the agent task server withholds both from its model (`LIVE_CONVERSATION_TOOLS`
-#: there), and a rename on one side must not leave the other offering a name
-#: that now reaches a different tool.
+#: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT` so the
+#: two names that act on a live conversation are spelled in one place.
 ATTACH_IMAGE = "attach_image"
-
-#: The tools that act on a conversation **in flight**, and so may neither be
-#: withheld from the loop nor run in the background.  `_check_new_input` pops a
-#: queued message out of the running loop's inbox and hands it to whoever
-#: called; `attach_image` injects parts into that loop's last user message.
-#: A background call runs in a detached task after the turn has moved on, so a
-#: backgrounded one would take a person's message out of band — the parked
-#: sender answered by a turn that never read it, the words arriving later as an
-#: async tool result — or attach pixels to a message the turn has finished.
-#: The agent-task server withholds both for the same reason: its loop is not the
-#: live one either.  One set, because the two questions — may this model see it,
-#: may this call be backgrounded — have the same answer for the same tools.
-LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
 
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut
