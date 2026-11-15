@@ -97,7 +97,6 @@ class FakeAdapter:
     async def transcribe_audio(self, **kwargs: Any) -> str:
         self.calls["asr"] = kwargs
         return "hello home"
-
     async def close(self) -> None:
         self.calls["closed"] = {}
 
@@ -203,6 +202,19 @@ async def test_an_image_call_reaches_the_configured_default() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_image_reference_is_resolved_from_the_working_directory() -> None:
+    """A local reference is the caller's path; a URL is passed through."""
+    adapter = FakeAdapter()
+    async with Client(server_for(adapter)) as client:
+        await ask(client, "generate_image", prompt="x", image="ref.png")
+        assert adapter.calls["image"]["image"] == str(agent_dir("jack") / "ref.png")
+        await ask(
+            client, "generate_image", prompt="x", image="https://example.test/a.png"
+        )
+        assert adapter.calls["image"]["image"] == "https://example.test/a.png"
+
+
+@pytest.mark.asyncio
 async def test_a_models_own_parameters_sit_under_the_calls() -> None:
     """The config may pin a resolution; the call may override it.
 
@@ -267,13 +279,35 @@ async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_text_file_is_read_for_speech() -> None:
+    """The file-to-file case: a text file in, the audio file's path out."""
+    script = agent_dir("jack") / "script.txt"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("hello from a file", encoding="utf-8")
+    adapter = Writing()
+    async with Client(server_for(adapter)) as client:
+        answer = await ask(client, "text_to_speech", input="script.txt")
+
+    assert adapter.calls["tts"]["text"] == "hello from a file"
+    assert Path(answer).read_bytes() == b"wav"
+
+
+@pytest.mark.asyncio
+async def test_speech_needs_text_or_a_text_file() -> None:
+    async with Client(server_for(FakeAdapter())) as client:
+        answer = await refused(client, "text_to_speech")
+
+    assert "nothing to say" in answer
+
+
+@pytest.mark.asyncio
 async def test_a_transcript_is_the_answer_and_writes_nothing() -> None:
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
-        answer = await ask(client, "transcribe_audio", path="a.wav")
+        answer = await ask(client, "transcribe_audio", input="a.wav")
 
     assert answer == "hello home"
-    assert adapter.calls["asr"]["audio_path"] == Path("a.wav")
+    assert adapter.calls["asr"]["audio_path"] == agent_dir("jack") / "a.wav"
 
 
 class Says(FakeAdapter):
@@ -298,7 +332,7 @@ async def test_a_long_transcript_is_answered_whole() -> None:
     """
     whole = "字" * 9000
     async with Client(server_for(Says(whole))) as client:
-        answer = await ask(client, "transcribe_audio", path="a.wav")
+        answer = await ask(client, "transcribe_audio", input="a.wav")
 
     assert answer == whole
     assert "do not fit" not in answer
@@ -311,7 +345,7 @@ async def test_a_transcript_can_be_written_to_a_named_file() -> None:
     """
     async with Client(server_for(Says("hello home"))) as client:
         answer = await ask(
-            client, "transcribe_audio", path="a.wav", output="transcripts/meeting.txt"
+            client, "transcribe_audio", input="a.wav", output="transcripts/meeting.txt"
         )
 
     assert answer != "hello home", "the text does not enter the conversation"
@@ -327,7 +361,7 @@ async def test_a_transcript_can_be_written_to_an_absolute_path(tmp_path) -> None
     target = tmp_path / "elsewhere" / "meeting.txt"
     async with Client(server_for(Says("hello home"))) as client:
         answer = await ask(
-            client, "transcribe_audio", path="a.wav", output=str(target)
+            client, "transcribe_audio", input="a.wav", output=str(target)
         )
 
     assert answer == str(target)

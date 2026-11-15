@@ -737,8 +737,8 @@ The `media:` section provides four capabilities:
 
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
-- `text_to_speech` — write speech to an audio file.
-- `transcribe_audio` — transcribe an audio file; `output` writes the transcript to the path you name (a relative path is relative to your working directory) and answers that path, while a long transcript without one is kept as a dump.
+- `text_to_speech` — say `text`, or read a text file named in `input`, into an audio file.
+- `transcribe_audio` — transcribe the audio file named in `input`; `output` writes the transcript to the path you name (a relative path is relative to your working directory) and answers that path, while without `output` the transcript is the answer and a long one is kept as a dump.
 
 Each generation tool writes into the agent's media directory by default; `output` names the file instead (a relative path is relative to the working directory). Every tool answers with the file's path as text, or — for `transcribe_audio` without `output` — the transcript.
 

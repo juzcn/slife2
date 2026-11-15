@@ -73,10 +73,11 @@ CONFIG_KEY = "media"
 INSTRUCTIONS = (
     "Generation: images, video, speech and transcripts, from the `media:` "
     "providers. Each tool writes where `output` names — a relative path is "
-    "relative to your working directory — or into the media directory; "
-    "`transcribe_audio` answers the text unless `output` names a file. "
-    "`generate_video` can take minutes; a long render times out on the wait "
-    "while the job keeps running at the provider."
+    "relative to your working directory — or into the media directory. The two "
+    "file-to-file tools are `transcribe_audio` (an audio `input`, answered as "
+    "text or written to `output`) and `text_to_speech` (a text file in `input` "
+    "when `text` is empty). `generate_video` can take minutes; a long render "
+    "times out on the wait while the job keeps running at the provider."
 )
 
 # ── The one bound a caller can be wrong about ────────────────────────────────
@@ -173,18 +174,30 @@ class Media:
                 logger.debug("media adapter did not close cleanly", exc_info=True)
 
 
-def _output_path(ctx: Context, output: str) -> Path | None:
-    """The file the caller named, or None for the media directory.
+def _input_path(ctx: Context, value: str) -> Path:
+    """A local path as the agent's working directory sees it.
 
-    A relative path is resolved against the agent's working directory — the
-    directory its own tools run in — because this process serves every agent
-    and has no cwd of its own to mean.  An absolute path is used as written.
+    A relative path is resolved against that directory — the one its own tools
+    run in — because this process serves every agent and has no cwd of its own
+    to mean.  An absolute path is used as written.
     """
+    agent, subagent = conversation_of(ctx)
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else work_dir(agent, subagent) / path
+
+
+def _reference_path(ctx: Context, value: str) -> str:
+    """A reference image as the adapter takes it: URL/URI, or a local path."""
+    if not value or value.startswith(("http://", "https://", "data:")):
+        return value
+    return str(_input_path(ctx, value))
+
+
+def _output_path(ctx: Context, output: str) -> Path | None:
+    """The file the caller named, or None for the media directory."""
     if not output.strip():
         return None
-    agent, subagent = conversation_of(ctx)
-    target = Path(output).expanduser()
-    return target if target.is_absolute() else work_dir(agent, subagent) / target
+    return _input_path(ctx, output)
 
 
 async def _make_parent(target: Path) -> None:
@@ -192,6 +205,15 @@ async def _make_parent(target: Path) -> None:
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
     except OSError as exc:
         raise ToolError(f"could not create {str(target.parent)!r}: {exc}") from exc
+
+
+async def _read_text(ctx: Context, value: str) -> str:
+    """A text file the caller named, read off the event loop."""
+    path = _input_path(ctx, value)
+    try:
+        return await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except OSError as exc:
+        raise ToolError(f"could not read {value!r}: {exc}") from exc
 
 
 async def _place(written: str, target: Path) -> None:
@@ -259,7 +281,8 @@ def build_server(
             size: `WIDTH*HEIGHT`, e.g. `1024*1024`. Empty uses the model's own
                 default.
             image: A picture to work from — a local path, an `http(s)` URL or a
-                `data:` URI. For models that take a reference image.
+                `data:` URI. A relative path is relative to your working
+                directory. For models that take a reference image.
             output: A file path for the image. A relative path is relative to
                 your working directory. Empty writes a generated name into your
                 media directory.
@@ -270,6 +293,7 @@ def build_server(
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
         params = merge_params(entry.params, {"size": wanted} if wanted else {})
+        reference = _reference_path(ctx, image)
         target = _output_path(ctx, output)
         if target is None:
             outputs_dir = media.output(ctx)
@@ -282,7 +306,7 @@ def build_server(
                 model=entry.model,
                 prompt=prompt,
                 size=wanted,
-                image=image or None,
+                image=reference or None,
                 outputs_dir=outputs_dir,
                 extra_params=params,
             ),
@@ -318,7 +342,8 @@ def build_server(
             prompt: What happens in the video.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for video.
-            image: A first frame to animate, as a local path. For
+            image: A first frame to animate, as a local path or a URL. A
+                relative path is relative to your working directory. For
                 image-to-video models.
             resolution: `720P`, `1080P`. Empty uses the model's own default.
             ratio: `16:9`, `9:16`, `1:1`. Empty uses the model's own default.
@@ -341,6 +366,7 @@ def build_server(
         if duration:
             given["duration"] = duration
         params = merge_params(entry.params, given)
+        reference = _reference_path(ctx, image)
         target = _output_path(ctx, output)
         if target is None:
             outputs_dir = media.output(ctx)
@@ -352,7 +378,7 @@ def build_server(
             lambda: media.adapter(provider).generate_video(
                 model=entry.model,
                 prompt=prompt,
-                image=image or None,
+                image=reference or None,
                 outputs_dir=outputs_dir,
                 extra_params=params,
                 deadline_s=timeout if timeout > 0 else None,
@@ -365,23 +391,40 @@ def build_server(
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
-        ctx: Context, text: str, model: str = "", voice: str = "", output: str = ""
+        ctx: Context,
+        text: str = "",
+        input: str = "",
+        output: str = "",
+        model: str = "",
+        voice: str = "",
     ) -> str:
         """Say something out loud, into an audio file, and answer where it is.
 
+        **The file-to-file case.**  `input` names a text file to read when
+        `text` is empty; `output` names the audio file to write.  With neither
+        `text` nor `input`, there is nothing to say.
+
         Args:
             text: What to say.
+            input: A text file to say when `text` is empty. A relative path is
+                relative to your working directory.
+            output: A file path for the audio. A relative path is relative to
+                your working directory. Empty writes a generated name into your
+                media directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for speech.
             voice: Which voice, by the provider's own name. Empty uses the
                 model's default.
-            output: A file path for the audio. A relative path is relative to
-                your working directory. Empty writes a generated name into your
-                media directory.
 
         Returns:
             The file's path, as text.
         """
+        if not text.strip():
+            if not input.strip():
+                raise ToolError(
+                    "nothing to say — pass `text`, or a text file in `input`."
+                )
+            text = await _read_text(ctx, input)
         provider, entry = media.resolve("tts", model)
         target = _output_path(ctx, output)
         if target is None:
@@ -406,35 +449,38 @@ def build_server(
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
     async def transcribe_audio(
-        ctx: Context, path: str, model: str = "", output: str = ""
+        ctx: Context, input: str, model: str = "", output: str = ""
     ) -> str:
-        """Write down what an audio file says, and answer the text or its file.
+        """Write down what an audio file says: text, or a transcript file.
 
-        A transcript is a tool output like any other: if it is too large for
-        the conversation, the harness keeps it whole as a dump and gives the
-        head and the address. Read the rest with `dump_read`, or find text in
-        it with `dump_grep`.
+        **The file-to-file case.**  `input` is the audio file; `output` is
+        where the transcript is written.  With `output` the answer is that
+        path and the text does not enter the conversation; without it the
+        transcript is the answer, and a long one is kept by the harness as a
+        dump.  Read a dump with `dump_read`, or find text in it with
+        `dump_grep`.
 
         Args:
-            path: The audio file, as a local path.
+            input: The audio file, as a local path. A relative path is relative
+                to your working directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
             output: A file path to write the transcript to instead of answering
                 it. A relative path is relative to your working directory. The
-                answer is the file's path; the text does not enter the
-                conversation. Empty answers the text itself. A file already
-                there is replaced.
+                answer is the file's path. Empty answers the text itself. A
+                file already there is replaced.
         """
-        if not path.strip():
-            raise ToolError("no audio file was named — pass the path of the recording.")
+        if not input.strip():
+            raise ToolError("no audio input was named — pass the recording's path.")
         provider, entry = media.resolve("asr", model)
         text = await _run(
             "transcript",
             lambda: media.adapter(provider).transcribe_audio(
                 model=entry.model,
-                # Not expanded here: every filesystem call belongs in the
-                # adapter, where it goes off the event loop.
-                audio_path=Path(path),
+                # Resolved here rather than in the adapter: the caller's
+                # working directory is this process's caller's fact, and the
+                # adapter has no conversation to ask.
+                audio_path=_input_path(ctx, input),
                 extra_params=dict(entry.params),
             ),
         )

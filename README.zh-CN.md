@@ -646,8 +646,8 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
-- `text_to_speech`——把文本写成语音文件。
-- `transcribe_audio`——转写音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于你的工作目录）并回答该路径；不指定时，长转写会存成 dump。
+- `text_to_speech`——把 `text` 或 `input` 指定的文本文件读成语音文件。
+- `transcribe_audio`——转写 `input` 指定的音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于你的工作目录）并回答该路径；不指定 `output` 时回答 transcript，长文本会存成 dump。
 
 生成工具默认写进 agent 的 media 目录；`output` 改为指定文件（相对路径相对于工作目录）。每个工具都以文本回答文件路径；`transcribe_audio` 不指定 `output` 时回答 transcript 本身。
 
