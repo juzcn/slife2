@@ -710,8 +710,11 @@ for a level below them.
 
 If the network notification cannot be made, the subagent is left unchanged.
 Nothing is asked of the subagent and nothing waits for it; removal is a forced
-cleanup whether it is idle or mid-turn. Removing an agent removes its subagents,
-because they are directories underneath it.
+cleanup whether it is idle or mid-turn. Releasing the place is what stops a turn:
+a subagent has no window, so its turn is the member call that process made, and
+dropping the session cancels it; a turn that stop does not reach is cancelled by
+its own handler. Removing an agent removes its subagents, because they are
+directories underneath it.
 
 #### 4.5.5 Local network
 
@@ -735,6 +738,12 @@ conversation. A turn that ends in prose is not a reply: the model's own
 `subagent_send_message` or `task_response` call is the only way out. The first
 roster read after a start connects the caller's place before reporting; a
 refused connection is reported as the tool's `error`, not raised.
+
+**A withdrawal on this network stops the work.** `subagent_cancel_task` cancels
+the member's running turn, because the turn *is* this process's call to the agent
+server — the same caller-abandoned ending a window's Escape gives its own turn.
+On the peer network the withdrawal remains a message the peer's model decides
+on, because its turn is in another process and cannot be reached.
 
 #### 4.5.6 Watching a conversation
 

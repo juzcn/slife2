@@ -376,6 +376,13 @@ class Session:
     #: file.
     groups: group_store.GroupStore = field(default_factory=group_store.GroupStore)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: The member turns this session has in flight, by the A2A task each was
+    #: started for.  **A withdrawal on the local network stops the work rather
+    #: than describing it** (`on_peer_cancel`): the turn is this process's own,
+    #: so this is the lever that makes `subagent_cancel_task` immediate instead
+    #: of a note the model may or may not read.  A bare message has no id and
+    #: is not filed.
+    turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
     #: is the only place the reason survives to `peer_agent_list` — otherwise it
     #: reports a bare "not connected" for what is really a name collision.
@@ -848,13 +855,22 @@ def _wire(session: Session) -> None:
         )
 
     def on_peer_cancel(task_id: str, peer: str) -> None:
-        """A peer withdrew an inbound task — hand it over like any other message.
+        """A peer withdrew an inbound task — stop the work, or hand it over.
 
-        The withdrawal is NOT a control signal: it reaches the model the same
-        way every other peer event does, and the model — the only party that
-        knows whether it is still working on that task — decides what to do with
-        it.  The one constraint rides the marker: the completion bridge died with
-        the task, so a `task_response` for it is refused.
+        **On the subagent network the work stops; on the peer network it is
+        described.**  A member's turn runs in this process (a subagent has no
+        window and never gets one — `run_turn`), so the maker's withdrawal has a
+        handle on the one call running it: the member turn is cancelled, and
+        the agent server ends the turn the way it ends one whose window's call
+        was abandoned.  The maker asked the work to stop, and waiting for a
+        model to read a note is not a stop.
+
+        A peer's turn is in another process, where nothing here can cancel
+        anything.  The withdrawal is NOT a control signal: it reaches the model
+        the same way every other peer event does, and the model — the only party
+        that knows whether it is still working on that task — decides what to do
+        with it.  The one constraint rides the marker: the completion bridge died
+        with the task, so a `task_response` for it is refused.
 
         **The peer is scrubbed here too**, for the reason `on_inbound_task`
         gives: a withdrawal is handed over like any other message, so its
@@ -862,6 +878,15 @@ def _wire(session: Session) -> None:
         both of them drawn or written verbatim.
         """
         peer = safe_name(peer)
+        if session.net is LOCAL and session.subagent and task_id:
+            running = session.turn_tasks.get(task_id)
+            if running is not None:
+                running.cancel()
+                return
+            # **No turn of its own is still a message to read.**  The task was
+            # folded into one already running, or it is interrupted and waiting
+            # for the model's own answer; there is nothing here to cancel, and
+            # the note is the only lever that reaches the model.
         session.post(
             f"{marker(sender_net(session, peer), peer, task_id, type='cancel_task')}"
             f"The sender withdrew this task — stop working on it.",
@@ -1235,6 +1260,18 @@ async def _drain(
                         name=f"a2a-turn-{session.subagent}",
                     )
                     member_turns.add(task)
+                    # **The turn is filed under the task it runs**, because a
+                    # withdrawal has to reach the *work* and this task is the
+                    # only handle on it (`on_peer_cancel`).  A bare message has
+                    # no id anybody can withdraw, so it is not filed.
+                    if task_id:
+                        session.turn_tasks[task_id] = task
+
+                        def _settled(done: asyncio.Task, tid: str = task_id) -> None:
+                            if session.turn_tasks.get(tid) is done:
+                                session.turn_tasks.pop(tid, None)
+
+                        task.add_done_callback(_settled)
                     continue
                 try:
                     await hand_over(
@@ -2827,6 +2864,8 @@ _TOOL_TEXTS: dict[str, str] = {
     CANCEL_TASK: (
         "Withdraw a task you sent to {them}.\n"
         "\n"
+        "{withdraw}\n"
+        "\n"
         "`status` is the answer: 'cancelled' when the withdrawal went out,\n"
         "'completed'/'failed'/'cancelled'/'rejected' when the task had already\n"
         "ended (a finished result is never lost by asking), or 'not_found' for\n"
@@ -2969,6 +3008,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "A name that is not on the roster may be a peer that has not\n"
             "appeared yet; the send is still accepted."
         ),
+        "withdraw": (
+            "The withdrawal is a request: the peer is told to stop, and its\n"
+            "model decides what to do with that."
+        ),
     },
     LOCAL.key: {
         # **The members are an agent and the subagents it made, and every one of
@@ -3012,6 +3055,10 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         "addressing": (
             "A name that is not a member of this network is refused before\n"
             "anything is sent; `{list}` reads the roster."
+        ),
+        "withdraw": (
+            "The member stops working on it: its running turn is cancelled,\n"
+            "and a later `task_response` for the task is refused."
         ),
     },
 }

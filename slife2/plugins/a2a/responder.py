@@ -797,7 +797,14 @@ class Responder(abc.ABC):
             )
             return
         self._inbound.terminal(task_id, CANCELLED, "")
-        round_task = self._rounds.pop(task_id, None)
+        # **The round stays registered while it is stopped.**  The handler that
+        # unwinds it asks this table whether the round it is cancelling is still
+        # the one registered — that is how a peer's withdrawal is told from a
+        # retry's replacement (`MeshResponder.on_request`) — and popping the id
+        # here made the peer path answer "no" about itself, so a working task's
+        # withdrawal was never handed to the agent.  The done callback is what
+        # removes the entry, once the round has actually finished.
+        round_task = self._rounds.get(task_id)
         if round_task is not None:
             round_task.cancel()
         else:

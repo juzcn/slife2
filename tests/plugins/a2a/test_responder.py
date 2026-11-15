@@ -485,7 +485,21 @@ async def test_cancel_of_an_interrupted_task_publishes_one_canceled(
 async def test_cancel_of_a_working_task_publishes_one_canceled(
     mesh: A2AMesh, client: RecordingClient
 ) -> None:
+    """**A working task's withdrawal reaches the agent, and only once.**
+
+    The responder cancels the round, and the round is what tells the agent the
+    task is withdrawn (`on_peer_cancel`).  The check that keeps a *replacement*
+    round from being read as a withdrawal (`on_request`) keys on the cancelled
+    round still being the registered one — so `_on_cancel` must not remove the
+    entry before it cancels.  It did, and the guard read the peer's own
+    withdrawal as machinery's ending: the work was never told to stop, and the
+    maker's `subagent_remove` then found a turn that outlived every request to
+    end it.
+    """
     task_id = _new_task()
+    mesh._connected = True
+    withdrawals: list[tuple[str, str]] = []
+    mesh.on_peer_cancel = lambda tid, peer: withdrawals.append((tid, peer))
     await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "do it")))
     await _until(lambda: client.sent, "the submitted ack")
 
@@ -496,6 +510,8 @@ async def test_cancel_of_a_working_task_publishes_one_canceled(
         lambda: mesh._inbound.get(task_id).state == "cancelled",
         "the recorded withdrawal",
     )
+    await _until(lambda: withdrawals, "the agent being told to stop")
+    assert withdrawals == [(task_id, "alice")]
 
 
 @pytest.mark.asyncio

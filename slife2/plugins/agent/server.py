@@ -748,6 +748,15 @@ class Loop:
     #: is blocked for `subagent_set` and untouchable for `subagent_remove` for
     #: ever.
     removed: bool = False
+    #: The task running this conversation's turn, or None when it is idle — the
+    #: handle a **forced stop** cancels.  `subagent_remove` asks the subagent
+    #: network to end the member turn first (a clean cancellation the agent
+    #: server sees as a caller abandoning the call); one that outlasts that is
+    #: cancelled here, because removal is a forced cleanup whether it is idle or
+    #: mid-turn (SDD §4.5.4).  One turn runs at a time, so one slot is the whole
+    #: of it.  Set once the message is running its own turn, cleared on the way
+    #: out by the task that set it.
+    turn_task: asyncio.Task | None = None
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
     #: conversation whose model is later edited out of the config still runs: the
@@ -3655,6 +3664,12 @@ def build_server(
                         f"{describe((agent, subagent))} was removed; this message "
                         f"was not delivered."
                     )
+                # **The handler holding the lock is the handle a forced stop
+                # cancels** (`Loop.turn_task`), registered for the whole of the
+                # locked region: a turn is the work under this lock, whatever
+                # step it is on.  A message that turns out to be folded clears
+                # it on the way out through the same identity guard.
+                loop.turn_task = asyncio.current_task()
                 # **The previous turn's record is taken up before this caller is
                 # told anything.**  A message folded into that turn was answered
                 # by it only if its row landed; a refused write is rolled back
@@ -3974,6 +3989,13 @@ def build_server(
             loop.last_used = time.monotonic()
             with contextlib.suppress(ValueError):
                 loop.inbox.remove(item)
+            # **Only the task that registered the handle clears it.**  A
+            # message queued behind this turn reaches its own `finally` with
+            # nothing registered; clearing unconditionally would erase the
+            # handle the *next* turn put there a moment later and leave a
+            # forced stop with nothing to cancel.
+            if loop.turn_task is asyncio.current_task():
+                loop.turn_task = None
             # **The one line a session is traced by**, on every ending.  It is
             # here rather than at the success return because a failure and a
             # cancellation are turns too — and the log is the only place they
@@ -4430,7 +4452,8 @@ def build_server(
         Its conversation is forgotten and everything it wrote — turns, cabinet,
         ledger — is deleted. Removing a subagent that is not there is not an
         error: the caller wanted it gone, and it is gone. A name that exists but
-        is not one of your subagents is refused rather than deleted.
+        is not one of your subagents is refused rather than deleted. A turn it
+        is running is stopped first, so removal works mid-turn.
 
         Args:
             name: Which of your subagents.  The same name you made it with.
@@ -4453,13 +4476,13 @@ def build_server(
                     f"not yours to remove, and this call will not delete it."
                 )
             return {"name": directory.name, "removed": False}
-        # **The conversation is stopped before the network is told, and that is
-        # the order.**  A turn holding the lock is waited for (bounded), a record
-        # it detached is awaited, and only once nothing can refuse any more is
-        # the subagent's place given up — a refusal after `leave_the_mesh` left
-        # the subagent alive but unreachable from the network until the removal
-        # was retried.  The lock is held across the mesh call so a turn cannot
-        # start between the two halves.
+        # **The network is told first, and that is what stops a turn.**  A
+        # member's turn runs in the subagent-network process (a subagent has no
+        # window), and giving up its place drops the session, which cancels
+        # that turn at the caller.  Waiting for the lock without that was the
+        # old order, and a mid-turn removal could only refuse: nothing else in
+        # this process can end a turn, so the maker had no lever at all
+        # (SDD §4.5.4 says this is a forced cleanup, idle or mid-turn).
         #
         # **And no `forget` against the store, which is the difference from
         # `reset`.**  What `reset` clears is the *stored* live-context list, and
@@ -4483,15 +4506,39 @@ def build_server(
             # (`leave_the_mesh`).
             await leave_the_mesh(maker, directory.name, client=mesh_client)
         else:
+            if current().subagent.network.configured:
+                # A turn in flight is cancelled by this call; an idle one has
+                # nothing to cancel, and the later call below still gives up the
+                # place (a new session may have been created in between).
+                await leave_the_mesh(maker, directory.name, client=mesh_client)
             try:
                 async with asyncio.timeout(_T.timeouts.grace.turn):
                     await loop.lock.acquire()
             except TimeoutError:
-                raise ToolError(
-                    f"{directory.name!r} is still running a turn; stop it or "
-                    f"wait for it, then remove it again — removing it now would "
-                    f"let that turn write the directory back."
-                ) from None
+                # **A turn the clean stop did not reach is stopped here.**  The
+                # network's cancel is a caller abandoning the call, which the
+                # agent server honours at its next checkpoint; a turn wedged
+                # somewhere that is not one is ended by cancelling its own
+                # handler.  It is the last step because it reaches into a
+                # request the server does not own, and it is bounded so a turn
+                # that cannot be cancelled cannot hold the removal for ever.
+                task = loop.turn_task
+                if task is not None:
+                    task.cancel()
+                    try:
+                        async with asyncio.timeout(_T.timeouts.grace.drain):
+                            await loop.lock.acquire()
+                    except TimeoutError:
+                        raise ToolError(
+                            f"{directory.name!r} is still running a turn that "
+                            f"will not stop; nothing was deleted — try again."
+                        ) from None
+                else:
+                    raise ToolError(
+                        f"{directory.name!r} is still running a turn; wait for "
+                        f"it, then remove it again — removing it now would let "
+                        f"that turn write the directory back."
+                    ) from None
             try:
                 if loops.get(key) is not loop:
                     raise ToolError(
@@ -4514,10 +4561,13 @@ def build_server(
                         ) from None
                     except Exception:  # noqa: BLE001 — a refused write writes nothing
                         pass
-                # **Every refusal has run, so the network may be told.**  A
-                # failure here leaves the subagent exactly as it was: nothing
-                # has been deleted and the loop is untouched, because
-                # `leave_the_mesh` raises before the record is dropped.
+                # **The place is given up again under the lock.**  The call
+                # above was what stopped a turn; this one is what makes the
+                # state true at the moment of the delete — a message that
+                # arrived while the lock was being taken may have placed a
+                # fresh session.  A failure here leaves the files alone: the
+                # loop is untouched, because `leave_the_mesh` raises before the
+                # record is dropped.
                 await leave_the_mesh(maker, directory.name, client=mesh_client)
                 loop.removed = True
                 loops.pop(key, None)

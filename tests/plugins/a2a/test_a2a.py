@@ -3226,6 +3226,55 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
 
 
 @pytest.mark.asyncio
+async def test_a_withdrawal_cancels_the_members_running_turn(tmp_path: Path) -> None:
+    """**The maker's withdrawal stops the work, not just the task's record.**
+
+    A subagent has no window, so its turn is a call this plugin makes to the
+    agent server (`run_turn`).  The responder's cancellation therefore has a
+    handle on the work itself: the member turn is filed under the task it runs,
+    and `on_peer_cancel` cancels it.  The agent server sees that as a caller
+    abandoning the call — the same ending a window's Escape gives its turn —
+    so the turn stops rather than waiting for a model to read a note.
+    """
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    mcp: FastMCP = FastMCP("agent")
+
+    @mcp.tool
+    async def send_message(
+        agent: str, prompt: str = "", subagent: str = "", channel: str = ""
+    ) -> dict[str, Any]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"text": "never"}  # pragma: no cover - the turn is cancelled
+
+    async with Client(mcp) as client:
+        session = local_member(tmp_path)
+        writer = asyncio.create_task(_drain(session, default_config(), None, client))
+        try:
+            session.mesh.on_inbound_task(AGENT, "do it", TASK)
+            await asyncio.wait_for(started.wait(), 2)  # timeouts: the test's own wait
+            assert TASK in session.turn_tasks, "the turn was not filed under its task"
+
+            session.mesh.on_peer_cancel(TASK, AGENT)
+
+            await asyncio.wait_for(cancelled.wait(), 2)  # timeouts: the test's own wait
+            for _ in range(200):
+                if TASK not in session.turn_tasks:
+                    break
+                await asyncio.sleep(0.01)
+            assert TASK not in session.turn_tasks, "the turn stayed filed"
+        finally:
+            writer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await writer
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_can_tell_its_agent_from_a_sibling(
     tmp_path: Path, agent_server: AgentServer
 ) -> None:

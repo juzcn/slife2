@@ -4187,22 +4187,23 @@ async def test_removing_something_that_is_not_a_subagent_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_removing_a_subagent_mid_turn_is_refused(
+async def test_removing_a_subagent_mid_turn_stops_the_turn_and_removes_it(
     context, hub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A removal waits for the turn, then refuses rather than deleting under it.**
+    """**Removal is a forced cleanup, idle or mid-turn** (SDD §4.5.4).
 
-    The turn holds the conversation's lock and writes its store on the way out.
-    Deleting the directory while it runs lets that write recreate it — with no
-    `subagent.yaml`, so the name is blocked for `subagent_set` and untouchable
-    for `subagent_remove` for ever.  The wait is short: a turn parked on an
-    approval is one to come back to, not to wait out.
+    The turn holds the conversation's lock and writes its store on the way out,
+    so the directory cannot go until the turn has ended — but nothing in this
+    process could end it, and a wait-then-refuse made a mid-turn removal
+    impossible: the maker had no lever at all (`subagent_cancel_task` could not
+    reach a turn either).
 
-    **And the refusal comes before the network is told.**  The mesh place used
-    to be given up first, so a turn that outlasted `grace.turn` made this call
-    refuse after the place was gone: the subagent was alive but unreachable
-    until the removal was retried.  The recorder proves the order — no `forget`
-    reached it while the removal was refused.
+    **The network is the lever, and it is told first.**  `forget` drops the
+    member's session, which cancels the call that runs the turn — a subagent
+    has no window, so its turn *is* a call this process made.  The recorder
+    proves the order: the call arrives while the turn is still running.  A turn
+    that the clean stop does not reach is ended by cancelling its own handler —
+    this fake cancels nothing, so that is the path it leaves.
     """
     monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
     backend = FakeBackend(
@@ -4212,12 +4213,14 @@ async def test_removing_a_subagent_mid_turn_is_refused(
             delay=0.2,  # timeouts: the value this test is built around, not a budget
         )
     )
-    told: list[dict[str, Any]] = []
+    #: Whether the turn was still running when the network was told.
+    seen: list[bool] = []
+    turn: asyncio.Task[Any] | None = None
     mcp: FastMCP = FastMCP("mesh")
 
     @mcp.tool
     async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
-        told.append({"agent": agent, "subagent": subagent})
+        seen.append(turn is None or not turn.done())
         return {"agent": agent, "subagent": subagent, "forgotten": True}
 
     base = default_config()
@@ -4239,17 +4242,13 @@ async def test_removing_a_subagent_mid_turn_is_refused(
                 break
             await asyncio.sleep(0.01)
 
-        with pytest.raises(ToolError, match="still running a turn"):
-            await remove_subagent(server, "researcher")
-        assert told == [], "the place on the network was given up by a refused removal"
-
-        assert subagent_of(DEFAULT_AGENT, "researcher").exists(), "nothing was deleted"
-        await turn
         done = await remove_subagent(server, "researcher")
         assert done.data["removed"] is True
-
-    assert told == [{"agent": DEFAULT_AGENT, "subagent": "researcher"}]
-    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+        assert seen and seen[0] is True, (
+            "the network was told after the turn ended, not as its stop"
+        )
+        await asyncio.gather(turn, return_exceptions=True)
+        assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
 
 @pytest.mark.asyncio

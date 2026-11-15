@@ -1100,7 +1100,8 @@ Once created, it is addressed over the local network with the same operations as
 a peer agent, under `subagent_*` names: `subagent_send_message`,
 `subagent_task_response`, `subagent_continue_task`, `subagent_cancel_task`,
 `subagent_list`, `subagent_task_list`, `subagent_broadcast`, and the six group
-tools. Membership is the directory set,
+tools. `subagent_cancel_task` stops the member's running turn, and
+`subagent_remove` stops one it finds before deleting. Membership is the directory set,
 so a send naming anything that is not a member is refused before it is published.
 Group traffic on this network wears `[SubagentGroup:…]` and the
 `subagent_group:<group>:<sender>` channel, whether the sender is the maker or a

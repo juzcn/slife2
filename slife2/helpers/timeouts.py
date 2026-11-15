@@ -227,9 +227,11 @@ class Grace:
     drain: float = 5.0
     #: How long one attempt at a lock waits before giving up.
     lock: float = 30.0
-    #: How long `subagent_remove` waits for the target conversation's turn to
-    #: release its lock before refusing.  Short: a turn parked on an approval
-    #: is one to come back to, not to wait out inside a model's tool call.
+    #: How long `subagent_remove` waits for the target turn to release its lock
+    #: after asking the subagent network to stop it, before cancelling the
+    #: turn's own handler.  Short: the stop has already gone out, and a turn
+    #: still holding the lock is one the clean path did not reach; `drain`
+    #: bounds the forced one.
     turn: float = 2.0
 
 
