@@ -4252,6 +4252,65 @@ async def test_removing_a_subagent_mid_turn_stops_the_turn_and_removes_it(
 
 
 @pytest.mark.asyncio
+async def test_removing_a_fork_mid_turn_is_the_same_stop_then_delete(
+    context, hub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A fork is removed by the same interrupt-then-delete.**
+
+    A fork has no log and shares its maker's cabinet and media, so the two
+    places a fork differs are both *outside* the removal: there is no record to
+    drain (`record` answers `None` by design), and the directory deleted is the
+    fork's own `subagent.yaml`, never the work directory it shares.  The turn,
+    the lock and the handle are the loop's, so nothing in the stop has a fork
+    branch.
+    """
+    monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
+    backend = FakeBackend(
+        text_turn("the maker's"),
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),
+    )
+    seen: list[bool] = []
+    turn: asyncio.Task[Any] | None = None
+    mcp: FastMCP = FastMCP("mesh")
+
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        seen.append(turn is None or not turn.done())
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
+
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=backend,
+            mesh_client=mesh,
+        )
+        await send(server, "one")  # the conversation the fork starts from
+        await set_subagent(server, "researcher", fork=True)
+        turn = asyncio.create_task(send(server, "two", subagent="researcher"))
+        for _ in range(200):
+            if len(backend.calls) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        done = await remove_subagent(server, "researcher")
+        assert done.data["removed"] is True
+        assert seen and seen[0] is True, (
+            "the network was told after the fork's turn ended, not as its stop"
+        )
+        await asyncio.gather(turn, return_exceptions=True)
+        assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+
+@pytest.mark.asyncio
 async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> None:
     """What a subagent owns, it owns: its conversation is written, and to itself.
 
