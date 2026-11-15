@@ -819,29 +819,45 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     that is *sent* as it stands; here a rebuilt list is handed straight
     to a loop that appends the user's message to it before anything is sent, so a
     closing line would be an assistant turn the user's message interrupts.
+
+    **A result answers the call before it, and no other.**  The set of ids is
+    therefore collected with the positions they occur at, and a call is answered
+    only by a result that appears *after* it.  The old walk collected every
+    `tool_call_id` in the list first, so a result in an earlier turn answered a
+    call with the same id in a later one — and the later turn's missing answer
+    was left unrepaired, the exact state this function exists to fix.  Duplicate
+    ids are not this build's writing (an id is one response's, and nothing
+    checks uniqueness across turns), but a rebuild is handed stored rows it did
+    not write.
     """
-    # Answered anywhere, in one pass first: a result always follows the call, so
-    # a single walk would decide each call before seeing whether it was answered
-    # and repair the whole of every healthy exchange.
-    answered = {
-        str(message.get("tool_call_id") or "")
-        for message in messages
-        if message.get("role") == "tool"
-    }
+    # Collected with positions in one pass first: a result always follows the
+    # call it answers, so the call has to be compared against results that come
+    # after it, not against the presence of its id somewhere in the list.
+    answered: dict[str, list[int]] = {}
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        call_id = str(message.get("tool_call_id") or "")
+        if call_id:
+            answered.setdefault(call_id, []).append(index)
     repaired: list[dict[str, Any]] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         repaired.append(dict(message))
         if message.get("role") != "assistant":
             continue
         for call in message.get("tool_calls") or []:
-            call_id = str((call or {}).get("id") or "")
-            if call_id and call_id not in answered:
-                answered.add(call_id)
-                repaired.append(
-                    {
-                        "role": "tool",
-                        "content": INTERRUPTED,
-                        "tool_call_id": call_id,
-                    }
-                )
+            if not isinstance(call, Mapping):
+                continue
+            call_id = str(call.get("id") or "")
+            if not call_id:
+                continue
+            if any(position > index for position in answered.get(call_id, ())):
+                continue
+            repaired.append(
+                {
+                    "role": "tool",
+                    "content": INTERRUPTED,
+                    "tool_call_id": call_id,
+                }
+            )
     return repaired

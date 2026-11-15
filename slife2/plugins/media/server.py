@@ -30,9 +30,11 @@ rather than a new call.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import re
-import shutil
+import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -217,18 +219,25 @@ async def _read_text(ctx: Context, value: str) -> str:
 
 
 async def _place(written: str, target: Path) -> None:
-    """Move one adapter's artifact to the path the caller named."""
+    """Move one adapter's artifact to the path the caller named.
+
+    **The old file is replaced by a complete one or not at all.**  The move is
+    `Path.replace`, a rename in the destination's own directory: every adapter
+    writes into `outputs_dir`, and the caller sets that to `target.parent`, so
+    source and target are on one filesystem by construction.  The previous
+    order removed `target` first and then moved, so a failed move left the
+    caller with neither the old file nor the new one; and the `shutil.move`
+    fallback it kept could copy half a file over the old one before failing.
+    A same-directory replace is atomic, so a refusal leaves the old document
+    exactly as it was and the artifact at its generated name.
+    """
 
     def move() -> None:
         source = Path(written)
         if source == target:
             return
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.unlink(missing_ok=True)
-        try:
-            source.replace(target)
-        except OSError:
-            shutil.move(str(source), str(target))
+        source.replace(target)
 
     try:
         await asyncio.to_thread(move)
@@ -524,20 +533,41 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
 
 
 async def _write_transcript(ctx: Context, output: str, text: str) -> str:
-    """Write a transcript where the caller named, and answer that path."""
+    """Write a transcript where the caller named, and answer that path.
+
+    **A file already there is replaced whole or left as it was.**  The write
+    goes to a temporary file beside the target and is renamed over it, so a
+    full disk or a refusal mid-write cannot truncate the transcript the caller
+    had; a failed write leaves the old file standing and says why.
+    """
     target = _output_path(ctx, output)
     if target is None:
         return text
     await _make_parent(target)
 
     def write() -> None:
-        target.write_text(text, encoding="utf-8")
+        _replace_text(target, text)
 
     try:
         await asyncio.to_thread(write)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ToolError(f"could not write {output!r}: {exc}") from exc
     return str(target)
+
+
+def _replace_text(target: Path, text: str) -> None:
+    """Put *text* at *target* by rename, keeping the old file until it lands."""
+    handle, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as opened:
+            opened.write(text)
+            opened.flush()
+            os.fsync(opened.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

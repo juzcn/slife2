@@ -179,6 +179,35 @@ async def test_a_listing_that_changed_during_the_handover_is_not_believed() -> N
 
 
 @pytest.mark.asyncio
+async def test_an_invalidation_during_the_listing_request_is_believed() -> None:
+    """**The peer may say the list changed while the request is in flight.**
+
+    `list_changed` is processed on the client's receive path, so it can land
+    after the `tools/list` response future is resolved but before this coroutine
+    resumes.  A counter snapshotted after the request would already contain the
+    increment, the stale answer would be marked ready, and the source would
+    serve it until `relist_after`.  The snapshot is taken when the ask begins,
+    which is what makes the question about the whole request.
+    """
+    holder: dict[str, Any] = {}
+
+    class ChangesDuringTheList(DeadClient):
+        async def list_tools(self) -> list[Any]:
+            holder["link"].invalidate()
+            return await super().list_tools()
+
+    def make(_transport: Any, _handler: Any) -> Any:
+        return ChangesDuringTheList(dies=False, refuses=False)
+
+    link = connection(client_factory=make)
+    holder["link"] = link
+
+    assert await link.ready() is False, "the refresh believed a stale listing"
+    assert link.usable is False
+    await link.close()
+
+
+@pytest.mark.asyncio
 async def test_a_listing_the_handover_refuses_never_counts_as_usable() -> None:
     """The callback's last word is kept, not overwritten by the frame that called it.
 

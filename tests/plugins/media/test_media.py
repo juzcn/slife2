@@ -37,7 +37,12 @@ from slife2.plugins.media.adapters import (
     media_dir,
     merge_params,
 )
-from slife2.plugins.media.server import build_server, check_size
+from slife2.plugins.media.server import (
+    _place,
+    _replace_text,
+    build_server,
+    check_size,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -276,6 +281,61 @@ async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
 
     assert answer == str(target)
     assert target.read_bytes() == b"png"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_move_keeps_the_file_that_was_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old artifact is replaced by a complete one or not at all.**
+
+    `_place` used to remove the destination and then move, so a move that failed
+    — a Windows sharing violation, an antivirus hold — left the caller with
+    neither the file they had nor the one the tool just made.  A same-directory
+    `Path.replace` is the atomic operation both are, and a refusal leaves the
+    old document exactly as it was.
+    """
+    target = tmp_path / "art" / "cover.png"
+    target.parent.mkdir()
+    target.write_bytes(b"the old cover")
+    source = target.parent / "generated.png"
+    source.write_bytes(b"the new cover")
+
+    def refuse(self: Path, other: Path) -> Path:
+        raise OSError("the file is held by another program")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+
+    with pytest.raises(ToolError, match="could not write"):
+        await _place(str(source), target)
+
+    assert target.read_bytes() == b"the old cover", "the old file was destroyed"
+    assert source.read_bytes() == b"the new cover", "the artifact is still there"
+
+
+def test_a_transcript_write_replaces_whole_or_leaves_the_old_file(
+    tmp_path: Path,
+) -> None:
+    """**A write that failed is not a write that happened.**
+
+    `_write_transcript` used `write_text`, which truncates the destination
+    before writing — so a full disk or a character UTF-8 cannot encode left the
+    previous transcript gone and the call reporting failure.  The text goes to a
+    temporary file beside it and is renamed over it; a failure removes the
+    temporary file and the old transcript stands.
+    """
+    target = tmp_path / "transcripts" / "meeting.txt"
+    target.parent.mkdir()
+    target.write_text("the earlier transcript", encoding="utf-8")
+
+    with pytest.raises(UnicodeError):
+        _replace_text(target, "half a character: \ud83d")
+
+    assert target.read_text(encoding="utf-8") == "the earlier transcript"
+    assert list(target.parent.glob("*.tmp")) == [], "the temporary file outlived it"
+
+    _replace_text(target, "the new transcript")
+    assert target.read_text(encoding="utf-8") == "the new transcript"
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,7 @@ from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
     HARNESS_PREFIX,
     INTERRUPTED,
+    LIVE_CONVERSATION_TOOLS,
     ToolRegistry,
     bind_timeout,
     split_meta,
@@ -414,6 +415,18 @@ class AgentLoop:
                 # bounded (SDD §5.2.4, §7.6).  `text` stays the event's own
                 # copy below, so the live line still shows the person's words.
                 fitted = await self._fit(call, text)
+                # **The channel and the receipt are asked again, after the
+                # call.**  `auto` answers the head it saw *before* the tool ran,
+                # and a caller cancelled in that window takes its entry out of
+                # the inbox: the tool then delivers the next message while this
+                # pair would wear the first one's bubble.  `folded` is the
+                # message that was really taken, and asking it here is also the
+                # commit point — the server marks the entry delivered inside
+                # this call, with no await before the appends below.
+                found = folded() if took and folded is not None else None
+                channel, receipt = (
+                    found if found is not None else (wanted.channel, wanted.receipt)
+                )
                 messages.append(
                     Message(role="assistant", content=None, tool_calls=[call])
                 )
@@ -427,7 +440,7 @@ class AgentLoop:
                         # rebuilt transcript draws for this pair wears the
                         # bubble of the channel the message came in on.  No
                         # message, no bubble.
-                        channel=wanted.channel if took else "",
+                        channel=channel if took else "",
                     )
                 )
                 # **Said after the pair is written**, so a screen is told about
@@ -443,8 +456,8 @@ class AgentLoop:
                         observer,
                         MessageCutIn(
                             text=text,
-                            channel=wanted.channel,
-                            receipt=wanted.receipt,
+                            channel=channel,
+                            receipt=receipt,
                         ),
                     )
             # The tool list goes with the call, so it is asked for with the
@@ -717,6 +730,23 @@ class AgentLoop:
             # spending somebody's attention on nothing.
             logger.info("tool_background_unsupported name=%s", call.name)
             return BACKGROUND_UNAVAILABLE, False
+
+        if meta.background and call.name in LIVE_CONVERSATION_TOOLS:
+            # **A tool that acts on the live conversation cannot leave it.**
+            # `_check_new_input` pops a queued message off the running loop's
+            # inbox; `attach_image` injects pixels into its last user message.
+            # A background call is detached and runs after this turn has moved
+            # on, so it would take the message out of band — the parked sender
+            # answered by a turn that never read it, the words arriving later as
+            # an async result — or attach to a message the turn has finished.
+            # The agent-task server withholds both from its model for the same
+            # reason; this is the loop's half of the same rule.
+            logger.info("tool_background_refused name=%s", call.name)
+            return (
+                f"Error: {call.name} acts on the conversation this turn is "
+                "running and cannot be sent to the background. Call it without "
+                "`_async`."
+            ), False
 
         if meta.approve and self._approve is not None and not await self._approve(call):
             logger.info("tool_denied name=%s", call.name)

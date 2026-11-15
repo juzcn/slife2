@@ -2963,7 +2963,10 @@ def build_server(
         bounded wait — would put a plugin's start-up time inside a `tool_search`,
         which is the call a model makes while it is stuck.  What a plugin
         declared last time is still in the catalogue, so a late one costs
-        freshness and nothing else.
+        freshness and nothing else.  **Its address book entries are kept too**:
+        a plugin that is up but could not answer this round carries its previous
+        sources into the swap (`carried`), so neither `live_sources` nor the
+        route a call takes loses a source because one report was late.
 
         **And that rule is enforced, not assumed.**  `Upstream.declare` has a
         bound of its own (`ready.connect_tools`) and raises when a plugin that is
@@ -3002,6 +3005,28 @@ def build_server(
             found: dict[str, DeclaredSource] = {}
             owners: dict[str, Upstream] = {}
             asked = [one for one in upstreams if one.usable]
+            mine = declarations()
+            # **The previous address book is what a failed refresh keeps.**  A
+            # plugin that is up but could not answer `list_sources` — still
+            # installing the external servers it holds — has not stopped
+            # declaring anything; what failed is the report, not the sources.
+            # Replacing the book with only the answers that arrived would drop
+            # every source that plugin holds from `live_sources`, so the hub's
+            # next request would hide its loaded tools from the model and a call
+            # by name would answer "no plugin is declaring it" even though the
+            # rows are still in the catalogue.  The old entries are seeded back
+            # only for the plugin whose ask failed, so a plugin that answers
+            # with fewer sources still has those sources dropped.
+            previous_held = dict(mine.held)
+            previous_owners = dict(mine.holders)
+
+            def carried(upstream: Upstream) -> None:
+                """Put back what *upstream* declared before this refresh."""
+                for name, source in previous_held.items():
+                    if previous_owners.get(name) is upstream:
+                        found[name] = source
+                        owners[name] = upstream
+                        known.add(name)
 
             async def fetched(
                 upstream: Upstream,
@@ -3035,8 +3060,10 @@ def build_server(
                         upstream.settings.name,
                         failure,
                     )
+                    carried(upstream)
                     continue
                 if held is None:
+                    carried(upstream)
                     continue
                 # **The reserved names are checked *before* the merge, not
                 # after it.**  `record` merges each source's rows into the
@@ -3077,17 +3104,16 @@ def build_server(
                         upstream.settings.name,
                         exc,
                     )
+                    carried(upstream)
                     continue
                 for one in declared:
                     known.add(one.name)
                     found[one.name] = one
                     owners[one.name] = upstream
-            mine = declarations()
             mine.held.clear()
             mine.held.update(found)
             mine.holders.clear()
             mine.holders.update(owners)
-
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
     #: which it re-reads on every call.  `live_sources` is handed in because the

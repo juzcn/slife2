@@ -640,6 +640,7 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     server = build_server(base, context_client=context, hub_client=hub, backend=backend)
     inbound = f"{LOCAL_AGENT.channel}:{DEFAULT_AGENT}"
 
+    await set_subagent(server, "researcher")
     await send(server, "one", subagent="researcher", channel=inbound)
     await send(server, "two", subagent="researcher", channel=inbound)
 
@@ -1041,6 +1042,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
     )
 
     await send(server, "one", agent="jack")
+    await set_subagent(server, "helper", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
 
     # The worker was not told what the agent's own conversation said...
@@ -1178,7 +1180,11 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
 
 
 def wired(
-    backend: FakeBackend, context: Client, config: Any = None
+    backend: FakeBackend,
+    context: Client,
+    config: Any = None,
+    *,
+    cabinet_client: Client | None = None,
 ) -> tuple[Client, FastMCP]:
     """A hub and an agent that can reach each other, which takes a holder.
 
@@ -1213,6 +1219,7 @@ def wired(
         config,
         context_client=context,
         hub_client=hub_client,
+        cabinet_client=cabinet_client,
         backend=backend,
     )
     holder["agent"] = server
@@ -1372,6 +1379,55 @@ async def test_a_cancelled_turn_still_delivered_the_cut_in_it_folded(context) ->
     assert answer.data["text"] == "", "there was no answer to repeat"
     assert prompts_seen(backend, 2).count("tool:two") == 1, (
         "the cut-in appears in the conversation twice"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cut_in_whose_pair_never_landed_runs_its_own_turn(context) -> None:
+    """**A take is not a delivery.**  The pair is written after the fit.
+
+    The message is popped and marked taken at the tool call, and the loop then
+    awaits `_fit` — here the cabinet writing the dump for a large paste — before
+    it appends the assistant/tool pair.  A turn cancelled in that window leaves
+    the message in no record at all, so its parked sender must run its own turn;
+    answering it `injected` with empty text would tell it the conversation holds
+    words it never got.  `delivered` is therefore set by the commit
+    (`folded_message`), not by the take.
+    """
+    stub = FastMCP("cabinet-stub")
+    entered = asyncio.Event()
+
+    @stub.tool
+    async def dump_save(call: str, output: str, tool: str) -> dict[str, Any]:
+        entered.set()
+        await asyncio.Event().wait()  # the fit goes on until the turn is cancelled
+        return {"path": "dumps/never.md", "size": len(output)}
+
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("second answer"),
+    )
+    async with Client(stub) as cabinet_stub:
+        hub_client, server = wired(backend, context, cabinet_client=cabinet_stub)
+        async with hub_client:
+            first = asyncio.create_task(send(server, "one"))
+            await wait_for_streams(backend)
+            # Over `tool_result.bytes`, so the fit is the cabinet's call.
+            second = asyncio.create_task(send(server, "two " * 20_000))
+            await asyncio.wait_for(entered.wait(), 5)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            answer = await second
+
+    assert answer.data["injected"] is False, "a take whose pair never landed is not delivery"
+    assert answer.data["text"] == "second answer"
+    prompts = prompts_seen(backend, 1)
+    assert any(one.startswith("user:two two") for one in prompts), prompts
+    assert not any(one.startswith("tool:") and "two two" in one for one in prompts), (
+        "the swallowed cut-in was written as a pair too"
     )
 
 
@@ -1938,9 +1994,9 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
             hub_client=FlakyHub(hub, DEAD_PLUGIN),
             backend=FakeBackend(),
         )
+        await set_subagent(server, "worker")
         with pytest.raises(Exception, match="not answering"):
             await send(server, "one", subagent="worker")
-
     rows = (
         sqlite3.connect(agent_dir(DEFAULT_AGENT, "worker") / "turns.db")
         .execute("SELECT messages FROM turn ORDER BY rowid")
@@ -2993,6 +3049,7 @@ async def test_an_interrupted_subagent_image_turn_claims_its_id(
         backend=backend,
     )
 
+    await set_subagent(server, "researcher")
     interrupted = asyncio.create_task(
         send(
             server,
@@ -3105,6 +3162,8 @@ async def test_a_refused_record_fails_the_turn_and_rolls_it_back(context, hub) -
             server = build_server(
                 config(), context_client=store, hub_client=hub, backend=backend
             )
+            if subagent:
+                await set_subagent(server, subagent)
             with pytest.raises(Exception, match="refuses the request"):
                 await send(server, "one", subagent=subagent)
             await send(server, "two", subagent=subagent)
@@ -4175,6 +4234,7 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
         backend=FakeBackend(text_turn("hello from the subagent")),
     )
 
+    await set_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     own = subagent_of(DEFAULT_AGENT, "researcher") / "turns.db"
@@ -4183,6 +4243,35 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
         "and not in the maker's — nobody said anything to the maker"
     )
     assert TurnStore(own).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_a_removed_subagent_is_refused_and_recreates_nothing(
+    context, hub
+) -> None:
+    """**The record is the membership, and a message does not make one.**
+
+    `subagent_remove` deletes the directory.  Before this refusal, a message
+    addressed to the stale name started a conversation, and its save recreated
+    `subagents/<name>/turns.db` — with no `subagent.yaml`, which is the state
+    `subagent_set` refuses as "already a directory that is not a subagent" and
+    `subagent_remove` refuses as not one of yours: the name was blocked for both
+    until somebody cleaned the filesystem by hand.  The read path already
+    refuses to create the directory (`read_store_for`); this is the write half.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await set_subagent(server, "researcher")
+    await remove_subagent(server, "researcher")
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+    with pytest.raises(ToolError, match="there is no subagent"):
+        await send(server, "one", subagent="researcher")
+
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists(), (
+        "the refused message recreated the directory"
+    )
 
 
 @pytest.mark.asyncio
@@ -4200,6 +4289,7 @@ async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
+    await set_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
     await send(server, "two")
 
@@ -4235,6 +4325,7 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
+    await set_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     prompt = backend.calls[0][0][0].content
@@ -4288,6 +4379,7 @@ async def test_a_subagent_runs_on_the_model_its_own_file_names(context, hub) -> 
         backend=FakeBackend(text_turn("ok"), text_turn("ok")),
     )
     await set_subagent(server, "researcher", model="other/slow")
+    await set_subagent(server, "helper")
 
     named = await send(server, "one", subagent="researcher")
     plain = await send(server, "one", subagent="helper")
@@ -5013,6 +5105,7 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
         hub_client=hub,
         backend=answering("hello back"),
     )
+    await set_subagent(server, "scout")
     await send(server, "hello", subagent="scout")
 
     async with watching(server, subagent="scout") as (frames, _):
@@ -5043,6 +5136,8 @@ async def test_a_watched_conversation_streams_its_next_turn(context, hub) -> Non
         backend=FakeBackend(text_turn("hi")),
     )
 
+    await set_subagent(server, "scout")
+
     async with watching(server, subagent="scout") as (frames, _):
         await send(server, "hello", subagent="scout")
         ended = await wait_for_frame(frames, TurnFinished)
@@ -5070,6 +5165,7 @@ async def test_a_watch_that_joins_mid_turn_is_handed_the_turn_from_its_start(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
+    await set_subagent(server, "scout")
     running = asyncio.create_task(send(server, "slow one", subagent="scout"))
     # The turn has reached the model, and has streamed at least one chunk by
     # the time the watch opens — so the replay has something to replay.

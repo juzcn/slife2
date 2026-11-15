@@ -414,6 +414,12 @@ class Pending:
     #: Whether a running turn took this message into its conversation — the fold
     #: itself, which is delivery even where there is no answer.
     #:
+    #: **Set when the pair is written, not when the message is taken**
+    #: (`folded_message`): between the take and the append there is one `_fit`,
+    #: and a turn that dies in it leaves the message in no record at all.  Marked
+    #: at take time, that window answered its sender "injected, empty" about a
+    #: message the conversation never held.
+    #:
     #: **A recorded cut-in is delivered even when the absorbing turn had no
     #: result.**  The cancellation repair keeps the pair and the turn's row
     #: records it, so the message is in the conversation; a parked caller that
@@ -1550,6 +1556,23 @@ def build_server(
         client = conversation_key(agent, subagent)
         loop = loops.get(client)
         if loop is None:
+            # **The record is the membership, and a message does not make one.**
+            # A subagent is created with `subagent_set` (§4.5), which writes
+            # `subagent.yaml`; a name with no record is a subagent that was
+            # never made or one that was removed.  Starting its conversation
+            # here would create `subagents/<name>/` — and the turn's save would
+            # create `turns.db` inside it — with no record, which is the state
+            # `subagent_set` refuses as "already a directory that is not a
+            # subagent" and `subagent_remove` refuses as not one of yours: the
+            # name is blocked for both until somebody cleans the filesystem by
+            # hand.  The read path was fixed the same way
+            # (`slife2.libs.store.db.read_store_for`); this is the write half.
+            if subagent and not subagent_file(agent, subagent).is_file():
+                raise ToolError(
+                    f"there is no subagent {subagent!r} of {agent}'s: it was "
+                    f"never made, or it was removed. Make it with {SUBAGENT_SET} "
+                    f"before messaging it."
+                )
             live = current()
             # What this subagent's own file says it is — its model, its role,
             # whether it is a fork — read *here*, when its conversation starts,
@@ -2108,6 +2131,13 @@ def build_server(
         in arrival order — the queue's first is the message that has waited
         longest.
 
+        **`delivered` is not set here**, because being taken is not yet being in
+        the conversation: the loop writes the pair after its own `_fit`, and an
+        interruption or a failed fit in that window leaves this message in no
+        record at all.  It is `folded_message` that marks the entry, at the
+        point the pair is about to be appended with nothing awaited in between
+        — so a take whose pair never lands still owes itself a turn.
+
         Returns `""` for nothing to deliver: no such conversation, an empty
         queue, or a head that carries images.  That last one is the single
         refusal, and it is `auto_invoke`'s too — a tool result carries text, so
@@ -2121,7 +2151,6 @@ def build_server(
         if waiting.images:
             return ""
         loop.inbox.popleft()
-        waiting.delivered = True
         loop.injected.append(waiting)
         return waiting.prompt
 
@@ -2253,14 +2282,23 @@ def build_server(
         def folded_message() -> tuple[str, str] | None:
             """The channel and receipt of the message taken most recently.
 
-            `take_waiting` appends the entry after it pops it, so the last one
-            is the message the call just took.  The loop asks only when the
-            count grew across that call; a `_check_new_input` that answered
-            "nothing waiting" must not wear the previous message's bubble.
+            **This is the delivery's commit point.**  The loop asks it after the
+            tool ran — `take_waiting` appends the entry after it pops it, so the
+            last one is the message the call just took — and then writes the
+            assistant/tool pair with no await between this call and the
+            appends.  Marking `delivered` here rather than at take time is what
+            keeps the flag honest: a take whose pair the turn never wrote (a
+            cancelled or failed `_fit`, a turn that died before appending) has
+            not been delivered, and its parked caller must run its own turn.
+
+            A `_check_new_input` that answered "nothing waiting" must not wear
+            the previous message's bubble, which is why the loop asks only when
+            the count grew across that call.
             """
             if not loop.injected:
                 return None
             item = loop.injected[-1]
+            item.delivered = True
             return item.channel, item.receipt
 
         # The monotonic clock is the duration's, and `started_at` the row's:
@@ -2519,6 +2557,14 @@ def build_server(
                 outcome.folded = list(loop.injected)
                 if outcome.result is not None:
                     for folded in loop.injected:
+                        # **Only a fold the record holds gets the answer.**  A
+                        # take whose pair was never written is not in this
+                        # turn's messages, so handing it this result would tell
+                        # its caller it was delivered and answered by a turn
+                        # that never read it.  `folded_message` marks the ones
+                        # that were; the others run their own turn.
+                        if not folded.delivered:
+                            continue
                         folded.result = outcome.result
                         # The absorbing turn's own record of what answered, and
                         # the model its folded callers are told — taken here

@@ -57,6 +57,7 @@ from starlette.routing import Route
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
+from slife2.libs.host.paths import local_path
 from slife2.libs.plugin.audience import FOR_THE_MODEL, request_conversation
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
@@ -327,11 +328,13 @@ def _content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-def _chunks(path: Path):
-    """Yield *path* in chunks, closing the handle however the reader stops."""
-    with open(path, "rb") as handle:
+def _chunks(handle):
+    """Yield an open file in chunks, closing it however the reader stops."""
+    try:
         while chunk := handle.read(_CHUNK):
             yield chunk
+    finally:
+        handle.close()
 
 
 async def serve_exposed(exposure: Exposure) -> Response:
@@ -341,38 +344,53 @@ async def serve_exposed(exposure: Exposure) -> Response:
     answers (403 for a file replaced since it was pinned, 404 for one deleted,
     a chunked 200) are decisions about *what* to serve, and they cost nothing
     to test without a tunnel or a socket.
+
+    **The file is opened before it is judged, and the response streams that
+    handle.**  A `stat` followed by a lazy `open` is two observations of a path
+    a writer can change in between: a file replaced under the link was then
+    served despite its pin, and one appended to made `Content-Length` disagree
+    with the bytes that followed.  `fstat` on the open handle is the same file
+    the body comes from, so the pin, the length and the bytes are one
+    observation.
     """
     path = Path(exposure.path)
-    stat = _stat(exposure.path)
-    if stat is None:
+    try:
+        handle = open(path, "rb")  # noqa: SIM115 - closed by `_chunks`
+    except OSError:
         return Response("The file is no longer there.", status_code=404)
-    if not path.is_file():
-        return Response("The file is no longer there.", status_code=404)
-    if not exposure.matches(stat):
-        logger.warning(
-            "share_changed_since_exposed token=%s path=%s — refusing",
-            exposure.token,
-            path,
-        )
-        return Response(
-            "The file changed since this link was made. Expose it again for "
-            "the current one.",
-            status_code=403,
-        )
+    try:
+        stat = os.fstat(handle.fileno())
+        if not exposure.matches(stat):
+            handle.close()
+            logger.warning(
+                "share_changed_since_exposed token=%s path=%s — refusing",
+                exposure.token,
+                path,
+            )
+            return Response(
+                "The file changed since this link was made. Expose it again for "
+                "the current one.",
+                status_code=403,
+            )
 
-    content_type = _content_type(path)
-    logger.info(
-        "share_served path=%s mime=%s size=%s", path, content_type, stat.st_size
-    )
-    return StreamingResponse(
-        _chunks(path),
-        status_code=200,
-        headers={
-            "Content-Type": content_type,
-            "Content-Length": str(stat.st_size),
-            "Content-Disposition": content_disposition(path.name),
-        },
-    )
+        content_type = _content_type(path)
+        logger.info(
+            "share_served path=%s mime=%s size=%s", path, content_type, stat.st_size
+        )
+        return StreamingResponse(
+            _chunks(handle),
+            status_code=200,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(stat.st_size),
+                "Content-Disposition": content_disposition(path.name),
+            },
+        )
+    except BaseException:
+        # The response owns the handle once it is returned; until then it is
+        # this call's to close.
+        handle.close()
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -593,8 +611,9 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         conversation otherwise.
 
         Args:
-            path: The file on this machine, as an absolute path or one
-                relative to where slife2 was started.
+            path: The file on this machine, as an absolute path or one relative
+                to your working directory — the data directory, where your own
+                tools run.
 
         Returns:
             `url` — the public link to hand to whoever needs the file — its
@@ -603,7 +622,10 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         """
         if not path.strip():
             raise ToolError("no file was named — pass the path of the file to publish.")
-        target = Path(path)
+        try:
+            target = local_path(path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         if not target.exists():
             raise ToolError(f"there is no file at {path}.")
         if not target.is_file():

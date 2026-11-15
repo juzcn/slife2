@@ -109,7 +109,7 @@ from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers import timeouts as _T
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
-from slife2.libs.host.paths import home
+from slife2.libs.host.paths import local_path
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
 from slife2.libs.store.answer import search_answer
@@ -414,18 +414,6 @@ async def _fetch_url(
         ) from exc
 
 
-def _local_path(entry: str) -> Path:
-    """One local source path, as the caller's own working directory spells it.
-
-    **A relative path is the model's**, and its working directory is the data
-    directory — where its own tools run, and where a path a tool printed is
-    relative to.  This daemon's working directory is `runtime/`, so resolving a
-    relative path here would name a different file, or none at all.
-    """
-    path = Path(entry)
-    return path if path.is_absolute() or path.drive else home() / path
-
-
 #: What survives into a fetched file's name.  Letters, digits, dots and spaces
 #: are kept — a name a site chose is worth keeping — and everything else becomes
 #: a dash, the compromise `slug` makes for the mirrors.
@@ -495,7 +483,10 @@ async def _save_entry(
         name = _download_name(entry, mime)
         mime = mime or (mimetypes.guess_type(name)[0] or "")
     else:
-        source = _local_path(entry)
+        try:
+            source = local_path(entry)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         if not source.is_file():
             raise ToolError(f"no such file: {source}")
         name = source.name
@@ -760,10 +751,20 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         A note, a day and a report are one copy on disk; the row carries the
         metadata and the address.  A row whose `mirror` is empty has no text to
-        read and answers empty (`body_of`).
+        read and answers empty (`body_of`).  **A row whose file is gone is
+        refused by name**: the store raises, because a document whose text is
+        gone is not an empty one, and the sentence a model reads has to say
+        which document and what happened — the same rule `dump_target` and
+        `file_target` state for the other two readers.
         """
         opened = await cabinet(ctx)
-        return await off_loop(opened.body_of, row)
+        try:
+            return await off_loop(opened.body_of, row)
+        except (OSError, UnicodeError) as exc:
+            raise ToolError(
+                f"{row.get('kind') or 'document'} {row.get('key')!r} is recorded "
+                f"but its file is gone or unreadable: {exc}"
+            ) from exc
 
     async def file_target(ctx: Context, path: str) -> Path:
         """The saved file a path names, resolved and checked.

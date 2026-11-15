@@ -310,6 +310,54 @@ async def test_a_note_is_created_then_replaced_by_an_update() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_note_whose_file_is_gone_is_refused_by_name() -> None:
+    """A document whose text is gone is not one with an empty text.
+
+    The row is the address and the file is the document, so a person deleting
+    or renaming the file leaves a row that cannot answer.  The reader names the
+    document and says what happened instead of letting a raw
+    `FileNotFoundError` out of the tool.
+    """
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "note_write", subject="gone", content="body")
+        (data_dir() / wrote["path"]).unlink()
+
+        with pytest.raises(ToolError, match="file is gone"):
+            await ask(client, "note_read", subject="gone")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_mirror_does_not_take_the_whole_cabinet_down() -> None:
+    """**One damaged document is one document, not a dead cabinet.**
+
+    A changed embedding model makes the next open walk every vectorized
+    document; a missing mirror raised there, so `sync` failed and *every* tool
+    for that agent failed with it — including the ones that answer from rows
+    alone.  The index reads the damaged document as having no text and names
+    it; the row is still listed, and the reader above still refuses its file.
+    """
+
+    class AnotherEmbedder(StubEmbedder):
+        def __init__(self) -> None:
+            super().__init__(identity="stub:two")
+
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "note_write", subject="gone", content="body")
+    (data_dir() / wrote["path"]).unlink()
+
+    # A fresh server means a fresh `synced` set, and the changed identity makes
+    # `sync` walk the corpus.
+    async with Client(build_server(load(), embedder=AnotherEmbedder())) as client:
+        listed = await payload(client, "note_list")
+        with pytest.raises(ToolError, match="file is gone"):
+            await ask(client, "note_read", subject="gone")
+
+    assert [entry["key"] for entry in listed["entries"]] == ["gone"], (
+        "the row is still listed; only its text is gone"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
     """**A replacement's id is read from the row it updated, not from its snapshot.**
 

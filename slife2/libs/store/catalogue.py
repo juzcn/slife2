@@ -69,6 +69,7 @@ from slife2.libs.store.index import (
     set_index_meta,
     storable,
     vector_identity,
+    where_clause,
 )
 
 logger = logging.getLogger(__name__)
@@ -1735,6 +1736,21 @@ class ToolStore:
             sentences = [" ".join(str(word) for word in keywords)]
 
         over = min(limit * _OVERFETCH, MAX_SQL_VARS)
+        # **A filter the KNN cannot apply costs the page places too.**  The
+        # semantic leg is a `vec0` KNN and every filter — a category, a status,
+        # `unloaded_only` — is re-applied to its answer afterwards
+        # (`_rows_in_order`), so a chunk belonging to a filtered-out row still
+        # occupies one of the `k` places and is then dropped.  The page can come
+        # back empty while matching rows exist beyond those chunks — the shape
+        # `tool_search(unloaded_only=true, sentences=[...])` produces on a
+        # machine whose loaded tools are the nearest ones.  The excluded chunks
+        # are counted and the page widened by them, bounded by the same ceiling
+        # the unfiltered page uses.
+        if clauses:
+            excluded = await asyncio.to_thread(
+                self._excluded_chunks, clauses, values
+            )
+            over = min(over + excluded, MAX_SQL_VARS)
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
@@ -1993,6 +2009,35 @@ class ToolStore:
             )
             for vector in vectors
         ]
+
+    def _excluded_chunks(self, clauses: list[str], values: list[Any]) -> int:
+        """How many indexed chunks the search's filters exclude.
+
+        **The unit `k` is counted in.**  The keyword leg filters in SQL, but the
+        semantic leg cannot — a `vec0` KNN has no column to filter on — so its
+        answer is filtered after fusion by `rows_in_order`, and the filtered
+        chunks have already spent their places in `k`.  This is the number the
+        page is widened by so the rows that pass the filter keep the page they
+        asked for.
+        """
+        if not clauses:
+            return 0
+        # **The chunks of the rows the filter rejects**, which is the set that
+        # spends places in `k` and is dropped afterwards.  Written as the
+        # complement of the filtered set rather than as the negation of each
+        # clause, so a NULL in a filtered column cannot turn "does not match"
+        # into "unknown" and count the wrong side.
+        where = where_clause(clauses)
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tool_chunk c"
+                    " JOIN tool t ON t.name = c.name"
+                    " WHERE t.rowid NOT IN"
+                    f" (SELECT rowid FROM tool WHERE 1 = 1 {where})",
+                    values,
+                ).fetchone()[0]
+            )
 
     def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, and the dedup it cannot do itself.

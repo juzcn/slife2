@@ -770,6 +770,19 @@ class _TunnelProviderBase:
                 await asyncio.to_thread(self._teardown)
                 self._drop_url()
                 down_since = None
+            elif self.public_url is not None:
+                # **An inherited URL is a tunnel this process did not start.**
+                # `SLIFE2_FILE_TUNNEL_URL` is how another instance (or a
+                # subagent's plugin process) hands down a tunnel that is already
+                # both published and reachable; there is no child here to probe,
+                # heal or respawn, and `is_reachable` answers from the URL
+                # alone.  Starting one would mint a second tunnel and overwrite
+                # the variable the parent passed down, so every link minted from
+                # then on would point at a hostname the parent does not know.
+                # The monitor's whole job for this case is to leave it alone.
+                down_since = None
+                await asyncio.sleep(_T.timeouts.pacing.tunnel_health)
+                continue
 
             # No tunnel — but an attempt may already be on its way: the plugin
             # eager-starts the tunnel on a task of its own, so this pass

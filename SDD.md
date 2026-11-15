@@ -639,6 +639,10 @@ subagent plugin would be the transport to it — a new protocol hop for every
 message — while a subagent's identity is already the conversation id.
 
 A subagent is created with `subagent_set` and removed with `subagent_remove`.
+**The record is the membership**: a message addressed to a name with no
+`subagent.yaml` — never made, or removed — is refused rather than starting a
+conversation that would recreate the directory with no record and block the name
+against both tools.
 After creation it is reached over the local network under `subagent_*` names:
 the direct seven (`subagent_send_message`, `subagent_task_response`,
 `subagent_continue_task`, `subagent_cancel_task`, `subagent_list`,
@@ -949,12 +953,14 @@ The window draws the message inside the running turn, in its own bubble, without
 closing the answer still being streamed. There is one queue: the agent server's
 inbox.
 
-**A message folded into a turn is delivered by it.** If that turn ends without an
-answer — cancelled or failed — the cut-in pair is still in its record, so its
-caller is answered as injected with no text. Running it again would put the same
-prompt in the conversation twice and have the model answer it twice. Only a
-refused record, whose messages are rolled back, leaves the message owing itself
-a turn.
+**A message folded into a turn is delivered by it once the pair is written.**
+If that turn then ends without an answer — cancelled or failed — the cut-in pair
+is still in its record, so its caller is answered as injected with no text.
+Running it again would put the same prompt in the conversation twice and have
+the model answer it twice. A take whose pair was never written — the fit failed,
+or the interruption landed before the append — is not a delivery: its caller
+still owes itself a turn and runs it. A refused record, whose messages are
+rolled back, leaves the message owing itself a turn the same way.
 
 ### 5.5 Context decision and memory selection
 
@@ -1285,7 +1291,11 @@ reached is reported and left out; the model simply has fewer tools.
 A declaration is the whole list, and it is refreshed before every search. The
 whole list is what makes a deleted entry stop being a hit; refreshing is what
 makes dropping a directory into `skills/` or editing the configuration take
-effect at the next search. The hub's own tools are rows too.
+effect at the next search. The hub's own tools are rows too. A plugin that is up
+but cannot answer this round keeps the sources it declared last time — its rows
+stay in the catalogue, and the address book keeps their routes and its place in
+`servers()` — so one late report costs freshness and nothing else. A plugin that
+answers with fewer sources has those sources removed.
 
 A plugin's own tools state the arguments they take; the hub stores the input
 schema in the catalogue's `schema` column, which spells absence as the empty
@@ -1525,7 +1535,10 @@ The live-context list is a row, not a file. It is written in the same transactio
 as the turn that changed it. A turn can point outside itself: a tool output too
 large for the conversation is stored whole in the cabinet, and the turn keeps a
 marked head of it, so the row still holds exactly what the model saw and the
-whole is reachable by the tool call id.
+whole is reachable by the tool call id. **A stored value that is not a list of
+turn ids is refused rather than coerced**: `true` is an `int` and a mapping
+iterates its keys, so a damaged value would otherwise add a turn nobody named —
+and the append path would write the wrong id back for good.
 
 **A read does not create the file.** A conversation that has never run and a
 removed subagent's stale name are the same absent store, and a read answers its
@@ -1639,7 +1652,10 @@ place before the row's transaction commits, so a filesystem that refuses the
 file takes the row, its keyword text and its vectors back with it, and **there
 is no body column**: the row is metadata and the address, not a second copy.
 The file holds the text exactly as the caller gave it; a note's subject, a day's
-date and a report's title are the row's and are never prepended to it. **Every answer about a document carries `path`** —
+date and a report's title are the row's and are never prepended to it. **A
+mirror file that is gone is refused by name when read, and skipped by the index
+passes** — a document whose text is gone is not one with an empty text, but one
+damaged file must not take the cabinet down with it. **Every answer about a document carries `path`** —
 the file relative to the data directory, where the agent's own tools run — so a
 model can hand the same file to `pandoc`, `rg` or a shell; the internal `mirror`
 and `file_path` stay out of the answer, and the readers carry `path` too. A
@@ -2464,7 +2480,12 @@ token to file, pinned to the file's device, inode, size, and modification time. 
 link stops working when the file changes, when `unexpose_local_image` is called,
 or when the process exits. A share outlives the turn that made it. A link belongs
 to the conversation that exposed it: two conversations exposing one file hold two
-tokens, each revocable only by the one that made it.
+tokens, each revocable only by the one that made it. A relative `path` is
+resolved against the caller's data directory — where the agent's own tools run —
+not against the daemon's working directory, which is the reconstructible runtime
+directory. The response is built from an open handle: the pin, the length and
+the bytes served are one observation of the file, so a file replaced while a
+request is in flight is never served under the old token.
 
 Three providers are supported:
 
@@ -2510,7 +2531,10 @@ agent's `media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork
 writes to its maker's. A caller that names an `output` path writes there instead
 — a relative path is relative to that directory, an absolute one is used as
 written. They never go to the process's working directory, which is the runtime
-directory and reconstructible. The file-to-file pair is `transcribe_audio`
+directory and reconstructible. **An `output` file is replaced only by a complete
+artifact**: a generated artifact is renamed onto it from the same directory, and
+a transcript is written beside it and renamed over it, so a failed write leaves
+the file that was there whole. The file-to-file pair is `transcribe_audio`
 (audio `input` → transcript `output`, or the text when omitted) and
 `text_to_speech` (a text file in `input` when `text` is empty → the audio
 `output`). Every media tool answers with the path as text.
@@ -2787,7 +2811,7 @@ The four shapes an undeclared fallback takes:
 | A turn fails with an image attached | Drop every image from the live list, keeping the note | The bytes in the live conversation | An image attached after the repair; the record, which never had the pixels | The note, the dropped-image sentence, and the original error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
-| A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
+| A stored turn body will not parse, or a message's shape is not one the reader can take | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
 | A stored `usage` breakdown will not parse, or is not the four-key shape | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
 | A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
@@ -2813,6 +2837,9 @@ The four shapes an undeclared fallback takes:
 | The post-turn trim cannot reach the hub | Skip the trim | The trim for that turn; the set stays over budget | The next turn, which fails loudly on a dead hub | A warning; an error for a task |
 | A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
 | A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
+| A plugin's declaration refresh fails | Keep the sources it declared last time in the address book | Freshness of that plugin's sources | A plugin that answers with a changed list, which replaces them | A warning naming the plugin |
+| A mirrored document's file is gone | Index its row without a body; the readers refuse the file by name | The document's text in search and its read | A row that exists and a file that reads | A warning naming the row |
+| An inherited file-tunnel URL is present | Treat it as active and leave it alone | A liveness probe for a URL this process did not start | A URL this process started, which it probes and heals | `tunnel_status` |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
 | A trim answer cannot be read | Return `{}`; `trim_answer` refuses it | The trim and the names the model would have seen | A call that could not be made, which raises | A refusal in the server log |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | A debug line naming the link |

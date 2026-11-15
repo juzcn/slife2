@@ -1304,6 +1304,42 @@ def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
     assert {"ours__waiting", "skill:alpha", "cli:alpha"} <= only_names
 
 
+def test_unloaded_only_widens_the_semantic_page_by_the_filtered_chunks(
+    tmp_path,
+) -> None:
+    """**The filter is applied after the KNN, so the KNN has to look past it.**
+
+    `unloaded_only` is in the keyword leg's SQL and in `rows_in_order`, but a
+    `vec0` KNN cannot filter.  Every chunk of a loaded tool still takes one of
+    the `k` places and is dropped afterwards, so a sentences-only search whose
+    nearest chunks all belong to loaded tools came back with an empty page —
+    a confident "nothing matches" — although unloaded tools existed beyond
+    them.  The page is widened by the filtered chunks.
+    """
+    store = store_at(tmp_path)
+    # Paragraphs, so every chunk of the long document carries the query's word
+    # and the loaded tools are the strictly nearest ones; a single paragraph
+    # would be packed into fewer, unevenly-similar chunks.
+    loaded = "\n\n".join(["工具 工具 工具"] * 400)
+    merge(
+        store,
+        "ours",
+        "plugin",
+        [tool("ours__held", loaded), tool("ours__held2", loaded)],
+    )
+    merge(store, "other", "plugin", [tool("ours__free", "trump")])
+    store.set_load("ours__held", LOADED)
+    store.set_load("ours__held2", LOADED)
+
+    page = asyncio.run(
+        store.search(
+            sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True
+        )
+    )
+
+    assert [row["name"] for row in page["results"]] == ["ours__free"]
+
+
 def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
     """**A column added to the index is a shape change, not a rules change.**
 

@@ -1085,6 +1085,14 @@ class TurnStore:
         if summary is None and tags is None:
             return False
         with self._connect() as connection:
+            # **The read is inside the write lock.**  The two columns are read
+            # and written back as a pair, so a second writer's call landing
+            # between the SELECT and the UPDATE would be erased by this one
+            # writing the values it read before that commit.  The implicit
+            # transaction starts at the first UPDATE, which is too late; this is
+            # the same `BEGIN IMMEDIATE` `set_context_turns` takes for the same
+            # reason.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT messages, summary, tags FROM turn WHERE rowid = ?",
                 (turn_id,),
@@ -1397,8 +1405,8 @@ class TurnStore:
         already there.  The keyword leg and the time-ranked branch filter them
         in SQL; the semantic leg cannot (a `vec0` KNN has no turn id to filter
         on), so its answer is filtered after fusion — where the time window is
-        filtered too — and `over` is widened by the number excluded so the
-        places they took can be refilled.
+        filtered too — and `over` is widened by **the chunks the excluded turns
+        hold**, which is what they really occupy in a `k` that counts chunks.
 
         Raises:
             EmptyQuery: If no sentence is given and the query holds no term.
@@ -1428,7 +1436,18 @@ class TurnStore:
             )
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
-        over = min(limit + len(excluded), MAX_SQL_VARS)
+        # **`k` counts chunks, while `exclude` names turns.**  The semantic leg
+        # is a `vec0` KNN and cannot filter a keep-list out of its candidates, so
+        # the turns excluded are removed after fusion — which means every chunk
+        # of every excluded turn still occupies a place in the k.  Widening by
+        # `len(excluded)` repays one chunk per excluded turn, not the four an
+        # ordinary turn holds, so a kept context can fill the whole page and a
+        # semantic recall comes back holding nothing but turns the caller
+        # already has.  The chunk count is what the excluded turns really took.
+        excluded_chunks = (
+            await off_loop(self._chunks_of, list(excluded)) if excluded else 0
+        )
+        over = min(limit + len(excluded) + excluded_chunks, MAX_SQL_VARS)
         keyword: list[int] = []
         if words:
             try:
@@ -1778,6 +1797,31 @@ class TurnStore:
             lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
         return lists
 
+    def _chunks_of(self, turn_ids: Sequence[int]) -> int:
+        """How many indexed chunks those turns hold.
+
+        **The unit `k` is counted in.**  A `vec0` KNN ranks chunks, so an
+        excluded turn takes one place per chunk it owns — and the recall has to
+        widen its page by that many to leave the same number of places for the
+        turns the caller is asking for.  Chunked, because the keep-list can be
+        longer than one statement may bind (`MAX_SQL_VARS`).
+        """
+        wanted = normalise_ids(turn_ids)
+        if not wanted:
+            return 0
+        total = 0
+        with self._connect() as connection:
+            for start in range(0, len(wanted), MAX_SQL_VARS):
+                chunk = wanted[start : start + MAX_SQL_VARS]
+                total += int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM turn_chunk"
+                        f" WHERE turn_id IN ({_marks(chunk)})",
+                        chunk,
+                    ).fetchone()[0]
+                )
+        return total
+
     def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.
 
@@ -1844,7 +1888,22 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
         return []
-    return normalise_ids(_structural(row["turn_ids"], what="context.turn_ids"))
+    parsed = _structural(row["turn_ids"], what="context.turn_ids")
+    # **A parsed value is not yet a list of turn ids.**  `normalise_ids` coerces
+    # whatever it is handed, and two shapes coerce *silently* into plausible
+    # ids: `[true]` becomes `[1]` because `bool` is an `int`, and `{"5": true}`
+    # becomes `[5]` because a mapping iterates its keys.  Both would add a turn
+    # the damage did not name to the live conversation — and `append_context`
+    # writes that list back, making the wrong id permanent.  The writer of this
+    # column produces a list of ints and nothing else, so anything else is
+    # damage for the same reason an unparseable string is.
+    if not isinstance(parsed, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) for value in parsed
+    ):
+        raise ValueError(
+            f"a stored value did not read as turn ids: context.turn_ids ({parsed!r})"
+        )
+    return normalise_ids(parsed)
 
 
 def write_context(
@@ -1979,6 +2038,36 @@ def _usage(raw: Any, *, what: str) -> Usage | None:
         return None
 
 
+def _readable_message(message: Mapping[str, Any]) -> bool:
+    """Whether `Message.from_wire` can read this message without raising.
+
+    **The body's outer shape is not the whole shape.**  `_messages` refuses a
+    value that is not a list of mappings, but a mapping inside it can still hold
+    a `tool_calls` no reader survives: `Message.from_wire` iterates the field and
+    asks each entry for its `function`, so a string iterates into characters and
+    an entry that is a number is not a mapping — an `AttributeError` raised out
+    of the runtime's `restore`, which loses the *whole conversation* rather than
+    the one damaged turn `_messages` exists to contain.
+
+    The fields checked are exactly the ones that reader assumes: `tool_calls`
+    absent or a list, each entry a mapping, and its `function` absent or a
+    mapping (a mapping with no `function` is read as an empty one, which is what
+    an id-less or name-less call already means).
+    """
+    calls = message.get("tool_calls")
+    if calls is None:
+        return True
+    if not isinstance(calls, list):
+        return False
+    for call in calls:
+        if not isinstance(call, Mapping):
+            return False
+        function = call.get("function")
+        if function is not None and not isinstance(function, Mapping):
+            return False
+    return True
+
+
 def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     """A stored turn's `messages`, tolerating one that will not read as them.
 
@@ -2003,6 +2092,10 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     refused exactly as one that will not parse is: they are the same fact about
     the row, and the same answer is honest for both.
 
+    **And a mapping's fields are part of that shape** (`_readable_message`): a
+    message whose `tool_calls` is a string is a body `Message.from_wire` raises
+    out of, which is the total loss again one level in.
+
     `what` is not decoration: a damaged row that is read as empty leaves a log
     line as the only trace of it, so the line has to say *which* row — the
     alternative is an operator counting rows by hand.
@@ -2011,7 +2104,11 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
         parsed = None
-    if isinstance(parsed, list) and all(isinstance(one, dict) for one in parsed):
+    if (
+        isinstance(parsed, list)
+        and all(isinstance(one, dict) for one in parsed)
+        and all(_readable_message(one) for one in parsed)
+    ):
         return parsed
     logger.warning("%s did not read as a list of messages; reading it as empty", what)
     return []

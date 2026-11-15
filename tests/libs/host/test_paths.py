@@ -25,6 +25,7 @@ from slife2.libs.host.paths import (
     in_checkout,
     in_home,
     known_homes,
+    local_path,
     register_home,
     runtime_dir,
     schedule_dbs,
@@ -236,6 +237,35 @@ def test_a_subagents_directory_is_inside_its_parents(
     assert agent_dir("jack") == jack, "and the agent's own does not move"
     # The one name that would have collided: an agent's own cabinet.
     assert agent_dir("jack", "cabinet") != jack / "cabinet"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows spelling")
+def test_a_drive_relative_path_is_resolved_in_the_home(tmp_path: Path) -> None:
+    """`C:foo` is not absolute; it is the caller's working directory on C:.
+
+    The daemon's current directory on a drive is a process-global fact it must
+    not lend to a caller, so a path that names the home's own drive is resolved
+    under the home — the model's working directory — rather than left for the
+    filesystem to place against whatever the daemon last used.
+    """
+    root = data_dir()
+    assert local_path(f"{root.drive}notes.txt") == root / "notes.txt"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows spelling")
+def test_a_path_relative_to_another_drive_is_refused() -> None:
+    """There is no honest anchor for it, so it is refused rather than guessed."""
+    root = data_dir()
+    other = "D:" if root.drive.casefold() != "d:" else "C:"
+
+    with pytest.raises(ValueError, match="relative to drive"):
+        local_path(f"{other}notes.txt")
+
+
+def test_a_relative_path_is_resolved_in_the_caller_home(tmp_path: Path) -> None:
+    """The daemon's working directory is `runtime/`; the model's is the home."""
+    assert local_path("agents/jack/notes.txt") == home() / "agents/jack/notes.txt"
+    assert local_path(str(tmp_path / "absolute.txt")) == tmp_path / "absolute.txt"
 
 
 def test_a_subagent_stays_inside_its_parent(

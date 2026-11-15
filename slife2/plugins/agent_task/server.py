@@ -108,9 +108,8 @@ from slife2.libs.turn.messages import Message, ToolSpec
 from slife2.libs.turn.prompt import render_instruction, render_system_prompt
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
 from slife2.libs.turn.tools import (
-    ATTACH_IMAGE,
     CATALOGUE_MISSING,
-    CHECK_NEW_INPUT,
+    LIVE_CONVERSATION_TOOLS,
     CatalogueAnswer,
     Tool,
     ToolFailed,
@@ -126,15 +125,16 @@ SERVER_NAME = AGENT_TASK_SERVER_NAME
 #: runs under is the channel its answers come back on.
 CONFIG_KEY = CHANNEL
 
-#: **The two tools a task's model must not have.**  They act on a *live*
-#: conversation: `_check_new_input` pops a queued message out of the running
-#: loop's inbox and hands it to whoever called, and `attach_image` injects parts
-#: into that loop's last user message.  A task shares the agent's identity by
-#: design — same context, same store, same tools — but it is not that live loop,
-#: and the shared identity is exactly what makes the two indistinguishable at
-#: the agent server.  So they are withheld here, and a by-name call is answered
-#: "not here" instead of stealing the main conversation's message or image.
-LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
+# **The two tools a task's model must not have**, from the one set that says
+#: which tools act on a *live* conversation (`slife2.libs.turn.tools`).
+#: `_check_new_input` pops a queued message out of the running loop's inbox and
+#: hands it to whoever called, and `attach_image` injects parts into that loop's
+#: last user message.  A task shares the agent's identity by design — same
+#: context, same store, same tools — but it is not that live loop, and the
+#: shared identity is exactly what makes the two indistinguishable at the agent
+#: server.  So they are withheld here, and a by-name call is answered "not here"
+#: instead of stealing the main conversation's message or image.  The same set
+#: is what the loop refuses to send to the background.
 
 # The tools, the states, the channel and the marker are
 # `slife2.libs.plugin.vocabulary`'s: each crosses a process boundary — the

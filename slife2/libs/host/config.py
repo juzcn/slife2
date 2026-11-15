@@ -3646,7 +3646,12 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping with host/port/path")
-    host = str(raw.get("host") or default.host)
+    # **The padding is not part of the host.**  A quoted `" localhost "` — an
+    # easy paste — passed `is_loopback_host`, which strips before judging, and
+    # then built `http:// localhost :24000/mcp`, which is not an URL anything
+    # can dial.  The field is read stripped so the address and the judgement are
+    # about the same string.
+    host = str(raw.get("host") or default.host).strip()
     if ":" in host or "/" in host:
         # **The first of the three fields, and the last to be refused.**  `port`
         # and `path` are refused below and the host was copied through,

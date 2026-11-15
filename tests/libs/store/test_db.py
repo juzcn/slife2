@@ -19,6 +19,7 @@ import pytest
 from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
+from slife2.libs.store import db
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     _TURN_COLUMNS,
@@ -224,6 +225,13 @@ async def test_turns_are_newest_first(tmp_path) -> None:
         "5",
         "[1, 2]",
         "null",
+        # Parses into a list of mappings, and a mapping's own fields are the
+        # shape too: `Message.from_wire` iterates `tool_calls` and asks each
+        # entry for `function`, so these raised an `AttributeError` out of the
+        # runtime's restore and lost the whole conversation.
+        '[{"role": "assistant", "content": "hi", "tool_calls": "oops"}]',
+        '[{"role": "assistant", "content": "hi", "tool_calls": [1]}]',
+        '[{"role": "assistant", "content": "hi", "tool_calls": [{"function": "x"}]}]',
     ],
 )
 async def test_a_damaged_row_does_not_hide_the_others(tmp_path, caplog, damage) -> None:
@@ -291,6 +299,76 @@ async def test_a_summary_over_a_damaged_row_is_still_written(tmp_path) -> None:
     assert store.update_summary(1, summary="a note", tags="filed") is True
     (record,), _ = store.turns()
     assert (record.summary, record.tags) == ("a note", "filed")
+
+
+@pytest.mark.asyncio
+async def test_a_summary_update_takes_the_write_lock_before_it_reads(tmp_path, monkeypatch) -> None:
+    """The read and the write are one transaction, not a read then a write.
+
+    `update_summary` writes both columns, so a second caller's tag update that
+    lands between this call's SELECT and its UPDATE is erased when this call
+    writes the summary and tag it read before that commit — the lost update a
+    read-modify-write without a write lock always has.  `BEGIN IMMEDIATE` is
+    what makes the SELECT part of the write; the first statement on the
+    connection is the assertion.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await store.save_turn(
+        embedder=EMBEDDER, messages=[{"role": "user", "content": "hi"}]
+    )
+
+    statements: list[str] = []
+    original = db.connect_to
+
+    def traced(target):
+        connection = original(target)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(db, "connect_to", traced)
+    assert store.update_summary(1, tags="planning") is True
+
+    assert statements[0].strip().upper() == "BEGIN IMMEDIATE", statements
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damaged",
+    [
+        # `bool` is an `int`, so this coerces to turn 1.
+        "[true]",
+        # A mapping iterates its keys, so this coerces to turn 5.
+        '{"5": true}',
+        # A float truncates to a plausible id.
+        "[1.5]",
+        # A numeric string is not what this column's writer writes.
+        '["7"]',
+    ],
+)
+async def test_a_damaged_live_context_is_refused_rather_than_coerced(
+    tmp_path, damaged
+) -> None:
+    """A parsed value is not yet a list of turn ids.
+
+    `normalise_ids` coerces whatever it is handed, and the coercions that
+    produce a *plausible* id are the dangerous ones: `[true]` becomes `[1]` and
+    `{"5": true}` becomes `[5]`, so a damaged list silently adds a turn nobody
+    named to the live conversation — and `append_context` writes it back, making
+    the wrong id permanent.  The writer of this column only ever writes a list
+    of ints, so anything else is structural damage and is refused.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
+            " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
+            (damaged,),
+        )
+
+    with pytest.raises(ValueError, match="context.turn_ids"):
+        store.context_turns()
 
 
 @pytest.mark.asyncio

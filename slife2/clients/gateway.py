@@ -588,6 +588,14 @@ class Connection:
         client = self._client
         if client is None:  # pragma: no cover - only reachable after `fail`
             return
+        # **The count is taken before the request, not after it.**  The peer can
+        # say its listing changed while the request is in flight, and the
+        # notification is processed on the client's own receive path: if the
+        # continuation resumes after that, a snapshot taken here would already
+        # contain the increment and the stale answer would be marked ready —
+        # the race `invalidate` exists to close.  Asking "did an invalidation
+        # land since this ask began" makes the answer about the whole request.
+        invalidations = self._invalidations
         try:
             async with asyncio.timeout(_T.timeouts.ready.connect_tools):
                 listed = await client.list_tools()
@@ -596,7 +604,6 @@ class Connection:
             self.fail(exc)
             return
         failures = self._failures
-        invalidations = self._invalidations
         self._listed_at = time.monotonic()
         if self._on_listed is not None:
             await self._on_listed(listed)
@@ -608,11 +615,13 @@ class Connection:
         # usable throughout, which is the point: it was already recorded, and
         # only a refusal may take it away.
         #
-        # **And a notification that landed during the merge is believed.**  The
-        # listing being recorded was answered before the peer said it changed,
-        # so it is known to be wrong: recomputing readiness from it would serve
-        # the stale rows for up to `relist_after`.  Leaving `_ready` false makes
-        # the next ask re-list.
+        # **And a notification that was believed is believed wherever it
+        # landed.**  The listing being recorded was answered before the peer
+        # said it changed — whether the notification arrived during the merge
+        # or while the request was still in flight — so it is known to be
+        # wrong: recomputing readiness from it would serve the stale rows for
+        # up to `relist_after`.  Leaving `_ready` false makes the next ask
+        # re-list.
         if self._failures == failures and self._client is not None:
             self._error = ""
         self._ready = (

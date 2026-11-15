@@ -492,6 +492,17 @@ class MeshResponder(Responder):
             try:
                 outcome = await waiter.wait()
             except BaseException:
+                if self._rounds.get(task_id) is not asyncio.current_task():
+                    raise
+                # **A cancellation this responder caused is not a withdrawal.**
+                # A retry that replaced this round cancels it (`Responder.
+                # _start_round`), and the new round has already taken the id in
+                # `_rounds` by the time this handler runs.  Reading that as the
+                # peer withdrawing told the agent to abandon work the peer had
+                # actually retried, and `_note_withdrawn` then made a later
+                # `task_response` read as "withdrawn by …".  Only a round that
+                # is still the registered one can have been cancelled by the
+                # peer path; anything else is the machinery's own ending.
                 # The responder cancelled this round.  Surface the peer's
                 # withdrawal to the agent — as an inbound MESSAGE, never a
                 # control signal — only when it can actually have been one:

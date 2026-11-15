@@ -551,6 +551,44 @@ async def test_a_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_recall_widens_by_chunks_not_by_excluded_turns(tmp_path) -> None:
+    """`k` counts chunks, so an excluded turn takes one place per chunk it has.
+
+    A kept turn of three chunks occupies three of the KNN's places while the
+    keep-list names it once.  Widening by the number of excluded *turns* repaid
+    one place for every three the kept context took, so a semantic recall whose
+    nearest chunks were all kept turns came back with nothing — although a turn
+    beyond them matched.  The two kept turns below hold six chunks between
+    them; the old widening (1 + 2 = 3) saw only their chunks, the fix widens by
+    those six and finds the turn past them.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    kept = "\n\n".join(["工具 工具 工具"] * 400)
+    for _ in range(2):
+        await store.save_turn(
+            messages=[
+                {"role": "user", "content": kept},
+                {"role": "assistant", "content": "好"},
+            ],
+            embedder=embedder,
+        )
+    await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump"},
+            {"role": "assistant", "content": "found"},
+        ],
+        embedder=embedder,
+    )
+
+    ranked = await store.recall(
+        query="", sentences=["工具"], embedder=embedder, limit=1, exclude={1, 2}
+    )
+
+    assert [turn_id for turn_id, _ in ranked] == [3]
+
+
+@pytest.mark.asyncio
 async def test_a_period_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
     """The time-ranked branch has no similarity, so it filters the same way."""
     store = TurnStore(tmp_path / "jack.turn.db")

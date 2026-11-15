@@ -1486,9 +1486,31 @@ class CabinetStore:
         return (self.root / mirror).read_bytes().decode("utf-8")
 
     def _with_body(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A row with `body` filled in, for the index passes."""
+        """A row with `body` filled in, for the index passes.
+
+        **A missing mirror is one damaged document, not a dead cabinet.**
+        `body_of` raises for the readers, which is right — a document whose text
+        is gone is not an empty one.  But this is the *index* path, and it runs
+        over the whole corpus when a cabinet is opened: one file a person
+        deleted or renamed used to raise out of `sync`, so every cabinet tool for
+        that agent failed with a raw `FileNotFoundError`, and the pass stopped
+        before indexing anything after it.  The index reads the document as
+        having no text (its row and metadata are still indexed), the warning
+        names the row, and `document_text` still refuses the file by name where
+        a person can act on it.
+        """
         found = dict(row)
-        found["body"] = self.body_of(found)
+        try:
+            found["body"] = self.body_of(found)
+        except (OSError, UnicodeError) as exc:
+            logger.warning(
+                "cabinet %s: %s %r has no readable file: %s",
+                self.path,
+                found.get("kind"),
+                found.get("key"),
+                exc,
+            )
+            found["body"] = ""
         return found
 
     def _with_path(self, row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:

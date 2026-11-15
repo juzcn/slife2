@@ -542,6 +542,20 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     )
 
 
+def test_a_server_host_is_read_without_the_padding(tmp_path) -> None:
+    """**A quoted `" localhost "` passed the loopback check and built a bad URL.**
+
+    `is_loopback_host` strips before judging, but the value was stored raw, so
+    the address became `http:// localhost :24000/mcp` — a URL whose hostname
+    keeps the spaces, which nothing can dial.  The field is stripped where it is
+    read, so the judgement and the address are about one string.
+    """
+    one = load(write(tmp_path, 'servers:\n  context:\n    host: " localhost "\n'))
+
+    assert one.server("context").host == "localhost"
+    assert one.server("context").url.startswith("http://localhost:")
+
+
 def test_a_server_host_beyond_loopback_is_refused(tmp_path) -> None:
     """**Loopback is the security boundary, so a bind beyond it is refused.**
 

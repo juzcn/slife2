@@ -74,6 +74,7 @@ from slife2.plugins.schedule.server import (
     poll_forever,
     poll_once,
     reconcile,
+    retry_stale_dispatches,
     sweep_once,
 )
 from slife2.plugins.schedule.store import (
@@ -1418,6 +1419,44 @@ async def test_the_sweep_adopts_a_task_a_stopped_dispatch_had_started(
     run = ledger().run("daily", stamp)
     assert run is not None and run.status == PENDING
     assert run.agent_task_id == f"agent-task:daily@{stamp}"
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_a_dispatch_the_startup_sweep_could_not_resolve_is_retried(
+    tasks: Tasks,
+) -> None:
+    """**The peer the startup sweep could not reach is asked again.**
+
+    The launcher starts this plugin in the same wave as the agent-task plugin,
+    so the sweep can run while that peer is still binding its port.  The marked
+    run used to stay `pending` for the life of the process — `reconcile` cannot
+    see it (it has no task id), and only another restart resolved it.  The
+    resolution is remembered and retried on later passes.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    # What the stopped process's dispatch actually started.
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+
+    class NotUp:
+        async def call_tool(self, *args, **kwargs):
+            raise ConnectionError("the agent-task plugin is not listening yet")
+
+    await sweep_once(default_config(), tasks_client=NotUp())
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == PENDING
+    assert not run.agent_task_id, "nothing was settled about the run"
+
+    did = await retry_stale_dispatches(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.agent_task_id == f"agent-task:daily@{stamp}"
     assert any("resolved from a stopped dispatch" in line for line in did)
 
 

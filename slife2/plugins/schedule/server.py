@@ -905,15 +905,65 @@ async def sweep_once(
         try:
             resolved = await _resolve_dispatching(config, store, tasks_client)
         except Exception as exc:  # noqa: BLE001 - a peer that is not there
-            # Nothing is settled: this says nothing about the runs, only about
-            # this process's view of them, and the next start asks again.  The
-            # same rule `_reconcile_one` follows for a list it cannot get.
+            # **The resolution is remembered, and retried.**  Nothing is
+            # settled: this says nothing about the runs, only about this
+            # process's view of them — and the peer it could not reach is one
+            # that may answer a moment later.  The marker is stale by
+            # construction (the process that wrote it is gone), so a later pass
+            # may finish the job; leaving it to the next *restart* left the run
+            # `pending` for the life of this process, invisible to `reconcile`
+            # because it has no task id.
+            _unresolved_dispatches.add(store.path)
             logger.warning(
                 "%s: the runs left in a stopped dispatch were not checked: %s",
                 store.agent,
                 exc,
             )
             continue
+        # It answered: whatever this ledger had outstanding is resolved now.
+        _unresolved_dispatches.discard(store.path)
+        if resolved:
+            did.append(
+                f"{store.agent}: {resolved} run(s) resolved from a stopped dispatch"
+            )
+    return did
+
+
+#: Ledgers whose startup dispatch resolution could not reach the agent-task
+#: plugin, kept until one pass gets an answer.  **Only a marker that was already
+#: there when the sweep ran belongs here** — a dispatch started by this process
+#: after that point is live work, and a list fetched mid-dispatch says nothing
+#: about a task that is about to exist (`_resolve_dispatching`).  Keyed by path
+#: rather than by store, because a ledger is the same file on every pass.
+_unresolved_dispatches: set[Path] = set()
+
+
+async def retry_stale_dispatches(
+    config: Config, *, tasks_client: Client | None = None
+) -> list[str]:
+    """Resolve the startup dispatches a peer was not answering for.
+
+    The startup sweep asks the agent-task plugin once; a launcher starts the
+    plugins in one wave, so that peer can still be binding its port when the
+    sweep runs.  Without a retry the marked run stayed `pending` for the life of
+    the process: `reconcile` cannot see it (it has no task id), and the only
+    other resolution was another restart.  Each pass asks again until an answer
+    arrives, and only for the ledgers the sweep could not resolve.
+    """
+    did: list[str] = []
+    if not _unresolved_dispatches:
+        return did
+    for store in ledgers():
+        if store.path not in _unresolved_dispatches:
+            continue
+        try:
+            resolved = await _resolve_dispatching(config, store, tasks_client)
+        except Exception as exc:  # noqa: BLE001 - the peer is still not there
+            logger.debug(
+                "%s: the stopped dispatch is still unresolved: %s", store.agent, exc
+            )
+            continue
+        _unresolved_dispatches.discard(store.path)
         if resolved:
             did.append(
                 f"{store.agent}: {resolved} run(s) resolved from a stopped dispatch"
@@ -943,6 +993,12 @@ async def poll_forever(
     row on one agent into every agent's tasks going quiet until the process
     restarted, which is the opposite of what one shared clock is for.  Only a
     cancellation ends the loop.
+
+    **The startup sweep's one unanswered ask is retried on every pass**
+    (`retry_stale_dispatches`): the launcher starts this plugin in the same wave
+    as the agent-task plugin, so the peer can be binding its port when the sweep
+    runs, and a marked run left unresolved would stay `pending` until another
+    restart.  The retry asks only about ledgers the sweep could not resolve.
     """
     try:
         for line in await sweep_once(config(), tasks_client=tasks_client):
@@ -959,6 +1015,14 @@ async def poll_forever(
     while True:
         await asyncio.sleep(_T.timeouts.pacing.schedule_poll)
         try:
+            # **A startup resolution the peer was not up for is retried.**
+            # Before `poll_once`, so a run whose dispatch was unresolved is
+            # adopted or closed on the first pass the agent-task plugin answers,
+            # rather than waiting for the process to be restarted.
+            for line in await retry_stale_dispatches(
+                config(), tasks_client=tasks_client
+            ):
+                logger.info("%s", line)
             for line in await poll_once(
                 config(),
                 window_client=window_client,

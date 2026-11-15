@@ -279,6 +279,11 @@ async def test_a_retry_after_an_evicted_record_owns_the_new_round(
     mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
         (source, content, tid, kind)
     )
+    # A live link is what makes a *real* cancellation look like a withdrawal;
+    # the replacement must not be reported as one even then.
+    mesh._connected = True
+    withdrawals: list[tuple[str, str]] = []
+    mesh.on_peer_cancel = lambda tid, peer: withdrawals.append((tid, peer))
     await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "do it")))
     await _until(lambda: handed, "the first hand-over")
 
@@ -296,6 +301,9 @@ async def test_a_retry_after_an_evicted_record_owns_the_new_round(
         "the evicted round's cancellation settled the retry's record"
     )
     assert "TASK_STATE_CANCELED" not in _states(client)
+    assert withdrawals == [], (
+        "the replaced round told the agent its peer had withdrawn the task"
+    )
 
     await _settle(mesh, task_id, "completed", "done")
 

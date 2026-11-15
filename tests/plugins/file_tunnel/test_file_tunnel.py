@@ -17,6 +17,7 @@ one was a bug before it was a test.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,14 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FileTunnelSettings, load
+from slife2.libs.host.paths import data_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
-from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
+from slife2.plugins.file_tunnel.providers import (
+    _TUNNEL_URL_ENV,
+    DEFAULT_PROVIDER,
+    KNOWN_PROVIDERS,
+    _TunnelProviderBase,
+)
 from slife2.plugins.file_tunnel.server import (
     Exposed,
     Exposure,
@@ -157,6 +164,57 @@ class SlowStartTunnel(FakeTunnel):
         self.active = True
 
 
+class NeverStarted(_TunnelProviderBase):
+    """A provider whose monitor is the only thing that could start it."""
+
+    label = "never"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+
+    def _do_start(self, port: int) -> str:
+        self.started += 1
+        return "https://second.test"
+
+    def _teardown(self) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_a_monitor_leaves_an_inherited_tunnel_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**An inherited URL is a tunnel this process did not start.**
+
+    `SLIFE2_FILE_TUNNEL_URL` is another process handing down a tunnel that is
+    already published; there is no child here to probe or respawn.  The monitor
+    tested its own `_public_url` only, so a process with no tunnel of its own
+    fell through to `start()` — minting a *second* tunnel and overwriting the
+    variable the parent passed down, after which links minted here and there
+    point at two different hostnames.
+    """
+    monkeypatch.setenv(_TUNNEL_URL_ENV, "https://inherited.test")
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_retry_delay", 0.01)
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_health", 0.01)
+    provider = NeverStarted()
+    provider.start_monitor(0)
+    try:
+        await asyncio.sleep(0.15)  # several passes of the monitor
+    finally:
+        provider.stop_monitor()
+        await asyncio.sleep(0)
+
+    assert provider.started == 0, "the monitor started a second tunnel"
+    assert provider.public_url == "https://inherited.test"
+    assert os.environ[_TUNNEL_URL_ENV] == "https://inherited.test", (
+        "the inherited URL was overwritten"
+    )
+
+
 def server_for(tunnel: FakeTunnel | None = None) -> FastMCP:
     """The plugin over the default config, with one fake tunnel."""
     return build_server(load(), provider=tunnel or FakeTunnel())
@@ -266,6 +324,25 @@ async def test_exposing_answers_with_a_public_url(tmp_path: Path) -> None:
     # so it is answered as a field of its own rather than left to be cut out.
     assert answer["token"] == exposed_url(answer).rsplit("/", 1)[-1]
     assert len(answer["token"]) == 30
+
+
+@pytest.mark.asyncio
+async def test_a_relative_path_is_the_models_working_directory() -> None:
+    """**A relative path is the data directory's, not this daemon's.**
+
+    The agent's tools run in the data directory, so a path one of them printed
+    is relative to it — and that is what the tool tells a model.  The file
+    tunnel's own process runs in `runtime/` (the directory this package calls
+    reconstructible), so resolving a relative path there named a different
+    file, or, as here, no file at all.
+    """
+    picture = data_dir() / "relative.png"
+    picture.write_bytes(b"png-bytes")
+
+    async with Client(server_for()) as client:
+        answer = await ask_json(client, "expose_local_image", path="relative.png")
+
+    assert answer["file"] == "relative.png"
 
 
 @pytest.mark.asyncio
@@ -706,6 +783,39 @@ async def test_a_replaced_file_is_refused(tmp_path: Path) -> None:
     exposure = Exposure("t" * 30, str(picture), None)
     picture.write_bytes(b"replaced, and longer than before")
     assert (await serve_exposed(exposure)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_file_replaced_after_the_check_streams_the_pinned_bytes(
+    tmp_path: Path,
+) -> None:
+    """**The pin, the length and the bytes are one observation of the file.**
+
+    A `stat` followed by a lazy `open` is two looks at a path a writer can
+    change in between: the response was built from the pinned file's size and
+    then streamed whatever the path held at iteration, so a replaced file was
+    served despite its pin (and a longer one overran the length).  The handle is
+    opened first and the body comes from it.
+    """
+    picture = tmp_path / "data.txt"
+    picture.write_bytes(b"the pinned bytes")
+    exposure = Exposure("t" * 30, str(picture), None)
+
+    response = await serve_exposed(exposure)
+    assert response.status_code == 200
+    # The writer rotates the file after the response has been decided: a new
+    # file renamed over the path.  On Windows the open handle refuses the
+    # rename; on POSIX the handle keeps the inode the pin was taken from.
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"new bytes written after the check, and longer")
+    try:
+        os.replace(replacement, picture)
+    except PermissionError:
+        pass  # the open handle is why; the pinned bytes are still readable
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    assert body == b"the pinned bytes"
+    assert response.headers["Content-Length"] == str(len(b"the pinned bytes"))
 
 
 @pytest.mark.asyncio

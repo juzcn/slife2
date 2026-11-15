@@ -364,7 +364,14 @@ async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
     )
     if task is not None and task.deliver is not None:
         await hand_back(task, task_id, task.status, result)
-    return result
+    # **The raw result does not outlive this return.**  `asyncio` keeps a
+    # task's return value on the task object, and `Task.handle` is held in
+    # `_tasks` until the model polls or the cap prunes it — so returning the
+    # full, *pre-fit* output here kept a copy of every delivered answer alive
+    # for the process, defeating the release `hand_back` just made.  Nothing
+    # reads this value: `check_async` and `cancel_async` read `Task.result`,
+    # which is cleared on delivery.
+    return ""
 
 
 async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:

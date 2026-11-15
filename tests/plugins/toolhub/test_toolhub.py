@@ -1943,6 +1943,63 @@ async def test_a_plugin_that_stops_answering_keeps_the_rows_it_declared() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_plugin_whose_declaration_fails_keeps_its_address_book_entry() -> None:
+    """**A failed report is not a removal.**  The rows stay in the catalogue, and
+    the source must stay in the hub's address book with them.
+
+    A plugin that is up but still installing the external servers it holds
+    cannot answer `list_sources` inside the connect budget.  The refresh keeps
+    its rows — and, before this, replaced the address book with only the
+    answers that arrived, so the source left `live_sources`: the model's next
+    list silently lost every loaded tool it held, and a call by name answered
+    "no plugin is declaring it right now".  The previous entries are carried
+    forward for the plugin whose ask failed, and only for that plugin.
+    """
+
+    class BreaksAfterFirst:
+        """Declares once, then fails the way a cold container does."""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def server(self) -> FastMCP:
+            server = FastMCP("declaring")
+
+            @server.tool(name=LIST_SOURCES)
+            def list_sources() -> dict[str, Any]:
+                self.attempts += 1
+                if self.attempts > 1:
+                    raise RuntimeError("still installing the servers it holds")
+                return one_source(
+                    category="mcp",
+                    rows=[
+                        {
+                            "name": "somewhere__thing",
+                            "description": "d",
+                            "status": "enabled",
+                        }
+                    ],
+                )
+
+            return server
+
+    flaky = BreaksAfterFirst()
+    async with Client(
+        hub_for(connected={"cli-server": lambda settings: flaky.server()})
+    ) as hub:
+        assert "somewhere__thing" in await found(hub, "somewhere__thing")
+        # A search is a refresh, so this second search is the second ask.
+        assert "somewhere__thing" in await found(hub, "somewhere__thing")
+        answer = await call(hub, "somewhere__thing")
+
+    assert answer["ok"] is False, "the fake plugin has no such tool, so it refused"
+    assert "Unknown tool" in answer["text"], (
+        "the call did not reach the plugin that declares the source — its "
+        "address-book entry was dropped because one report was late"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> None:
     """**The row is real, so the answer may not say the config is what is wrong.**
 

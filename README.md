@@ -783,7 +783,8 @@ unexpose_local_image(token)   -> the URL stops working
 The file is served from its original location. A link stops working when the file
 changes, when `unexpose_local_image` is called, or when the process exits. A share
 outlives the turn that created it. Private keys, `.env` files, and saved
-passwords are refused by name.
+passwords are refused by name. `path` is an absolute path, or one relative to the
+data directory — where the agent's own tools run.
 
 The tunnel is pointed at a loopback listener that serves only
 `/share/<token>`; the MCP endpoint is not published, so knowing the hostname

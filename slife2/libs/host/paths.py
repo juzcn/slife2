@@ -319,6 +319,44 @@ def home() -> Path:
     return override if override is not None else data_dir()
 
 
+def local_path(entry: str) -> Path:
+    """One path a caller wrote, with a relative one resolved in its home.
+
+    **A relative path is the model's**, and its working directory is the data
+    directory — where its own tools run, and where a path a tool printed is
+    relative to.  A daemon's own working directory is `runtime/`, which this
+    package documents as reconstructible and which holds none of a caller's
+    files, so resolving a relative path there names a different file, or none
+    at all.
+
+    `expanduser` is part of the same rule: `~` is the person's home directory,
+    and the process reading this is not the person.
+
+    **A Windows drive-relative path is the home's or it is refused.**  `C:foo`
+    is not absolute — it means "foo under the current directory on C:" — and
+    the current directory on a drive is a process-global fact this daemon must
+    not lend to a caller.  When the named drive is the home's, joining resolves
+    it under the home, which is the caller's working directory; when it is
+    another drive there is no honest answer, and it is refused rather than left
+    to resolve against the daemon's own directory (the failure this function
+    exists to prevent).
+
+    This is the one spelling of that rule.  The cabinet and the file tunnel both
+    take a path from a model, and two copies would be two answers to which file
+    a caller named (`slife2.plugins.cabinet.server`, `slife2.plugins.file_tunnel.server`).
+    """
+    path = Path(entry).expanduser()
+    if path.is_absolute():
+        return path
+    root = home()
+    if path.drive and path.drive.casefold() != root.drive.casefold():
+        raise ValueError(
+            f"{entry!r} is relative to drive {path.drive}, and this home is on "
+            f"{root.drive or 'another drive'} — write an absolute path"
+        )
+    return root / path
+
+
 def home_key(root: str | Path | None = None) -> str:
     """One home's **canonical spelling — the first half of an identity**, not a path.
 
