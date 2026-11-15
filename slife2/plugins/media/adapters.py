@@ -40,7 +40,6 @@ from typing import Any, Protocol, runtime_checkable
 import httpx2
 
 import slife2.helpers.timeouts as _T
-from slife2.helpers.fs import confined
 from slife2.libs.host.config import unresolved_reference
 from slife2.libs.host.paths import work_dir
 from slife2.libs.turn.attachments import MEDIA_TYPES
@@ -56,29 +55,21 @@ logger = logging.getLogger(__name__)
 MEDIA_DIR = "media"
 
 
-def media_dir(agent: str, subagent: str = "", folder: str = "") -> Path:
-    """Where an artifact goes: `work_dir(agent, subagent)/media[/folder]/`.
+def media_dir(agent: str, subagent: str = "") -> Path:
+    """Where an artifact goes by default: `work_dir(agent, subagent)/media/`.
 
     **Per conversation, with forks sharing their maker's.**  A non-fork subagent
     owns its media; a fork is a temporary copy of its maker's conversation and
-    writes to the maker's directory.  **Contained**, which is not decoration:
-    `folder` is a model-written string, and `folder="../../.."` would be a model
-    choosing where on this machine to write a file.  Resolved before it is
-    compared, refused rather than rewritten — a silently corrected path is a
-    file somewhere other than where the model said
-    (`slife2.helpers.fs.confined` is that line, for this directory too).
+    writes to the maker's directory.
+
+    **The default, not a boundary.**  A caller that names a file does so with a
+    tool's `output` path; this directory is where an artifact lands when it
+    names none.  The process's own working directory is never used — it is the
+    runtime directory, shared by every agent and reconstructible.
     """
     root = work_dir(agent, subagent) / MEDIA_DIR
-    if not folder.strip():
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-    candidate = confined(root, folder)
-    if candidate is None:
-        raise MediaAdapterError(
-            f"{folder!r} is not a folder inside the media directory"
-        )
-    candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def stamp(moment: datetime | None = None) -> str:

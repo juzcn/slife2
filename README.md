@@ -738,7 +738,9 @@ The `media:` section provides four capabilities:
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
 - `text_to_speech` — write speech to an audio file.
-- `transcribe_audio` — transcribe an audio file; `output` writes the transcript to a file in the media directory, and a long transcript is kept as a dump.
+- `transcribe_audio` — transcribe an audio file; `output` writes the transcript to the path you name (a relative path is relative to your working directory) and answers that path, while a long transcript without one is kept as a dump.
+
+Each generation tool writes into the agent's media directory by default; `output` names the file instead (a relative path is relative to the working directory).
 
 Each model declares what it is for:
 
@@ -763,10 +765,11 @@ The supported `api:` values are `dashscope-aigc` (images, video, speech,
 transcription) and `openai-images` (image generation only). Choosing a model that
 does not support the requested kind is refused.
 
-Generated files are written under `<data>/agents/<agent>/media/`. A `folder`
-argument creates a subdirectory inside that root; a path outside it is refused.
-A long-running video call that exceeds its timeout is refused with the provider's
-job id rather than its result.
+Generated files are written under `<data>/agents/<agent>/media/` by default. Each
+generation tool also takes an `output` path: a relative one is relative to the
+agent's working directory, an absolute one is used as written, and the artifact
+is written there instead. A long-running video call that exceeds its timeout is
+refused with the provider's job id rather than its result.
 
 ### File tunnel
 

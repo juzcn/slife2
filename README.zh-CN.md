@@ -647,7 +647,9 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
 - `text_to_speech`——把文本写成语音文件。
-- `transcribe_audio`——转写音频文件；`output` 可把 transcript 写进媒体目录，长转写会存成 dump。
+- `transcribe_audio`——转写音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于你的工作目录）并回答该路径；不指定时，长转写会存成 dump。
+
+生成工具默认写进 agent 的 media 目录；`output` 改为指定文件（相对路径相对于工作目录）。
 
 每个模型声明自己的用途：
 
@@ -671,9 +673,9 @@ media:
 支持的 `api:` 值是 `dashscope-aigc`（图片、视频、语音、转写）和 `openai-images`
 （仅图片生成）。选择不支持所请求 kind 的模型会被拒绝。
 
-生成的文件写在 `<data>/agents/<agent>/media/` 下。`folder` 参数在该根目录内创建
-子目录；越界的路径会被拒绝。超时仍未完成的长时间视频调用会带着 provider 的 job id
-被拒绝，而不是返回结果。
+生成的文件默认写在 `<data>/agents/<agent>/media/` 下。每个生成工具还接受一个
+`output` 路径：相对路径相对于 agent 的工作目录，绝对路径按原样使用，产物写到那里。
+超时仍未完成的长时间视频调用会带着 provider 的 job id 被拒绝，而不是返回结果。
 
 ### 文件隧道
 

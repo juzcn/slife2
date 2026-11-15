@@ -2,10 +2,10 @@
 
 Three halves, and each is tested where it can be driven without a network.  The
 *tools* run over the in-memory transport with a fake adapter injected, so what is
-under test is which provider, which model, which parameters and which folder a
-call reaches.  The *config* is parsed from text.  The *adapters* are driven
-against a fake `_request`, which is where the vendor's shapes live — the request
-body, the poll, and the four ways a call can fail.
+under test is which provider, which model, which parameters and which output
+path a call reaches.  The *config* is parsed from text.  The *adapters* are
+driven against a fake `_request`, which is where the vendor's shapes live — the
+request body, the poll, and the four ways a call can fail.
 """
 
 from __future__ import annotations
@@ -73,9 +73,9 @@ class FakeAdapter:
     """An adapter that records its calls and answers with a path.
 
     The tool half is about *addressing* — which provider, model, parameters and
-    folder a call reaches — and a fake that records exactly that is what makes
-    those assertions readable.  A class with four methods says what the
-    contract is, in a way a `MagicMock` cannot.
+    output directory a call reaches — and a fake that records exactly that is
+    what makes those assertions readable.  A class with four methods says what
+    the contract is, in a way a `MagicMock` cannot.
     """
 
     def __init__(self, *, answer: str = "/tmp/out") -> None:
@@ -111,6 +111,28 @@ class Failing(FakeAdapter):
 
     async def generate_image(self, **kwargs: Any) -> str:
         raise self.error
+
+
+class Writing(FakeAdapter):
+    """An adapter that writes the artifact its call would have saved."""
+
+    async def generate_image(self, **kwargs: Any) -> str:
+        self.calls["image"] = kwargs
+        return _written(kwargs["outputs_dir"], "png")
+
+    async def generate_video(self, **kwargs: Any) -> str:
+        self.calls["video"] = kwargs
+        return _written(kwargs["outputs_dir"], "mp4")
+
+    async def text_to_speech(self, **kwargs: Any) -> str:
+        self.calls["tts"] = kwargs
+        return _written(kwargs["outputs_dir"], "wav")
+
+
+def _written(outputs_dir: Path, suffix: str) -> str:
+    target = Path(outputs_dir) / f"made.{suffix}"
+    target.write_bytes(suffix.encode())
+    return str(target)
 
 
 def server_for(adapter: FakeAdapter | None = None) -> FastMCP:
@@ -162,7 +184,7 @@ async def test_the_four_tools_are_the_models() -> None:
     assert all(for_the_model(tool.meta) for tool in listed.values())
 
 
-# --- which provider, model, parameters and folder -----------------------------
+# --- which provider, model, parameters and output path -----------------------
 
 
 @pytest.mark.asyncio
@@ -207,21 +229,41 @@ async def test_a_voice_falls_back_to_the_config_and_a_model_can_be_named() -> No
         assert adapter.calls["tts"]["model"] == "say"
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments", "call", "suffix"),
+    [
+        ("generate_image", {"prompt": "x", "size": "1024*1024"}, "image", "png"),
+        ("generate_video", {"prompt": "x"}, "video", "mp4"),
+        ("text_to_speech", {"text": "hi"}, "tts", "wav"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_folder_is_a_subdirectory_of_the_media_root() -> None:
-    adapter = FakeAdapter()
+async def test_an_output_path_names_the_artifact(
+    tool: str, arguments: dict[str, str], call: str, suffix: str
+) -> None:
+    """The caller names the file; the adapter writes into its directory and the
+    tool moves the artifact to that name.  A relative path is relative to the
+    agent's working directory.
+    """
+    adapter = Writing()
     async with Client(server_for(adapter)) as client:
-        await ask(client, "generate_image", prompt="x", folder="project")
-        escaped = await refused(
-            client, "generate_image", prompt="x", folder="../../elsewhere"
-        )
+        answer = await ask(client, tool, output=f"art/a.{suffix}", **arguments)
 
-    assert (
-        adapter.calls["image"]["outputs_dir"] == agent_dir("jack") / "media" / "project"
-    )
-    assert "not a folder inside the media directory" in escaped, (
-        "a model does not choose where to write"
-    )
+    target = agent_dir("jack") / "art" / f"a.{suffix}"
+    assert answer == {"path": str(target)}
+    assert target.read_bytes() == suffix.encode()
+    assert adapter.calls[call]["outputs_dir"] == agent_dir("jack") / "art"
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
+    adapter = Writing()
+    target = tmp_path / "a.png"
+    async with Client(server_for(adapter)) as client:
+        answer = await ask(client, "generate_image", prompt="x", output=str(target))
+
+    assert answer == {"path": str(target)}
+    assert target.read_bytes() == b"png"
 
 
 @pytest.mark.asyncio
@@ -264,32 +306,32 @@ async def test_a_long_transcript_is_answered_whole() -> None:
 
 @pytest.mark.asyncio
 async def test_a_transcript_can_be_written_to_a_named_file() -> None:
-    """The optional output path: the text is still the answer, and the file is a
-    copy the caller can hand to a person or another tool.
+    """The output path replaces the text in the answer: the transcript goes to
+    the file, and what enters the conversation is the path.
     """
     async with Client(server_for(Says("hello home"))) as client:
         answer = await ask(
             client, "transcribe_audio", path="a.wav", output="transcripts/meeting.txt"
         )
 
-    assert answer == "hello home"
-    written = agent_dir("jack") / "media" / "transcripts" / "meeting.txt"
-    assert written.read_text(encoding="utf-8") == "hello home"
+    assert answer != "hello home", "the text does not enter the conversation"
+    assert Path(answer).read_text(encoding="utf-8") == "hello home"
+    assert Path(answer) == agent_dir("jack") / "transcripts" / "meeting.txt"
 
 
 @pytest.mark.asyncio
-async def test_a_transcript_cannot_be_written_outside_the_media_directory() -> None:
-    """**A model-written path is contained, like an artifact's folder.**  The
-    agent's home holds its turn log and cabinet; a transcript path is not a
-    write target anywhere in it.
+async def test_a_transcript_can_be_written_to_an_absolute_path(tmp_path) -> None:
+    """A path the caller names is the caller's: an absolute one is used as
+    written, not moved under a directory the tool chose.
     """
-    async with Client(server_for(FakeAdapter())) as client:
-        answer = await refused(
-            client, "transcribe_audio", path="a.wav", output="../outside.txt"
+    target = tmp_path / "elsewhere" / "meeting.txt"
+    async with Client(server_for(Says("hello home"))) as client:
+        answer = await ask(
+            client, "transcribe_audio", path="a.wav", output=str(target)
         )
 
-    assert "media directory" in answer
-    assert not (agent_dir("jack") / "outside.txt").exists()
+    assert answer == str(target)
+    assert target.read_text(encoding="utf-8") == "hello home"
 
 
 # --- the refusals -------------------------------------------------------------

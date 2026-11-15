@@ -2485,11 +2485,12 @@ load, naming the `media.defaults.<kind>` line. It is not replaced by the first
 model of the kind: a default is the operator's statement, and a typo must not
 spend a paid call on a model nobody named.
 
-Artifacts are written under the conversation's work directory: the agent's
-`media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork writes to
-its maker's. They never go to the process's working directory, which is the
-runtime directory and reconstructible. `folder=` is contained inside that root;
-it is a model-written string.
+Artifacts are written under the conversation's work directory by default: the
+agent's `media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork
+writes to its maker's. A caller that names an `output` path writes there instead
+— a relative path is relative to that directory, an absolute one is used as
+written. They never go to the process's working directory, which is the runtime
+directory and reconstructible.
 
 Two adapters are supported: `dashscope-aigc` (images, video, speech,
 transcription) and `openai-images` (image generation only; it refuses the other

@@ -20,11 +20,11 @@ about a model rather than about a vendor.  `MediaSettings.resolve` is the four
 step search that answers it, and `slife2/plugins/media/adapters.py` is the translation
 layer — so this file never learns a vendor's name either.
 
-**The four tools carry no addressing of their own.**  A caller names a model only
-to override the configured default, and a `folder` only to sort its own work;
-everything else — endpoint, key, the model's own parameters — is the config's,
-which is what makes "switch to the cheap image model" a config edit rather than
-a new call.
+**The four tools carry no provider addressing of their own.**  A caller names a
+model only to override the configured default, and an `output` only to name the
+file; everything else — endpoint, key, the model's own parameters — is the
+config's, which is what makes "switch to the cheap image model" a config edit
+rather than a new call.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,7 +41,6 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from slife2.helpers.fs import confined
 from slife2.libs.host.config import (
     MEDIA_SERVER_NAME,
     Config,
@@ -48,6 +48,7 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
+from slife2.libs.host.paths import work_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
 from slife2.plugins.media.adapters import (
@@ -71,9 +72,11 @@ CONFIG_KEY = "media"
 
 INSTRUCTIONS = (
     "Generation: images, video, speech and transcripts, from the `media:` "
-    "providers. Each tool answers the file it wrote — `transcribe_audio`, the "
-    "text itself. `generate_video` can take minutes; a long render times out on "
-    "the wait while the job keeps running at the provider."
+    "providers. Each tool writes where `output` names — a relative path is "
+    "relative to your working directory — or into the media directory; "
+    "`transcribe_audio` answers the text unless `output` names a file. "
+    "`generate_video` can take minutes; a long render times out on the wait "
+    "while the job keeps running at the provider."
 )
 
 # ── The one bound a caller can be wrong about ────────────────────────────────
@@ -150,19 +153,17 @@ class Media:
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
 
-    def output(self, ctx: Context, folder: str) -> Path:
-        """Where this call's artifact goes: `agents/<agent>/media[/folder]/`.
+    def output(self, ctx: Context) -> Path:
+        """The default place for this call's artifact: `agents/<agent>/media/`.
 
         The agent comes from the call, like every other per-agent fact in this
         system: one process serves every agent, so "whose work is this" is
         something only the caller can say — and a call that does not say is
-        refused rather than written under somebody else's name.
+        refused rather than written under somebody else's name.  A caller that
+        named an `output` path does not use this.
         """
         agent, subagent = conversation_of(ctx)
-        try:
-            return media_dir(agent, subagent, folder)
-        except MediaAdapterError as exc:
-            raise ToolError(str(exc)) from exc
+        return media_dir(agent, subagent)
 
     async def close(self) -> None:
         for adapter in self._adapters.values():
@@ -172,6 +173,47 @@ class Media:
                 logger.debug("media adapter did not close cleanly", exc_info=True)
 
 
+def _output_path(ctx: Context, output: str) -> Path | None:
+    """The file the caller named, or None for the media directory.
+
+    A relative path is resolved against the agent's working directory — the
+    directory its own tools run in — because this process serves every agent
+    and has no cwd of its own to mean.  An absolute path is used as written.
+    """
+    if not output.strip():
+        return None
+    agent, subagent = conversation_of(ctx)
+    target = Path(output).expanduser()
+    return target if target.is_absolute() else work_dir(agent, subagent) / target
+
+
+async def _make_parent(target: Path) -> None:
+    try:
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ToolError(f"could not create {str(target.parent)!r}: {exc}") from exc
+
+
+async def _place(written: str, target: Path) -> None:
+    """Move one adapter's artifact to the path the caller named."""
+
+    def move() -> None:
+        source = Path(written)
+        if source == target:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        try:
+            source.replace(target)
+        except OSError:
+            shutil.move(str(source), str(target))
+
+    try:
+        await asyncio.to_thread(move)
+    except OSError as exc:
+        raise ToolError(f"could not write {str(target)!r}: {exc}") from exc
+
+
 def build_server(
     config: Config, *, adapters: dict[str, MediaAdapter] | None = None
 ) -> FastMCP:
@@ -179,8 +221,8 @@ def build_server(
 
     `adapters` is the seam, and it is the one worth having: every test of the
     four tools drives a fake adapter, so what is under test is the *tool* half
-    (which provider, which model, which parameters, which folder) with no HTTP
-    anywhere.  The adapters' own shapes are tested against a fake transport in
+    (which provider, which model, which parameters, which output path) with no
+    HTTP anywhere.  The adapters' own shapes are tested against a fake transport in
     `tests/plugins/media/test_media.py`, which is the other half.
     """
     media = Media(config, adapters=adapters)
@@ -203,7 +245,7 @@ def build_server(
         model: str = "",
         size: str = "",
         image: str = "",
-        folder: str = "",
+        output: str = "",
     ) -> dict[str, Any]:
         """Draw an image from a description, and answer where it was written.
 
@@ -218,8 +260,9 @@ def build_server(
                 default.
             image: A picture to work from — a local path, an `http(s)` URL or a
                 `data:` URI. For models that take a reference image.
-            folder: A folder inside the media directory to write into. Empty
-                writes at the top.
+            output: A file path for the image. A relative path is relative to
+                your working directory. Empty writes a generated name into your
+                media directory.
 
         Returns:
             `path` — the file the picture was written to.
@@ -227,18 +270,27 @@ def build_server(
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
         params = merge_params(entry.params, {"size": wanted} if wanted else {})
-        output = await _run(
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "image",
             lambda: media.adapter(provider).generate_image(
                 model=entry.model,
                 prompt=prompt,
                 size=wanted,
                 image=image or None,
-                outputs_dir=media.output(ctx, folder),
+                outputs_dir=outputs_dir,
                 extra_params=params,
             ),
         )
-        return {"path": output}
+        if target is None:
+            return {"path": written}
+        await _place(written, target)
+        return {"path": str(target)}
 
     @mcp.tool(name="generate_video", meta=FOR_THE_MODEL)
     async def generate_video(
@@ -249,7 +301,7 @@ def build_server(
         resolution: str = "",
         ratio: str = "",
         duration: int = 0,
-        folder: str = "",
+        output: str = "",
         # The model's own argument rather than a budget of ours: it is the
         # schema's default, the tool reads it, and there is nothing here to
         # route through the registry.
@@ -271,7 +323,9 @@ def build_server(
             resolution: `720P`, `1080P`. Empty uses the model's own default.
             ratio: `16:9`, `9:16`, `1:1`. Empty uses the model's own default.
             duration: Seconds. Zero uses the model's own default.
-            folder: A folder inside the media directory to write into.
+            output: A file path for the video. A relative path is relative to
+                your working directory. Empty writes a generated name into your
+                media directory.
             timeout: How long to wait, in seconds. Zero or less uses the
                 default.
 
@@ -287,22 +341,31 @@ def build_server(
         if duration:
             given["duration"] = duration
         params = merge_params(entry.params, given)
-        output = await _run(
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "video",
             lambda: media.adapter(provider).generate_video(
                 model=entry.model,
                 prompt=prompt,
                 image=image or None,
-                outputs_dir=media.output(ctx, folder),
+                outputs_dir=outputs_dir,
                 extra_params=params,
                 deadline_s=timeout if timeout > 0 else None,
             ),
         )
-        return {"path": output}
+        if target is None:
+            return {"path": written}
+        await _place(written, target)
+        return {"path": str(target)}
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
-        ctx: Context, text: str, model: str = "", voice: str = "", folder: str = ""
+        ctx: Context, text: str, model: str = "", voice: str = "", output: str = ""
     ) -> dict[str, Any]:
         """Say something out loud, into an audio file, and answer where it is.
 
@@ -312,29 +375,40 @@ def build_server(
                 default for speech.
             voice: Which voice, by the provider's own name. Empty uses the
                 model's default.
-            folder: A folder inside the media directory to write into.
+            output: A file path for the audio. A relative path is relative to
+                your working directory. Empty writes a generated name into your
+                media directory.
 
         Returns:
             `path` — the file the audio was written to.
         """
         provider, entry = media.resolve("tts", model)
-        output = await _run(
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "speech",
             lambda: media.adapter(provider).text_to_speech(
                 model=entry.model,
                 text=text,
                 voice=voice or entry.voice,
-                outputs_dir=media.output(ctx, folder),
+                outputs_dir=outputs_dir,
                 extra_params=dict(entry.params),
             ),
         )
-        return {"path": output}
+        if target is None:
+            return {"path": written}
+        await _place(written, target)
+        return {"path": str(target)}
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
     async def transcribe_audio(
         ctx: Context, path: str, model: str = "", output: str = ""
     ) -> str:
-        """Write down what an audio file says, and answer the text.
+        """Write down what an audio file says, and answer the text or its file.
 
         A transcript is a tool output like any other: if it is too large for
         the conversation, the harness keeps it whole as a dump and gives the
@@ -345,9 +419,11 @@ def build_server(
             path: The audio file, as a local path.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
-            output: A file path inside your media directory to write the
-                transcript to; it cannot leave that directory. Empty answers
-                the text only. A file already there is replaced.
+            output: A file path to write the transcript to instead of answering
+                it. A relative path is relative to your working directory. The
+                answer is the file's path; the text does not enter the
+                conversation. Empty answers the text itself. A file already
+                there is replaced.
         """
         if not path.strip():
             raise ToolError("no audio file was named — pass the path of the recording.")
@@ -363,7 +439,7 @@ def build_server(
             ),
         )
         if output.strip():
-            await _write_transcript(ctx, output, text)
+            return await _write_transcript(ctx, output, text)
         return text
 
     return mcp
@@ -401,28 +477,21 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
         raise ToolError(str(exc)) from exc
 
 
-async def _write_transcript(ctx: Context, relative: str, text: str) -> None:
-    """Write a transcript to a path inside the caller's media directory.
-
-    **Contained, like an artifact's folder.**  The path is model-written, so it
-    is resolved and refused rather than rewritten; the media directory is the
-    one place an artifact of this plugin goes, and the rest of the agent's home
-    — its turn log included — is not a model-chosen write target.  An explicit
-    path replaces the file it names.
-    """
-    agent, subagent = conversation_of(ctx)
-    target = confined(media_dir(agent, subagent), relative)
+async def _write_transcript(ctx: Context, output: str, text: str) -> str:
+    """Write a transcript where the caller named, and answer that path."""
+    target = _output_path(ctx, output)
     if target is None:
-        raise ToolError(f"{relative!r} is not a file path inside your media directory")
+        return text
+    await _make_parent(target)
 
     def write() -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
 
     try:
         await asyncio.to_thread(write)
     except OSError as exc:
-        raise ToolError(f"could not write {relative!r}: {exc}") from exc
+        raise ToolError(f"could not write {output!r}: {exc}") from exc
+    return str(target)
 
 
 def main(argv: list[str] | None = None) -> int:
