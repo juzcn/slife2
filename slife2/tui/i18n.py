@@ -383,8 +383,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # picker, for `no_models`'s reason: a list with no rows is a key that looks
     # broken, and the tool that would fix it is the thing worth naming.
     "no_subagents": {
-        "en": "{agent} has no subagents yet; the model makes one with `subagent_set`",
-        "zh": "{agent} 还没有 subagent；模型可用 `subagent_set` 创建",
+        "en": "{agent} has no subagents yet; the model makes one with `subagent_create`",
+        "zh": "{agent} 还没有 subagent；模型可用 `subagent_create` 创建",
     },
     "subagents_failed": {
         "en": "the subagents could not be listed: {err}",

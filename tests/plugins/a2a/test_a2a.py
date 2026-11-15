@@ -3150,10 +3150,10 @@ def write_subagent(maker: str, name: str) -> Path:
 
     `subagent_dirs` is the whole of what membership means, so this is what the
     send path's look finds — written the way the agent server writes it
-    (`subagent_set`), because the two have to agree about what makes a member.
+    (`subagent_create`), because the two have to agree about what makes a member.
     """
     path = subagent_file(maker, name)
-    # A read does not make the directory; `subagent_set` (and this fixture) do.
+    # A read does not make the directory; `subagent_create` (and this fixture) do.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"name: {name}\nrole: test\n", encoding="utf-8")
     return path

@@ -415,7 +415,7 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
     container is the whole of what that buys.  `agents/jack/` also holds
     `cabinet/`, `media/` and every fixed name this build has, so a subagent
     called `cabinet` would be *that directory* — and a name check in
-    `subagent_set` (`slife2.plugins.agent.server`) is a convention somebody can
+    `subagent_create` (`slife2.plugins.agent.server`) is a convention somebody can
     go around.  One segment makes the collision impossible to express: a
     subagent's name is a name *inside* `subagents/`, and nothing else in this
     system writes there.
@@ -449,7 +449,7 @@ def subagent_path(agent: str, subagent: str) -> Path:
 
     `agent_dir`'s subagent branch is this plus the `mkdir`, and the difference is
     load-bearing for the one caller that *asks* about a name before using it:
-    `subagent_set` refuses a name that is already a directory, and a path builder
+    `subagent_create` refuses a name that is already a directory, and a path builder
     that made the directory would answer its own question.
 
     `agents_dir(agent)` is in here rather than in each caller for the reason the
@@ -745,7 +745,7 @@ def work_path(agent: str, subagent: str = "") -> Path:
     `subagent_path` states: a read that asked where a conversation's files are
     would create the directory it is asking about, and a removed subagent's
     stale name would then come back as a directory with no record — blocked for
-    `subagent_set` and untouchable for `subagent_remove`.
+    `subagent_create` and untouchable for `subagent_remove`.
 
     **A fork shares its maker's work directory; a subagent that is not a fork
     owns its own.**  A fork is a temporary copy of its maker's conversation —
@@ -854,7 +854,7 @@ def subagent_file(agent: str, subagent: str) -> Path:
     # **A read must not make the directory it is reading.**  `agent_dir` mkdirs,
     # and this path is asked for by `read_subagent` and by `conversation` for
     # names that may be typos or stale: a `send_message(subagent="reserch")`
-    # created `subagents/reserch/`, after which `subagent_set` refused the name
+    # created `subagents/reserch/`, after which `subagent_create` refused the name
     # for ever as a "half-removed" directory and `subagent_remove` would not
     # delete it.  The writer's `statefile.write` makes its own parents.
     return subagent_path(agent, subagent) / _SUBAGENT_YAML

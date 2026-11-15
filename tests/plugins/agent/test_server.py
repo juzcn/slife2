@@ -90,8 +90,8 @@ from slife2.libs.turn.watch import (
 )
 from slife2.plugins.agent.server import (
     ATTACH_IMAGE,
+    SUBAGENT_CREATE,
     SUBAGENT_REMOVE,
-    SUBAGENT_SET,
     Pending,
     ProgressObserver,
     _remove_tree,
@@ -398,8 +398,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "model_switch",
         "reset",
         "send_message",
+        "subagent_create",
         "subagent_remove",
-        "subagent_set",
         "subagents",
         "transcript",
         "watch",
@@ -642,7 +642,7 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     server = build_server(base, context_client=context, hub_client=hub, backend=backend)
     inbound = f"{LOCAL_AGENT.channel}:{DEFAULT_AGENT}"
 
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher", channel=inbound)
     await send(server, "two", subagent="researcher", channel=inbound)
 
@@ -1044,7 +1044,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
     )
 
     await send(server, "one", agent="jack")
-    await set_subagent(server, "helper", agent="jack")
+    await create_subagent(server, "helper", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
 
     # The worker was not told what the agent's own conversation said...
@@ -1998,7 +1998,7 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
             hub_client=FlakyHub(hub, DEAD_PLUGIN),
             backend=FakeBackend(),
         )
-        await set_subagent(server, "worker")
+        await create_subagent(server, "worker")
         with pytest.raises(Exception, match="not answering"):
             await send(server, "one", subagent="worker")
     rows = (
@@ -2031,7 +2031,7 @@ async def test_a_forks_failed_turn_is_kept_and_written_nowhere(context, hub) -> 
         backend=backend,
     )
 
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     with pytest.raises(Exception, match="not answering"):
         await send(server, "one", subagent="researcher")
     await send(server, "two", subagent="researcher")
@@ -3053,7 +3053,7 @@ async def test_an_interrupted_subagent_image_turn_claims_its_id(
         backend=backend,
     )
 
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     interrupted = asyncio.create_task(
         send(
             server,
@@ -3167,7 +3167,7 @@ async def test_a_refused_record_fails_the_turn_and_rolls_it_back(context, hub) -
                 config(), context_client=store, hub_client=hub, backend=backend
             )
             if subagent:
-                await set_subagent(server, subagent)
+                await create_subagent(server, subagent)
             with pytest.raises(Exception, match="refuses the request"):
                 await send(server, "one", subagent=subagent)
             await send(server, "two", subagent=subagent)
@@ -3958,7 +3958,7 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
 # --- subagents ---------------------------------------------------------------
 
 
-async def set_subagent(
+async def create_subagent(
     server: FastMCP,
     name: str,
     *,
@@ -3970,7 +3970,7 @@ async def set_subagent(
     """Name a subagent, with the caller's conversation id attached — as a turn does."""
     async with Client(server) as client:
         return await client.call_tool(
-            SUBAGENT_SET,
+            SUBAGENT_CREATE,
             {"name": name, "model": model, "role": role, "fork": fork},
             meta=conversation_meta(agent),
         )
@@ -3996,7 +3996,7 @@ def subagent_of(agent: str, name: str) -> Path:
 
 @pytest.mark.asyncio
 async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None:
-    """`subagent_set` makes a member: a directory, and the record that says so.
+    """`subagent_create` makes a member: a directory, and the record that says so.
 
     The record is what `subagent_remove` proves its blast radius with, and it
     holds the whole of what a subagent *is* — the model it runs on, the role it
@@ -4010,7 +4010,7 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    made = await set_subagent(
+    made = await create_subagent(
         server,
         "researcher",
         model="deepseek/deepseek-flash",
@@ -4040,7 +4040,7 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
 
 @pytest.mark.asyncio
 async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> None:
-    """`set` rather than `add`: what a model may say twice without thinking.
+    """Creation is idempotent: what a model may say twice without thinking.
 
     What a second call changes is what the subagent *runs on* and what it is
     *for* — its model and its role, which are its settings.  What it does not
@@ -4054,11 +4054,11 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    first = await set_subagent(server, "researcher", model="one/one", fork=True)
+    first = await create_subagent(server, "researcher", model="one/one", fork=True)
     before = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
     )
-    again = await set_subagent(
+    again = await create_subagent(
         server, "researcher", model="two/two", role="code reviewer", fork=False
     )
     after = YAML(typ="safe").load(
@@ -4090,7 +4090,7 @@ async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
     async with Client(server) as client:
         with pytest.raises(ToolError) as refused:
             await client.call_tool(
-                SUBAGENT_SET,
+                SUBAGENT_CREATE,
                 {"name": "deeper"},
                 meta=conversation_meta(DEFAULT_AGENT, "researcher"),
             )
@@ -4110,13 +4110,13 @@ async def test_the_cap_refuses_a_subagent_past_it(context, hub) -> None:
         backend=FakeBackend(),
     )
 
-    await set_subagent(server, "one")
+    await create_subagent(server, "one")
     with pytest.raises(ToolError) as refused:
-        await set_subagent(server, "two")
+        await create_subagent(server, "two")
 
     assert "max_running" in str(refused.value)
     # And naming the one that is already there is not a second subagent.
-    assert (await set_subagent(server, "one")).data["created"] is False
+    assert (await create_subagent(server, "one")).data["created"] is False
 
 
 @pytest.mark.asyncio
@@ -4135,7 +4135,7 @@ async def test_a_name_the_agent_already_uses_is_refused(context, hub) -> None:
     (cabinet / "note.md").write_text("mine", encoding="utf-8")
 
     with pytest.raises(ToolError) as refused:
-        await set_subagent(server, "cabinet")
+        await create_subagent(server, "cabinet")
 
     assert "not a subagent" in str(refused.value)
     assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
@@ -4151,7 +4151,7 @@ async def test_removing_a_subagent_takes_its_directory_with_it(context, hub) -> 
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     (subagent_of(DEFAULT_AGENT, "researcher") / "work.txt").write_text(
         "something it made", encoding="utf-8"
     )
@@ -4235,7 +4235,7 @@ async def test_removing_a_subagent_mid_turn_stops_the_turn_and_removes_it(
             backend=backend,
             mesh_client=mesh,
         )
-        await set_subagent(server, "researcher")
+        await create_subagent(server, "researcher")
         turn = asyncio.create_task(send(server, "one", subagent="researcher"))
         for _ in range(200):
             if backend.calls:
@@ -4294,7 +4294,7 @@ async def test_removing_a_fork_mid_turn_is_the_same_stop_then_delete(
             mesh_client=mesh,
         )
         await send(server, "one")  # the conversation the fork starts from
-        await set_subagent(server, "researcher", fork=True)
+        await create_subagent(server, "researcher", fork=True)
         turn = asyncio.create_task(send(server, "two", subagent="researcher"))
         for _ in range(200):
             if len(backend.calls) >= 2:
@@ -4325,7 +4325,7 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
         backend=FakeBackend(text_turn("hello from the subagent")),
     )
 
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     own = subagent_of(DEFAULT_AGENT, "researcher") / "turns.db"
@@ -4345,7 +4345,7 @@ async def test_a_message_to_a_removed_subagent_is_refused_and_recreates_nothing(
     `subagent_remove` deletes the directory.  Before this refusal, a message
     addressed to the stale name started a conversation, and its save recreated
     `subagents/<name>/turns.db` — with no `subagent.yaml`, which is the state
-    `subagent_set` refuses as "already a directory that is not a subagent" and
+    `subagent_create` refuses as "already a directory that is not a subagent" and
     `subagent_remove` refuses as not one of yours: the name was blocked for both
     until somebody cleaned the filesystem by hand.  The read path already
     refuses to create the directory (`read_store_for`); this is the write half.
@@ -4353,7 +4353,7 @@ async def test_a_message_to_a_removed_subagent_is_refused_and_recreates_nothing(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     await remove_subagent(server, "researcher")
     assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
@@ -4380,7 +4380,7 @@ async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
     await send(server, "two")
 
@@ -4416,7 +4416,7 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     prompt = backend.calls[0][0][0].content
@@ -4469,8 +4469,8 @@ async def test_a_subagent_runs_on_the_model_its_own_file_names(context, hub) -> 
         hub_client=hub,
         backend=FakeBackend(text_turn("ok"), text_turn("ok")),
     )
-    await set_subagent(server, "researcher", model="other/slow")
-    await set_subagent(server, "helper")
+    await create_subagent(server, "researcher", model="other/slow")
+    await create_subagent(server, "helper")
 
     named = await send(server, "one", subagent="researcher")
     plain = await send(server, "one", subagent="helper")
@@ -4498,8 +4498,8 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
         hub_client=hub,
         backend=backend,
     )
-    await set_subagent(server, "researcher", role="code reviewer")
-    await set_subagent(server, "helper")
+    await create_subagent(server, "researcher", role="code reviewer")
+    await create_subagent(server, "helper")
 
     await send(server, "one", subagent="researcher")
     await send(server, "one")
@@ -4533,7 +4533,7 @@ async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
     )
 
     await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     await send(server, "two", subagent="researcher")
 
     assert prompts_seen(backend, 1) == [
@@ -4565,7 +4565,7 @@ async def test_a_fork_taken_from_a_maker_that_has_said_nothing(context, hub) -> 
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     await send(server, "one", subagent="researcher")
 
     assert prompts_seen(backend, 0) == ["user:one"]
@@ -4587,7 +4587,7 @@ async def test_a_fork_writes_nothing_down(context, hub) -> None:
     )
 
     await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     await send(server, "two", subagent="researcher")
 
     assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
@@ -4619,7 +4619,7 @@ async def test_a_cancelled_fork_turn_is_not_rolled_back_by_the_next_message(
     )
 
     await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     interrupted = asyncio.create_task(send(server, "two", subagent="researcher"))
     await wait_for_streams(backend, 2)
     interrupted.cancel()
@@ -4650,8 +4650,8 @@ async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
     first = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
-    await set_subagent(first, "researcher", fork=True)
-    await set_subagent(first, "writer")
+    await create_subagent(first, "researcher", fork=True)
+    await create_subagent(first, "writer")
 
     assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
     assert subagent_of(DEFAULT_AGENT, "writer").is_dir()
@@ -4672,7 +4672,7 @@ async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
 
     # And the name is free again rather than being a half-subagent that `set`
     # would silently take for the old one.
-    remade = await set_subagent(second, "researcher", fork=True)
+    remade = await create_subagent(second, "researcher", fork=True)
     assert remade.data["created"] is True
 
 
@@ -4696,7 +4696,7 @@ async def test_the_idle_sweep_does_not_forget_a_fork(context, hub, monkeypatch) 
     )
 
     await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     await send(server, "two", subagent="researcher")
     await send(server, "three", subagent="researcher")
 
@@ -4732,7 +4732,7 @@ async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> N
     )
 
     await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     await send(server, "two", subagent="researcher")
     await send(server, "three")
     await send(server, "four", subagent="researcher")
@@ -4755,7 +4755,7 @@ async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> N
 async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> None:
     """The copy ends at the last exchange that finished, and it has to.
 
-    A maker calls `subagent_set` *as* a tool call, so the conversation it is in
+    A maker calls `subagent_create` *as* a tool call, so the conversation it is in
     the middle of ends with an assistant message whose call has no result yet —
     the one history every provider refuses (`trim_tools` records the same thing
     about the same pair).  A copy taken then is a conversation nobody can be
@@ -4808,7 +4808,7 @@ async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> No
     turn = asyncio.create_task(maker())
     await asyncio.wait_for(parked.wait(), timeout=10)
 
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     # **Bounded, because the way this test fails is a deadlock.**  A fork that
     # waits on the maker's lock waits out the maker's *whole turn*, and the
     # maker here is parked on an approval this test cannot answer until after
@@ -4869,7 +4869,7 @@ async def test_a_fork_made_while_the_maker_is_live_keeps_its_message(
 
     maker = asyncio.create_task(send(server, "one"))
     await asyncio.wait_for(store.arrived.wait(), timeout=_T.timeouts.work.hub)
-    await set_subagent(server, "researcher", fork=True)
+    await create_subagent(server, "researcher", fork=True)
     fork = asyncio.create_task(send(server, "two", subagent="researcher"))
     # **Where the two builds part company.**  Without the lock the fork is in
     # its own restore by now — the maker's is parked and holds nothing — and this
@@ -5046,7 +5046,7 @@ async def test_removing_a_subagent_tells_the_network_before_it_deletes(
             backend=FakeBackend(),
             mesh_client=mesh,
         )
-        await set_subagent(server, "researcher")
+        await create_subagent(server, "researcher")
         directory = subagent_of(DEFAULT_AGENT, "researcher")
         assert directory.is_dir(), "nothing to remove, so nothing to tell"
 
@@ -5073,7 +5073,7 @@ async def test_a_machine_with_no_subagent_network_removes_without_telling_anyone
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
 
     assert (await remove_subagent(server, "researcher")).data["removed"] is True
     assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
@@ -5153,8 +5153,8 @@ async def test_the_subagent_list_is_the_makers_directories(context, hub) -> None
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher", role="code reviewer")
-    await set_subagent(server, "scout", model="deepseek/deepseek-flash")
+    await create_subagent(server, "researcher", role="code reviewer")
+    await create_subagent(server, "scout", model="deepseek/deepseek-flash")
 
     async with Client(server) as client:
         answer = await client.call_tool("subagents", {"agent": DEFAULT_AGENT})
@@ -5196,7 +5196,7 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
         hub_client=hub,
         backend=answering("hello back"),
     )
-    await set_subagent(server, "scout")
+    await create_subagent(server, "scout")
     await send(server, "hello", subagent="scout")
 
     async with watching(server, subagent="scout") as (frames, _):
@@ -5227,7 +5227,7 @@ async def test_a_watched_conversation_streams_its_next_turn(context, hub) -> Non
         backend=FakeBackend(text_turn("hi")),
     )
 
-    await set_subagent(server, "scout")
+    await create_subagent(server, "scout")
 
     async with watching(server, subagent="scout") as (frames, _):
         await send(server, "hello", subagent="scout")
@@ -5256,7 +5256,7 @@ async def test_a_watch_that_joins_mid_turn_is_handed_the_turn_from_its_start(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
-    await set_subagent(server, "scout")
+    await create_subagent(server, "scout")
     running = asyncio.create_task(send(server, "slow one", subagent="scout"))
     # The turn has reached the model, and has streamed at least one chunk by
     # the time the watch opens — so the replay has something to replay.
@@ -5287,7 +5287,7 @@ async def test_removing_a_subagent_ends_its_watch(context, hub) -> None:
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "scout")
+    await create_subagent(server, "scout")
 
     async with watching(server, subagent="scout") as (frames, task):
         await remove_subagent(server, "scout")

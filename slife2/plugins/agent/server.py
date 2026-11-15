@@ -8,7 +8,7 @@ and a model name from the config.
 **This server keeps the conversations**, and it addresses each one by
 `(agent, subagent)` — the same pair every other server in this system keys its
 own state by.  `subagent=""` is the agent's own conversation; anything else is
-one of its subagents, an agent it made and owns (`subagent_set`, SDD §3.5).  A
+one of its subagents, an agent it made and owns (`subagent_create`, SDD §3.5).  A
 caller submits a user message under that key and gets
 that turn's answer back.  The management surface a client uses is
 `send_message`, `reset`, `transcript` (what a window that has just opened asks
@@ -237,11 +237,13 @@ Compressor = Callable[[ConversationId], Compress]
 #: is *made* and *unmade*, and everything else it can do, it does with the tools
 #: an agent has.
 #:
-#: **`_set` and `_remove` rather than `_add`**, because that is what this system
-#: calls membership: `mcp_set`/`rest_api_set`/`skill_set` make a thing the agent
-#: holds and `*_remove` ends it, in every family there is.  A second spelling for
-#: the same act would be a vocabulary a model has to learn twice.
-SUBAGENT_SET = "subagent_set"
+#: **`_create` rather than `_set` or `_add`**, because the act is the thing
+#: itself: the call takes a free name, writes `subagent.yaml` under it, and that
+#: directory is what makes the name a member.  `_set` names what a second call
+#: does to one already there — its model and role — which is the smaller half of
+#: the tool; `_add` names the maker's list rather than the subagent, and the list
+#: is only how the directory is found.
+SUBAGENT_CREATE = "subagent_create"
 SUBAGENT_REMOVE = "subagent_remove"
 
 #: What a subagent is when the call that made it named no role, and the word the
@@ -745,7 +747,7 @@ class Loop:
     #: tells it the conversation no longer exists.  Without it that turn would
     #: run and its save would recreate the directory `subagent_remove` had just
     #: deleted — and the recreated directory has no `subagent.yaml`, so the name
-    #: is blocked for `subagent_set` and untouchable for `subagent_remove` for
+    #: is blocked for `subagent_create` and untouchable for `subagent_remove` for
     #: ever.
     removed: bool = False
     #: The task running this conversation's turn, or None when it is idle — the
@@ -1566,12 +1568,12 @@ def build_server(
         loop = loops.get(client)
         if loop is None:
             # **The record is the membership, and a message does not make one.**
-            # A subagent is created with `subagent_set` (§4.5), which writes
+            # A subagent is created with `subagent_create` (§4.5), which writes
             # `subagent.yaml`; a name with no record is a subagent that was
             # never made or one that was removed.  Starting its conversation
             # here would create `subagents/<name>/` — and the turn's save would
             # create `turns.db` inside it — with no record, which is the state
-            # `subagent_set` refuses as "already a directory that is not a
+            # `subagent_create` refuses as "already a directory that is not a
             # subagent" and `subagent_remove` refuses as not one of yours: the
             # name is blocked for both until somebody cleans the filesystem by
             # hand.  The read path was fixed the same way
@@ -1579,7 +1581,7 @@ def build_server(
             if subagent and not subagent_file(agent, subagent).is_file():
                 raise ToolError(
                     f"there is no subagent {subagent!r} of {agent}'s: it was "
-                    f"never made, or it was removed. Make it with {SUBAGENT_SET} "
+                    f"never made, or it was removed. Make it with {SUBAGENT_CREATE} "
                     f"before messaging it."
                 )
             live = current()
@@ -1930,7 +1932,7 @@ def build_server(
         turn of its own, an agent task working in its name, a scheduled fire.
 
         **The copy ends at the last exchange that finished** (`settled_messages`),
-        and that is not tidiness.  A maker calls `subagent_set` *as* a tool call,
+        and that is not tidiness.  A maker calls `subagent_create` *as* a tool call,
         so the last thing in its list is an assistant message whose call has no
         result yet — and a history that ends that way is the one state every
         provider refuses.  So the fork is handed the conversation as it stood
@@ -4325,8 +4327,8 @@ def build_server(
         logger.debug("reset: %s forgotten", describe((agent, subagent)))
         return {"reset": True}
 
-    @mcp.tool(name=SUBAGENT_SET, meta=FOR_THE_MODEL)
-    async def subagent_set(
+    @mcp.tool(name=SUBAGENT_CREATE, meta=FOR_THE_MODEL)
+    async def subagent_create(
         ctx: Context,
         name: str,
         model: str = "",
@@ -4342,8 +4344,8 @@ def build_server(
         `subagent_remove`; everything else it does, it does with the tools you
         have.
 
-        **A subagent you already have is the same subagent** — `set` rather than
-        `add`, so naming one twice is safe. What a second call changes is its
+        **A subagent you already have is the same subagent** — naming one twice
+        makes no second one, so it is safe. What a second call changes is its
         model and its role; whether it was made as a fork is what it was — a
         fork's conversation is a copy already taken, and a later call cannot
         re-decide what it is made of.
@@ -4416,7 +4418,8 @@ def build_server(
         # What a second call does not get to rewrite, and both are the same
         # reason: whether it is a fork is settled by the copy that was taken when
         # it was made, and when it was made is not a question a later call is
-        # answering.  A `set` says what this subagent runs on and what it is for.
+        # answering.  A second call says what this subagent runs on and what it
+        # is for.
         made_fork = fork if created else record.get("fork") is True
         _write_subagent(
             maker,
@@ -4432,7 +4435,7 @@ def build_server(
         logger.info(
             "subagent %s %s (model %s, role %s%s)",
             describe((maker, directory.name)),
-            "made" if created else "set",
+            "created" if created else "updated",
             model or "the maker's",
             role or DEFAULT_ROLE,
             ", fork" if made_fork else "",
@@ -4678,7 +4681,7 @@ def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
     return SubagentSpec(
         model=str(record.get("model") or ""),
         role=str(record.get("role") or DEFAULT_ROLE),
-        # `is True` rather than `bool(…)`: this file is written by `subagent_set`
+        # `is True` rather than `bool(…)`: this file is written by `subagent_create`
         # and YAML spells a boolean as one, so a quoted "false" is a hand-edit
         # that means nothing rather than a second spelling of False — and reading
         # it as True would make a subagent a fork on the strength of a typo.
@@ -4787,7 +4790,7 @@ def settled_messages(messages: list[Message]) -> list[Message]:
     things its maker knows, which is the one thing a fork is for.
 
     It is here for the fork (`adopt_maker`), which is taken while its maker is
-    *in* a turn — the maker calls `subagent_set` as a tool call, so its own list
+    *in* a turn — the maker calls `subagent_create` as a tool call, so its own list
     necessarily ends mid-exchange — and a copy of that list is a conversation
     nobody can be sent.  What it costs is the exchange the maker had not
     finished: a tool round nobody has spoken about yet, which is the part of the

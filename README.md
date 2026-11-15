@@ -1093,9 +1093,9 @@ A subagent is an agent that belongs to another agent. It has the maker's tool
 set, its own role-specific system prompt, and its own conversation, but no
 process, no window, no claim on an agent name, and no external identity. It is
 reached only on the local subagent network and runs when something sends it a
-message. `subagent_set` and `subagent_remove` refuse a subagent caller.
+message. `subagent_create` and `subagent_remove` refuse a subagent caller.
 
-A subagent is created with `subagent_set` and removed with `subagent_remove`.
+A subagent is created with `subagent_create` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations as
 a peer agent, under `subagent_*` names: `subagent_send_message`,
 `subagent_task_response`, `subagent_continue_task`, `subagent_cancel_task`,

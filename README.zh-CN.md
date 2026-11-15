@@ -925,10 +925,10 @@ peer_agent:
 
 subagent 是属于另一个 agent 的 agent。它有创建者的工具集、自己的角色化 system
 prompt 和自己的对话，但没有进程、没有窗口、不占用 agent 名字，也没有外部身份。它只在
-本地 subagent 网络上可达，在有消息发给它时运行。`subagent_set` 和 `subagent_remove`
+本地 subagent 网络上可达，在有消息发给它时运行。`subagent_create` 和 `subagent_remove`
 会拒绝 subagent 调用者。
 
-subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
+subagent 用 `subagent_create` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
 与 peer agent 相同的操作、以 `subagent_*` 名字寻址：`subagent_send_message`、
 `subagent_task_response`、`subagent_continue_task`、`subagent_cancel_task`、
 `subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。

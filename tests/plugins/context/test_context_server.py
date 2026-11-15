@@ -679,7 +679,7 @@ async def test_a_read_of_a_conversation_that_was_never_written_creates_nothing()
 
     `agent_dir` makes a conversation's directory, and `TurnStore` makes its file,
     so a `restore`, a browse or a search against a stale name used to leave a
-    directory with no `subagent.yaml` behind — which `subagent_set` and
+    directory with no `subagent.yaml` behind — which `subagent_create` and
     `subagent_remove` then both refuse until somebody cleans the filesystem by
     hand.  A conversation that has genuinely never run is the same absent file,
     and the empty answer is the honest one for both.

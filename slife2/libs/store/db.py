@@ -2169,7 +2169,7 @@ def read_store_for(agent: str, subagent: str = "") -> TurnStore | None:
     and the file, which is right for a write and wrong for a read: a subagent
     that has been removed is a name with no record, and a `transcript` or a
     search against that stale name recreated its directory — leaving one with no
-    `subagent.yaml` that `subagent_set` and `subagent_remove` then refuse until
+    `subagent.yaml` that `subagent_create` and `subagent_remove` then refuse until
     the filesystem is cleaned by hand.  A conversation that has genuinely never
     run is the same absent file, and the honest answer for both is the empty
     one its reader already gives.

@@ -373,7 +373,7 @@ def test_reading_a_subagent_record_does_not_create_the_subagent(
     """A read is a read.  `subagent_file` built its path through `agent_dir`.
 
     `agent_dir` mkdirs, so `send_message(subagent="reserch")` (a typo) created
-    `subagents/reserch/`; `subagent_set` then refused the name for ever as a
+    `subagents/reserch/`; `subagent_create` then refused the name for ever as a
     "half-removed" directory and `subagent_remove` would not delete it.  The
     writer creates its own parents (`statefile.write`).
     """

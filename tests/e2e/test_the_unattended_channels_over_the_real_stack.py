@@ -364,7 +364,7 @@ async def test_a_watched_subagent_runs_unattended_and_the_watch_sees_it(
     try:
         async with Client(config.agent.server.url) as server:
             await server.call_tool(
-                "subagent_set",
+                "subagent_create",
                 {"name": SCOUT, "role": "researcher"},
                 meta=conversation_meta(MAKER),
             )

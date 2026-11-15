@@ -3581,7 +3581,7 @@ async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
         await pilot.press("ctrl+o")
         assert await settled(pilot, lambda: "no subagents yet" in shown(app))
         assert not app.query(ConversationPicker)
-        assert "`subagent_set`" in shown(app)
+        assert "`subagent_create`" in shown(app)
 
 
 async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window() -> (

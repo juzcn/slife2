@@ -616,7 +616,7 @@ attributable rather than interleaved (§11.7).
 
 A subagent is an agent that belongs to another agent. A subagent:
 
-- has the maker's tool set, with one exception: `subagent_set` and
+- has the maker's tool set, with one exception: `subagent_create` and
   `subagent_remove` refuse a subagent caller (§4.5.3);
 - has its own role-specific system prompt (`subagent.j2`) and its own
   `subagent.yaml`; a non-fork subagent also has its own stored conversation,
@@ -638,7 +638,7 @@ table already exists and is keyed by `(home, agent, subagent)`. The cost of a
 subagent plugin would be the transport to it — a new protocol hop for every
 message — while a subagent's identity is already the conversation id.
 
-A subagent is created with `subagent_set` and removed with `subagent_remove`.
+A subagent is created with `subagent_create` and removed with `subagent_remove`.
 **The record is the membership**: a message addressed to a name with no
 `subagent.yaml` — never made, or removed — is refused rather than starting a
 conversation that would recreate the directory with no record and block the name
@@ -695,7 +695,7 @@ network meets.
 
 #### 4.5.3 One level only
 
-A subagent MUST NOT create or remove a subagent. `subagent_set` and
+A subagent MUST NOT create or remove a subagent. `subagent_create` and
 `subagent_remove` are refused when the caller is itself a subagent: the local
 network holds a place for the maker's own subagents and nothing holds a place
 for a level below them.
@@ -1563,7 +1563,7 @@ and the append path would write the wrong id back for good.
 **A read does not create the file.** A conversation that has never run and a
 removed subagent's stale name are the same absent store, and a read answers its
 empty shape rather than creating a directory with no `subagent.yaml` — which
-would then block the name against `subagent_set` and `subagent_remove`. Only a
+would then block the name against `subagent_create` and `subagent_remove`. Only a
 write makes the directory and the file.
 
 ### 8.2 Index machinery
