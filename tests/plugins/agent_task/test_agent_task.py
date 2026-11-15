@@ -525,9 +525,7 @@ async def test_the_task_start_declaration_stays_when_the_hub_offers_it(
     hub = Client(
         build_hub(
             base,
-            transports=plugin_transports(
-                base, {"agent-task": lambda _settings: stub}
-            ),
+            transports=plugin_transports(base, {"agent-task": lambda _settings: stub}),
             embedder=StubEmbedder(),
         )
     )
