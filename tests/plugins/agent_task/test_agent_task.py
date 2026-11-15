@@ -1,4 +1,4 @@
-"""The agent task: one loop of the agent's own, run on a description, answered
+"""The agent task: one turn of the agent's own, run on a description, answered
 by a message.
 
 Everything here runs over FastMCP's **in-memory transport**.  A task is a turn —
@@ -43,6 +43,7 @@ from fakes import (
     a_home,
     plugin_transports,
     text_turn,
+    wait_until_settled,
 )
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -50,7 +51,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
-from slife2.libs.plugin.audience import conversation_meta, for_the_model
+from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta, for_the_model
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.libs.turn.tools import CHECK_NEW_INPUT
@@ -320,7 +321,7 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
 
     The poll is the test's, which is the one place polling is right: the model is
     told not to do it (that is what the tool's description is for), and a test
-    has no other way to wait for a background loop.
+    has no other way to wait for a background task.
 
     **The bound is a wall clock, not a count of polls.**  A count makes the
     budget depend on how fast each poll is answered, and a loaded CI runner
@@ -421,10 +422,9 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
 
     # **The hub's own list, by name** — compared against what the hub
     # advertises rather than against two names, because there is no per-caller
-    # *tool set* here: a task gets the names its agent does, which is what makes
-    # starting a task from inside one possible rather than forbidden.  The two
-    # that act on a live conversation keep their declarations but are backed by
-    # a refusal (`LIVE_CONVERSATION_TOOLS`).
+    # *tool set* here: a task gets the names its agent does.  The tools it must
+    # not run keep their declarations but are backed by a refusal
+    # (`WITHHELD_FROM_A_TASK`).
     from slife2.clients.toolclient import remote_tools
 
     assert {spec.name for spec in built.backend.calls[0][1]} == {
@@ -463,6 +463,104 @@ async def test_a_task_cannot_take_the_live_conversations_cut_in(
         if getattr(message, "role", "") == "tool"
     ]
     assert any("not available in an agent task" in text for text in results), results
+
+
+async def test_a_task_cannot_start_another_task(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """**One turn has no second turn for a task result.**
+
+    Starting another task is the same nesting `_async` is refused for: the
+    child's answer would arrive after this turn has ended.  The refusal is the
+    same shape as the live-conversation pair's — the declaration stays, the call
+    is answered with a sentence — and no child task exists afterwards.
+    """
+    calling = ScriptedTurn(
+        result=StreamChatResult(
+            text="",
+            usage=Usage(),
+            tool_calls=(
+                ToolCall(
+                    id="c1",
+                    name=AGENT_TASK_START,
+                    arguments={"name": "child", "description": "more work"},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+    )
+    built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
+
+    await start(built)
+    await settle(built)
+
+    results = [
+        str(message.content)
+        for message in built.messages()
+        if getattr(message, "role", "") == "tool"
+    ]
+    assert any("cannot start another task" in text for text in results), results
+    async with Client(built.mcp) as client:
+        listed = await ask(client, AGENT_TASK_LIST)
+    assert [row["name"] for row in listed["tasks"]] == ["research"]
+
+
+async def test_the_task_start_declaration_stays_when_the_hub_offers_it(
+    store: Store, window: Window
+) -> None:
+    """**The declaration stays, the behaviour goes.**  In a real home the hub
+    advertises `agent_task_start` to every model, so the task's list must keep
+    the name — a model that knows it would otherwise go through
+    `tool_search`/`func_tool_load` for ever — and answer the call with a refusal.
+    """
+    from slife2.plugins.toolhub.server import build_server as build_hub
+
+    stub = FastMCP("agent-task")
+
+    @stub.tool(name=AGENT_TASK_START, meta=FOR_THE_MODEL)
+    async def offered(name: str, description: str) -> dict[str, Any]:
+        return {"started": name}
+
+    base = default_config()
+    hub = Client(
+        build_hub(
+            base,
+            transports=plugin_transports(
+                base, {"agent-task": lambda _settings: stub}
+            ),
+            embedder=StubEmbedder(),
+        )
+    )
+    calling = ScriptedTurn(
+        result=StreamChatResult(
+            text="",
+            usage=Usage(),
+            tool_calls=(
+                ToolCall(
+                    id="c1",
+                    name=AGENT_TASK_START,
+                    arguments={"name": "child", "description": "more work"},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+    )
+    async with hub:
+        await wait_until_settled(hub)
+        # The list the task inherits is the hub's *loaded* set; a name the model
+        # knows is one it loaded, and that is the case this test is about.
+        await hub.call_tool("tool_load", {"name": AGENT_TASK_START})
+        built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
+        await start(built)
+        await settle(built)
+
+    assert AGENT_TASK_START in {spec.name for spec in built.backend.calls[0][1]}
+    results = [
+        str(message.content)
+        for message in built.messages()
+        if getattr(message, "role", "") == "tool"
+    ]
+    assert any("cannot start another task" in text for text in results), results
 
 
 async def test_the_context_is_rebuilt_exactly_once(
@@ -531,7 +629,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     """`turn_ids` was tolerated where `messages` beside it was validated.
 
     So an answer carrying messages and no ids was adopted as a context whose
-    turns nothing could name, and the task's loop and the store disagreed about
+    turns nothing could name, and the task's turn and the store disagreed about
     what it held from that point on — the identical deformation the agent
     server's `_adopt` was fixed for.  Both halves of one answer are read the same
     way: a missing or null `turn_ids` is refused, naming the payload

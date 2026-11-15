@@ -72,4 +72,4 @@ The marker at the start of a message says where it came from.
 ## Last words
 
 - **Subagents** are yours, with their own conversation and memory; **peers** are other agents, with their own identity and memory. `subagent_*` does not reach a peer, and `peer_agent_*` does not reach your subagents.
-- **Agent tasks** run as you in the background, from this conversation's stored turns. 
+- **Agent tasks** run as you in the background, from this conversation's stored turns. A task is a single turn: `_async` and starting another task are refused inside it.

@@ -555,7 +555,7 @@ async def test_a_tool_that_acts_on_the_live_conversation_cannot_be_backgrounded(
 async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
     """No `deliver` means the mode is refused, in a sentence that can be acted on.
 
-    An agent task's loop is that case (SDD §14.2): it runs one turn and has no
+    An agent task's turn is that case (SDD §14.2): it runs one turn and has no
     second one for a result to arrive in, so a task id would be a promise nothing
     could keep.  The refusal says which one line fixes it.
     """

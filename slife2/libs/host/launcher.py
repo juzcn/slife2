@@ -663,7 +663,7 @@ def others_running() -> list[ClientRecord]:
 
 
 #: The plugins the hub cannot be made to wait for, because each of them waits on
-#: the hub: itself, `agent-task` (a task's loop *runs on* the hub's tool list) and
+#: the hub: itself, `agent-task` (a task's turn *runs on* the hub's tool list) and
 #: `schedule` (its runs are handed to `agent-task`).  Named once, so that the
 #: entry below can be the rule rather than a list of names.
 _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")

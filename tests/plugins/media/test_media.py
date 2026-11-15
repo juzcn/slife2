@@ -387,7 +387,7 @@ class Says(FakeAdapter):
 async def test_a_long_transcript_is_answered_whole() -> None:
     """**A transcript is a tool output like any other.**  The tool does not
     estimate, page or clip it; the harness's byte bound is the one place a
-    result is fitted, and a task's loop cuts it there.  The failure this pins is
+    result is fitted, and a task's turn cuts it there.  The failure this pins is
     the old one: a page cut to a token budget whose marker made `offset +
     len(text)` skip the marker's characters.
     """

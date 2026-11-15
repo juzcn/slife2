@@ -3,7 +3,7 @@
 **A window's turn has no answer of its own.**  A `submit` hands a message to the
 window and returns; the turn's assistant text answers everything folded into
 that turn, so no assistant text can be attributed to one probe.  The probe asks
-through an *agent task* instead: the task runs one loop of the agent's own (no
+through an *agent task* instead: the task runs one turn of the agent's own (no
 inbox, no cut-ins), and its stop message is delivered to the conversation as an
 `agent-task:<name>` message wearing `[AgentTaskResult:{…}]`.  That named message
 is the answer.

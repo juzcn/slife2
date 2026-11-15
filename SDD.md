@@ -241,7 +241,7 @@ Each plugin has one job:
 | `job-server` | The home's Python functions as tools |
 | `cabinet`, `media` | Documents and dumps; images, video, speech, transcription |
 | `file-tunnel`, `wechat` | A public file URL; one WeChat login per agent |
-| `agent-task`, `schedule` | Background loops; timers and the run ledger |
+| `agent-task`, `schedule` | Background turns; timers and the run ledger |
 | `peer-agent`, `subagent` | The peer and local networks |
 | `tui` | The terminal inbox |
 
@@ -949,7 +949,7 @@ the turn records where it came in.
 | `peer_agent:<peer>` | A peer agent | `PeerAgent(<peer>)>` | `[PeerAgent:{…}]` |
 | `agent:<name>` | The agent, in one of its subagents' conversations | `Agent(<name>)>` | `[Agent:{…}]` |
 | `subagent:<name>` | One of this agent's subagents | `Subagent(<name>)>` | `[Subagent:{…}]` |
-| `agent-task:<name>` | A background loop's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
+| `agent-task:<name>` | A background turn's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
 | `async-tool:<name>` | A background tool call's result | `AsyncTool(<name>)>` | `[AgentToolResult:{…}]` |
 
 The channel is recorded, so the marker belongs to the channel, the displayed line
@@ -1520,7 +1520,7 @@ advertised schema and stripped before dispatch, so no tool server sees them.
 | Parameter | Semantics |
 |---|---|
 | `_timeout` | Seconds for this call: a positive, finite number, overriding the tool's default. Any other value — `0`, negative, text, `inf` — fails the call with an error the model reads; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
-| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task's loop has no `_async`. |
+| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task is one turn, so it refuses `_async` and starting another task. |
 | `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
 
 The loop reads these parameters off the call and strips them before dispatch.
@@ -1996,7 +1996,7 @@ a profile message.
 
 ### 9.3 Agent tasks
 
-`plugins/agent_task/` runs one loop of the agent's own on a description, and the
+`plugins/agent_task/` runs one turn of the agent's own on a description, and the
 answer comes back as a message. It is a separate mechanism from a subagent: it
 runs on the agent's own context, has no address of its own, records nothing, and
 accepts no second message.
@@ -2005,13 +2005,15 @@ Properties:
 
 1. **A cap and a name.** `agent_task_start` refuses a duplicate name and refuses
    past `agent-task.max_running`.
-2. **A task's turns are not written to the agent's database.** The task reads the
+2. **A task's turn is not written to the agent's database.** The task reads the
    agent's context and adds nothing to it. What the conversation gains is the
    answer, which the agent server records as a message.
-3. **Every failure is a message.** A loop that raises still has an answer to
+3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
-4. **Background work inside a task is refused.** The task loop runs one turn and
-   has no second turn for a background result to arrive in.
+4. **Background work and a nested task are refused.** A task runs one turn and
+   has no second turn to receive a result from `_async` or from a task it
+   started; `agent_task_start` keeps its declaration and answers with a
+   refusal.
 5. **`finished` means delivered.** A task's answer is its product and no copy is
    kept (§9.3), so a task whose answer reached no window is `failed`; the status
    can be trusted to mean what it says.
@@ -2020,13 +2022,14 @@ A task runs one turn, so it makes one rebuild; zero would make it the one turn i
 the system whose context nobody decided. It runs with the agent's system prompt,
 model, tools, and context decision. Its opening message is the shipped
 `agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
-message sent when the task stops is the whole of what comes back, and background
-work or a nested task is refused. It does not have the turn that started it,
-because `restore` reads the stored turn list and a turn is written only when it
-ends; the description must restate the last exchange.
+message sent when the task stops is the whole of what comes back, and `_async`
+or a nested task is refused because there is no later turn to receive the
+result. It does not have the turn that started it, because `restore` reads the
+stored turn list and a turn is written only when it ends; the description must
+restate the last exchange.
 
-A task may start another task, because the tool set is one catalogue and nothing
-filters it. `agent-task.max_running` bounds concurrency, not total work over
+A task cannot start another task — the same one-turn rule that refuses
+`_async`. `agent-task.max_running` bounds concurrency, not total work over
 time.
 
 The answer is delivered as a message on the `agent-task:<name>` channel, with an
@@ -2266,7 +2269,7 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | `embeddings:` | The context store, the cabinet, and the tool hub |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
-| `tool_result:` | The harness, the cabinet's readers and `dump_read`/`dump_grep`, and the agent-task loop's cut |
+| `tool_result:` | The harness, the cabinet's readers and `dump_read`/`dump_grep`, and the agent-task turn's cut |
 | `mcp:` | `slife2-mcp-tools`, and the tool hub for its source names |
 | `rest-api:` | `slife2-restapi-tools`, and the tool hub for its source names |
 | `cli:` | `slife2-cli` |
@@ -2720,13 +2723,13 @@ The following are not implemented in this version:
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
-| A cap on total agent-task work | `max_running` bounds concurrency; a rate or depth is the missing number. | Total work over time is unbounded. |
+| A cap on total agent-task work | `max_running` bounds concurrency; a rate is the missing number. | Total work over time is unbounded. |
 | A cap on the number of conversations | The inbox is capped; the number of loops is not. | A client can create conversations without a machine-wide limit. |
 | A visible agent-task progress line | The four tools are the model's; the window has no line for a running task. | A person's only lever is to ask the model. |
 | A word to the model about the loaded set | The tool descriptions explain themselves. | A model may not use loading unless it reads them. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
-| Background work inside an agent task | A task runs one turn and has no second turn for a result. | `_async` is refused with an explanation. |
+| Background work inside an agent task | A task runs one turn and has no second turn to receive a result. | `_async` and `agent_task_start` are refused with an explanation. |
 | A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |

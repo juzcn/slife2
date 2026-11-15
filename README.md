@@ -670,7 +670,7 @@ advertised schema and stripped before dispatch.
 | Parameter | Effect |
 |---|---|
 | `_timeout` | Seconds for this call. It overrides the tool's default. Any value that is not a positive, finite number — `0`, a negative, text — fails the call; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. |
-| `_async` | Run the call in the background. The model receives a `task_id`; the result arrives with an `[AgentToolResult:{…}]` marker on the `async-tool:<tool>` channel. `check_async` reports the state; `cancel_async` abandons it. The result budget still applies. An agent task's loop has no `_async`. |
+| `_async` | Run the call in the background. The model receives a `task_id`; the result arrives with an `[AgentToolResult:{…}]` marker on the `async-tool:<tool>` channel. `check_async` reports the state; `cancel_async` abandons it. The result budget still applies. An agent task is one turn, so it refuses `_async` and starting another task. |
 | `_approve` | Ask the user before running. The terminal draws an inline row (`y` approves, `n` or `Esc` denies) and answers with `answer_approval`. If the channel has no person behind it, the call runs without asking. A caller that can answer says so with `watched=true`. |
 
 #### Skills and commands
@@ -929,8 +929,10 @@ not, and the plugin is one shared process.
 
 ### Agent tasks
 
-An agent task is a separate loop of the same agent, started with a name and a
-description and answered later by a message in the same conversation.
+An agent task is a separate turn of the same agent, started with a name and a
+description and answered later by a message in the same conversation. It is one
+turn: it cannot receive a result that arrives later, so `_async` and starting
+another task are refused inside it.
 
 | Tool | Purpose |
 |---|---|
@@ -953,8 +955,8 @@ agent-task:
 ```
 
 `max_running` is the only key the section owns; everything else comes from
-`agent:`. A task may start another task, so `max_running` bounds concurrency but
-not total work over time.
+`agent:`. A task cannot start another task — it is one turn, like `_async`.
+`max_running` bounds concurrency, not total work over time.
 
 ### Scheduled tasks
 
@@ -1248,8 +1250,7 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
   not sandboxed. The top-level tool call is the approval point.
 - There is no approval gate before a configuration edit, including `mcp_set`
   with a `command:` that records a program slife2 will start.
-- An agent task may start another agent task; `agent-task.max_running` bounds
-  concurrency, not total work over time.
+- `agent-task.max_running` bounds concurrent tasks, not total work over time.
 
 ## License
 

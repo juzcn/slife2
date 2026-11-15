@@ -911,7 +911,7 @@ def _probe(
 
     **Two roads, one answer contract.**  `a2a` (the default) is a mock peer: a
     `task_request` on the peer network, answered by the model's own
-    `task_response`.  `tui` is an agent task: the task runs one loop of the
+    `task_response`.  `tui` is an agent task: the task runs one turn of the
     agent's own and its delivered `agent-task:<name>` message is the answer —
     never the window's assistant text, which answers everything folded into the
     turn.

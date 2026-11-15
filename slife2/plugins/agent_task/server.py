@@ -1,8 +1,8 @@
-"""slife2-agent-task — the agent task: one loop of the agent's own, run on a
+"""slife2-agent-task — the agent task: one turn of the agent's own, run on a
 description, answered by a message.
 
-An **agent task** is a background loop.  The model starts one with a name and a
-description; the loop runs as the calling agent — the same system prompt, the
+An **agent task** is a background turn.  The model starts one with a name and a
+description; the turn runs as the calling agent — the same system prompt, the
 same model, the same tools — and its last message is handed back to that
 conversation when it stops.  Nothing waits for it: the call that starts one
 answers at once, and the answer arrives later as a message on the `agent-task`
@@ -40,10 +40,13 @@ than because it was left out:
   batch for every caller (`slife2.libs.turn.loop`), so the list it leaves is well
   formed; and a task's list is local and dies with it, so there is no next
   request to poison either way.
-* **No filtering of the tool set.**  The catalogue is one list for the whole
-  system (`slife2-toolhub`), so a task may start a task and the registry here is
-  **flat** — no parents, no depth.  `agent-task: max_running` is the bound
-  instead; SDD §14.2 holds the one it does not bound.
+* **One more tool is withheld, for the same reason `_async` is.**  A task is
+  one turn, so a result that arrives later — from a background tool call or
+  from another task — has nowhere to land.  `agent_task_start` keeps its declaration
+  and is backed by a refusal, exactly as the tools that act on a live
+  conversation are.  The rest of the catalogue is the hub's whole list, and the
+  registry here is **flat** — no parents, no depth.  `agent-task: max_running`
+  is the bound; SDD §14.2 holds the one it does not bound.
 
 The answer goes back through `slife2-tui`'s `submit`, which is this system's one
 path for "something outside the conversation became a turn in it" (SDD §5.4).  A
@@ -125,16 +128,18 @@ SERVER_NAME = AGENT_TASK_SERVER_NAME
 #: runs under is the channel its answers come back on.
 CONFIG_KEY = CHANNEL
 
-# **The two tools a task's model must not have**, from the one set that says
-#: which tools act on a *live* conversation (`slife2.libs.turn.tools`).
-#: `_check_new_input` pops a queued message out of the running loop's inbox and
-#: hands it to whoever called, and `attach_image` injects parts into that loop's
-#: last user message.  A task shares the agent's identity by design — same
-#: context, same store, same tools — but it is not that live loop, and the
-#: shared identity is exactly what makes the two indistinguishable at the agent
-#: server.  So they are withheld here, and a by-name call is answered "not here"
-#: instead of stealing the main conversation's message or image.  The same set
-#: is what the loop refuses to send to the background.
+#: **The tools a task's model must not run.**  The first two act on a *live*
+#: conversation (`LIVE_CONVERSATION_TOOLS`): `_check_new_input` pops a queued
+#: message out of the running loop's inbox and hands it to whoever called, and
+#: `attach_image` injects parts into that loop's last user message.  A task
+#: shares the agent's identity by design — same context, same store, same tools
+#: — but it is not that live loop, and the shared identity is exactly what makes
+#: the two indistinguishable at the agent server.  The third is
+#: `agent_task_start`: a task is one turn, so a task result would arrive after
+#: it with nowhere to land.  All three keep their declarations and are backed by
+#: a refusal, and none is fetched from the hub by name; the live pair is also
+#: what the loop refuses to send to the background.
+WITHHELD_FROM_A_TASK = LIVE_CONVERSATION_TOOLS | frozenset({AGENT_TASK_START})
 
 # The tools, the states, the channel and the marker are
 # `slife2.libs.plugin.vocabulary`'s: each crosses a process boundary — the
@@ -159,7 +164,7 @@ DESCRIPTION_CHARS = 120
 
 @dataclass
 class AgentTask:
-    """One background loop, and everything this process knows about it.
+    """One background turn, and everything this process knows about it.
 
     The five fields `report` answers with are a task's *whole* description:
     there is no message list here, no transcript and no result beyond the one
@@ -413,17 +418,25 @@ def build_server(
         to special-case the catalogue: this loop has no `_async` (see below), so
         it will never hand the model a task id, but `check_async` and
         `cancel_async` are model tools like every other and arrive in the list
-        the hub advertises.  The one exception is the two tools that act on a
-        *live* conversation (`LIVE_CONVERSATION_TOOLS`): their declarations stay
-        — dropping a name a model already knows sends it through
-        `tool_search`/`func_tool_load` for ever — but the function behind each is
-        a refusal, because this loop is not the conversation they mutate.
+        the hub advertises.  The exceptions are the tools in
+        `WITHHELD_FROM_A_TASK`: their declarations stay — dropping a name a
+        model already knows sends it through `tool_search`/`func_tool_load` for
+        ever — but the function behind each is a refusal.  Two act on a live
+        conversation this loop is not; the third would start a second turn,
+        whose result this one has nowhere to receive.
         """
 
         def refused(name: str):
             """The declaration a withheld tool keeps, backed by a refusal."""
 
             async def run(_arguments: dict[str, Any]) -> str:
+                if name == AGENT_TASK_START:
+                    raise ToolFailed(
+                        f"{name} is not available in an agent task: this task is "
+                        f"one turn, so it cannot start another task. Do this work "
+                        f"in this turn, or put what should happen next in your "
+                        f"answer."
+                    )
                 raise ToolFailed(
                     f"{name} is not available in an agent task: it acts on the "
                     f"agent's live conversation, and this task is not that "
@@ -441,9 +454,11 @@ def build_server(
 
         async def catalogue_has(name: str) -> CatalogueAnswer:
             """What the catalogue says about a name outside this request's list."""
-            if name in LIVE_CONVERSATION_TOOLS:
-                # A task has no live conversation for these to act on; the
-                # catalogue has them for the agent, not for this model.
+            if name in WITHHELD_FROM_A_TASK:
+                # The catalogue holds these for the agent, not for this model: a
+                # task has no live conversation for the first two to act on, and
+                # the third would start a turn whose result this one cannot
+                # receive.
                 return CATALOGUE_MISSING
             return (await tool_lookup(await runtime.hub(), name, task.identity)).answer
 
@@ -451,7 +466,7 @@ def build_server(
             name: str, arguments: dict[str, Any]
         ) -> Tool | None:
             """The same name, made runnable when the call fits its current schema."""
-            if name in LIVE_CONVERSATION_TOOLS:
+            if name in WITHHELD_FROM_A_TASK:
                 # **A by-name call is refused, not acquired.**  The registry
                 # would otherwise fetch the real tool from the hub and run it —
                 # the exact action this whole guard exists to prevent.
@@ -461,15 +476,15 @@ def build_server(
             )
 
         # **The declaration stays, the behaviour goes.**  The hub advertises
-        # these two to every model, and dropping them here would send a model
-        # that knows their names through `tool_search`/`func_tool_load` in a
-        # loop that can never load them.  A stub keeps the list the hub's own —
-        # and makes the call a refusal the model reads, rather than an action on
-        # somebody else's inbox.
+        # these to every model, and dropping them here would send a model that
+        # knows their names through `tool_search`/`func_tool_load` in a loop
+        # that can never load them.  A stub keeps the list the hub's own — and
+        # makes the call a refusal the model reads, rather than an action on
+        # somebody else's inbox or a second task this turn cannot receive.
         tools = [
             (
                 tool
-                if tool.spec.name not in LIVE_CONVERSATION_TOOLS
+                if tool.spec.name not in WITHHELD_FROM_A_TASK
                 else Tool(spec=tool.spec, run=refused(tool.spec.name))
             )
             for tool in await remote_tools(await runtime.hub(), task.identity)
@@ -556,6 +571,8 @@ def build_server(
             # arrive in, so there is nowhere to hand one back to: the loop
             # therefore *refuses* the mode with a sentence the model can act on
             # (`BACKGROUND_UNAVAILABLE`) rather than running the call quietly.
+            # The same reason withholds `agent_task_start` from the registry
+            # above: a result from another task would arrive after this turn.
             # The background-call tools are still in the list like every other
             # model tool; there is simply no task id here for them to answer.
         )
@@ -846,13 +863,16 @@ def build_server(
     async def agent_task_start(
         ctx: Context, name: str, description: str
     ) -> dict[str, Any]:
-        """Start an agent task: one background loop that runs as you.
+        """Start an agent task: one background turn that runs as you.
 
         For work that would hold you — long, or waiting on the home. The call
         returns at once and the answer reaches this conversation on its own: do
         not wait for it, and do not poll. **If no window is showing this
         conversation when it stops, the task ends `failed`** — the answer is the
         product and it is not kept, so there is nothing to fetch later.
+
+        A task is one turn: inside it, `_async` and starting another task are
+        refused, because there is no later turn to receive their result.
 
         `description` is the task itself. It starts from this conversation's
         stored turns, so **the turn you are answering is not among them** — put
