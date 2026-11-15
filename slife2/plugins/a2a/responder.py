@@ -238,6 +238,38 @@ class Responder(abc.ABC):
     async def on_cancel(self, task_id: str, peer: str) -> None:  # noqa: B027 - a no-op default hook, not an abstract obligation
         """A peer withdrew an interrupted task; the harness may want to know."""
 
+    async def withdraw_inbound(self, task_id: str) -> bool:
+        """Settle an inbound task whose sender no longer exists.
+
+        **The receiver's half of a removal, and the half a session drop cannot
+        reach.**  The tasks a removed member *sent* are filed here, in the
+        inbound tables of the members that survived it.  Its reply topic is
+        gone, so no answer can ever be published for them, and a live round
+        keeps a responder slot waiting on a completion nobody can send.  The
+        task ends `cancelled`, and the work is told through `on_cancel` — the
+        same hook a peer's withdrawal uses, because from this side that is what
+        happened.
+
+        A bare message is not a task: its delivery settles it, so it is left
+        alone.  There is no status to publish — there is nobody left to read
+        one — which is the whole of the difference from `CancelTask`.
+
+        Returns:
+            Whether there was an open task to settle.
+        """
+        record = self._inbound.get(task_id)
+        if record is None or record.state in TERMINAL_STATUSES:
+            return False
+        if record.kind != "task":
+            return False
+        self._inbound.terminal(task_id, CANCELLED, "")
+        round_task = self._rounds.get(task_id)
+        if round_task is not None:
+            round_task.cancel()
+        else:
+            await self.on_cancel(task_id, record.peer)
+        return True
+
     # ── Connection ───────────────────────────────────────────────────────
 
     async def run(self) -> None:

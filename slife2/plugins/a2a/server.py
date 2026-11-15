@@ -376,13 +376,6 @@ class Session:
     #: file.
     groups: group_store.GroupStore = field(default_factory=group_store.GroupStore)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    #: The member turns this session has in flight, by the A2A task each was
-    #: started for.  **A withdrawal on the local network interrupts the turn
-    #: that task started rather than describing it** (`on_peer_cancel`): the
-    #: turn is this process's own call, so this is the lever that makes
-    #: `subagent_cancel_task` immediate instead of a note the model may or may
-    #: not read.  A bare message has no id and is not filed.
-    turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
     #: is the only place the reason survives to `peer_agent_list` — otherwise it
     #: reports a bare "not connected" for what is really a name collision.
@@ -855,24 +848,25 @@ def _wire(session: Session) -> None:
         )
 
     def on_peer_cancel(task_id: str, peer: str) -> None:
-        """A peer withdrew an inbound task — interrupt its turn, or hand it over.
+        """A peer withdrew an inbound task — hand the withdrawal to the model.
 
-        **On the subagent network the turn that task started is interrupted; on
-        the peer network the withdrawal is described.**  A member's turn runs in
-        this process (a subagent has no window and never gets one — `run_turn`),
-        so the maker's withdrawal has a handle on the one call running it: the
-        member turn filed under that task is cancelled at its caller, and the
-        agent server ends it the way it ends one whose window's call was
-        abandoned.  The word for that is *interrupt* — the window's Escape has
-        the same one; `cancel` is the task operation.  Waiting for a model to
-        read a note is not an interrupt.
+        **The task is settled where the withdrawal is accepted, and the work is
+        the model's to stop.**  The responder has already recorded the task
+        terminal by the time this runs (`Responder._on_cancel`), so a later
+        `task_response` for the id is refused; what the model gets instead is
+        this message, and it owes no answer.  The line reaches the conversation
+        the same way every other inbound line does — at the running turn's next
+        boundary, or as a turn of its own.
 
-        A peer's turn is in another process, where nothing here can cancel
-        anything.  The withdrawal is NOT a control signal: it reaches the model
-        the same way every other peer event does, and the model — the only party
-        that knows whether it is still working on that task — decides what to do
-        with it.  The one constraint rides the marker: the completion bridge died
-        with the task, so a `task_response` for it is refused.
+        **Nothing cancels a turn, on either network.**  A peer's turn is in
+        another process and cannot be reached.  A member's turn runs in this one
+        (`run_turn`), which makes an interrupt look possible, but a turn is not
+        a task: one turn can fold in several tasks' messages, a task can outlive
+        the turn that started it, and only the model knows which of them it is
+        working on.  An interrupt would either miss the work (the task was
+        folded into another turn) or reach work nobody withdrew (another task
+        folded into this one).  Both networks say the same thing, in the same
+        envelope.
 
         **The peer is scrubbed here too**, for the reason `on_inbound_task`
         gives: a withdrawal is handed over like any other message, so its
@@ -880,18 +874,10 @@ def _wire(session: Session) -> None:
         both of them drawn or written verbatim.
         """
         peer = safe_name(peer)
-        if session.net is LOCAL and session.subagent and task_id:
-            running = session.turn_tasks.get(task_id)
-            if running is not None:
-                running.cancel()
-                return
-            # **No turn of its own is still a message to read.**  The task was
-            # folded into one already running, or it is interrupted and waiting
-            # for the model's own answer; there is nothing here to cancel, and
-            # the note is the only lever that reaches the model.
         session.post(
             f"{marker(sender_net(session, peer), peer, task_id, type='cancel_task')}"
-            f"The sender withdrew this task — stop working on it.",
+            f"The sender withdrew this task — it is settled as cancelled, so "
+            f"stop working on it; no task_response is needed.",
             peer,
             f"a withdrawal from {peer}",
         )
@@ -1262,18 +1248,6 @@ async def _drain(
                         name=f"a2a-turn-{session.subagent}",
                     )
                     member_turns.add(task)
-                    # **The turn is filed under the task it runs**, because a
-                    # withdrawal has to reach the *work* and this task is the
-                    # only handle on it (`on_peer_cancel`).  A bare message has
-                    # no id anybody can withdraw, so it is not filed.
-                    if task_id:
-                        session.turn_tasks[task_id] = task
-
-                        def _settled(done: asyncio.Task, tid: str = task_id) -> None:
-                            if session.turn_tasks.get(tid) is done:
-                                session.turn_tasks.pop(tid, None)
-
-                        task.add_done_callback(_settled)
                     continue
                 try:
                     await hand_over(
@@ -1916,11 +1890,15 @@ def build_server(
         session (`drop_session`), which is what a *forced* cleanup means and why
         this is not a message to the member.
 
-        **The tasks sent to it are withdrawn with it.**  They live in the
-        senders' sessions, not the member's, so a teardown that only dropped
-        this session would leave each one `pending` in `task_list` — a row
-        saying work is still running whose member has just stopped existing.
-        `A2AMesh.withdraw_sends_to` records the one true status.
+        **The tasks around it are withdrawn with it, in both directions.**
+        The ones sent *to* it live in the senders' sessions and the ones it
+        *sent* live in the receivers' inbound tables; neither is the member's,
+        so a teardown that only dropped its session would leave each one
+        `pending` in `task_list` — a row saying work is still running whose
+        member has just stopped existing.  `A2AMesh.withdraw_sends_to` and
+        `A2AMesh.withdraw_inbound_from` record the one true status; the second
+        also tells the surviving receiver's model, because its work has just
+        lost the party that was waiting for it.
 
         Args:
             agent: Whose member it is — the conversation id's first half.
@@ -1931,15 +1909,19 @@ def build_server(
         key = (home_key(where), agent, subagent)
         found = sessions.get(key)
         if net is LOCAL and subagent:
-            # **The tasks sent to the member end with it.**  They are filed in
-            # the senders' sessions, which outlive the member, so dropping its
-            # session alone leaves each one `pending` in `task_list` — a row
-            # claiming work is still running whose member no longer exists.
-            # Every session in this process is the maker's or a sibling's, and
-            # the store is shared, so the withdrawal is one scan.
+            # **Both directions, because neither lives in the member's session.**
+            # The tasks sent *to* it are filed in the senders' sessions, and the
+            # tasks it *sent* are filed in the receivers' inbound tables;
+            # dropping the member's own session reaches neither.  Left open,
+            # each is a `pending` row in `task_list` — a row claiming work whose
+            # member no longer exists — and a sent task's live round would hold a
+            # responder slot against a sender that can never answer.  Every
+            # session in this process is the maker's or a sibling's, so both
+            # sweeps are one scan.
             withdrawn = 0
             for other in list(sessions.values()):
                 withdrawn += await other.mesh.withdraw_sends_to(subagent)
+                withdrawn += await other.mesh.withdraw_inbound_from(subagent)
             if withdrawn:
                 logger.info(
                     "a2a_member_tasks_withdrawn agent=%s count=%d",
@@ -3033,8 +3015,9 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "appeared yet; the send is still accepted."
         ),
         "withdraw": (
-            "The withdrawal is a request: the peer is told to stop, and its\n"
-            "model decides what to do with that."
+            "The withdrawal is a request: the peer is told the task is\n"
+            "withdrawn, and its model decides when to stop. The task is\n"
+            "settled as cancelled; no task_response is needed for it."
         ),
     },
     LOCAL.key: {
@@ -3081,8 +3064,9 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "anything is sent; `{list}` reads the roster."
         ),
         "withdraw": (
-            "The member stops working on it: the turn this task started is\n"
-            "interrupted, and a later `task_response` for the task is refused."
+            "The withdrawal is a request: the member is told the task is\n"
+            "withdrawn, and its model decides when to stop. The task is\n"
+            "settled as cancelled; no task_response is needed for it."
         ),
     },
 }

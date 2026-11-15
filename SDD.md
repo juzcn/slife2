@@ -708,9 +708,11 @@ for a level below them.
 2. stop the subagent's loop;
 3. delete its directory.
 
-Releasing the place also withdraws every task this process sent to the member:
-each open send is recorded `cancelled`, because a `pending` row would name work
-whose member no longer exists.
+Releasing the place also withdraws every task around the member, in both
+directions. Each open send *to* it is recorded `cancelled`; each task it *sent*
+lives in the receiver's inbound table rather than the member's, so it is settled
+`cancelled` there and the receiver's model is told. A `pending` row would name
+work whose member no longer exists.
 
 If the network notification cannot be made, the subagent is left unchanged.
 Nothing is asked of the subagent and nothing waits for it; removal is a forced
@@ -743,15 +745,16 @@ conversation. A turn that ends in prose is not a reply: the model's own
 roster read after a start connects the caller's place before reporting; a
 refused connection is reported as the tool's `error`, not raised.
 
-**A withdrawal on this network interrupts the turn that task started.**
-`subagent_cancel_task` cancels the *task*; its effect on the work is an
-**interrupt**, because the turn *is* this process's call to the agent server —
-the same caller-abandoned ending a window's Escape gives its own turn (`cancel`
-is the task operation, `interrupt` is the turn's). A task whose message was
-folded into another task's turn is withdrawn by a note, not an interrupt: an
-interrupt belongs to the task whose call it cancels, and stopping another
-task's work would be a different act. On the peer network the withdrawal remains a message the peer's
-model decides on, because its turn is in another process and cannot be reached.
+**A withdrawal is a message, on both networks.** `subagent_cancel_task`
+settles the task as cancelled where the withdrawal is accepted — the sender is
+told `cancelled`, and a later `task_response` for the id is refused — and hands
+the member's model the same `cancel_task` marker a peer's model gets: the task
+was withdrawn, it may stop working on it, and it owes no response. Nothing
+cancels the member's turn. A turn is not a task: one turn can fold in several
+tasks' messages, a task can outlive the turn that started it, and only the model
+knows which of them it is working on. The local process owns the member's call
+to the agent server, which makes an interrupt look possible; it would still be an
+interrupt of a turn, not a withdrawal of a task, and the two do not line up.
 
 #### 4.5.6 Watching a conversation
 

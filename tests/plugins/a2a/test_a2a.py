@@ -125,6 +125,7 @@ from slife2.plugins.a2a.server import (
     channel_for,
     marker,
 )
+from slife2.plugins.a2a.states import WORKING
 from slife2.plugins.a2a.task_store import TaskStore, get_store
 from slife2.tui.client import MCPMeshClient
 
@@ -3232,31 +3233,38 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
 
 
 @pytest.mark.asyncio
-async def test_a_withdrawal_cancels_the_members_running_turn(tmp_path: Path) -> None:
-    """**The maker's withdrawal stops the work, not just the task's record.**
+async def test_a_withdrawal_reaches_a_working_member_as_a_message(
+    tmp_path: Path,
+) -> None:
+    """**A turn is not a task, so a withdrawal is told, not executed.**
 
-    A subagent has no window, so its turn is a call this plugin makes to the
-    agent server (`run_turn`).  The responder's cancellation therefore has a
-    handle on the work itself: the member turn is filed under the task it runs,
-    and `on_peer_cancel` cancels it.  The agent server sees that as a caller
-    abandoning the call — the same ending a window's Escape gives its turn —
-    so the turn stops rather than waiting for a model to read a note.
+    The responder settles the task as cancelled when it accepts the withdrawal;
+    what reaches the work is the same marker a peer's model gets, and the model
+    owes no response.  Nothing here cancels the member's call: one turn can fold
+    in several tasks' messages, a task can outlive the turn that started it, and
+    a call carrying a task's message is not that task's work.  The peer network
+    has always worked this way; the local one now says the same thing.
     """
     started = asyncio.Event()
+    note_seen = asyncio.Event()
     cancelled = asyncio.Event()
+    prompts: list[str] = []
     mcp: FastMCP = FastMCP("agent")
 
     @mcp.tool
     async def send_message(
         agent: str, prompt: str = "", subagent: str = "", channel: str = ""
     ) -> dict[str, Any]:
+        prompts.append(prompt)
+        if len(prompts) > 1:
+            note_seen.set()
+            return {"text": "done"}
         started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             cancelled.set()
             raise
-        return {"text": "never"}  # pragma: no cover - the turn is cancelled
 
     async with Client(mcp) as client:
         session = local_member(tmp_path)
@@ -3264,16 +3272,17 @@ async def test_a_withdrawal_cancels_the_members_running_turn(tmp_path: Path) -> 
         try:
             session.mesh.on_inbound_task(AGENT, "do it", TASK)
             await asyncio.wait_for(started.wait(), 2)  # timeouts: the test's own wait
-            assert TASK in session.turn_tasks, "the turn was not filed under its task"
 
             session.mesh.on_peer_cancel(TASK, AGENT)
 
-            await asyncio.wait_for(cancelled.wait(), 2)  # timeouts: the test's own wait
-            for _ in range(200):
-                if TASK not in session.turn_tasks:
-                    break
-                await asyncio.sleep(0.01)
-            assert TASK not in session.turn_tasks, "the turn stayed filed"
+            await asyncio.wait_for(note_seen.wait(), 2)  # timeouts: the test's own wait
+            note = prompts[1]
+            assert a2a_message_type(note, LOCAL_AGENT) == "cancel_task"
+            assert f'"task_id": "{TASK}"' in note, (
+                "the withdrawal did not name its task"
+            )
+            assert "withdrew this task" in note
+            assert not cancelled.is_set(), "the withdrawal cancelled the member's turn"
         finally:
             writer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -4078,9 +4087,16 @@ async def test_forgetting_a_member_withdraws_the_tasks_sent_to_it(
         self._sends[task] = _OutboundSend(task, agent, "session", "{}")
         return task
 
+    inbound_members: list[str] = []
+
+    async def withdraw_inbound_from(self: Any, member: str) -> int:
+        inbound_members.append(member)
+        return 0
+
     monkeypatch.setattr(A2AMesh, "connect", connect)
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     monkeypatch.setattr(A2AMesh, "send_message", send_message)
+    monkeypatch.setattr(A2AMesh, "withdraw_inbound_from", withdraw_inbound_from)
 
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
@@ -4111,6 +4127,49 @@ async def test_forgetting_a_member_withdraws_the_tasks_sent_to_it(
     )
     record = get_store().get(task)
     assert record is not None and record.status == "cancelled"
+    assert set(inbound_members) == {"tester"}, (
+        "the tasks the member sent were not swept"
+    )
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_a_removed_member_settles_the_tasks_it_sent(
+    window: Window,
+) -> None:
+    """**The other direction: the rows the removed member left behind.**
+
+    A task the member sent lives in the *receiver's* inbound table, not in the
+    member's session, so dropping that session leaves it open.  Its reply topic
+    is gone — no answer can ever be published — and a live round keeps a
+    responder slot waiting for one.  Settling it as cancelled makes `task_list`
+    true again, and the receiver's model gets the same withdrawal line a cancel
+    delivers.  A bare message is not a task; its delivery settles it.
+    """
+    session = wired(window=window)
+    session.mesh._connected = True
+    session.mesh._inbound.add(TASK, PEER)
+    session.mesh._inbound.add("a-message", PEER, kind="message")
+    session.mesh._inbound.add("someone-elses", "other")
+
+    withdrawn = await session.mesh.withdraw_inbound_from(PEER)
+
+    assert withdrawn == 1
+    removed = session.mesh._inbound.get(TASK)
+    message = session.mesh._inbound.get("a-message")
+    other = session.mesh._inbound.get("someone-elses")
+    assert removed is not None and removed.state == CANCELLED
+    assert message is not None and message.state == WORKING
+    assert other is not None and other.state == WORKING
+    assert {row["task_id"] for row in session.mesh.open_tasks()} == {
+        "a-message",
+        "someone-elses",
+    }, "the removed member's task is still open"
+
+    await drain_until_idle(session, window=window)
+    text = window.handed[-1]["text"]
+    assert a2a_message_type(text, REMOTE) == "cancel_task"
+    assert f'"task_id": "{TASK}"' in text
+    assert "withdrew this task" in text
 
 
 # ── groups: the vocabulary, the store, the wire, and the five tools ─────────

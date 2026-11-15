@@ -2077,6 +2077,31 @@ class A2AMesh:
                 withdrawn += 1
         return withdrawn
 
+    async def withdraw_inbound_from(self, member: str) -> int:
+        """Settle every task this mesh still holds that `member` sent it.
+
+        **The other direction of a removal.**  `withdraw_sends_to` ends the
+        tasks the removed member was *sent* — rows in the senders' sessions.
+        The ones it *sent* are rows here, in a surviving member's inbound
+        table, and dropping the member's own session cannot reach them: its
+        reply topic is gone, so no answer can ever be published, and a live
+        round would hold a responder slot for the rest of the process.
+
+        Each ends as `cancelled`, and its work is told through the responder's
+        `on_cancel` hook — the same withdrawal message a cancel delivers,
+        because from the receiver's side the task's sender no longer exists.
+
+        Returns:
+            How many inbound tasks were settled.
+        """
+        withdrawn = 0
+        for task in list(self._inbound.pending()):
+            if task.peer != member:
+                continue
+            if await self._responder.withdraw_inbound(task.task_id):
+                withdrawn += 1
+        return withdrawn
+
     async def cancel_task(self, agent: str, task_id: str) -> str:
         """Standard ``CancelTask``; returns the resulting status string.
 
