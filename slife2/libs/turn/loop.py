@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 #: (`slife2.libs.turn.tools` states the same rule for a tool's own failures).
 DENIED = "Error: Tool execution was denied by user."
 
+
 def timed_out(name: str, bound: float) -> str:
     """What a call that ran past the bound somebody set is answered with.
 
