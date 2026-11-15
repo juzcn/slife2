@@ -302,7 +302,9 @@ async def test_a_summary_over_a_damaged_row_is_still_written(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_summary_update_takes_the_write_lock_before_it_reads(tmp_path, monkeypatch) -> None:
+async def test_a_summary_update_takes_the_write_lock_before_it_reads(
+    tmp_path, monkeypatch
+) -> None:
     """The read and the write are one transaction, not a read then a write.
 
     `update_summary` writes both columns, so a second caller's tag update that

@@ -239,7 +239,9 @@ def test_a_subagents_directory_is_inside_its_parents(
     assert agent_dir("jack", "cabinet") != jack / "cabinet"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows spelling")
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
 def test_a_drive_relative_path_is_resolved_in_the_home(tmp_path: Path) -> None:
     """`C:foo` is not absolute; it is the caller's working directory on C:.
 
@@ -252,7 +254,9 @@ def test_a_drive_relative_path_is_resolved_in_the_home(tmp_path: Path) -> None:
     assert local_path(f"{root.drive}notes.txt") == root / "notes.txt"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="drive-relative paths are a Windows spelling")
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
 def test_a_path_relative_to_another_drive_is_refused() -> None:
     """There is no honest anchor for it, so it is refused rather than guessed."""
     root = data_dir()

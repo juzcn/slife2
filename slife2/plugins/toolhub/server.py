@@ -3114,6 +3114,7 @@ def build_server(
             mine.held.update(found)
             mine.holders.clear()
             mine.holders.update(owners)
+
     #: The tools this process serves itself.  Built once — a local tool's
     #: *schema* is a constant, and only the data its body reads can change,
     #: which it re-reads on every call.  `live_sources` is handed in because the

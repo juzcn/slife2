@@ -141,7 +141,9 @@ def test_a_huge_output_is_not_sliced_in_half_to_find_a_small_head() -> None:
 
     text = CountingText("x" * 1_000_000)
 
-    answer = dumps.window(call="c", text=text, where=WHERE, size=1_000_001, budget=BUDGET)
+    answer = dumps.window(
+        call="c", text=text, where=WHERE, size=1_000_001, budget=BUDGET
+    )
 
     assert answer
     assert CountingText.deepest <= BUDGET, (

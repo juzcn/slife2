@@ -1422,7 +1422,9 @@ async def test_a_cut_in_whose_pair_never_landed_runs_its_own_turn(context) -> No
                 await first
             answer = await second
 
-    assert answer.data["injected"] is False, "a take whose pair never landed is not delivery"
+    assert answer.data["injected"] is False, (
+        "a take whose pair never landed is not delivery"
+    )
     assert answer.data["text"] == "second answer"
     prompts = prompts_seen(backend, 1)
     assert any(one.startswith("user:two two") for one in prompts), prompts

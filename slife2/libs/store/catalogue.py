@@ -1747,9 +1747,7 @@ class ToolStore:
         # are counted and the page widened by them, bounded by the same ceiling
         # the unfiltered page uses.
         if clauses:
-            excluded = await asyncio.to_thread(
-                self._excluded_chunks, clauses, values
-            )
+            excluded = await asyncio.to_thread(self._excluded_chunks, clauses, values)
             over = min(over + excluded, MAX_SQL_VARS)
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None

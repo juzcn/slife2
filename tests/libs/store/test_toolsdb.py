@@ -1332,9 +1332,7 @@ def test_unloaded_only_widens_the_semantic_page_by_the_filtered_chunks(
     store.set_load("ours__held2", LOADED)
 
     page = asyncio.run(
-        store.search(
-            sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True
-        )
+        store.search(sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True)
     )
 
     assert [row["name"] for row in page["results"]] == ["ours__free"]

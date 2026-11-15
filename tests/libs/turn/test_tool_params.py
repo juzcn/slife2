@@ -520,7 +520,9 @@ async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_tool_that_acts_on_the_live_conversation_cannot_be_backgrounded() -> None:
+async def test_a_tool_that_acts_on_the_live_conversation_cannot_be_backgrounded() -> (
+    None
+):
     """**A background call is detached, and these tools act on the live turn.**
 
     `_check_new_input` pops a queued message off the running loop's inbox and
@@ -538,9 +540,7 @@ async def test_a_tool_that_acts_on_the_live_conversation_cannot_be_backgrounded(
         ran = True
         return "a message"
 
-    call = ToolCall(
-        id="call-live", name=CHECK_NEW_INPUT, arguments={"_async": True}
-    )
+    call = ToolCall(id="call-live", name=CHECK_NEW_INPUT, arguments={"_async": True})
     loop = one(call, [a_tool(CHECK_NEW_INPUT, check)], deliver=collected)
 
     messages: list[Message] = []

@@ -102,6 +102,7 @@ class FakeAdapter:
     async def transcribe_audio(self, **kwargs: Any) -> str:
         self.calls["asr"] = kwargs
         return "hello home"
+
     async def close(self) -> None:
         self.calls["closed"] = {}
 
