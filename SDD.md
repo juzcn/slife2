@@ -708,6 +708,10 @@ for a level below them.
 2. stop the subagent's loop;
 3. delete its directory.
 
+Releasing the place also withdraws every task this process sent to the member:
+each open send is recorded `cancelled`, because a `pending` row would name work
+whose member no longer exists.
+
 If the network notification cannot be made, the subagent is left unchanged.
 Nothing is asked of the subagent and nothing waits for it; removal is a forced
 cleanup whether it is idle or mid-turn. Releasing the place is what **interrupts
@@ -2728,6 +2732,7 @@ The following are not implemented in this version:
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
 | A bound on tool-call arguments | Arguments are the model's own words; shortening them is a different problem. | A model can write an unbounded argument into the conversation. |
 | Stopping a server started elevated | `taskkill /F /T` opens the target with `PROCESS_QUERY_INFORMATION`, which UAC refuses across integrity levels; the alternative — a Toolhelp walk with `TerminateProcess`, which needs only `PROCESS_TERMINATE` — is a second kill path rather than a flag. | Each such server reports `pid N did not exit; the record is kept`, and a `down` run at the server's integrity is what can still find and stop it. |
+| Reaping a tool server's spawned processes | A process started through a tool server's own session (`desktop-commander__start_process`) is that server's: slife2 makes one MCP call and the call is over before the process ends, so nothing here holds a handle to it. A generic reaper would have to know which tool names spawn processes — one server's vocabulary inside the agent. | The process outlives the turn, the conversation and a subagent's removal; it ends with the stack, which stops the server's tree, or when the model kills it with the server's own tool. |
 
 ### 14.3 Candidate capabilities
 

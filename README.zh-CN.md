@@ -933,7 +933,7 @@ subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，
 `subagent_task_response`、`subagent_continue_task`、`subagent_cancel_task`、
 `subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。
 `subagent_cancel_task` 会中断（interrupt）该 task 启动的 turn，`subagent_remove`
-删除前也会先中断正在运行的 turn。成员身份就是目录集合，点名的名字不是成员时，
+删除前也会先中断正在运行的 turn，并把发给它的 task 记为 cancelled。成员身份就是目录集合，点名的名字不是成员时，
 发送在发布前被拒绝。这个网络上的群消息带 `[SubagentGroup:…]` 和
 `subagent_group:<group>:<sender>` channel，无论发送者是创建者还是兄弟，每个成员
 维护自己的 `subagent-groups.yaml`——本地网络的文件，与 peer 网络的 `groups.yaml`

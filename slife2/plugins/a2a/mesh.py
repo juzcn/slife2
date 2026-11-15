@@ -2047,6 +2047,36 @@ class A2AMesh:
         if running:
             await asyncio.gather(*running, return_exceptions=True)
 
+    async def withdraw_sends_to(self, member: str) -> int:
+        """End every send this mesh still has open with `member`.
+
+        **A removed member cannot still be running a task.**  Removal is a
+        forced cleanup (SDD §4.5.4): the work ends with the member, so its row
+        must end too — `task_list` reports `pending` as "still running", and a
+        row naming a member that no longer exists is a fact nobody can act on.
+        A bare message has no row to record, but its ladder stops all the same.
+        Nothing is published: the member's topic has no listener left, and the
+        ledger this writes is this process's own.
+
+        The ladder stops first, for `cancel_task`'s reason — a rung already
+        asleep would otherwise publish the request after the member was gone.
+
+        Returns:
+            How many task rows were recorded as withdrawn.
+        """
+        withdrawn = 0
+        for send in list(self._sends.values()):
+            if send.agent != member:
+                continue
+            record = get_store().get(send.task_id)
+            if record is not None and record.status in TERMINAL_STATUSES:
+                continue
+            await self._stop_ladder(send)
+            if send.record:
+                get_store().record_cancel(send.task_id)
+                withdrawn += 1
+        return withdrawn
+
     async def cancel_task(self, agent: str, task_id: str) -> str:
         """Standard ``CancelTask``; returns the resulting status string.
 

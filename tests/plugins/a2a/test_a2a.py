@@ -4051,6 +4051,68 @@ async def test_forget_gives_up_a_members_place(
     )
 
 
+@pytest.mark.asyncio
+async def test_forgetting_a_member_withdraws_the_tasks_sent_to_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A forced removal ends the member's work, so the ledger says so.**
+
+    `subagent_remove` tells the network to forget the member, and the tasks
+    sent *to* it are filed in the senders' sessions, which stay alive.  Left
+    open, each is a `pending` row in `task_list` — a row documented as "still
+    running" whose member no longer exists.  The withdrawal is recorded
+    locally: there is no member left on its topic to publish to.
+    """
+    task = "task-the-member-was-removed-with"
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def disconnect(self: Any, **kwargs: Any) -> None:
+        pass
+
+    async def send_message(
+        self: Any, agent: str, message: str, *, message_type: str = "task_request"
+    ) -> str:
+        get_store().record_send(task, agent)
+        self._sends[task] = _OutboundSend(task, agent, "session", "{}")
+        return task
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "hello"},
+                meta=conversation_meta(AGENT),
+            )
+            before = await client.call_tool(
+                LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
+            )
+            await client.call_tool(
+                FORGET,
+                {"agent": AGENT, "subagent": "tester"},
+                meta=conversation_meta(AGENT),
+            )
+            after = await client.call_tool(
+                LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
+            )
+
+    assert [(row["task_id"], row["status"]) for row in before.data["tasks"]] == [
+        (task, "pending")
+    ], "the send is open before the member is removed"
+    assert after.data["tasks"] == [], (
+        "a removed member is still reported as running a task"
+    )
+    record = get_store().get(task)
+    assert record is not None and record.status == "cancelled"
+
+
 # ── groups: the vocabulary, the store, the wire, and the five tools ─────────
 #
 # A group is a named roster with an owner.  Its state is the member's own —

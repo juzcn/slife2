@@ -1916,6 +1916,12 @@ def build_server(
         session (`drop_session`), which is what a *forced* cleanup means and why
         this is not a message to the member.
 
+        **The tasks sent to it are withdrawn with it.**  They live in the
+        senders' sessions, not the member's, so a teardown that only dropped
+        this session would leave each one `pending` in `task_list` — a row
+        saying work is still running whose member has just stopped existing.
+        `A2AMesh.withdraw_sends_to` records the one true status.
+
         Args:
             agent: Whose member it is — the conversation id's first half.
             subagent: The member's own name.  Empty is the agent itself, which
@@ -1924,6 +1930,22 @@ def build_server(
         where = str(home())
         key = (home_key(where), agent, subagent)
         found = sessions.get(key)
+        if net is LOCAL and subagent:
+            # **The tasks sent to the member end with it.**  They are filed in
+            # the senders' sessions, which outlive the member, so dropping its
+            # session alone leaves each one `pending` in `task_list` — a row
+            # claiming work is still running whose member no longer exists.
+            # Every session in this process is the maker's or a sibling's, and
+            # the store is shared, so the withdrawal is one scan.
+            withdrawn = 0
+            for other in list(sessions.values()):
+                withdrawn += await other.mesh.withdraw_sends_to(subagent)
+            if withdrawn:
+                logger.info(
+                    "a2a_member_tasks_withdrawn agent=%s count=%d",
+                    describe((agent, subagent)),
+                    withdrawn,
+                )
         if found is None:
             return {"agent": agent, "subagent": subagent, "forgotten": False}
         await drop_session(found, key)
