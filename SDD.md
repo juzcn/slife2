@@ -2682,7 +2682,21 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-None.
+Each is a verified defect with a known mechanism; none is fixed in this version.
+
+| Issue | Where | Current behavior |
+|---|---|---|
+| An unknown hand-over outcome is settled as a rejection | `plugins/a2a/server.py` (`_drain`) | A message that may have landed is reported to the peer as `rejected`, and the model's later `task_response` is refused because the task is terminal. |
+| A cancel does not stop the requester retry ladder | `plugins/a2a/mesh.py` (`cancel_task`, `_deliver`) | A rung already scheduled can still publish after the cancel and start work on a revived peer; the local row says `cancelled`, so the peer's ending is discarded. |
+| A response-typed frame publishes a terminal for a working task | `plugins/a2a/responder.py` (the `task_response` branch) | A foreign peer sending `message_type: task_response` on the request topic gets `completed` for an id that is still `working`; the real artifact then has no route. |
+| Completion bridges are keyed by task id only | `plugins/a2a/mesh.py` (`_completion`, `resolve`) | A client-level retry of an old `task_response` can settle a newer continuation round with the old answer. |
+| A family's per-home mirror is not re-read | `libs/plugin/family.py` (`Homes`), `plugins/cli`, `plugins/skills` | `cli_list`/`skill_list` read the file while `list_sources` serves the mirror built at first ask; an edit made while the process runs is reported by one and not the other. |
+| An approval is mounted on the hidden default screen | `tui/app.py` (`_ask_approval`) | With a watch screen open the row and its arguments are not visible; the turn stays parked until the watch closes or the app-level `y`/`n` is pressed. |
+| An approval request is emitted best-effort | `plugins/agent/server.py` (`ask`), `libs/turn/loop.py` (`_emit`) | If the progress event cannot be written, the turn waits on a future no client saw; there is no approval deadline. |
+| A removal gives up the mesh place before the turn lock | `plugins/agent/server.py` (`subagent_remove`) | A turn that outlasts `grace.turn` makes the call refuse after the place is gone: the subagent is alive but unreachable until removal is retried. |
+| An in-place catalogue overwrite is not detected | `libs/store/catalogue.py` (`_ensure_file`) | The identity check compares device/inode and `application_id`; `cp` over the live path keeps both, so a stale schema is served and a row it rejects fails the tool list. |
+| `turn_search` under-reports word evidence | `plugins/context/server.py` (`turn_search`) | `worded` is true only for keyword-only hits, so an exact word match that is also in the semantic list can still report `confidence: none`. |
+| The run-lock table is never pruned | `plugins/schedule/server.py` (`RunLocks`) | One `asyncio.Lock` per task name ever used stays for the process's life. |
 
 ### 14.2 Deferred capabilities
 
@@ -2690,6 +2704,7 @@ The following are not implemented in this version:
 
 | Capability | Why deferred | Current behavior |
 |---|---|---|
+| Durable inbound WeChat messages | The bridge re-serves a batch only until its ack cursor advances; holding one without a durable queue would re-run every already-delivered message on reconnect, and that queue is a capability of its own. | The cursor advances before the hand-over, and a message past `MAX_INFLIGHT` is dropped for good; a redelivery is deduplicated only for `pacing.wechat_dedup` (30 s). |
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
