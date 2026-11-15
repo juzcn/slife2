@@ -530,11 +530,12 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         """Change part of an installed skill, keeping every file you do not name.
 
         Use this to fix a step, tighten a description or add a script to a skill
-        that is already installed. Read it first with `skill_use`, change what
-        needs changing, and write only the files you changed: anything you leave
-        out stays as it is — unlike `skill_set`, which replaces the whole skill.
-        The `skills:` entry's `env` and switch are not touched; those are
-        `skill_set` and `skill_set_enabled`.
+        that is already installed. Read the files you are changing first: the
+        skill's directory is the one `skill_use` prints, and the shell your
+        tools provide reads any file in it as written. Then write only the files
+        you changed: anything you leave out stays as it is — unlike `skill_set`,
+        which replaces the whole skill. The `skills:` entry's `env` and switch
+        are not touched; those are `skill_set` and `skill_set_enabled`.
 
         Args:
             name: The skill to change — the name `skill_list` shows.
