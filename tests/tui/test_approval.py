@@ -192,6 +192,98 @@ async def test_a_keypress_reaches_the_server_as_an_answer() -> None:
     assert client.answers == [("call-1", True)]
 
 
+async def test_the_answers_survive_the_focus_moving_to_the_prompt() -> None:
+    """**A keystroke is what takes the focus away, so the keys must outlast it.**
+
+    Every printable key moves the focus to the prompt (`redirect_printable`),
+    and a row-scoped binding is then out of the chain: a person who began their
+    next thought and then pressed `y` typed a `y` instead of approving.  The
+    app carries the same two answers while a question is pending, so they work
+    from wherever the focus has gone; with no question up they are disabled and
+    the draft gets both letters.
+    """
+    app, client = make_app(asking())
+    async with app.run_test() as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        assert app._approval is not None
+
+        await pilot.press("a")  # the draft takes the focus
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._approval is None
+
+    assert client.answers == [("call-1", True)]
+    assert client.prompts == ["do it"], "and the answer went to the waiting call"
+
+    # With nothing being asked, `y` and `n` are ordinary letters again.
+    app, client = make_app(lambda prompt, on_event: "done")
+    async with app.run_test() as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        prompt = app.query_one(HistoryInput)
+        prompt.text = ""
+        await pilot.press("y")
+        await pilot.press("n")
+        await pilot.pause()
+        assert prompt.text == "yn"
+        assert client.answers == []
+
+
+async def test_escape_over_the_prompt_refuses_the_call_and_not_the_turn() -> None:
+    """Esc beside a question is the answer to it, wherever the focus is.
+
+    `Esc` is the turn interrupt everywhere else (and stays one), but while the
+    model is parked on an approval it means the smaller thing: a person who
+    types a letter, moves to the draft and presses Esc must not lose the turn
+    around the one call they meant to refuse.
+    """
+    app, client = make_app(asking())
+    async with app.run_test() as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        assert app._approval is not None
+        await pilot.press("a")
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._approval is None
+        assert app._interrupting is False, "the turn was not the thing Esc stopped"
+
+    assert client.answers == [("call-1", False)]
+
+
+async def test_an_approval_flushed_after_its_turn_failed_does_not_mount_a_prompt() -> (
+    None
+):
+    """**The cancel/failure flush applies what was posted before the turn died.**
+
+    A request the turn made just before it ended can be sitting in that queue —
+    its waiting future was dropped with the turn — so mounting the row would put
+    up a question nobody can answer.  The event is honoured only while a turn is
+    still there to be waiting on it.
+    """
+
+    def asks_then_fails(_prompt: str, on_event) -> str:
+        on_event(ToolApprovalRequested("late", "sensitive", {"path": "/tmp/x"}))
+        raise RuntimeError("the model call failed")
+
+    app, _ = make_app(asks_then_fails)
+    async with app.run_test() as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._approval is None, "a prompt nobody could answer was mounted"
+        assert not app.query(ApprovalPrompt)
+
+
 async def test_a_cancelled_turn_denies_the_prompt_it_was_holding() -> None:
     """`Esc` refuses the call and then stops the turn — the order follows the
     reason: a row left undecided is an answer nobody will ever give.

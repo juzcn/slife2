@@ -145,6 +145,40 @@ async def test_a_listing_is_usable_only_once_the_handover_has_recorded_it() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_listing_that_changed_during_the_handover_is_not_believed() -> None:
+    """**A notification inside the merge is the last word, not a lost one.**
+
+    The rows were answered before the peer said they changed, so the refresh is
+    recording a listing it already knows is wrong.  Recomputing readiness from
+    it would serve those rows for up to `relist_after`; counting the
+    invalidations is what keeps the source unready and makes the next ask
+    re-list.
+    """
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    link: Connection
+
+    async def recording(_tools: list[Any]) -> None:
+        started.set()
+        await finish.wait()
+
+    link = Connection(
+        settings(),
+        transport=lambda _settings: server(),
+        on_listed=recording,
+    )
+    reading = asyncio.create_task(link.ready())
+    await started.wait()
+
+    link.invalidate()  # the peer's `tools/list_changed` lands inside the merge
+    finish.set()
+
+    assert await reading is False, "the refresh believed the stale listing"
+    assert link.usable is False
+    await link.close()
+
+
+@pytest.mark.asyncio
 async def test_a_listing_the_handover_refuses_never_counts_as_usable() -> None:
     """The callback's last word is kept, not overwritten by the frame that called it.
 

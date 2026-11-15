@@ -262,6 +262,48 @@ async def test_a_retry_with_the_same_message_id_replays_working(
 
 
 @pytest.mark.asyncio
+async def test_a_retry_after_an_evicted_record_owns_the_new_round(
+    mesh: A2AMesh, client: RecordingClient
+) -> None:
+    """**The round that was cancelled must not settle the record that replaced it.**
+
+    The store prunes past its cap, so a live round can lose its record; a retry
+    of the same task id then builds a fresh one and cancels the old round.  The
+    old round's cancellation used to read "the task with this id" — the *new*
+    record — mark it `cancelled` and publish that terminal, after which the new
+    round finished into a state that was already terminal and dropped its
+    answer.  Identity is what makes the ending the old round's own.
+    """
+    task_id = _new_task()
+    handed: list[tuple[str, str, str, str]] = []
+    mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
+        (source, content, tid, kind)
+    )
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "do it")))
+    await _until(lambda: handed, "the first hand-over")
+
+    # The cap evicted the live round's record, and the peer retried the same
+    # message, which builds a fresh record and cancels the old round.
+    mesh._inbound.drop(task_id)
+    await mesh._responder.dispatch(
+        client, _message(_send(task_id, "m1", "do it"), corr="corr-2")
+    )
+    await _until(lambda: len(handed) == 2, "the retry's hand-over")
+    await asyncio.sleep(0.01)  # the old round's cancellation runs
+
+    record = mesh._inbound.get(task_id)
+    assert record is not None and record.state == "working", (
+        "the evicted round's cancellation settled the retry's record"
+    )
+    assert "TASK_STATE_CANCELED" not in _states(client)
+
+    await _settle(mesh, task_id, "completed", "done")
+
+    assert "artifact:done" in _states(client), "the retry's answer was dropped"
+    assert _states(client)[-1] == "TASK_STATE_COMPLETED"
+
+
+@pytest.mark.asyncio
 async def test_a_new_message_while_working_is_refused(
     mesh: A2AMesh, client: RecordingClient
 ) -> None:

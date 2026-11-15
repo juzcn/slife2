@@ -25,7 +25,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.plugins.context.server as context_server
 from slife2.libs.host.config import default_config
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import agent_dir, subagent_path
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
@@ -635,6 +635,43 @@ async def test_a_new_conversation_restores_its_own_head() -> None:
         )
 
     assert answer.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+
+
+@pytest.mark.asyncio
+async def test_a_read_of_a_conversation_that_was_never_written_creates_nothing() -> (
+    None
+):
+    """**A removed subagent is a name with no record, and a read must not revive it.**
+
+    `agent_dir` makes a conversation's directory, and `TurnStore` makes its file,
+    so a `restore`, a browse or a search against a stale name used to leave a
+    directory with no `subagent.yaml` behind — which `subagent_set` and
+    `subagent_remove` then both refuse until somebody cleans the filesystem by
+    hand.  A conversation that has genuinely never run is the same absent file,
+    and the empty answer is the honest one for both.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        restored = await client.call_tool(
+            "restore",
+            {"agent": "jack", "subagent": "ghost", "messages": [SYSTEM]},
+        )
+        listed = await client.call_tool(
+            "turn_list", {}, meta=conversation_meta("jack", "ghost")
+        )
+        found = await client.call_tool(
+            "turn_search",
+            {"keywords": ["ghost"]},
+            meta=conversation_meta("jack", "ghost"),
+        )
+        with pytest.raises(ToolError, match="no turn 1"):
+            await client.call_tool(
+                "turn_read", {"turn_id": 1}, meta=conversation_meta("jack", "ghost")
+            )
+
+    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+    assert listed.data["entries"] == []
+    assert found.data["results"] == []
+    assert not subagent_path("jack", "ghost").exists(), "the read made its directory"
 
 
 @pytest.mark.asyncio

@@ -578,8 +578,7 @@ class Responder(abc.ABC):
                 req,
                 response_topic,
                 correlation,
-                task_id,
-                record.context_id,
+                record,
                 continuation,
             )
         )
@@ -597,11 +596,26 @@ class Responder(abc.ABC):
         req: A2ARequest,
         reply_topic: str,
         correlation: str,
-        task_id: str,
-        context_id: str,
+        record: InboundTask,
         continuation: bool,
     ) -> None:
         request_id = req.request_id
+        task_id = record.task_id
+        context_id = record.context_id
+
+        def ours() -> InboundTask | None:
+            """This round's record, while the store still holds it.
+
+            **A record can be evicted and replaced while its round runs.**  The
+            store prunes past its cap, and a profile retry of the same task id
+            then builds a fresh record and cancels the old round — so an ending
+            recorded against "the task with this id" would land on the *new*
+            record, publish its terminal state, and the new round would finish
+            into a state that is already terminal and drop its answer.  Identity
+            is what makes an ending this round's own.
+            """
+            current = self._inbound.get(task_id)
+            return current if current is record else None
 
         async def stream(message: str, *, type: str = "text") -> None:
             await self._publish_status(
@@ -631,10 +645,10 @@ class Responder(abc.ABC):
             async with self._semaphore:
                 outcome = await self.on_request(req, stream, continuation=continuation)
         except asyncio.CancelledError:
-            record = self._inbound.get(task_id)
+            current = ours()
             if (
-                record is not None
-                and record.state not in TERMINAL_STATUSES
+                current is not None
+                and current.state not in TERMINAL_STATUSES
                 and not self._stopping
             ):
                 self._inbound.terminal(task_id, CANCELLED, "")
@@ -651,8 +665,10 @@ class Responder(abc.ABC):
             raise
         except Exception:  # noqa: BLE001 - a handler failure is a task failure, and the peer is owed the state
             log.exception("A2A round failed for task %s", task_id)
-            current = self._inbound.get(task_id)
-            if current is not None and current.state in TERMINAL_STATUSES:
+            current = ours()
+            if current is None:
+                return  # this round's record was evicted; its retry owns the task
+            if current.state in TERMINAL_STATUSES:
                 return  # a withdrawal already ended it
             self._inbound.terminal(task_id, FAILED, "Internal error")
             await self._publish_status(
@@ -668,9 +684,12 @@ class Responder(abc.ABC):
             return
 
         # A withdrawal may have landed while the model was still working; the
-        # cancel path already recorded the terminal state and published it.
-        current = self._inbound.get(task_id)
-        if current is not None and current.state in TERMINAL_STATUSES:
+        # cancel path already recorded the terminal state and published it.  A
+        # record that is gone or replaced is the other ending: this round no
+        # longer speaks for the task, and its answer must not settle somebody
+        # else's round.
+        current = ours()
+        if current is None or current.state in TERMINAL_STATUSES:
             return
 
         if outcome.state == COMPLETED:

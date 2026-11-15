@@ -88,10 +88,11 @@ from slife2.libs.store.db import (
     StaleSchema,
     TurnStore,
     assistant_message,
+    read_store_for,
     store_for,
     user_message,
 )
-from slife2.libs.store.index import Embedder, page_limit
+from slife2.libs.store.index import Embedder, page_limit, time_window
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
@@ -290,6 +291,18 @@ def build_server(
         """One conversation's store, with its indexes brought up to date."""
         store = await off_loop(store_for, agent, subagent)
         if store.path not in synced:
+            await indexed(store, await embedding.get())
+        return store
+
+    async def read_store_of(agent: str, subagent: str) -> TurnStore | None:
+        """As `store_of`, for a read: `None` when the conversation was never written.
+
+        **A read must not create the conversation it is reading.**  See
+        `slife2.libs.store.db.read_store_for` — a stale subagent name would
+        otherwise come back as a directory with no record.
+        """
+        store = await off_loop(read_store_for, agent, subagent)
+        if store is not None and store.path not in synced:
             await indexed(store, await embedding.get())
         return store
 
@@ -492,14 +505,28 @@ def build_server(
             `assistant_message` per turn — and `total`, how many turns match the
             filters, so `offset + len(entries) < total` says whether more remain.
         """
-        # `store_for` and not `store_of`: reading history needs the turn table
-        # and nothing else, so it must not need an embedding model.  A browse
-        # that failed because the embeddings endpoint was down would be a read
-        # coupled to a write's dependency.  Building the store is still a
-        # blocking call — it opens the file and runs the schema — so it goes off
-        # the loop like every other one here.
+        # `read_store_for` and not `store_of`: reading history needs the turn
+        # table and nothing else, so it must not need an embedding model.  A
+        # browse that failed because the embeddings endpoint was down would be
+        # a read coupled to a write's dependency.  Nor may it create the file:
+        # a browse of a conversation that has never run is the empty page, not
+        # a store this call invented (`read_store_for`).  Building the store is
+        # still a blocking call — it opens the file and runs the schema — so it
+        # goes off the loop like every other one here.
         agent, subagent = _caller(ctx)
-        store = await off_loop(store_for, agent, subagent)
+        # **The window is the caller's input, so it is judged before the history
+        # is.**  A spelling the grammar cannot place is refused even when the
+        # conversation has never run and the page is empty — the refusal is
+        # about what was asked, not about what was found.
+        time_window(since, until)
+        store = await off_loop(read_store_for, agent, subagent)
+        if store is None:
+            return {
+                "entries": [],
+                "total": 0,
+                "limit": page_limit(limit),
+                "offset": max(0, offset),
+            }
         records, total = await off_loop(
             store.turns, since=since, until=until, limit=limit, offset=offset
         )
@@ -522,10 +549,11 @@ def build_server(
             turn_id: The turn to read, as `turn_list` reported it.
         """
         agent, subagent = _caller(ctx)
-        # `store_for`, for the reason `turn_list` gives: a read of one turn does
-        # not need the embedding model, only the table the turn is in.
-        store = await off_loop(store_for, agent, subagent)
-        record = await off_loop(store.turn, turn_id)
+        # `read_store_for`, for the reason `turn_list` gives: a read of one turn
+        # does not need the embedding model, only the table the turn is in — and
+        # a conversation that was never written has no turn to find.
+        store = await off_loop(read_store_for, agent, subagent)
+        record = await off_loop(store.turn, turn_id) if store is not None else None
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         wire = record.to_wire()
@@ -599,7 +627,14 @@ def build_server(
                 "turn_search needs something to look for — `keywords`, "
                 "`sentences`, or `turn_list` to browse the history without one."
             )
-        store = await store_of(agent, subagent)
+        store = await read_store_of(agent, subagent)
+        if store is None:
+            # A conversation that was never written has no history to search,
+            # and the answer is the empty page rather than a store invented to
+            # have searched it — the window is still judged first, for
+            # `turn_list`'s reason.
+            time_window(since, until)
+            return search_answer([], scores=[], worded=False, limit=page_limit(limit))
         # The store's keyword leg reads one string, and its terms are ANDed
         # either way; those same words are the meaning query when no sentence is
         # given.
@@ -862,7 +897,12 @@ def build_server(
             boundaries are the record's and not the model's.  One read answers
             both readers for that reason.
         """
-        store = await store_of(agent, subagent)
+        store = await read_store_of(agent, subagent)
+        if store is None:
+            # A conversation that was never written is this list unchanged — the
+            # honest answer for a genuinely new key, and for a subagent that has
+            # been removed, whose name must not be recreated by a read.
+            return {"messages": list(messages), "turn_ids": [], "turns": []}
         turn_ids = await off_loop(store.context_turns)
         if not turn_ids:
             return {"messages": list(messages), "turn_ids": [], "turns": []}

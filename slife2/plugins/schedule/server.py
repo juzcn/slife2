@@ -762,6 +762,15 @@ async def poll_once(
                     # the record-and-dispatch would otherwise start the same run
                     # a second time.
                     async with RunLocks.held(locks, store, task.name):
+                        # **The definition is re-read under the lock.**  The
+                        # snapshot was taken once for the whole pass, and a
+                        # `schedule_set` that switched the task off or re-croned
+                        # it while the pass walked its other ledgers would
+                        # otherwise fire one run on the definition it replaced.
+                        current = store.task(task.name)
+                        if current is None or not current.enabled:
+                            continue
+                        task = current
                         verdict = due(task, reference)
                         if verdict is None:
                             continue
@@ -1124,9 +1133,14 @@ def build_server(
             expressions.zone(timezone)
         except expressions.ScheduleError as exc:
             raise ToolError(str(exc)) from exc
-        task = store_for(agent).put_task(
-            name, description, cron, timezone, enabled=enabled
-        )
+        store = store_for(agent)
+        # **Under the task's lock, for the poll's sake.**  A fire reads this
+        # task's definition and starts its work; a write landing between the
+        # pass's snapshot and its fire must be ordered against that decision,
+        # or the run fires once on the definition the caller just replaced.
+        # `schedule_remove` takes the same lock for the same reason.
+        async with RunLocks.held(locks, store, name):
+            task = store.put_task(name, description, cron, timezone, enabled=enabled)
         logger.info("scheduled task %s written for %s", name, agent)
         return row(task)
 

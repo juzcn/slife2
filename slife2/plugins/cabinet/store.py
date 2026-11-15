@@ -1290,6 +1290,14 @@ class CabinetStore:
         resurrected.  The harness's upsert is `INSERT … ON CONFLICT … DO
         UPDATE`, which leaves `created_at` alone: the output of one call may be
         written twice, but it arrived once.
+
+        **A replacement's id is read back from the row it updated**, not taken
+        from the snapshot the caller read before its embedding await.  A
+        remove-and-create of the same key in that window replaces the row with a
+        new rowid, and the old id would then carry the keyword text and the
+        chunks — an updated document invisible to both search legs, because no
+        live row has that id.  The `UPDATE` and the read run in one transaction,
+        so the id is the row this write actually hit.
         """
         columns = (
             "kind",
@@ -1319,7 +1327,13 @@ class CabinetStore:
                 " WHERE kind = ? AND key = ?",
                 (*values, row.get("kind"), row.get("key")),
             )
-            return int(row["id"]) if placed.rowcount else None
+            if not placed.rowcount:
+                return None
+            found = connection.execute(
+                "SELECT id FROM cabinet_doc WHERE kind = ? AND key = ?",
+                (row.get("kind"), row.get("key")),
+            ).fetchone()
+            return int(found["id"])
         insert = (
             f"INSERT INTO cabinet_doc ({', '.join(columns)})"
             f" VALUES ({', '.join('?' * len(columns))})"

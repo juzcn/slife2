@@ -260,6 +260,14 @@ class SlifeApp(App[None]):
         # itself, because `TextArea` claims them and nothing else can.
         Binding("home", "scroll_home", "Scroll to top", priority=True),
         Binding("end", "scroll_end", "Scroll to bottom", priority=True),
+        # The approval row's answers, kept here so they survive a blur: every
+        # printable key moves the focus to the prompt (`redirect_printable`),
+        # and a row-scoped binding is then no longer in the chain — the person
+        # presses `y` or `n` and types it instead.  `check_action` leaves both
+        # disabled while no call is waiting, so an ordinary draft still gets its
+        # `y` and its `n`; while one is, the answer wins wherever focus is.
+        Binding("y", "approve_request", "Approve", show=False, priority=True),
+        Binding("n", "deny_request", "Deny", show=False, priority=True),
     ]
 
     def __init__(
@@ -327,6 +335,10 @@ class SlifeApp(App[None]):
         #: refuse the call it was holding: the loop is parked on that future, and
         #: a prompt nothing ever answers would keep the turn from ending.
         self._approval: ApprovalPrompt | None = None
+        #: Set while a cancelled or failed turn's queued events are being
+        #: flushed.  The turn is gone, so an approval among them has nobody left
+        #: to answer it — `_apply` drops it rather than mounting the row.
+        self._turn_over = False
         #: Where this window *attaches* so a message arriving on another channel
         #: can be handed to it (`slife2.plugins.tui.server`) — the plugin's address, and
         #: the window is its client.  Empty means no inbox, which is what a test
@@ -895,6 +907,9 @@ class SlifeApp(App[None]):
                     # the turn is declared over.**  A cancelled turn's ticket is
                     # retired below, so an event still in the pump would be
                     # dropped — and `[interrupted]` is the last thing it is owed.
+                    # The turn is gone, though, so an approval waiting in that
+                    # queue is a question nobody can answer (`_turn_over`).
+                    self._turn_over = True
                     await self._flush_events()
                     if not entry.drawn:
                         self._transcript.add_user(entry.prompt, channel=entry.channel)
@@ -913,6 +928,7 @@ class SlifeApp(App[None]):
                     # the same reason: a turn that is over must not mount
                     # anything later, and the ticket is retired before the line
                     # below so no event can arrive under it.
+                    self._turn_over = True
                     await self._flush_events()
                     self._finish_entry(ticket)
                     # A turn that died before its first event still had a
@@ -938,6 +954,7 @@ class SlifeApp(App[None]):
                     )
                 finally:
                     self._interrupting = False
+                    self._turn_over = False
                     self._turn = None
                     # **Whatever the turn was still waiting on has no ending
                     # coming.**  A tool call ends through `ToolCallFinished`, and
@@ -1077,6 +1094,13 @@ class SlifeApp(App[None]):
             self._refresh_status()
             return
         if isinstance(event, ToolApprovalRequested):
+            # **A late prompt is not a prompt.**  The cancel/failure flush waits
+            # for everything posted before it, and a request the turn made
+            # before it died can be in that queue: its future was dropped with
+            # the turn, so mounting the row would put up a question nobody will
+            # ever answer.  A live turn is what gives the question a meaning.
+            if self._turn is None or self._turn_over:
+                return
             # **The turn is parked on this**, so it is answered off the message
             # pump rather than in it — see `_ask_approval`.
             self._ask_approval(event.call_id, event.name, event.arguments)
@@ -1119,14 +1143,45 @@ class SlifeApp(App[None]):
         return True
 
     def action_cancel(self) -> None:
-        """Stop the running turn — and nothing else, which is the point.
+        """Refuse the call that is being asked about, or stop the running turn.
 
-        Slife's rule, kept: escape is never a way out of the app, so pressing it
-        by reflex at the wrong moment costs a cancelled turn at worst and never
-        the window.  That is what makes it the interrupt to offer while
-        something is selected, where ctrl+c is busy deciding whether to copy.
+        **A pending approval owns escape, wherever the focus is.**  The row has
+        its own `escape` binding while it is focused, but every printable key
+        moves focus to the prompt, and there the key used to fall through to
+        this action and cancel the whole turn — a person answering the one call
+        the model asked about, and losing the work around it.  Refusing the call
+        is the smaller answer, and it is the one Esc means beside a question.
+
+        With nothing being asked, this is the turn interrupt and nothing else,
+        which is the point: escape is never a way out of the app.  That is what
+        makes it the interrupt to offer while something is selected, where
+        ctrl+c is busy deciding whether to copy.
         """
+        if self._approval is not None and self._approval.pending:
+            self._approval.action_deny()
+            return
         self._cancel_turn()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Whether one of this app's bindings applies right now.
+
+        The two approval answers exist only while a call is waiting for one:
+        with no prompt up they are disabled, and `y`/`n` reach the prompt as
+        ordinary letters — the draft keeps every key it had before.
+        """
+        if action in ("approve_request", "deny_request"):
+            return self._approval is not None and self._approval.pending
+        return super().check_action(action, parameters)
+
+    def action_approve_request(self) -> None:
+        """Approve the waiting call — the row's `y`, wherever the focus is."""
+        if self._approval is not None:
+            self._approval.action_approve()
+
+    def action_deny_request(self) -> None:
+        """Refuse the waiting call — the row's `n`, wherever the focus is."""
+        if self._approval is not None:
+            self._approval.action_deny()
 
     def action_interrupt(self) -> None:
         """Stop the running turn, or quit when there is nothing to stop.

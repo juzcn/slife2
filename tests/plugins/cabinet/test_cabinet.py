@@ -309,6 +309,63 @@ async def test_a_note_is_created_then_replaced_by_an_update() -> None:
     assert "first" not in json.dumps(read), "the older body is gone"
 
 
+@pytest.mark.asyncio
+async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
+    """**A replacement's id is read from the row it updated, not from its snapshot.**
+
+    `write(REPLACE)` reads the row id, then awaits the embedding.  A concurrent
+    remove-and-create of the same key in that window replaces the row with a new
+    rowid, and the old id used to carry the new keyword text and chunks — which
+    no live row has, so the updated document vanished from both search legs until
+    a rebuild.  The id is read back inside the write's own transaction.
+    """
+
+    class Swapping(StubEmbedder):
+        """Embeds normally, but replaces the row once, between read and write."""
+
+        def __init__(self, swap) -> None:
+            super().__init__()
+            self._swap = swap
+            self._swapped = False
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            if not self._swapped:
+                self._swapped = True
+                await self._swap()
+            return await super().embed(texts)
+
+    async def swap() -> None:
+        await store.remove(NOTE, "Python")
+        await store.write(
+            NOTE, "Python", body=f"{OTHER} interloper", embedder=StubEmbedder()
+        )
+
+    store = CabinetStore(tmp_path / "index.db")
+    await store.sync(StubEmbedder())
+    # **A live row above it keeps the old id from being reused.**  SQLite hands a
+    # freed *max* rowid to the next insert, so the replaced row has to be the
+    # earlier one — otherwise the concurrent create lands on the very id the
+    # snapshot held and hides the defect.
+    await store.write(NOTE, "Python", body=f"{WORD} first", embedder=StubEmbedder())
+    await store.write(NOTE, "Other", body="unrelated", embedder=StubEmbedder())
+    await store.write(
+        NOTE,
+        "Python",
+        mode=REPLACE,
+        body=f"{WORD} second",
+        embedder=Swapping(swap),
+    )
+
+    by_words = await store.search(keywords=["second"], embedder=StubEmbedder())
+    by_meaning = await store.search(sentences=[WORD], embedder=StubEmbedder())
+
+    # Each leg ranks the updated row first; under the dead id both lost it —
+    # the keyword text and the chunks belonged to no live row, so the decoy's
+    # live row outranked the document the caller had just replaced.
+    assert by_words["results"][0]["key"] == "Python", "the keyword leg lost it"
+    assert by_meaning["results"][0]["key"] == "Python", "the meaning leg lost it"
+
+
 def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None:
     """Two notes in one repeated DST hour do not sort as offset strings.
 

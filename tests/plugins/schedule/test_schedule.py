@@ -631,6 +631,41 @@ async def test_a_task_that_has_come_due_starts_the_work_as_an_agent_task(
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
 
 
+async def test_a_definition_that_changed_after_the_snapshot_is_not_fired(
+    window: Window, tasks: Tasks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The pass's snapshot is not the definition it fires.**
+
+    The poll reads every enabled task once and then walks them; a `schedule_set`
+    that switches one off while it walks the earlier ones would otherwise be
+    invisible, and the disabled task would fire one run on the definition the
+    caller had just replaced.  The definition is therefore read again under the
+    task's lock — this hands the pass the stale snapshot on purpose and asserts
+    that the stored definition wins.
+    """
+    async with Client(build(window, tasks)) as client:
+        await write(client, cron=EVERY_MINUTE)
+        stale = ledger().task("daily")
+        assert stale is not None and stale.enabled
+        await write(client, cron=EVERY_MINUTE, enabled=False)
+
+    def stale_snapshot(self, **kwargs):
+        return [stale], 1
+
+    monkeypatch.setattr(ScheduleStore, "tasks", stale_snapshot)
+
+    did = await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
+
+    assert did == [], "the pass fired a task that is no longer enabled"
+    assert window.asked == []
+    assert ledger().newest("daily") is None
+
+
 async def test_the_window_and_the_task_are_addressed_to_the_ledgers_own_agent(
     window: Window, tasks: Tasks
 ) -> None:

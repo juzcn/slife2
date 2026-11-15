@@ -389,20 +389,18 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
 
     **Both names are sanitised here**, so that no caller has to remember to: they
     come off a command line and out of a model's tool call, and `..` is a
-    directory too.  `safe_agent_name` is imported inside this function rather
-    than at the top because it lives in `slife2.libs.store.db` and `db` imports this
-    module — a local import is what keeps one implementation of "a name fit to
-    be a file", instead of a second copy in the leaf that cannot reach the first.
-    It is also what keeps a subagent *inside* its parent: the sanitiser refuses a
-    name that reduces to `.` or `..`, so the last segment cannot climb out of the
-    ones above it.
+    directory too.  The sanitiser is reached inside `_agent_segment` and
+    `subagent_path` because it lives in `slife2.libs.store.db` and `db` imports
+    this module — a local import is what keeps one implementation of "a name fit
+    to be a file", instead of a second copy in the leaf that cannot reach the
+    first.  It is also what keeps a subagent *inside* its parent: the sanitiser
+    refuses a name that reduces to `.` or `..`, so the last segment cannot climb
+    out of the ones above it.
     """
-    from slife2.libs.store.db import safe_agent_name
-
     path = (
         subagent_path(agent, subagent)
         if subagent
-        else agents_dir() / safe_agent_name(agent)
+        else agents_dir() / _agent_segment(agent)
     )
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -702,8 +700,14 @@ SUBAGENTS_DIR = "subagents"
 _SUBAGENT_YAML = "subagent.yaml"
 
 
-def work_dir(agent: str, subagent: str = "") -> Path:
-    """The directory a conversation's private work lives in.
+def work_path(agent: str, subagent: str = "") -> Path:
+    """Where a conversation's private work lives — **without making it**.
+
+    `work_dir` minus the `mkdir`, and the distinction is the same one
+    `subagent_path` states: a read that asked where a conversation's files are
+    would create the directory it is asking about, and a removed subagent's
+    stale name would then come back as a directory with no record — blocked for
+    `subagent_set` and untouchable for `subagent_remove`.
 
     **A fork shares its maker's work directory; a subagent that is not a fork
     owns its own.**  A fork is a temporary copy of its maker's conversation —
@@ -716,8 +720,27 @@ def work_dir(agent: str, subagent: str = "") -> Path:
     directory like a fork does.
     """
     if subagent and not forked(agent, subagent):
-        return agent_dir(agent, subagent)
-    return agent_dir(agent)
+        return subagent_path(agent, subagent)
+    return agents_dir() / _agent_segment(agent)
+
+
+def work_dir(agent: str, subagent: str = "") -> Path:
+    """The directory a conversation's private work lives in, made if needed."""
+    path = work_path(agent, subagent)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _agent_segment(agent: str) -> str:
+    """One agent's directory name, sanitised — `agent_dir`'s other half.
+
+    Imported inside for the reason `agent_dir` gives: `slife2.libs.store.db`
+    imports this module, and a local import is what keeps one implementation of
+    "a name fit to be a file".
+    """
+    from slife2.libs.store.db import safe_agent_name
+
+    return safe_agent_name(agent)
 
 
 def forked(agent: str, subagent: str) -> bool:

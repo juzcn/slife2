@@ -412,6 +412,11 @@ class Connection:
         #: same as "never", which is what a source that has not listed yet is.
         self._listed_at = 0.0
         self._lock = asyncio.Lock()
+        #: How many times the peer has said its listing changed.  Read across
+        #: the handover: a notification that lands while the merge awaits means
+        #: the listing being recorded is already known to be wrong, and the
+        #: refresh must not mark the source ready on it.
+        self._invalidations = 0
         #: The attempt in flight, if any.  Held so that a caller can wait for it
         #: and so that a second one is never started alongside it.
         self._attempt: asyncio.Task[None] | None = None
@@ -591,6 +596,7 @@ class Connection:
             self.fail(exc)
             return
         failures = self._failures
+        invalidations = self._invalidations
         self._listed_at = time.monotonic()
         if self._on_listed is not None:
             await self._on_listed(listed)
@@ -601,12 +607,25 @@ class Connection:
         # last thing this source said.  For a re-list the old listing stayed
         # usable throughout, which is the point: it was already recorded, and
         # only a refusal may take it away.
+        #
+        # **And a notification that landed during the merge is believed.**  The
+        # listing being recorded was answered before the peer said it changed,
+        # so it is known to be wrong: recomputing readiness from it would serve
+        # the stale rows for up to `relist_after`.  Leaving `_ready` false makes
+        # the next ask re-list.
         if self._failures == failures and self._client is not None:
             self._error = ""
-        self._ready = not self._error and self._client is not None
+        self._ready = (
+            self._invalidations == invalidations
+            and not self._error
+            and self._client is not None
+        )
 
     def invalidate(self) -> None:
         """Forget the tool list, keeping the connection.
+
+        **Counted, not merely flagged**, because a refresh can be in the middle
+        of recording a listing when this lands: see `_refresh`.
 
         Called from the peer's own `tools/list_changed`, and from there only: a
         call that failed at the transport takes `disconnect` instead, because
@@ -623,6 +642,7 @@ class Connection:
         listing may be, this makes it zero — which is all a legacy server, whose
         notifications still arrive, gets out of having sent one.
         """
+        self._invalidations += 1
         if self._ready:
             self._ready = False
 

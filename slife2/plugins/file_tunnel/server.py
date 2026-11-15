@@ -213,26 +213,33 @@ class Exposed:
 
     What is held per agent is the *owner*, which is what lets one conversation
     refuse to revoke another's link (see :meth:`revoke`) — the one place the
-    identity is available and can be made to matter.
+    identity is available and can be made to matter.  The reuse key is
+    `(path, owner)` for that reason: two conversations exposing one file are two
+    links, and a single `path` key would hand the second the first's token,
+    which it cannot revoke, and let the first's revoke kill the second's.
     """
 
     def __init__(self) -> None:
         self._by_token: dict[str, Exposure] = {}
-        self._by_path: dict[str, str] = {}
+        self._by_path: dict[tuple[str, tuple[str, str] | None], str] = {}
 
     def register(self, path: str, owner: tuple[str, str] | None) -> Exposure:
-        """Publish *path*, reusing its token when the file has not changed.
+        """Publish *path*, reusing this owner's token when the file has not changed.
 
         The token is 30 hex characters (``secrets.token_hex(15)``) —
         deliberately under 32, which is the length a generic redactor treats as
         a secret, and hex rather than base64url so nothing in it breaks the URL
         detection of whatever is drawing the answer.
 
-        A path that already has a token whose pin no longer matches gets a NEW
-        one: otherwise the caller would be handed the same URL that now answers
-        403 to everyone holding it.
+        **The reuse is per owner as well as per path.**  A second conversation
+        exposing the same file gets a token of its own — otherwise it is handed
+        the first conversation's link, cannot revoke it, and loses it to the
+        first conversation's revoke.  A token whose pin no longer matches gets a
+        NEW one, so a changed file is re-exposed rather than handed back as a
+        URL that now answers 403.
         """
-        existing = self._by_path.get(path)
+        key = (path, owner)
+        existing = self._by_path.get(key)
         if existing is not None:
             found = self._by_token.get(existing)
             if found is not None and found.matches(_stat(path)):
@@ -244,7 +251,7 @@ class Exposed:
         token = secrets.token_hex(15)
         exposure = Exposure(token, path, owner)
         self._by_token[token] = exposure
-        self._by_path[path] = token
+        self._by_path[key] = token
         logger.debug("exposed path=%s token=%s", path, token)
         return exposure
 
@@ -273,7 +280,7 @@ class Exposed:
     def _drop(self, token: str) -> None:
         found = self._by_token.pop(token, None)
         if found is not None:
-            self._by_path.pop(found.path, None)
+            self._by_path.pop((found.path, found.owner), None)
 
     def __len__(self) -> int:
         return len(self._by_token)

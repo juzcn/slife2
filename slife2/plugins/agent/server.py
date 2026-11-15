@@ -401,17 +401,28 @@ class Pending:
     #: asked, or the model's request for a check becomes a turn that hangs.
     watched: bool = False
     #: Set by the turn that folded this message into itself, and **only when that
-    #: turn produced a result**.  `None` is therefore the honest "nothing folded
-    #: this in — run your own turn", and one field carries both the branch and
-    #: the answer rather than a second slot that could disagree with it.
+    #: turn produced a result**.  `None` and `delivered` together are what say
+    #: whether this caller owes itself a turn: an answer that exists, or a fold
+    #: that was recorded, means it does not.
     #:
     #: A turn that produced no result — cancelled *or* failed — leaves this alone
-    #: on purpose: the message was not answered, so it still owes itself a turn,
-    #: and the caller is already parked on the lock with this very object in hand.
-    #: Restoring it to the inbox instead would race a caller that had been
-    #: cancelled in the meantime and leave an orphan the next turn would fold in
-    #: with nobody waiting for it.
+    #: on purpose: the message was not answered.  Whether it was nonetheless
+    #: *delivered* is `delivered`'s to say, and restoring it to the inbox would
+    #: race a caller that had been cancelled in the meantime and leave an orphan
+    #: the next turn would fold in with nobody waiting for it.
     result: TurnResult | None = None
+    #: Whether a running turn took this message into its conversation — the fold
+    #: itself, which is delivery even where there is no answer.
+    #:
+    #: **A recorded cut-in is delivered even when the absorbing turn had no
+    #: result.**  The cancellation repair keeps the pair and the turn's row
+    #: records it, so the message is in the conversation; a parked caller that
+    #: ran its own turn because `result` was `None` would put the same prompt in
+    #: there twice and have the model answer it twice — the outcome the receipt
+    #: mechanism exists to prevent.  It is cleared when that turn's record is
+    #: refused and its messages are rolled back (`unanswer_folded`): the message
+    #: is gone from the conversation then, and its own turn is the honest answer.
+    delivered: bool = False
     #: The model that answered this message, written **with** `result` and only
     #: by the turn that wrote it.  Kept on the entry rather than read off the
     #: loop when the caller is finally answered, because the two can differ: the
@@ -1757,6 +1768,7 @@ def build_server(
         """
         for folded in outcome.folded:
             folded.result = None
+            folded.delivered = False
             folded.model = ""
 
     def roll_back(loop: Loop, outcome: Outcome) -> None:
@@ -2091,8 +2103,10 @@ def build_server(
         **The entry is claimed before it is returned**, into `loop.injected`, so
         that the turn this arrives in is the turn that answers for it: the
         caller parked on the lock reads its own entry's `result` and stops
-        waiting.  Taken in arrival order — the queue's first is the message that
-        has waited longest.
+        waiting — or, when the turn ends without one, reads `delivered` and is
+        still answered as a cut-in rather than running the prompt again.  Taken
+        in arrival order — the queue's first is the message that has waited
+        longest.
 
         Returns `""` for nothing to deliver: no such conversation, an empty
         queue, or a head that carries images.  That last one is the single
@@ -2107,6 +2121,7 @@ def build_server(
         if waiting.images:
             return ""
         loop.inbox.popleft()
+        waiting.delivered = True
         loop.injected.append(waiting)
         return waiting.prompt
 
@@ -3587,10 +3602,11 @@ def build_server(
                 # handed this message inside that one and its answer is the
                 # answer to this, so the caller is given exactly what that turn's
                 # own caller got.  Asked of the *entry* rather than inferred from
-                # the queue, because a turn that produced no result leaves it as
-                # `None` — and then this message still owes itself a turn, which
-                # is what the rest of this block is for.
-                if item.result is not None:
+                # the queue, because a turn that produced no result leaves
+                # `result` as `None` — and only `delivered` then says whether the
+                # fold survived into the record or the message still owes itself
+                # a turn, which is what the rest of this block is for.
+                if item.result is not None or item.delivered:
                     return _injected_reply(item)
                 # **Ours, and its turn is starting now.**  A message waiting in
                 # the inbox is *not* in `messages`: `AgentLoop.run_turn`
@@ -4795,9 +4811,23 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
     `_reply` builds one dict, and a caller must not have to know which path
     handed it the answer in order to read a field of it.
     """
+    # **A delivered cut-in with no answer has no answer to repeat, and still no
+    # turn to run.**  Its absorbing turn was cancelled or failed after the fold,
+    # and its row records the pair: the message is in the conversation already,
+    # so an empty answer says the only thing that is true — it was delivered and
+    # not answered.  A caller that ran it again would store it twice.
+    if item.result is None:
+        return {
+            "text": "",
+            "usage": Usage().to_wire(),
+            "iterations": 0,
+            "stop_reason": "",
+            "model": item.model,
+            "injected": True,
+            "refused": [],
+        }
     # Written together with `result` and only by a turn that produced one
     # (`Pending.model`), so by the time this caller is answered both are there.
-    assert item.result is not None
     return _reply(item.result, model=item.model, injected=True, refused=[])
 
 

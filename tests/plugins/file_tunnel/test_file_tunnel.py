@@ -797,6 +797,30 @@ def test_distinct_files_get_distinct_tokens(tmp_path: Path) -> None:
     )
 
 
+def test_one_file_exposed_by_two_conversations_is_two_links(tmp_path: Path) -> None:
+    """**A token belongs to the conversation that minted it.**
+
+    Reuse used to be keyed by the path alone, so a second conversation exposing
+    one file was handed the first's token: it could not revoke its own link,
+    and the first conversation's revoke killed the second's.  The same owner
+    re-exposing an unchanged file still gets its token back — that is the reuse
+    this registry is for.
+    """
+    picture = tmp_path / "a.png"
+    picture.write_bytes(b"x")
+    exposed = Exposed()
+    first = exposed.register(str(picture), ("jack", ""))
+    second = exposed.register(str(picture), ("jill", ""))
+
+    assert first.token != second.token
+    assert exposed.register(str(picture), ("jack", "")).token == first.token
+
+    assert exposed.revoke(first.token, ("jill", "")) is Revoked.FOREIGN
+    assert exposed.revoke(first.token, ("jack", "")) is Revoked.OK
+    assert exposed.lookup(second.token) is second, "the other conversation's link"
+    assert exposed.revoke(second.token, ("jill", "")) is Revoked.OK
+
+
 def test_an_unknown_token_looks_up_to_nothing() -> None:
     assert Exposed().lookup("deadbeef") is None
 

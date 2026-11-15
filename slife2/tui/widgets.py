@@ -1302,6 +1302,25 @@ class HistoryInput(TextArea):
         self._index = -1
         self._draft = ""
 
+    def check_consume_key(self, key: str, character: str | None = None) -> bool:
+        """Whether this prompt takes *key* before the window's bindings do.
+
+        **The approval row's answers are the window's while it is up.**  `y`,
+        `n` and `Esc` answer the question the model is parked on, and the focus
+        is moved here by any printable keystroke (`redirect_printable`) — before
+        this, the next `y` was inserted into the draft instead of answering, and
+        `Esc` cancelled the whole turn.  So the prompt yields those three keys
+        only while an undecided `ApprovalPrompt` is on the screen; with no
+        question up they are ordinary input, and a draft keeps every letter.
+        """
+        if key in ("y", "n", "escape") and self._answering():
+            return False
+        return super().check_consume_key(key, character)
+
+    def _answering(self) -> bool:
+        """Whether an approval is waiting for these keys right now."""
+        return any(prompt.pending for prompt in self.screen.query(ApprovalPrompt))
+
     async def _on_key(self, event) -> None:
         """Enter submits, wherever the cursor happens to be.
 
@@ -1775,7 +1794,10 @@ class ApprovalPrompt(Static):
     picker's reason, one keystroke further: without them `y` and `n` would be
     typed into the prompt and `Esc` would cancel the whole *turn* instead of
     refusing one call, so the key a person presses here would sometimes be the
-    one that throws their turn away.
+    one that throws their turn away.  They are the *app's* too
+    (`slife2.tui.app`), because every printable key moves the focus to the
+    prompt: a row-scoped binding is out of the chain after that, and the answer
+    would be inert exactly when the person had begun to type.
 
     **A decided row stays, as its status line.**  The panel for the tool itself
     is mounted *after* an approval and never for a refusal, so this line is the

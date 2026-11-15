@@ -11,8 +11,8 @@
 # elsewhere. 0 disables it. The MQTT broker is not shifted.
 wsl_port_offset: 100
 
+# One process per entry, each at 127.0.0.1:<port>/mcp.
 servers:
-  # One process per entry, each at 127.0.0.1:<port>/mcp.
   openai-completions: {port: 24001}
   anthropic-messages: {port: 24002}
   openai-responses: {port: 24003}
@@ -39,8 +39,8 @@ servers:
   file-tunnel: {port: 24038}
   agent-task: {port: 24037}
 
+# `api` selects the wire protocol. Models are referenced as `provider/model`.
 providers:
-  # `api` selects the wire protocol. Models are referenced as `provider/model`.
   deepseek:
     api: openai-completions
     base_url: https://api.deepseek.com
@@ -113,9 +113,9 @@ subagent:
     host: localhost
     port: 1883
 
+# OpenAI-compatible embedding endpoints. The width is discovered; changing
+# the model re-embeds the index on the next start.
 embeddings:
-  # OpenAI-compatible embedding endpoints. The width is discovered; changing
-  # the model re-embeds the index on the next start.
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
@@ -199,11 +199,11 @@ tool_result:
   # Minimum 2048.
   bytes: 32768
 
+# External MCP servers. `command` starts a process; `url` connects to one
+# already running. `enabled: false` keeps the entry configured but not
+# connected. Tools arrive as `{name}__{tool}`; one that should start loaded
+# goes in `tool_load.autoload` by that name — per tool, not per server.
 mcp:
-  # External MCP servers. `command` starts a process; `url` connects to one
-  # already running. `enabled: false` keeps the entry configured but not
-  # connected. Tools arrive as `{name}__{tool}`; one that should start loaded
-  # goes in `tool_load.autoload` by that name — per tool, not per server.
   serper:
     command: npx
     args:
@@ -354,10 +354,11 @@ mcp:
     headers:
       Authorization: Bearer ${GITEE_ACCESS_TOKEN}
     description: Gitee（码云）官方远程 MCP Server（https://api.gitee.com/mcp）— 仓库/Issue/PR/Release/通知/搜索，凭据经 GITEE_ACCESS_TOKEN 以 Bearer 注入。
+
+# `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
+# `command:` uses a proxy of your own instead. A large spec is worth
+# `enabled: false`.
 rest-api:
-  # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
-  # `command:` uses a proxy of your own instead. A large spec is worth
-  # `enabled: false`.
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
     base_url: https://api.github.com
@@ -367,11 +368,12 @@ rest-api:
     spec: https://registry.modelcontextprotocol.io/openapi.json
     base_url: https://registry.modelcontextprotocol.io
     description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
+
+# Programs already installed. Each entry is a catalogue row (`cli:<name>`),
+# not a callable tool: run the command through your shell. `install` is shown
+# when the command is missing — by the catalogue, and by the installer for a
+# program it cannot install itself.
 cli:
-  # Programs already installed. Each entry is a catalogue row (`cli:<name>`),
-  # not a callable tool: run the command through your shell. `install` is shown
-  # when the command is missing — by the catalogue, and by the installer for a
-  # program it cannot install itself.
   yt-dlp:
     command: yt-dlp
     description: 'yt-dlp is a powerful command-line video downloader supporting 1000+ sites including YouTube, Twitter/X, Bilibili, TikTok, etc. Common usage: yt-dlp <URL> to download best quality; yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 <URL> for best quality merged MP4; yt-dlp --list-formats <URL> to list available formats; yt-dlp -f <format_id> <URL> for specific format. Supports cookies, subtitles, playlists, and more.'
@@ -393,19 +395,20 @@ cli:
     source:
       type: choco
       version: 14.1.0
+
+# Playbooks live in skills/<name>/SKILL.md. This section supplies the
+# environment each playbook declares. Scripts are not run; `skill_use`
+# refuses a missing key.
 skills:
-  # Playbooks live in skills/<name>/SKILL.md. This section supplies the
-  # environment each playbook declares. Scripts are not run; `skill_use`
-  # refuses a missing key.
   baidu-search:
     env:
       BAIDU_API_KEY: ${BAIDU_API_KEY}
 
+# `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
+# (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
+# refused. `defaults` applies when a call names no model; `params` and `voice`
+# are the model's own defaults.
 media:
-  # `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
-  # (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
-  # refused. `defaults` applies when a call names no model; `params` and `voice`
-  # are the model's own defaults.
   defaults:
     image: bailian_personal/wan2.7-image
     video: bailian_personal/happyhorse-1.1-t2v
@@ -443,11 +446,11 @@ media:
         - model: qwen-audio-3.0-asr-flash
           kind: asr
 
+# Exactly one provider is active; the others stay configured and inert.
+# `expose_local_image` serves a local file through the tunnel. An unknown
+# provider name is a config error, refused at load; `tunnel_status` reports
+# the provider in use.
 file-tunnel:
-  # Exactly one provider is active; the others stay configured and inert.
-  # `expose_local_image` serves a local file through the tunnel. An unknown
-  # provider name is a config error, refused at load; `tunnel_status` reports
-  # the provider in use.
   active: cloudflare
   providers:
     ngrok:

@@ -1330,22 +1330,63 @@ async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
+async def test_a_cancelled_turn_still_delivered_the_cut_in_it_folded(context) -> None:
+    """**A recorded cut-in is delivered even when its absorbing turn was cancelled.**
+
+    The turn folds "two" in at its boundary — the pair completes and goes into
+    the repair — and is cancelled in the next stream.  Its `result` is `None`
+    because it produced no answer, but the pair is in the row the cancelled turn
+    still records.  A parked caller that ran its own turn on the empty `result`
+    would put "two" in the conversation twice and have the model answer it
+    twice; the reply therefore says it was injected, with empty text: delivered,
+    not answered.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("third answer"),
+    )
+    hub_client, server = wired(backend, context)
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        # The second stream is the one after the fold: the cut-in pair is in
+        # the turn when the interruption lands.
+        await wait_for_streams(backend, 2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        answer = await second
+        # And the conversation the next turn runs on holds it exactly once.
+        await send(server, "three")
+
+    assert answer.data["injected"] is True
+    assert answer.data["text"] == "", "there was no answer to repeat"
+    assert prompts_seen(backend, 2).count("tool:two") == 1, (
+        "the cut-in appears in the conversation twice"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_failed_still_delivered_the_cut_in_it_folded(
     context,
 ) -> None:
-    """A turn that produced no answer answered for nothing it was handed.
+    """A failure records the fold too, so it is delivery and not a turn to run.
 
     The absorbing turn raises here — a provider 500 on its second call — so
-    there is no repair (only a cancellation truncates) and the pair stays in that
-    turn's record.  What must not follow is the folded message being counted as
-    answered: its `result` is written only by a turn that produced one, so its
-    sender runs its own turn and gets its own answer.
-
-    This is the case that decides how the handoff is asked.  A design that
-    inferred "it was absorbed" from the message having left the queue would see
-    the empty `result` and answer this caller out of whatever the last turn
-    happened to leave behind — a wrong answer rather than a missing one, and
-    nothing downstream could tell.
+    there is no repair, but the pair is already complete and the failed turn's
+    row keeps it.  The sender is told it was injected with no text; running its
+    own turn because `result` is empty would write the same prompt into the
+    conversation a second time.  Only a record that was *refused*, and whose
+    messages were rolled back, leaves the message owing itself a turn.
     """
 
     class FailsOnTheSecondCall(FakeBackend):
@@ -1374,8 +1415,8 @@ async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
             await first
         answer = await second
 
-    assert answer.data["injected"] is False
-    assert answer.data["text"] == "second answer"
+    assert answer.data["injected"] is True
+    assert answer.data["text"] == ""
 
 
 @pytest.mark.asyncio

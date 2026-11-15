@@ -10,6 +10,7 @@ is not left on disk.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -418,6 +419,75 @@ def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
     assert "Describes tail" in after
     assert after.index("Describes tail") < after.index("tail:")
     assert list(load(path).mcp) == ["tail"]
+
+
+def test_a_removal_of_the_first_entry_keeps_the_sections_own_explanation(
+    tmp_path,
+) -> None:
+    """**The convention the removal relies on, exercised at the one slot it
+    cannot decide by itself.**
+
+    ruamel keeps the comment above a mapping's first key in that mapping's
+    pending slot, so an editor removing the first entry sees one block where two
+    things can live: the section's explanation (which belongs to the section and
+    must survive) and the entry's own introduction (which goes with it). The
+    file answers that by convention — a section's explanation is written above
+    the section key, a distinct slot — and this is the reading the writer takes:
+    the block inside the section belongs to the entry, the block above the key
+    belongs to the section.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "# ── External servers ──\n"
+        "mcp:\n"
+        "  # Describes slow-one, and slow-one is going.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "slow-one", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "# ── External servers ──" in after, "the section's explanation"
+    assert "Describes slow-one" not in after, "the entry's introduction"
+    assert "Describes filesystem" in after
+    assert after.index("Describes filesystem") < after.index("filesystem:")
+    assert list(load(path).mcp) == ["filesystem"]
+
+
+def test_the_shipped_config_puts_each_sections_explanation_above_its_key() -> None:
+    """**The shipped file is the convention's first reader, so it must follow it.**
+
+    The four plugins that write `mcp:`, `rest-api:`, `cli:` and `skills:` — and
+    the model writer that writes `providers:` — remove and replace first entries
+    through the reading above. A section explanation written *inside* the
+    section, above its first entry, is indistinguishable from that entry's own
+    introduction and would go with it.
+    """
+    from ruamel.yaml import YAML
+
+    shipped = Path(__file__).parents[3] / "slife2.yaml"
+    document = YAML(typ="rt").load(shipped.read_text(encoding="utf-8"))
+    for section in (
+        "providers",
+        "embeddings",
+        "mcp",
+        "rest-api",
+        "cli",
+        "skills",
+        "media",
+        "file-tunnel",
+    ):
+        values = document[section]
+        pending = values.ca.comment if values.ca.comment else None
+        assert not pending or pending[1] is None, (
+            f"`{section}:` explains itself above its first entry; write the "
+            "explanation above the section key instead"
+        )
 
 
 def test_an_entry_that_ends_on_a_sequence_keeps_the_next_comment(tmp_path) -> None:

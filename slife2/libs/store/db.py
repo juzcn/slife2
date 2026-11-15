@@ -89,7 +89,7 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.paths import TURNS_DB, work_dir
+from slife2.libs.host.paths import TURNS_DB, work_path
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     MAX_SQL_VARS,
@@ -214,12 +214,16 @@ def database_path(agent: str, subagent: str = "") -> Path:
     **A fork has no store of its own.** It is a temporary copy of its maker's
     conversation, held in memory and never written down, so its context reads
     the maker's turn log and its cabinet and media are the maker's. Reads go
-    there; writes never do. `work_dir` is what resolves the two cases; who lays
+    there; writes never do. `work_path` is what resolves the two cases; who lays
     the directory out is
     `slife2.libs.host.paths.agent_dir`, and this function is one line because of
     it: the layout belongs in one place, and the file name in another.
+
+    **A path and not a directory**: this asks where the file *would* be, and a
+    caller that wants one that exists opens it through `store_for` or
+    `read_store_for`.
     """
-    return work_dir(agent, subagent) / TURNS_DB
+    return work_path(agent, subagent) / TURNS_DB
 
 
 @dataclass(frozen=True)
@@ -2029,4 +2033,24 @@ def _structural(raw: Any, *, what: str) -> Any:
 
 def store_for(agent: str, subagent: str = "") -> TurnStore:
     """The store for one conversation id, creating its file if needed."""
-    return TurnStore(database_path(agent, subagent))
+    path = database_path(agent, subagent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return TurnStore(path)
+
+
+def read_store_for(agent: str, subagent: str = "") -> TurnStore | None:
+    """The store for one conversation id, or `None` when it was never written.
+
+    **A read does not create a conversation.**  `store_for` makes the directory
+    and the file, which is right for a write and wrong for a read: a subagent
+    that has been removed is a name with no record, and a `transcript` or a
+    search against that stale name recreated its directory — leaving one with no
+    `subagent.yaml` that `subagent_set` and `subagent_remove` then refuse until
+    the filesystem is cleaned by hand.  A conversation that has genuinely never
+    run is the same absent file, and the honest answer for both is the empty
+    one its reader already gives.
+    """
+    path = database_path(agent, subagent)
+    if not path.exists():
+        return None
+    return TurnStore(path)

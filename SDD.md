@@ -949,6 +949,13 @@ The window draws the message inside the running turn, in its own bubble, without
 closing the answer still being streamed. There is one queue: the agent server's
 inbox.
 
+**A message folded into a turn is delivered by it.** If that turn ends without an
+answer — cancelled or failed — the cut-in pair is still in its record, so its
+caller is answered as injected with no text. Running it again would put the same
+prompt in the conversation twice and have the model answer it twice. Only a
+refused record, whose messages are rolled back, leaves the message owing itself
+a turn.
+
 ### 5.5 Context decision and memory selection
 
 The agent server owns one loop per conversation key, created on first use. The
@@ -1519,6 +1526,12 @@ as the turn that changed it. A turn can point outside itself: a tool output too
 large for the conversation is stored whole in the cabinet, and the turn keeps a
 marked head of it, so the row still holds exactly what the model saw and the
 whole is reachable by the tool call id.
+
+**A read does not create the file.** A conversation that has never run and a
+removed subagent's stale name are the same absent store, and a read answers its
+empty shape rather than creating a directory with no `subagent.yaml` — which
+would then block the name against `subagent_set` and `subagent_remove`. Only a
+write makes the directory and the file.
 
 ### 8.2 Index machinery
 
@@ -2428,6 +2441,11 @@ entry does not have, which is what makes switching an entry from `url` to
 write preserves an existing file's mode; a mode that cannot be preserved is
 logged rather than silently tightened.
 
+**A section's explanation is written above the section key.** A comment above the
+section's first entry belongs to that entry, and goes with it when the entry is
+removed. ruamel keeps both in one slot, so the file follows this convention and
+the writer reads the two positions as the two things.
+
 The model configuration is live: the agent server resolves a reference per turn.
 `model_switch` is the one edit that moves the current conversation; a turn in
 flight finishes on the model it started with.
@@ -2444,7 +2462,9 @@ program slife2 will start; the write is legible but not gated. The model's
 a chat API that cannot read the machine's disk. The plugin holds a registry of
 token to file, pinned to the file's device, inode, size, and modification time. A
 link stops working when the file changes, when `unexpose_local_image` is called,
-or when the process exits. A share outlives the turn that made it.
+or when the process exits. A share outlives the turn that made it. A link belongs
+to the conversation that exposed it: two conversations exposing one file hold two
+tokens, each revocable only by the one that made it.
 
 Three providers are supported:
 
@@ -2638,67 +2658,7 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **A section's introduction and its first entry's comment share one slot.**
-   ruamel keeps the comment above a mapping's first key as the mapping's pending
-   comment, so removing the first entry cannot tell the section's explanation
-   (the shipped `slife2.yaml` style, which should survive) from the entry's own
-   introduction (which should go with it); the removal takes whichever is there,
-   and a checked-in test encodes the entry-comment reading. *Resolution would
-   require:* a convention that puts the section explanation above the section key
-   (a distinct slot), or a marker that tells the two apart.
-2. **A read recreates a removed subagent's directory.** `transcript`/`watch`
-   restore the conversation, and `restore` creates the store file and its
-   directory for any name; after `subagent_remove`, a read of the stale name
-   leaves a directory with no `subagent.yaml`, which `subagent_set` and
-   `subagent_remove` then refuse until the filesystem is cleaned by hand. A
-   conversation is created lazily, so the record's absence is not an existence
-   guard. *Resolution would require:* a tombstone for a removed name, or a
-   read-only restore that creates nothing.
-3. **`schedule_set` runs outside the run lock.** The poll decides from a task
-   snapshot read once per pass; a `schedule_set` that disables or re-crons a task
-   mid-pass leaves the snapshot stale and the task fires once on its old
-   definition. `schedule_remove` takes the lock for exactly this race; `set` does
-   not. *Resolution would require:* the run lock around `schedule_set`, or
-   re-reading the task under the lock before firing.
-4. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
-    store prunes a non-terminal record past its cap, a profile retry of the same
-    task id builds a fresh record and cancels the old round, whose cancel handler
-    reads the *new* record and publishes a terminal `cancelled`; the new round
-    then finishes into a terminal state and drops its answer. *Resolution would
-    require:* the cancel handler keying off its own round's record or generation.
-5. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
-   id, then awaits the vector step; a concurrent remove+create of the same key
-   replaces the row and the update returns the old id, so the keyword text and
-   chunks land under a rowid no live row has — the updated document is invisible
-   to both search legs until a rebuild. *Resolution would require:* re-reading
-   the rowid after the await, or indexing inside the write's transaction.
-6. **A share token is reused across conversations.** `expose_local_image`
-   returns an existing exposure when the pin matches without comparing owner, so
-   a second conversation is handed a token owned by the first: it cannot revoke
-   its own link, and the first conversation's revoke kills the second's —
-   defeating the owner field's stated purpose. *Resolution would require:*
-   comparing owner on reuse, or minting a per-owner token.
-7. **A late approval outlives its turn.** The cancel/failure flush applies a
-    queued `ToolApprovalRequested` after the turn is gone, mounting a prompt
-    nobody will answer; and the approval row's y/n/Esc are focus-scoped priority
-    bindings, so a keystroke that moves focus to the input leaves them inert and
-    Esc cancels the whole turn instead of refusing the one call. *Resolution would
-    require:* a turn-liveness guard on the approval event, and answering bindings
-    that survive blur.
-8. **A tool-list change during the handover is un-believed.** The gateway's
-    `_refresh` awaits `on_listed`; an `invalidate()` in that window is overwritten
-    when the refresh recomputes readiness from the pre-notification listing, so a
-    tool added or removed during the merge stays wrong for up to `relist_after`.
-    Only external legacy servers that send the notification reach it (ours
-    advertise `listChanged: false`). *Resolution would require:* honouring an
-    invalidate that lands during the merge.
-9. **A folded cut-in is delivered twice when its turn is cancelled.** The
-    repaired batch keeps the cut-in pair and records it, but the cancelled turn's
-    result stays `None`, so the parked caller runs its own turn with the same
-    prompt — the message sits in the conversation twice and the model answers it
-    twice, the outcome the receipt mechanism exists to prevent. *Resolution would
-    require:* treating a recorded cut-in as delivered even when the absorbing turn
-    has no result.
+None.
 
 ### 14.2 Deferred capabilities
 
