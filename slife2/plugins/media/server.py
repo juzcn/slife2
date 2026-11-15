@@ -48,7 +48,6 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
-from slife2.libs.turn.tokens import clip_to_tokens
 from slife2.plugins.media.adapters import (
     MediaAdapter,
     MediaAdapterError,
@@ -330,35 +329,23 @@ def build_server(
         return {"path": output}
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
-    async def transcribe_audio(
-        path: str, model: str = "", offset: int = 0, limit: int = 0
-    ) -> dict[str, Any]:
+    async def transcribe_audio(path: str, model: str = "") -> str:
         """Write down what an audio file says, and answer the text.
 
-        A recording can be longer than one answer may carry, so this is read in
-        pages: `offset` says where to start and `limit` how much to ask for.
-        Read the rest from `offset + len(text)` — an hour of speech is several
-        turns of reading, and every page says where the next one begins.
+        A transcript is a tool output like any other: if it is too large for
+        the conversation, the harness keeps it whole as a dump and gives the
+        head and the address. Read the rest with `dump_read`, or find text in
+        it with `dump_grep`.
 
         Args:
             path: The audio file, as a local path.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
-            offset: The character to start at; `0` is the beginning.
-            limit: The most characters to answer with. `0` answers as much as
-                one page may hold, which is also the ceiling on any `limit` —
-                a page is never longer than that whatever is asked for.
-
-        Returns:
-            `text` — the transcript from `offset` — `total`, how many characters
-            the whole transcript is, and `offset`/`limit` as asked. So
-            `offset + len(text) < total` says whether more remains.
         """
         if not path.strip():
             raise ToolError("no audio file was named — pass the path of the recording.")
-        start = max(0, offset)
         provider, entry = media.resolve("asr", model)
-        text = await _run(
+        return await _run(
             "transcript",
             lambda: media.adapter(provider).transcribe_audio(
                 model=entry.model,
@@ -368,21 +355,6 @@ def build_server(
                 extra_params=dict(entry.params),
             ),
         )
-        page = text[start : start + limit] if limit > 0 else text[start:]
-        # **The budget is the last word, whatever `limit` said.**  A page size
-        # in characters is not a size in tokens — `limit=20000` of Chinese is
-        # several times what an English 20000 is, and a transcript is the one
-        # answer here whose length is the recording's rather than the caller's.
-        # An answer over `tool_result.tokens` is one the harness would have to
-        # shorten again, which is our own reader feeding our own truncation
-        # (the cabinet's `dump_read` and `dump_grep` bound themselves the same
-        # way).
-        return {
-            "text": clip_to_tokens(page, config.tool_result.tokens),
-            "total": len(text),
-            "offset": start,
-            "limit": limit,
-        }
 
     return mcp
 

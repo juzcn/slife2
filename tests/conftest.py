@@ -241,21 +241,17 @@ def clean_registered_secrets():
 
 @pytest.fixture(autouse=True)
 def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite off the network, and off a vocabulary load per worker.
+    """Keep the suite on the fallback: no vocabulary parse per worker.
 
-    `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base` when it
-    can get it, and getting it means a few megabytes fetched over the network
-    the first time anybody asks — once per *process*, which under `-n auto` is
-    once per worker, from a cold cache: a dozen simultaneous downloads to answer
-    a question about a turn's size.
-
-    The suite's own rule is that nothing in it needs the network (README,
-    "Tests"), and a test run is not the place to discover whether this machine
-    has one.  So the resolver is pinned to "no vocabulary", which makes every
-    test that sizes a turn use the script fallback — a branch that has to work
-    anyway, since a machine with no network is supported rather than broken.
-    `tests/libs/turn/test_tokens.py` puts the real one back by asking for the
-    `real_tokenizer` fixture, and skips where there is genuinely none.
+    `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base`
+    when it can read the bundled vocabulary, and reading it is a few megabytes
+    parsed per *process* — under `-n auto`, once per worker, for a question most
+    tests never ask.  So the resolver is pinned to "no vocabulary" here, which
+    makes every test that sizes a turn use the script fallback — a branch that
+    has to work anyway, since a machine with a broken install is supported
+    rather than broken.  `tests/libs/turn/test_tokens.py` puts the real one back
+    by asking for the `real_tokenizer` fixture, and the bundle is part of the
+    package, so that fixture does not reach the network either.
     """
     monkeypatch.setattr(tokens, "_openai_encoding", lambda: None)
 
@@ -298,10 +294,11 @@ def tokenizer_resolver():
 def real_tokenizer(monkeypatch: pytest.MonkeyPatch, tokenizer_resolver) -> None:
     """Undo `no_tokenizer_download`, for the tests that are *about* the tokenizer.
 
-    Skips rather than fails when the vocabulary cannot be had: the point of the
-    fallback is that this machine is supported, so a machine without `tiktoken`'s
-    vocabulary is a machine that runs the rest of the suite, not a red one.
+    The vocabulary ships with the package, so this does not reach the network;
+    a checkout whose bundle is missing skips with the packaging defect named
+    rather than fetching to cover it.
     """
+    bundled = tokens._BUNDLED_CACHE / tokens._CACHE_KEY
+    if not bundled.is_file():
+        pytest.skip(f"the bundled o200k_base vocabulary is missing: {bundled}")
     monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    if tokenizer_resolver() is None:
-        pytest.skip("no o200k_base vocabulary on this machine")

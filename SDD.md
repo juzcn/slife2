@@ -829,12 +829,18 @@ nor a failed delivery.
 
 A tool result too large for the conversation is stored whole as a `dump` row in
 the cabinet, keyed by the tool call id. The conversation carries a fixed
-**head** of it within `tool_result.tokens`, and the marker in front of the head
+**head** of it within `tool_result.bytes`, and the marker in front of the head
 names the call, the file's byte size and its path relative to the data
 directory — where the agent's own tools run, so moving the home does not
 invalidate a marker already in a turn. The size is one `stat` of the file the
 cabinet wrote; the marker counts no lines and no characters, because a count is
 a scan the marker does not need — the readers answer it when asked.
+
+**The bound is bytes, not tokens.** It is a size cap on one result, not a token
+accounting of the conversation; the recall's `context.ceiling` is the token
+guard. Bytes need no vocabulary and cost one expression to measure, and UTF-8
+bytes track text volume across scripts better than characters do. The readers'
+addresses — `offset`, `limit`, `next` — stay characters.
 
 The head is a truncation by rule, not a selection by model. It is the largest
 prefix of the tool's own text that fits, so nothing is rewritten; the file is
@@ -851,10 +857,11 @@ is expensive, and its input can itself be larger than the context it was meant
 to protect. A fixed head costs one measurement and cannot overflow; the model
 that needs a part the head did not carry reads it from the file.
 
-**Why 8,000 tokens.** The window is meant to fire rarely: on the 2026-10 turn
-log (349 results), the largest result was 5,284 tokens, so an 8,000-token window
-shortened none, while a 4,000-token window would have shortened 2%. The case the
-mechanism exists for is a tool bound to be long, such as a 10,000-word essay.
+**Why 32 KiB.** The window is meant to fire rarely: on the 2026-10 turn log
+(349 results), the largest result was 5,284 tokens — roughly 20 KB — so a 32 KiB
+window shortened none, while a 16 KiB window would have shortened some. The
+case the mechanism exists for is a tool bound to be long, such as a
+10,000-word essay.
 
 A non-text result gets the same treatment: the head is what tells a model what
 it is, and the readers are bounded, so an attempt to read bytes is a bounded
@@ -863,6 +870,12 @@ answer rather than a second overflow.
 The harness reaches the cabinet directly for `dump_save`, because that tool
 carries no audience mark; the model's routes back are `dump_read` and
 `dump_grep`.
+
+**An agent task has no cabinet client**, and its messages are not recorded. Its
+loop gets a `Compress` that cuts an over-budget result to the same byte bound
+with a marker that promises no file (`dumps.cut`); the bound holds, the tail is
+gone, and the model can call the tool again. The dump is the agent
+conversation's recovery convenience, not the bound itself.
 
 #### 5.2.5 Fallbacks
 
@@ -1454,7 +1467,7 @@ schema.
 - **Two tools answer with text rather than JSON, because the text is the
   thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
   hands over the skill's whole `SKILL.md`.
-- **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 512). A
+- **No answer exceeds `tool_result.bytes`** (default 32 KiB; minimum 2 KiB). A
   listing pages; an output that cannot be bounded is the harness's dump, and
   `dump_read` and `dump_grep` are bounded readers within the same budget.
 
@@ -1470,7 +1483,7 @@ advertised schema and stripped before dispatch, so no tool server sees them.
 | Parameter | Semantics |
 |---|---|
 | `_timeout` | Seconds for this call: a positive, finite number, overriding the tool's default. Any other value — `0`, negative, text, `inf` — fails the call with an error the model reads; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
-| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.tokens`. An agent task's loop has no `_async`. |
+| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task's loop has no `_async`. |
 | `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
 
 The loop reads these parameters off the call and strips them before dispatch.
@@ -1557,11 +1570,16 @@ into the vector identity and `SEARCH_TEXT_VERSION` into the keyword stamp beside
 `RULES_VERSION`; either rebuilds the index at startup rather than mixing rows
 made from two different texts.
 
-The token estimator uses `tiktoken`'s `o200k_base` when the vocabulary can be
-fetched, and a script-aware character measure when it cannot. The character
-measure was measured about 25% high on English and 60% high on Chinese — a bias
-rather than a tolerance. Measured usage is unaffected: the provider's own count
-is what the record keeps.
+The token estimator uses `tiktoken`'s `o200k_base`, **bundled with the package**:
+`libs/turn/tiktoken_cache/` holds the cache file and the resolver points
+`TIKTOKEN_CACHE_DIR` at it, so a resolution is a local read and parse (~186 ms
+once per process) with no network. **It serves the context rebuild's recall
+budget and nothing else**: a tool result is bounded by bytes (§5.2.4), and a
+page or a dump reader fits itself by bytes too. The fallback is a last resort —
+ASCII at four characters per token and every non-ASCII character at one — and
+it errs high on non-ASCII text rather than low, which is the direction a budget
+can afford. Measured usage is unaffected: the provider's own count is what the
+record keeps.
 
 ### 8.3 Cabinet
 
@@ -1690,7 +1708,7 @@ for the following one. Path resolution and the binary rendering live in one
 function, and the encoding sniff in another, so the two readers cannot disagree
 about what the file's text is.
 
-Every answer stays within `tool_result.tokens`; the bound is enforced where the
+Every answer stays within `tool_result.bytes`; the bound is enforced where the
 answer leaves, or a reader could return more than the shortening removed.
 
 A dump and an image are not in the corpus. Their address is the marker the turn
@@ -2193,7 +2211,7 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | `embeddings:` | The context store, the cabinet, and the tool hub |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
-| `tool_result:` | The harness, the cabinet's `dump_read` and `dump_grep`, and the media server |
+| `tool_result:` | The harness, the cabinet's readers and `dump_read`/`dump_grep`, and the agent-task loop's cut |
 | `mcp:` | `slife2-mcp-tools`, and the tool hub for its source names |
 | `rest-api:` | `slife2-restapi-tools`, and the tool hub for its source names |
 | `cli:` | `slife2-cli` |
@@ -2616,14 +2634,7 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
-   synchronous and reached from deep in the greps and the compress; its first
-   call fetches the tiktoken vocabulary over the network with no timeout, so a
-   cold cache behind a blocked route stalls every conversation the daemon serves
-   until the OS TCP timeout — the registered script fallback engages only after
-   the fetch raises. *Resolution would require:* pre-warming the encoding
-   off-loop, or an async measure seam the callers await.
-2. **A section's introduction and its first entry's comment share one slot.**
+1. **A section's introduction and its first entry's comment share one slot.**
    ruamel keeps the comment above a mapping's first key as the mapping's pending
    comment, so removing the first entry cannot tell the section's explanation
    (the shipped `slife2.yaml` style, which should survive) from the entry's own
@@ -2631,7 +2642,7 @@ the field arrives as a test that fails without the fix.
    and a checked-in test encodes the entry-comment reading. *Resolution would
    require:* a convention that puts the section explanation above the section key
    (a distinct slot), or a marker that tells the two apart.
-3. **A read recreates a removed subagent's directory.** `transcript`/`watch`
+2. **A read recreates a removed subagent's directory.** `transcript`/`watch`
    restore the conversation, and `restore` creates the store file and its
    directory for any name; after `subagent_remove`, a read of the stale name
    leaves a directory with no `subagent.yaml`, which `subagent_set` and
@@ -2639,45 +2650,45 @@ the field arrives as a test that fails without the fix.
    conversation is created lazily, so the record's absence is not an existence
    guard. *Resolution would require:* a tombstone for a removed name, or a
    read-only restore that creates nothing.
-4. **`schedule_set` runs outside the run lock.** The poll decides from a task
+3. **`schedule_set` runs outside the run lock.** The poll decides from a task
    snapshot read once per pass; a `schedule_set` that disables or re-crons a task
    mid-pass leaves the snapshot stale and the task fires once on its old
    definition. `schedule_remove` takes the lock for exactly this race; `set` does
    not. *Resolution would require:* the run lock around `schedule_set`, or
    re-reading the task under the lock before firing.
-5. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
+4. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
     store prunes a non-terminal record past its cap, a profile retry of the same
     task id builds a fresh record and cancels the old round, whose cancel handler
     reads the *new* record and publishes a terminal `cancelled`; the new round
     then finishes into a terminal state and drops its answer. *Resolution would
     require:* the cancel handler keying off its own round's record or generation.
-6. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
+5. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
    id, then awaits the vector step; a concurrent remove+create of the same key
    replaces the row and the update returns the old id, so the keyword text and
    chunks land under a rowid no live row has — the updated document is invisible
    to both search legs until a rebuild. *Resolution would require:* re-reading
    the rowid after the await, or indexing inside the write's transaction.
-7. **A share token is reused across conversations.** `expose_local_image`
+6. **A share token is reused across conversations.** `expose_local_image`
    returns an existing exposure when the pin matches without comparing owner, so
    a second conversation is handed a token owned by the first: it cannot revoke
    its own link, and the first conversation's revoke kills the second's —
    defeating the owner field's stated purpose. *Resolution would require:*
    comparing owner on reuse, or minting a per-owner token.
-8. **A late approval outlives its turn.** The cancel/failure flush applies a
+7. **A late approval outlives its turn.** The cancel/failure flush applies a
     queued `ToolApprovalRequested` after the turn is gone, mounting a prompt
     nobody will answer; and the approval row's y/n/Esc are focus-scoped priority
     bindings, so a keystroke that moves focus to the input leaves them inert and
     Esc cancels the whole turn instead of refusing the one call. *Resolution would
     require:* a turn-liveness guard on the approval event, and answering bindings
     that survive blur.
-9. **A tool-list change during the handover is un-believed.** The gateway's
+8. **A tool-list change during the handover is un-believed.** The gateway's
     `_refresh` awaits `on_listed`; an `invalidate()` in that window is overwritten
     when the refresh recomputes readiness from the pre-notification listing, so a
     tool added or removed during the merge stays wrong for up to `relist_after`.
     Only external legacy servers that send the notification reach it (ours
     advertise `listChanged: false`). *Resolution would require:* honouring an
     invalidate that lands during the merge.
-10. **A folded cut-in is delivered twice when its turn is cancelled.** The
+9. **A folded cut-in is delivered twice when its turn is cancelled.** The
     repaired batch keeps the cut-in pair and records it, but the cancelled turn's
     result stays `None`, so the parked caller runs its own turn with the same
     prompt — the message sits in the conversation twice and the model answers it

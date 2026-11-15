@@ -16,9 +16,9 @@ import slife2.libs.host.config
 from slife2.libs.host.config import (
     A2A_BROKER_ENV_VAR,
     API_BACKENDS,
-    DEFAULT_TOOL_RESULT_TOKENS,
+    DEFAULT_TOOL_RESULT_BYTES,
     LOCAL,
-    MIN_TOOL_RESULT_TOKENS,
+    MIN_TOOL_RESULT_BYTES,
     PLUGINS,
     REMOTE,
     ConfigError,
@@ -572,7 +572,7 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     for text, expected in [
         ("agent:\n  max_iterations: many\n", "agent.max_iterations"),
         ("tool_load:\n  threshold: lots\n", "tool_load.threshold"),
-        ("tool_result:\n  tokens: lots\n", "tool_result.tokens"),
+        ("tool_result:\n  bytes: lots\n", "tool_result.bytes"),
         ("context:\n  ceiling: high\n", "context.ceiling"),
         ("servers:\n  context:\n    port: eight\n", "servers.context.port"),
         # **A value that is a number and not the setting's number is a typo
@@ -691,20 +691,24 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     configuration, it is a reader that answers nothing and a shortening that
     keeps nothing.
     """
-    assert load(write(tmp_path, "")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
-    stated = load(write(tmp_path, "tool_result:\n  tokens: 800\n")).tool_result
-    assert stated.tokens == 800
+    assert load(write(tmp_path, "")).tool_result.bytes == DEFAULT_TOOL_RESULT_BYTES
+    stated = load(write(tmp_path, "tool_result:\n  bytes: 4000\n")).tool_result
+    assert stated.bytes == 4000
 
-    path = write(tmp_path, "tool_result:\n  tokens: 0\n")
+    path = write(tmp_path, "tool_result:\n  bytes: 0\n")
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
         load(path)
+
+    # The old spelling is refused with the rename, not read as a missing key.
+    with pytest.raises(ConfigError, match="tool_result.bytes"):
+        load(write(tmp_path, "tool_result:\n  tokens: 8000\n"))
 
 
 def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
     """**Refused where it is written, not at the turn it would ruin.**
 
     A window over a shortened result opens with the marker and the sentence
-    that say where the whole of it is, and that address costs about 140 tokens
+    that say where the whole of it is, and that address costs about 400 bytes
     for the call ids the providers emit and the home-relative path — more than
     a small budget has in total.  `dumps.window` refuses to hand back a window whose
     address it had to cut, so such a budget can only ever fail a turn; the
@@ -712,13 +716,13 @@ def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
     already makes about zero.
     """
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
-        load(write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS - 1}\n"))
+        load(write(tmp_path, f"tool_result:\n  bytes: {MIN_TOOL_RESULT_BYTES - 1}\n"))
 
     assert (
         load(
-            write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS}\n")
-        ).tool_result.tokens
-        == MIN_TOOL_RESULT_TOKENS
+            write(tmp_path, f"tool_result:\n  bytes: {MIN_TOOL_RESULT_BYTES}\n")
+        ).tool_result.bytes
+        == MIN_TOOL_RESULT_BYTES
     )
 
 

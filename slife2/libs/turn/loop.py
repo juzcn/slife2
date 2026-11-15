@@ -779,7 +779,7 @@ class AgentLoop:
 
         **The harness's move and not the tool's**, which is why it is a callback
         the caller injects rather than anything this module decides: the bound
-        is `tool_result.tokens`, and the party that writes the dump and knows
+        is `tool_result.bytes`, and the party that writes the dump and knows
         where it went is the agent server.  The loop hands over the call and the
         text and takes back what to append.  A loop with no callback hands the
         result on unchanged: the same None-means-nobody-said rule `approve` and

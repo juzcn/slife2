@@ -84,8 +84,9 @@ WECHAT_AGENT = "e2e-wechat"
 #: writes.  Small on purpose: the window is what the reader is asserted
 #: against, and a window near the default would be a window no test can see.
 #: It is the config's own floor: a smaller one cannot hold the dump marker's
-#: address, so `load()` refuses it before a child ever reads the file.
-WINDOW = 512
+#: address, so `load()` refuses it before a child ever reads the file.  Bytes,
+#: like `tool_result.bytes`.
+WINDOW = 2048
 
 #: The embedding model's name, and the input limit its listing reports.  The
 #: limit is not optional: see `_ProviderHandler.do_GET`.

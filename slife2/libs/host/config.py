@@ -1647,34 +1647,37 @@ class ToolLoadSettings:
     autoload: tuple[str, ...] = REQUIRED_AUTOLOAD
 
 
-#: How much of one tool result a model is handed.  **One number for both
-#: sides**: the harness spends it on the head it carries for a result too large
-#: for the conversation, and the tools that hand text back — the cabinet's
-#: `dump_read` and `dump_grep` — cap themselves with it.  Two numbers would be
-#: two answers to "how much fits", and the failure is a loop with this system's
-#: machinery at both ends.
+#: How much of one tool result a model is handed, **in UTF-8 bytes**.  One
+#: number for both sides: the harness spends it on the head it carries for a
+#: result too large for the conversation, and the tools that hand text back —
+#: the cabinet's readers and `dump_read`/`dump_grep` — cap themselves with it.
+#: Two numbers would be two answers to "how much fits", and the failure is a
+#: loop with this system's machinery at both ends.
 #:
-#: **Measured, and above every ordinary result.**  On the 2026-10 turn log (349
-#: results) the median was 48 tokens, p90 1,587, the largest 5,284: at 8,000 the
-#: mechanism fires on none of them, and still catches the case it exists for — an
-#: output whose length nobody controls (a shell command, a huge file read) riding
-#: in every later request.
+#: **A size bound, not a token accounting.**  The context rebuild's `ceiling` is
+#: the token guard; this is the per-result cap that keeps one output from
+#: carrying a conversation on its own.  Bytes are the unit because they need no
+#: vocabulary, cost one expression to measure, and track text volume across
+#: scripts (a CJK character is three bytes where an ASCII one is one).  The
+#: tools' own addresses stay character-based — `offset`, `limit` and `next` are
+#: what a reader continues from.
 #:
-#: The case it exists for is the tool *bound* to be long (a ten-thousand-word
-#: essay is ~13,000 tokens): 8,000 sits above the ordinary and below the
-#: deliberate, so shortening fires on what nobody controls rather than on what a
-#: model asked for once.  Re-reading the log is the same instrument that would
-#: move it again (SDD §7.4).
-DEFAULT_TOOL_RESULT_TOKENS = 8000
+#: **Above every ordinary result.**  On the 2026-10 turn log (349 results) the
+#: median was 48 tokens, p90 1,587, the largest 5,284 — roughly 20 KB rendered.
+#: At 32 KiB the mechanism fires on none of them, and still catches the case it
+#: exists for: an output whose length nobody controls (a shell command, a huge
+#: file read) riding in every later request.  The log is the instrument that
+#: would move it again (SDD §7.4).
+DEFAULT_TOOL_RESULT_BYTES = 32_768
 
 #: The smallest window that can hold the *address* and still show a head.  The
 #: marker and the sentence that says where the rest is —
 #: `[DUMP:{"call": …, "bytes": …, "file": …}] Too large for the conversation: …`
-#: — cost about 100 tokens for a long provider call id and the home-relative
+#: — cost about 400 bytes for a long provider call id and the home-relative
 #: path.  A budget below that cannot hold the address at all, and one just above
 #: it would show so little of the output that a model could not tell what kind
-#: of file it has; 512 leaves room for a readable head.
-MIN_TOOL_RESULT_TOKENS = 512
+#: of file it has; 2 KiB leaves room for a readable head.
+MIN_TOOL_RESULT_BYTES = 2_048
 
 
 @dataclass(frozen=True)
@@ -1685,17 +1688,18 @@ class ToolResultSettings:
     tool returned.**  Whether an output is the right length is the tool
     designer's business; what the harness owns is the context that has to carry
     it and the whole of what was returned, and the two are answered separately —
-    the whole is kept (a dump, or the file it already came from) and over the
-    bound the model is handed a fixed head of it with the call id that reads the
-    rest.  The head is chosen by a rule, not by a model: the boundary is what
-    this section sets, and the model's route back is `dump_read` and
-    `dump_grep`.
+    the whole is kept where there is a cabinet (a dump) and over the bound the
+    model is handed a fixed head of it with the call id that reads the rest.  An
+    agent task has no cabinet and no recorded messages, so its over-size result
+    is cut instead, with a marker that promises no file (§5.2.4).  The head is
+    chosen by a rule, not by a model: the boundary is what this section sets,
+    and the model's route back is `dump_read` and `dump_grep`.
 
     There is deliberately no "off".  A window with no bound is the whole output,
     which is the thing this exists to prevent.
     """
 
-    tokens: int = DEFAULT_TOOL_RESULT_TOKENS
+    bytes: int = DEFAULT_TOOL_RESULT_BYTES
 
 
 @dataclass(frozen=True)
@@ -2970,14 +2974,19 @@ def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
     if raw is None:
         return base
     section = _mapping(raw, "tool_result")
-    tokens = _int_or(section.get("tokens"), base.tokens, "tool_result.tokens")
-    if tokens < MIN_TOOL_RESULT_TOKENS:
+    if "tokens" in section:
         raise ConfigError(
-            f"tool_result.tokens: {tokens} is smaller than the window's own "
-            f"address — set at least {MIN_TOOL_RESULT_TOKENS} (the default is "
-            f"{DEFAULT_TOOL_RESULT_TOKENS}), or leave the section out"
+            "tool_result.tokens is now `tool_result.bytes` — the bound is a "
+            "size, not a token budget; 32 KiB is 32768, or leave the section out"
         )
-    return ToolResultSettings(tokens=tokens)
+    size = _int_or(section.get("bytes"), base.bytes, "tool_result.bytes")
+    if size < MIN_TOOL_RESULT_BYTES:
+        raise ConfigError(
+            f"tool_result.bytes: {size} is smaller than the window's own "
+            f"address — set at least {MIN_TOOL_RESULT_BYTES} (the default is "
+            f"{DEFAULT_TOOL_RESULT_BYTES}), or leave the section out"
+        )
+    return ToolResultSettings(bytes=size)
 
 
 def _media(raw: Any, base: MediaSettings) -> MediaSettings:

@@ -171,7 +171,7 @@ RUNS_MAX = 200
 #: is therefore a page rather than a wall for the same reason the run listing
 #: is — a model that has scheduled for a year is a model whose `schedule_list`
 #: would otherwise be truncated by the harness and read back through `dump_read`
-#: or `dump_grep` (`tool_result.tokens`).
+#: or `dump_grep` (`tool_result.bytes`).
 TASKS_LIMIT = 50
 TASKS_MAX = 200
 

@@ -70,6 +70,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.logcontext as logcontext
 from slife2.clients.toolclient import acquire_tool, remote_tools, tool_lookup
 from slife2.helpers.clock import now
+from slife2.libs.harness import dumps
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import (
     AGENT_TASK_SERVER_NAME,
@@ -544,6 +545,11 @@ def build_server(
             # nowhere.
             refresh=partial(registry, task),
             max_iterations=current.agent.max_iterations,
+            # **A task has no cabinet client and records no messages**, so its
+            # tool results are cut to the same byte bound rather than dumped:
+            # the bound is the guarantee, the dump is the agent server's
+            # recovery convenience (`slife2.libs.harness.dumps.cut`).
+            compress=dumps.cut_for(current.tool_result.bytes),
             # **No `deliver`, and so no `_async` here — a stated limitation**
             # (SDD §14.2, "Background work inside an agent task").  This loop
             # runs one turn and has no second one for a background result to

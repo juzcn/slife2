@@ -458,7 +458,7 @@ is a `${VAR}` reference resolved at runtime.
 | `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes, each with an optional `rerank_model` for the recall's rerank stage. |
 | `context:` | Limits for the context decision. |
 | `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
-| `tool_result:` | Token budget for a single tool result. |
+| `tool_result:` | Size budget for a single tool result, in UTF-8 bytes. |
 | `mcp:` | External MCP servers (stdio or HTTP). |
 | `rest-api:` | OpenAPI documents exposed as tools. |
 | `cli:` | Commands already installed on the machine. |
@@ -521,7 +521,7 @@ tool_load:
              turn_read]                                # and never evicted
 
 tool_result:
-  tokens: 8000               # per-result budget; minimum 512
+  bytes: 32768               # per-result budget; minimum 2048
 
 mcp:
   arxiv:
@@ -659,7 +659,7 @@ thing itself: `_check_new_input` returns a person's message verbatim, and
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`; `total` says whether
 another page exists. A refusal or a miss raises a `ToolError`, which the harness
 reports as a failed call with the reason. No answer is intended to exceed
-`tool_result.tokens`; an output that would exceed it is stored as a dump (see
+`tool_result.bytes`; an output that would exceed it is stored as a dump (see
 [Cabinet](#cabinet)).
 
 #### Tool call options
@@ -738,7 +738,7 @@ The `media:` section provides four capabilities:
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
 - `text_to_speech` — write speech to an audio file.
-- `transcribe_audio` — transcribe an audio file, paged by `offset` and `limit`.
+- `transcribe_audio` — transcribe an audio file; a long transcript is kept as a dump.
 
 Each model declares what it is for:
 
@@ -831,7 +831,7 @@ period are what the update passes, and an omitted one is cleared.
 A dump is a tool output too large for the conversation. The output is stored
 whole **in its file**, keyed by the tool call id; the cabinet row is the
 address and holds no copy of the text, so a large output is never stored twice.
-The conversation carries its head within `tool_result.tokens` — a marker with
+The conversation carries its head within `tool_result.bytes` — a marker with
 the file's size and its path relative to the data directory (where the agent's
 own tools run, so it survives moving the home). Nothing is paraphrased, and
 nothing is counted: the size is the mirror file's `stat`, not a pass over the

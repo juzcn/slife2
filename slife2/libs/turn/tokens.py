@@ -7,32 +7,29 @@ db stores on every turn and which the provider reports rather than guesses.  Tha
 number drives the ceiling check and the status bar, and nothing here may stand
 in for it.
 
-What no measurement can answer is how large a turn *would* be: a candidate a
-recall is considering, or a turn a selection is about to spend its budget on.
-That is the whole of this module's job, and the reason it is one module rather
-than three functions in three places is that counting, the trim's stop
-condition and the recall's token budget are the same question, so the three
-must not come to disagree about how big something is.
+**One decision in this system is genuinely in tokens: the context rebuild's
+recall budget.**  A candidate a recall is considering is a turn that has not been
+sent, so nothing has measured it; the budget is a fraction of a model window, and
+the estimate is how the selection decides what fits.  Every other bound is a
+size: a tool result is cut by bytes, a page is fitted by bytes, and
+`tool_result.bytes` is the one number those answer to.  This module therefore
+serves the recall and nothing else, which is why it can afford a real tokenizer.
 
 **The base measure is OpenAI's own tokenizer**, `tiktoken`'s `o200k_base` — the
-vocabulary GPT-4o and later are trained on.  It replaces a script-aware
-character measure that is now only the fallback, because counting by hand was
-wrong by a *direction* that mattered: the old rule charged 4 characters per
-token for Latin text and 1 token per CJK character, so an English sentence came
-out about 25% high and a Chinese one about 60% high — both in the direction that
-spends a window it did not need to.
+vocabulary GPT-4o and later are trained on.  **It ships with the package**:
+`tiktoken_cache/` holds the file tiktoken expects, and `_openai_encoding` points
+`TIKTOKEN_CACHE_DIR` at it before asking for the encoding.  Resolving it is a
+local read and parse — no network, no timeout, no proxy — about 186 ms once per
+process, and the recall's cost runs off the event loop.
 
-**And the fallback is load-bearing rather than polite.**  `tiktoken` fetches a
-few megabytes of vocabulary over the network the first time it is asked for one,
-so a machine that is offline, air-gapped or behind a proxy that blocks it has no
-tokenizer to use — and this project's whole point is that its endpoints are
-DeepSeek, Qwen, Ollama and whatever gateway the operator points at, most of
-which run perfectly well with no internet at all.  So a failure to load is
-**not** an error here: it is logged, remembered for a cooldown, and the script
-measure answers meanwhile.  The retry matters because one transient outage
-should not degrade a long-lived process forever.  That is also why nothing
-resolves at import — a backend process that never sizes a conversation never
-touches this.
+**The fallback remains the last resort**, not the ordinary path.  If the bundled
+vocabulary cannot be read — a broken install, or a tiktoken that no longer knows
+the name — the script measure answers: ASCII at four characters per token, every
+non-ASCII character at one.  That is deliberately conservative; a real BPE packs
+common CJK pairs into one token, so this runs high there.  It is one rule and no
+table of ranges, because a table is always missing the next block: the old one
+omitted emoji and made the fallback *under*count them by four to five times,
+which is the one direction a budget cannot afford.
 
 **No vocabulary is exact for a non-OpenAI endpoint**, and this one is not
 claimed to be: a Qwen or DeepSeek model has its own.  What makes `o200k_base`
@@ -41,18 +38,27 @@ error is small and unbiased where a hand-written ratio's is structural.  The
 budget it feeds is a fraction of a window, so an estimate that is 5% wrong
 spends 5% of a window that was sized for it.
 
-**What the number is for, and what it is not.**  Every caller here is choosing
-what *fits*.  None of them reports it as usage, and a caller that finds itself
-printing one has made a mistake this module cannot catch.
+**A failed read is remembered, but not forever.**  Retrying on every message
+would be one failed open per message; remembering it for the process's whole
+life would turn a reinstalled file into a permanent overestimate.  The attempt
+is retried after `_RETRY_AFTER`.  Nothing resolves at import: a process that
+never sizes a conversation never touches this.
+
+**What the number is for.**  The recall chooses what fits; none of it reports
+usage, and a caller that finds itself printing one has made a mistake this
+module cannot catch.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -62,33 +68,42 @@ logger = logging.getLogger(__name__)
 #: use, and the name is the whole of what a reader needs to check that.
 _ENCODING = "o200k_base"
 
+#: Where tiktoken's loader looks for it, and the name it expects: the cache file
+#: is keyed by the SHA-1 of the URL `read_file_cached` would fetch.  The name is
+#: derived rather than written down, so the URL and the file name stay one
+#: statement.  The data directory's README records the content hash and source.
+_VOCAB_URL = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+_CACHE_KEY = hashlib.sha1(_VOCAB_URL.encode()).hexdigest()
+
+#: The package directory holding the cache file.  A normal wheel is unpacked, so
+#: `__file__` is a real path; a zipped import is not a mode this project ships.
+_BUNDLED_CACHE = Path(__file__).with_name("tiktoken_cache")
+
 #: Resolved once per process, on the first estimate.  `None` means "not resolved
 #: yet"; `_failed_at` says when the last attempt failed, which is what the retry
 #: cooldown is measured from.
 _encoding: Any = None
 _failed_at: float | None = None
 
-#: How long a failed fetch is remembered before the next attempt.  Long enough
-#: that an offline machine does not pay a network timeout per turn; short enough
-#: that a transient outage does not degrade this process for its whole life.
+#: How long a failed read is remembered before the next attempt.  Long enough
+#: that a broken install does not pay a file open per message; short enough that
+#: a repair does not degrade this process for its whole life.
 _RETRY_AFTER = 600.0
 
 
 def _openai_encoding() -> Any:
-    """`o200k_base`, or `None` if this machine cannot get it — the seam a test
-    replaces to keep the suite off the network (see `tests/conftest.py`).
+    """`o200k_base`, or `None` if this machine cannot read it — the seam a test
+    replaces to keep the suite off the vocabulary (see `tests/conftest.py`).
 
-    Resolved lazily and never at import: the vocabulary is a few megabytes
-    `tiktoken` downloads the first time anybody asks, and a process that never
-    sizes a conversation — a model backend, the TUI, most plugins — should not
-    pay for one at all.
+    Resolved lazily and never at import: the file is a few megabytes to parse,
+    and a process that never sizes a conversation — a model backend, the TUI,
+    most plugins — should not pay for one at all.
 
-    **A failure is remembered, but not forever.**  Retrying on every message
-    would be one failed fetch per message of every conversation; remembering it
-    for the process's whole life would turn one transient network error into a
-    permanent 25–60% overestimate.  The attempt is retried after
-    `_RETRY_AFTER`, so an offline machine pays once every ten minutes and a
-    machine that comes back online gets the real tokenizer on its next try.
+    **The bundle is a cache directory, not a format of ours.**  tiktoken's
+    `read_file_cached` checks `TIKTOKEN_CACHE_DIR` before it fetches, and the
+    bundled file is named with the SHA-1 of the URL it would fetch, so pointing
+    the variable at the package directory is the whole of the integration.
+    `setdefault` leaves an operator's own cache directory alone.
     """
     global _encoding, _failed_at
     if _encoding is None:
@@ -98,27 +113,24 @@ def _openai_encoding() -> Any:
         try:
             import tiktoken
 
+            if (_BUNDLED_CACHE / _CACHE_KEY).is_file():
+                os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(_BUNDLED_CACHE))
             _encoding = tiktoken.get_encoding(_ENCODING)
         except Exception as exc:  # noqa: BLE001 — any failure means "no vocabulary"
             _failed_at = now
             logger.warning(
                 "tokenizer_unavailable encoding=%s error=%s — falling back to the "
-                "script measure, which runs high on both scripts",
+                "script measure, which charges every non-ASCII character",
                 _ENCODING,
                 exc,
             )
     return _encoding
 
 
-#: Characters per token for text that is not CJK, in the fallback measure.  Four
-#: is the long-standing figure for English prose under BPE, and the rationale
-#: the fallback runs on.
+#: Characters per token for ASCII text, in the fallback measure.  Four is the
+#: long-standing figure for English prose under BPE, and the rationale the
+#: fallback runs on.
 _CHARS_PER_TOKEN = 4
-
-#: And a CJK character is close to a token of its own — which is why one ratio
-#: for the whole string would be wrong by a factor of four on a Chinese
-#: conversation, and why this counts the two separately.
-_WIDE_TOKENS = 1
 
 #: What one attached image is charged.  It is not text and cannot be counted as
 #: any; the figure is a fixed charge, and what it is for is keeping an
@@ -128,57 +140,29 @@ _WIDE_TOKENS = 1
 #: answer**, so it is charged the same way whichever measure is in force.
 _IMAGE_TOKENS = 200
 
-
-#: The ranges a tokenizer spends about one token on — and the single statement of
-#: them, because two copies of a table like this are two answers waiting to
-#: disagree.  They are the ones `wcwidth` calls double-width, which is the
-#: closest thing to a standard answer to this question: Latin, Cyrillic, Greek
-#: and Arabic are not in them and are counted at `_CHARS_PER_TOKEN`; Han, Kana,
-#: Hangul and the fullwidth forms are.
-_WIDE_RANGES: tuple[tuple[int, int], ...] = (
-    (0x1100, 0x115F),  # Hangul Jamo
-    (0x2E80, 0x303E),  # CJK radicals and punctuation
-    (0x3041, 0x33FF),  # Kana, Hangul Compatibility Jamo, CJK
-    (0x3400, 0x4DBF),  # CJK Unified Ideographs Extension A
-    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
-    (0xA000, 0xA4CF),  # Yi
-    (0xAC00, 0xD7A3),  # Hangul syllables
-    (0xF900, 0xFAFF),  # CJK compatibility ideographs
-    (0xFE30, 0xFE6F),  # CJK compatibility forms
-    (0xFF00, 0xFF60),  # fullwidth forms
-    (0xFFE0, 0xFFE6),  # fullwidth signs
-    (0x20000, 0x3FFFD),  # the supplementary ideographic planes
-)
-
-#: The same ranges as one character class, so the scan happens in C rather than
-#: in a Python loop over every character.
-#:
-#: **Not a micro-optimisation.**  `_by_script` is what an offline machine runs
-#: for its whole life, and it is called many times per turn: once for each
-#: candidate a budget measures, and once per step of `clip_to_tokens`'s binary
-#: search, each over a string that may be a megabyte of tool output.  Counting
-#: characters one at a time made this the largest single cost in the project's
-#: own test suite — nine of the ten seconds of its slowest test — *on text with
-#: no wide character in it at all*, because the loop pays per character and not
-#: per match.
-_WIDE = re.compile(
-    "[" + "".join(f"{chr(low)}-{chr(high)}" for low, high in _WIDE_RANGES) + "]"
-)
+#: The one rule of the fallback: ASCII text at `_CHARS_PER_TOKEN` characters per
+#: token, every non-ASCII character at one.  **No range table**, because a table
+#: is always missing the next block — the old one omitted emoji (U+1F300–U+1FAFF
+#: is East-Asian-Wide) and charged them at a quarter of a token each, four to
+#: five times under the real BPE.  One rule cannot have that hole.  The scan is a
+#: compiled regex so it happens in C; a recall measuring a long turn is the cost
+#: this protects.
+_NON_ASCII = re.compile("[^\x00-\x7f]")
 
 
 def _by_script(text: str) -> int:
-    """The fallback: about how many tokens *text* is, by its own two scripts.
+    """The fallback: ASCII at four characters per token, non-ASCII at one each.
 
-    Used when the vocabulary cannot be had (`_openai_encoding`).  It is the
-    measure this module was built on, kept because the machine that needs it is
-    the one with no network — which is a supported machine, not a broken one.
+    Used when the bundled vocabulary cannot be read.  It is deliberately a
+    measure that errs high on non-ASCII text — a CJK page is charged one token
+    per character where the real BPE often packs two into one — because the one
+    direction a budget cannot afford is an undercount.  The previous table of
+    "wide" ranges charged every other non-ASCII script at a quarter of a token
+    and omitted emoji entirely.
     """
-    # `subn` and not `findall`: the count is the same and it builds no match
-    # object per wide character, which on a Chinese document is one per character
-    # of it.
-    _narrowed, wide = _WIDE.subn("", text)
-    narrow = len(text) - wide
-    return wide * _WIDE_TOKENS + (narrow + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+    _ascii_only, non_ascii = _NON_ASCII.subn("", text)
+    ascii_chars = len(text) - non_ascii
+    return non_ascii + (ascii_chars + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -260,50 +244,3 @@ def estimate_turn_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
     it is a lie that bounds the count.
     """
     return max(sum(estimate_message_tokens(message) for message in messages), 1)
-
-
-def clip_to_tokens(text: str, budget: int) -> str:
-    """`text`, cut to fit `budget` tokens — **and never over it**.
-
-    The last line of defence for a tool of ours whose answer is bounded by
-    `tool_result.tokens`, and it exists because "bounded" by construction is not
-    the same claim as "bounded": every path through such a tool has to come out
-    under the budget, including the ones nobody thought about — a refusal that
-    quotes back the argument it refused, a header naming a path, a sentence
-    about a pattern.  A model can put anything into an argument, so a message
-    built out of one is only bounded if something measures it.
-
-    What that failure costs is not one long answer: an answer over the budget is
-    a tool result the harness would have to shorten again, and shortening *this
-    tool's* answer is what a loop with our own machinery at both ends looks
-    like.  So the bound is enforced once, where the answer leaves, rather than
-    argued for at each return.
-
-    The cut is **announced**, like every other shortening here, and the marker is
-    measured with the text it is attached to: the point of this function is the
-    number, so a marker that pushed the answer back over the budget would defeat
-    it.  A budget too small to hold even the marker answers with the empty
-    string, which is the only answer that fits.
-    """
-    if estimate_text_tokens(text) <= budget:
-        return text
-    marker = f"\n[... {len(text)} characters do not fit {budget} tokens]"
-    room = budget - estimate_text_tokens(marker)
-    if room < 1:
-        return ""
-    low, high = 0, len(text)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if estimate_text_tokens(text[:middle]) <= room:
-            low = middle
-        else:
-            high = middle - 1
-    clipped = text[:low] + marker
-    # Token counts are not additive — a boundary spanning the join costs a token
-    # of its own — so the answer is measured rather than trusted, and backed off
-    # until it is under.  It terminates: every step shortens, and the empty
-    # string is under any budget this function was called with.
-    while low > 0 and estimate_text_tokens(clipped) > budget:
-        low -= max(low // 16, 1)
-        clipped = text[:low] + marker
-    return clipped if estimate_text_tokens(clipped) <= budget else ""

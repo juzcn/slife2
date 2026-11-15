@@ -90,7 +90,6 @@ import base64
 import codecs
 import hashlib
 import ipaddress
-import json
 import logging
 import mimetypes
 import os
@@ -115,7 +114,7 @@ from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
 from slife2.libs.store.answer import search_answer
 from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.turn.tools import as_tool_text
 from slife2.plugins.cabinet.store import (
     CORPUS_KIND_HINT,
     DIARY,
@@ -1187,7 +1186,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=config.tool_result.bytes,
         )
 
     @mcp.tool(name="file_grep", meta=FOR_THE_MODEL)
@@ -1246,7 +1245,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=config.tool_result.bytes,
         )
 
     @mcp.tool(name="file_list", meta=FOR_THE_MODEL)
@@ -1482,7 +1481,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=config.tool_result.bytes,
         )
 
     @mcp.tool(name="dump_grep", meta=FOR_THE_MODEL)
@@ -1544,7 +1543,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=config.tool_result.bytes,
         )
 
     @mcp.tool(name="dump_save")
@@ -1943,7 +1942,7 @@ def _line_fill(
     budget: int,
     where: str,
 ) -> dict[str, Any]:
-    """Fill a line page from a stream, **never larger than `budget` tokens**.
+    """Fill a line page from a stream, **never larger than `budget` bytes**.
 
     The bound is on the whole answer, envelope included: a reader that handed
     back more than the budget would be a tool of ours feeding the harness's own
@@ -1970,9 +1969,7 @@ def _line_fill(
         kept.append((number, text))
         following = number + 1 if number < total_lines else None
         if (
-            estimate_text_tokens(
-                _wire(_line_payload(kept, total_lines, total_chars, following, where))
-            )
+            _size(_line_payload(kept, total_lines, total_chars, following, where))
             > budget
         ):
             kept.pop()
@@ -1981,7 +1978,7 @@ def _line_fill(
         next_line = following
     if not kept:
         raise ToolError(
-            f"line {start} is longer than a {budget}-token window on its own — "
+            f"line {start} is longer than a {budget}-byte window on its own — "
             f'read it with mode="char", offset={first_offset} '
             f"(the file is at {_where(where)})."
         )
@@ -2053,21 +2050,17 @@ def _char_window(
     low, high = 0, room
     while low < high:
         middle = (low + high + 1) // 2
-        if estimate_text_tokens(_wire(page_of(middle))) <= budget:
+        if _size(page_of(middle)) <= budget:
             low = middle
         else:
             high = middle - 1
     count = low
-    page = page_of(count)
-    while count > 0 and estimate_text_tokens(_wire(page)) > budget:
-        count -= max(count // 16, 1)
-        page = page_of(count)
     if count == 0:
         raise ToolError(
-            f"a {budget}-token window cannot hold a character of this text — "
-            f"raise `tool_result.tokens`; the file is at {_where(where)}."
+            f"a {budget}-byte window cannot hold a character of this text — "
+            f"raise `tool_result.bytes`; the file is at {_where(where)}."
         )
-    return page
+    return page_of(count)
 
 
 def _grep_pattern(pattern: str) -> str:
@@ -2175,7 +2168,7 @@ def _grep_finalize(
         page = _grep_payload(
             total_lines, total_chars, matched, shown, first_unshown, where
         )
-        if estimate_text_tokens(_wire(page)) <= budget:
+        if _size(page) <= budget:
             return page
         if len(shown) > 1:
             dropped = shown.pop()
@@ -2193,8 +2186,8 @@ def _grep_finalize(
             shown.clear()
             continue
         raise ToolError(
-            f"a {budget}-token window cannot hold this answer — raise "
-            f"`tool_result.tokens`."
+            f"a {budget}-byte window cannot hold this answer — raise "
+            f"`tool_result.bytes`."
         )
 
 
@@ -2251,7 +2244,7 @@ def _grep_answer(
                 full = True
                 continue
             match["cut"] = True
-        if estimate_text_tokens(_wire(page())) > budget:
+        if _size(page()) > budget:
             if len(shown) == 1:
                 # Keep the only address there is; the finalizer cuts its text.
                 full = True
@@ -2409,11 +2402,10 @@ def _stream_read(
             where=where,
         )
     start = _char_start(0 if offset is None else offset, total_chars)
-    # The window's size in characters is not known until it is measured;
-    # gather a generous multiple of the budget (a token is at least one
-    # character, and four covers the priciest BPE splits) and let
-    # `_char_window` cut it back to what fits.
-    room = budget * 4 + 1024
+    # The window's size in characters is not known until it is measured; a
+    # character is at least one byte, so a byte budget's worth of characters
+    # is a safe bound on what can fit.  `_char_window` cuts it back.
+    room = budget + 1024
     if limit:
         room = min(room, limit)
     chunk = _file_char_text(target, encoding, start, room)
@@ -2538,7 +2530,7 @@ def _fit_match_text(
         return {**page, "matches": [*page["matches"][:-1], match]}
 
     def fits(start: int, end: int) -> bool:
-        return estimate_text_tokens(_wire(candidate(start, end))) <= budget
+        return _size(candidate(start, end)) <= budget
 
     before, after = GREP_BEFORE_CHARS, GREP_AFTER_CHARS
     while before or after:
@@ -2562,8 +2554,8 @@ def _fit_match_text(
             high = middle - 1
     if low == 0:
         raise ToolError(
-            f"this match is longer than a {budget}-token window even as an "
-            f"address; raise `tool_result.tokens`."
+            f"this match is longer than a {budget}-byte window even as an "
+            f"address; raise `tool_result.bytes`."
         )
     return line[start : start + low], char - found + start
 
@@ -2577,16 +2569,15 @@ def _where(where: str) -> str:
     return where or "the cabinet"
 
 
-def _wire(payload: dict[str, Any]) -> str:
-    """A payload as the text a model is handed, for measuring it against the budget.
+def _size(payload: dict[str, Any]) -> int:
+    """A payload's size as the model receives it, in UTF-8 bytes.
 
-    JSON, which is what every tool of ours answers in — and deliberately the
-    *wider* of the two spellings of it: the serializer that puts a structured
-    result in a tool message drops the spaces after `,` and `:`, and this keeps
-    them, so the number a window is measured against is never smaller than what
-    the model reads.
+    `as_tool_text` is the one renderer that builds a tool message — the hub and
+    the loop both go through it — so this measures what the conversation
+    carries, not an approximation of it.  The budget is `tool_result.bytes`;
+    the addresses (`offset`, `limit`, `next`) stay characters.
     """
-    return json.dumps(payload, ensure_ascii=True, default=str)
+    return len(as_tool_text(payload).encode("utf-8", "backslashreplace"))
 
 
 def _document(row: dict[str, Any], *, text: str) -> dict[str, Any]:

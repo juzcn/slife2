@@ -31,7 +31,6 @@ from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import turn_footnote, turn_note
 from slife2.libs.turn.messages import Usage
-from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -174,9 +173,9 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
     assert record["turn_id"] == 1
     assert record["messages"] == messages
     assert record["what_model"] == "deepseek/deepseek-flash"
-    # The read answers with the turn's own size, not the bill it cost or the
-    # context it ran in; the stored row keeps both for the status bar.
-    assert record["token_count"] == estimate_turn_tokens(messages)
+    # The read is the turn itself; the bill and the context size are the
+    # status bar's, and the stored row keeps both.
+    assert "token_count" not in record
     assert "context_tokens" not in record
     assert "who_helped" not in record
     assert "usage" not in record, "a bill is the operator's, not the model's"
@@ -419,7 +418,6 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
         "created_at",
         "user_message",
         "assistant_message",
-        "token_count",
         "similarity",
     }
     # The envelope is the one all three searches give.

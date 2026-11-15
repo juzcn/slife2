@@ -159,7 +159,7 @@ servers:
 # and a tool of ours handing text back — and a test that read it from the
 # default would prove nothing about the config file every child reads.
 tool_result:
-  tokens: {WINDOW}
+  bytes: {WINDOW}
 
 # `note_write` is the tool the turn test asks the model for, so it is in the
 # list the model is offered.  Every other cabinet tool is on demand, which is

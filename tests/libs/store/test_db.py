@@ -34,7 +34,6 @@ from slife2.libs.store.db import (
 from slife2.libs.store.index import _rowid
 from slife2.libs.turn import attachments
 from slife2.libs.turn.messages import Usage
-from slife2.libs.turn.tokens import estimate_turn_tokens
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -768,8 +767,12 @@ async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
 
     assert listing["user_message"] == "what is 2+2?"
     assert listing["assistant_message"] == "It is 4."
-    # The turn's own size, not what the stored bill happened to be.
-    assert listing["token_count"] == estimate_turn_tokens(record.messages)
+    assert set(listing) == {
+        "turn_id",
+        "created_at",
+        "user_message",
+        "assistant_message",
+    }
     assert listing["created_at"] and listing["turn_id"] == record.turn_id
 
 

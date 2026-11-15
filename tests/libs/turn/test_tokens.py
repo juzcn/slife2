@@ -17,11 +17,19 @@ smaller and unbiased where a hand-written ratio is structurally high.
 
 from __future__ import annotations
 
+import hashlib
+import subprocess
+import sys
+
 import pytest
 
 from slife2.libs.turn import tokens
 
 pytestmark = pytest.mark.unit
+
+#: The content hash `tiktoken 0.14.0` states for `o200k_base`'s file.  The
+#: bundle's README records where it came from and how to update it.
+BUNDLED_SHA256 = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
 
 #: A sentence and its Chinese counterpart: the same shape of test through both
 #: scripts, because one ratio for the whole string is exactly what the fallback
@@ -51,6 +59,13 @@ def test_the_fallback_counts_the_two_scripts_separately() -> None:
         # the estimate — which is the whole point.
         assert tokens.estimate_text_tokens("你好世界") == 4
         assert tokens._by_script(CHINESE) > tokens._by_script(ENGLISH) / 2
+        # **Every non-ASCII character costs at least one token, whatever the
+        # script.**  The old wide-range table omitted emoji (East-Asian-Wide)
+        # and charged Cyrillic, Greek and emoji at a quarter of a token, which
+        # undercounted a real BPE by four to five times — the one direction a
+        # budget cannot afford.
+        assert tokens.estimate_text_tokens("😀" * 8) == 8
+        assert tokens.estimate_text_tokens("Привет") == 6
 
 
 def test_a_special_token_spelling_does_not_raise(real_tokenizer) -> None:
@@ -222,16 +237,13 @@ def test_a_transient_failure_is_retried_after_the_cooldown(
 
 
 def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
-    """Importing must not fetch megabytes, so a backend never pays for one.
+    """Importing must not parse megabytes, so a backend never pays for one.
 
     `slife2.libs.turn.tokens` is imported by `slife2-context` — and, through it, by
     anything that imports the plugin — so a resolution at module scope would put
-    a network fetch in the start-up of a process that may never size anything.
+    a vocabulary parse in the start-up of a process that may never size anything.
     Asserted in a fresh interpreter, because this one has already estimated.
     """
-    import subprocess
-    import sys
-
     result = subprocess.run(
         [
             sys.executable,
@@ -244,3 +256,43 @@ def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
         check=True,
     )
     assert result.stdout.strip() == "None None"
+
+
+def test_the_bundled_vocabulary_is_present_and_whole() -> None:
+    """The cache file is package data, and it is the file tiktoken expects.
+
+    The name is tiktoken's cache key (the SHA-1 of the URL) and the content is
+    verified against the hash `tiktoken` pins; a stale or truncated bundle fails
+    here rather than at a user's first recall.
+    """
+    path = tokens._BUNDLED_CACHE / tokens._CACHE_KEY
+
+    assert path.is_file(), f"the bundled vocabulary is missing: {path}"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == BUNDLED_SHA256
+
+
+def test_the_bundled_vocabulary_loads_without_a_network() -> None:
+    """**The point of shipping it.**  A cold process resolves the encoding with
+    `requests.get` poisoned, so a cache-key drift or a missing data file fails
+    the suite instead of quietly turning the first recall into a download.
+    """
+    code = """
+import requests
+
+def refuse(*args, **kwargs):
+    raise AssertionError("the estimator touched the network")
+
+requests.get = refuse
+
+from slife2.libs.turn import tokens
+
+encoding = tokens._openai_encoding()
+assert encoding is not None, "the bundled vocabulary did not load"
+assert tokens.estimate_text_tokens("hello") > 0
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

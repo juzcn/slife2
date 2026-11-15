@@ -5,9 +5,14 @@ carry, and that text is then carried by *every* request the conversation makes
 afterwards.  Nothing here decides whether an output is the right length — that
 is the tool designer's business — so the whole of it is kept (a `dump`, in the
 cabinet) and what the conversation gets is the **head** of it, cut to
-`tool_result.tokens`, and an address: the `[DUMP:…]` marker names the call, the
+`tool_result.bytes`, and an address: the `[DUMP:…]` marker names the call, the
 file's size and its path, and the model reads the rest with `dump_read` or
 finds a part of it with `dump_grep`.
+
+**The bound is bytes, not tokens.**  This is a size cap on one result, not a
+token accounting of the conversation; the recall's `ceiling` is the token guard.
+Bytes need no vocabulary and cost one expression to measure, and a UTF-8 byte
+tracks text volume across scripts better than a character does.
 
 **Why the head and not a selection.**  Choosing the *interesting* lines is what
 a discriminator model call used to do here.  It was expensive — every shortened
@@ -22,6 +27,12 @@ the latter has no reason to read on, and if it does, the readers are bounded.
 **The address is the tool call id**, which both sides already carry: the
 conversation's own tool message holds it and the cabinet's dump is keyed by it.
 Nothing has to be invented or kept in step.
+
+**A loop with no cabinet gets `cut` instead.**  An agent task has no cabinet
+client and its messages are not recorded, so a result over the budget is cut to
+the same bound with a marker that promises no file; the turn continues and the
+tail is gone.  The bound is the guarantee in both cases; the dump is the
+recovery convenience.
 """
 
 from __future__ import annotations
@@ -30,7 +41,6 @@ import json
 from collections.abc import Awaitable, Callable
 
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tokens import estimate_text_tokens
 
 #: How the harness fits one tool result into a conversation: the call it came
 #: from and the text the tool answered with.  **A callback rather than a
@@ -48,11 +58,14 @@ MARKER = "[DUMP:"
 MARKER_END = "]"
 
 
-#: The first head size the fit tries, in characters.  A budget's worth of
-#: text is usually between this and a few doublings of it; starting here keeps
-#: the search from slicing a multi-megabyte output in half just to find the
-#: few thousand characters that fit.
-_HEAD_PROBE = 1024
+def text_size(text: str) -> int:
+    """`text`'s size as the model receives it, in UTF-8 bytes.
+
+    `backslashreplace` is the same rule `as_tool_text` applies: a lone surrogate
+    cannot be encoded at all, and it travels as the `\\uXXXX` escape it would
+    have been.  The measure and the message therefore count the same bytes.
+    """
+    return len(text.encode("utf-8", "backslashreplace"))
 
 
 def window(*, call: str, text: str, where: str, size: int, budget: int) -> str:
@@ -93,40 +106,49 @@ def window(*, call: str, text: str, where: str, size: int, budget: int) -> str:
         body = text[:shown]
         return f"{head}{said}" + (f"\n\n{body}" if body else "")
 
-    if estimate_text_tokens(render(0)) > budget:
+    if text_size(render(0)) > budget:
         raise ValueError(
-            f"a `tool_result.tokens` window of {budget} cannot hold the "
-            f"window's own address ({estimate_text_tokens(render(0))} tokens), "
-            f"so the output could not be read back — raise it"
+            f"a `tool_result.bytes` window of {budget} cannot hold the "
+            f"window's own address ({text_size(render(0))} bytes), so the "
+            f"output could not be read back — raise it"
         )
-    # **Grow to the fit, do not halve the output.**  A probe costs a slice of
-    # what it measures, and starting at `len(text)` would copy half of a huge
-    # output on the first try.  Doubling from `_HEAD_PROBE` reaches a budget's
-    # worth of characters in a few steps and never touches the rest.
-    low, high = 0, min(total_chars, _HEAD_PROBE)
-    while True:
-        fits = estimate_text_tokens(render(high)) <= budget
-        if fits and high < total_chars:
-            low = high
-            high = min(high * 2, total_chars)
-            continue
-        break
-    if fits:
-        shown = high
-    else:
-        while low < high:
-            middle = (low + high + 1) // 2
-            if estimate_text_tokens(render(middle)) <= budget:
-                low = middle
-            else:
-                high = middle - 1
-        shown = low
-    # Token counts are not additive — a boundary spanning the join costs a token
-    # of its own — so the answer is measured rather than trusted, and backed off
-    # until it is under.  It terminates: every step shortens, and zero is under
-    # any budget that got past the guard above.
-    answer = render(shown)
-    while shown > 0 and estimate_text_tokens(answer) > budget:
-        shown -= max(shown // 16, 1)
-        answer = render(shown)
-    return answer
+    # A byte budget bounds the character count too (every character is at least
+    # one byte), so `budget` is a safe upper bound for the search; every probe
+    # is a slice of the head, never the whole output.
+    low, high = 0, min(total_chars, budget)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if text_size(render(middle)) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return render(low)
+
+
+def cut(text: str, budget: int) -> str:
+    """The head of an output that could not be kept: no file, no address.
+
+    The difference from `window` is the promise.  A `[DUMP:…]` marker names a
+    file that exists; this marker does not claim one, so a loop with no cabinet
+    (an agent task) can still hold the bound and end the turn honestly.  The
+    tail is gone; a model that needs it calls the tool again.
+    """
+    marker = "\n[... the rest of this output was not shown]"
+    room = budget - text_size(marker)
+    if room < 1:
+        return ""
+    body = text.encode("utf-8", "backslashreplace")[:room].decode("utf-8", "ignore")
+    return f"{body}{marker}" if body else ""
+
+
+def cut_for(budget: int) -> Compress:
+    """A `Compress` that cuts rather than dumps, for a loop with no cabinet.
+
+    The async shape is the loop's (`Compress`); the cut itself is the same one
+    an address-less result gets.  A result that fits goes in as it came.
+    """
+
+    async def fit(_call: ToolCall, text: str) -> str:
+        return text if text_size(text) <= budget else cut(text, budget)
+
+    return fit

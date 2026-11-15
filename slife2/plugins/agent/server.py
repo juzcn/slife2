@@ -184,7 +184,6 @@ from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import render_system_prompt
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
-from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
@@ -1121,10 +1120,14 @@ def build_server(
         """How one conversation's tool results are fitted into it.
 
         **A fixed rule, not a model call** (SDD §5.2.4).  Under
-        `tool_result.tokens` the result goes in as it came.  Over it the whole
+        `tool_result.bytes` the result goes in as it came.  Over it the whole
         output is saved as a dump — a file, keyed by the call — and the
         conversation carries the head of it and the address: the `[DUMP:…]`
         marker, the size of the file, and the readers that open it.
+
+        **The bound is a size, not a token count.**  One UTF-8 byte length
+        decides this, the same number the cabinet's readers cap themselves with;
+        no vocabulary is touched on this path.
 
         **Saving is the one step that must succeed.**  The marker promises a
         file; a conversation carrying a marker whose file is not there would be
@@ -1134,8 +1137,8 @@ def build_server(
         """
 
         async def compress(call: ToolCall, text: str) -> str:
-            window = current().tool_result.tokens
-            if estimate_text_tokens(text) <= window:
+            window = current().tool_result.bytes
+            if dumps.text_size(text) <= window:
                 return text
             client = await cabinet()
             answer = await client.call_tool(
@@ -2699,7 +2702,7 @@ def build_server(
             await runtime.close()
             # The third client this server opens for itself, for the same rule:
             # `cabinet()` is reached by a turn whose result is past
-            # `tool_result.tokens` and by a turn carrying images, and a cabinet
+            # `tool_result.bytes` and by a turn carrying images, and a cabinet
             # left open across a session boundary is handed to the next session
             # already shut — every oversized result then calling `dump_save` on
             # a shut client, every image `image_save`.  `compress_for`

@@ -196,7 +196,7 @@ def build_server(
 
         **`skill_use` answers with the document itself, not a measured page.**
         A playbook is a procedure to follow, and a result cut at
-        `tool_result.tokens` would stop in the middle of a step.  Its size is the
+        `tool_result.bytes` would stop in the middle of a step.  Its size is the
         installed skill's — the operator's decision — so the full document is
         the answer; one too large for a conversation is the harness's dump path
         like any other oversized result, not a shorter answer invented here.

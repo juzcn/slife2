@@ -44,8 +44,8 @@ dependencies = [
     # a payload still arriving no longer trips the keepalive.  Both apply to
     # the mesh's long-lived connections.
     "paho-mqtt>=2.2.0",
-    # The vocabulary is fetched on first use; a failed fetch degrades to the
-    # script measure.
+    # The vocabulary ships in slife2/libs/turn/tiktoken_cache; a failure to
+    # read it degrades to the script measure.
     "tiktoken>=0.14.0",
     "griffelib>=2.0.0",
     # The job authoring loop's checks; nothing imports them.

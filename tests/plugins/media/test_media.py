@@ -230,9 +230,7 @@ async def test_a_transcript_is_the_answer_and_writes_nothing() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "transcribe_audio", path="a.wav")
 
-    assert answer["text"] == "hello home"
-    assert answer["total"] == len("hello home")
-    assert answer["offset"] == 0, "the whole of it was in one page"
+    assert answer == "hello home"
     assert adapter.calls["asr"]["audio_path"] == Path("a.wav")
 
 
@@ -249,43 +247,19 @@ class Says(FakeAdapter):
 
 
 @pytest.mark.asyncio
-async def test_a_transcript_is_read_in_pages() -> None:
-    """**The one answer here whose length is the recording's.**  An hour of
-    speech is a text no single answer may carry, so a page is read by offset and
-    `offset + len(text) < total` is how the next one is asked for.
-    """
-    async with Client(server_for(Says("abcdefghij"))) as client:
-        first = await ask(client, "transcribe_audio", path="a.wav", limit=4)
-        second = await ask(
-            client,
-            "transcribe_audio",
-            path="a.wav",
-            offset=first["offset"] + len(first["text"]),
-            limit=4,
-        )
-
-    assert first["text"] == "abcd"
-    assert first["total"] == 10, "the whole transcript, not the page"
-    assert second["text"] == "efgh"
-    assert second["offset"] == 4
-    assert second["offset"] + len(second["text"]) < second["total"], "more remains"
-
-
-@pytest.mark.asyncio
-async def test_a_page_never_outgrows_the_tool_result_budget() -> None:
-    """**`limit` counts characters and the budget counts tokens**, so the budget
-    is the last word: a page of Chinese is several times what a page of English
-    of the same length costs, and an answer over `tool_result.tokens` would be a
-    result the harness had to shorten again — our own reader feeding our own
-    shortening.
+async def test_a_long_transcript_is_answered_whole() -> None:
+    """**A transcript is a tool output like any other.**  The tool does not
+    estimate, page or clip it; the harness's byte bound is the one place a
+    result is fitted, and a task's loop cuts it there.  The failure this pins is
+    the old one: a page cut to a token budget whose marker made `offset +
+    len(text)` skip the marker's characters.
     """
     whole = "字" * 9000
     async with Client(server_for(Says(whole))) as client:
-        page = await ask(client, "transcribe_audio", path="a.wav")
+        answer = await ask(client, "transcribe_audio", path="a.wav")
 
-    assert page["total"] == 9000
-    assert len(page["text"]) < 9000, "the budget cut the page short"
-    assert "do not fit" in page["text"], "and the cut is announced"
+    assert answer == whole
+    assert "do not fit" not in answer
 
 
 # --- the refusals -------------------------------------------------------------

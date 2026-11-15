@@ -32,11 +32,12 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
+from slife2.libs.harness.dumps import text_size
 from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.paths import data_dir
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.turn.tools import as_tool_text
 from slife2.plugins.cabinet.store import DUMP, UPSERT, index_path, store_of
 from slife2.tui.client import MCPAgentClient
 from tests.e2e.edges import ANSWER, WINDOW, ChatAnswer, ToolAsk
@@ -290,7 +291,7 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
     )
     await _save_dump("e2e", "call_e2e", body)
     config = stack["config"]
-    budget = config.tool_result.tokens
+    budget = config.tool_result.bytes
     assert budget == WINDOW, "the window came from the config file"
 
     async with Client(config.server("cabinet").url) as client:
@@ -309,7 +310,7 @@ async def test_a_dump_is_read_back_over_the_real_stack_within_its_window(stack) 
         )
 
     for answer in (first, second, found, huge, chars):
-        assert estimate_text_tokens(json.dumps(answer)) <= budget, str(answer)[:300]
+        assert text_size(as_tool_text(answer)) <= budget, str(answer)[:300]
 
     # A window, and the address of the next one: the numbers in it are lines of
     # the output rather than of the page it was shown.

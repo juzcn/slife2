@@ -36,12 +36,12 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.helpers.clock import at
+from slife2.libs.harness.dumps import text_size
 from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.store import index as store_index
 from slife2.libs.store.index import connect_to, table_exists
-from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.cabinet import server as cabinet_server
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
@@ -1082,7 +1082,7 @@ async def test_a_binary_sniff_beats_a_wrong_guess() -> None:
 async def test_a_saved_file_is_read_in_windows_like_a_dump() -> None:
     """**The same window over a file that `dump_read` gives a dump.**
 
-    The file on disk stays whole; the answer is bounded by `tool_result.tokens`
+    The file on disk stays whole; the answer is bounded by `tool_result.bytes`
     and `next` names the line the following window starts at.
     """
     source = data_dir() / "long.txt"
@@ -2145,7 +2145,7 @@ async def test_dump_save_answers_the_files_size_and_a_relative_path() -> None:
 async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     """**The property the arrangement rests on**, and not a nicety.
 
-    A reader of ours handing back more than `tool_result.tokens` would be one
+    A reader of ours handing back more than `tool_result.bytes` would be one
     system at both ends of a loop: the harness truncates a result, the model
     reads it back, and the truncation fires again on our own tool's answer.  So
     the bound is on the whole answer — envelope included, which is why the
@@ -2153,12 +2153,12 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     """
     body = dump_body()
     await save_dump("call_big", body)
-    tight = replace(load(), tool_result=ToolResultSettings(tokens=120))
+    tight = replace(load(), tool_result=ToolResultSettings(bytes=2_048))
 
     async with Client(build_server(tight, embedder=StubEmbedder())) as client:
         answer = await ask(client, "dump_read", call="call_big")
 
-    assert estimate_text_tokens(answer) <= 120
+    assert text_size(answer) <= 2_048
     window = json.loads(answer)
     shown = window["text"].splitlines()
     assert shown[0].endswith("line 1 of a tool output"), (
@@ -2521,7 +2521,7 @@ async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> No
     assert match["text"].startswith("start ")
     assert 0 < len(match["text"]) < len(body)
     assert len(match["text"]) <= len("start ") + cabinet_server.GREP_AFTER_CHARS
-    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+    assert text_size(json.dumps(found)) <= load().tool_result.bytes
 
 
 @pytest.mark.asyncio
@@ -2564,7 +2564,7 @@ async def test_a_mid_line_match_gets_a_window_around_it() -> None:
     assert window["text"] == match["text"], (
         "`text_char` is the address the same window is read back from"
     )
-    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+    assert text_size(json.dumps(found)) <= load().tool_result.bytes
 
 
 @pytest.mark.asyncio
@@ -2610,7 +2610,7 @@ async def test_a_huge_pattern_is_not_quoted_back() -> None:
         )
 
     assert json.loads(answer)["matched"] == 0
-    assert estimate_text_tokens(answer) <= load().tool_result.tokens
+    assert text_size(answer) <= load().tool_result.bytes
 
 
 @pytest.mark.asyncio

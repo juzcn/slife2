@@ -2,7 +2,8 @@
 
 Everything here is a pure function, which is the point of the split — the
 cabinet writes the file, the agent server calls this, and what is under test is
-what a conversation carries in place of the whole output.
+what a conversation carries in place of the whole output.  The bound is a UTF-8
+byte count, not a token count: the context rebuild is where tokens are spent.
 """
 
 from __future__ import annotations
@@ -12,15 +13,15 @@ import json
 import pytest
 
 from slife2.libs.harness import dumps
-from slife2.libs.host.config import DEFAULT_TOOL_RESULT_TOKENS
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.host.config import DEFAULT_TOOL_RESULT_BYTES
+from slife2.libs.turn.messages import ToolCall
 
 #: The window the shipped config states.
-WINDOW = DEFAULT_TOOL_RESULT_TOKENS
+WINDOW = DEFAULT_TOOL_RESULT_BYTES
 
 #: The smallest budget the config allows, so the address and a readable head
 #: both have to fit inside it.
-BUDGET = 512
+BUDGET = 2_048
 
 #: The path the cabinet answers with: relative to the agent's data directory.
 WHERE = "agents/jack/cabinet/dumps/call_0123456789abcdef0123456789abcdef.md"
@@ -86,12 +87,12 @@ def test_the_sentence_says_exactly_how_much_was_shown() -> None:
 def test_a_window_never_exceeds_its_budget() -> None:
     """**The property the arrangement rests on**, address and sentence included."""
     text = body()
-    for budget in (BUDGET, 800, 4000):
+    for budget in (BUDGET, 4000, 16_000):
         answer = dumps.window(
             call="call_abc", text=text, where=WHERE, size=len(text) + 1, budget=budget
         )
 
-        assert estimate_text_tokens(answer) <= budget, budget
+        assert dumps.text_size(answer) <= budget, budget
 
 
 def test_the_address_gives_way_last() -> None:
@@ -119,18 +120,16 @@ def test_a_single_line_longer_than_the_window_still_gets_a_head() -> None:
     head = answer.split("\n\n", 1)[1]
     assert head == "x" * len(head)
     assert len(head) > 0
-    assert estimate_text_tokens(answer) <= BUDGET
+    assert dumps.text_size(answer) <= BUDGET
 
 
-def test_a_huge_output_is_not_sliced_in_half_to_find_a_small_head(monkeypatch) -> None:
-    """**The search grows to the fit; it does not start from the output's size.**
+def test_a_huge_output_is_not_sliced_in_half_to_find_a_small_head() -> None:
+    """**The search starts from the budget, not the output's size.**
 
-    Binary-searching the whole string would copy half of a multi-megabyte output
-    on the first probe.  With the fallback measure (one token per character), a
-    1,000,000-character output needs at most a few thousand characters shown;
-    the largest slice the renderer ever asks for must stay far below the file.
+    A byte budget bounds the character count too, so the first probe is at most
+    `budget` characters; a multi-megabyte output is never copied to find the few
+    thousand characters that fit.
     """
-    monkeypatch.setattr(dumps, "estimate_text_tokens", lambda value: len(value))
 
     class CountingText(str):
         deepest = 0
@@ -142,11 +141,40 @@ def test_a_huge_output_is_not_sliced_in_half_to_find_a_small_head(monkeypatch) -
 
     text = CountingText("x" * 1_000_000)
 
-    answer = dumps.window(call="c", text=text, where=WHERE, size=1_000_001, budget=512)
+    answer = dumps.window(call="c", text=text, where=WHERE, size=1_000_001, budget=BUDGET)
 
     assert answer
-    assert CountingText.deepest <= 4096, (
+    assert CountingText.deepest <= BUDGET, (
         f"the search sliced {CountingText.deepest} characters of a 1,000,000-"
-        f"character output; it should never need more than a small multiple of "
-        f"the head"
+        f"character output; it should never need more than the budget"
     )
+
+
+def test_a_cut_holds_the_bound_and_promises_no_file() -> None:
+    """**The task path's bound.**  A task has no cabinet, so its over-budget
+    result is cut with a marker that names no dump — unlike `[DUMP:…]`, it
+    claims nothing a reader could fail to open.
+    """
+    text = "x" * 100_000
+
+    answer = dumps.cut(text, BUDGET)
+
+    assert dumps.text_size(answer) <= BUDGET
+    assert dumps.MARKER not in answer
+    assert "not shown" in answer
+    assert answer.startswith("x")
+
+
+@pytest.mark.asyncio
+async def test_cut_for_is_the_loops_bound() -> None:
+    """The `Compress` an agent task gets: a fitting result passes through, a
+    larger one is cut — no cabinet, no marker that names a file.
+    """
+    fit = dumps.cut_for(BUDGET)
+    call = ToolCall(id="c1", name="fake__echo", arguments={})
+
+    assert await fit(call, "short") == "short"
+
+    answer = await fit(call, "x" * 100_000)
+    assert dumps.text_size(answer) <= BUDGET
+    assert dumps.MARKER not in answer

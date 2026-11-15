@@ -410,7 +410,7 @@ system prompt 中；修改后下一个对话即可读到。安装器按配置的
 | `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
 | `context:` | 上下文决策的限额。 |
 | `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
-| `tool_result:` | 单个工具结果的 token 预算。 |
+| `tool_result:` | 单个工具结果的尺寸预算，按 UTF-8 字节。 |
 | `mcp:` | 外部 MCP server（stdio 或 HTTP）。 |
 | `rest-api:` | 暴露为工具的 OpenAPI 文档。 |
 | `cli:` | 机器上已经安装的命令。 |
@@ -466,7 +466,7 @@ tool_load:
              turn_read]                                # 且永不被逐出
 
 tool_result:
-  tokens: 8000               # 每个结果的预算；最小 512
+  bytes: 32768               # 每个结果的预算；最小 2048
 
 mcp:
   arxiv:
@@ -583,7 +583,7 @@ catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变
 人的消息，`skill_use` 交出 playbook 文本。列表回答
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`；`total` 说明是否还有下一页。
 拒绝或未命中会抛出 `ToolError`，harness 将其报告为带原因的工具失败。任何回答都不应
-超过 `tool_result.tokens`；超过预算的输出会存成 dump（见[文件柜](#文件柜)）。
+超过 `tool_result.bytes`；超过预算的输出会存成 dump（见[文件柜](#文件柜)）。
 
 #### 工具调用选项
 
@@ -647,7 +647,7 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
 - `text_to_speech`——把文本写成语音文件。
-- `transcribe_audio`——转写音频文件，按 `offset` 和 `limit` 分页。
+- `transcribe_audio`——转写音频文件；长转写会存成 dump。
 
 每个模型声明自己的用途：
 
@@ -723,7 +723,7 @@ corpus。语义检索只覆盖 agent 自己写的三类——note、diary、repo
 
 dump 是对对话而言过大的工具输出。输出完整存储在**它的文件**里，以工具调用 id 为键；
 文件柜里的行只是地址，不保存正文，所以大输出不会在 SQLite 里再存一份。对话携带的是在
-`tool_result.tokens` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
+`tool_result.bytes` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
 路径（agent 自己的工具就在这个目录下运行，数据目录迁移后仍然有效）；不做任何改写，
 也不数行或字符——大小直接来自镜像文件的 `stat`，不需要再扫一遍内容。模型用
 `dump_read` 读回任意部分：`mode="line"` 按行读，`offset` 从 1 开始、负数从末尾数；

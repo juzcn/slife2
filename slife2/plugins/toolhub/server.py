@@ -2326,7 +2326,7 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
 
     `description` is **never cut**.  It is the one thing a model chooses by, and
     `mcp-pandoc`'s is ninety lines against a catalogue median of one — a search
-    answer that outgrows `tool_result.tokens` because of it is the harness's
+    answer that outgrows `tool_result.bytes` because of it is the harness's
     problem (`slife2.plugins.llm`'s dump), and a truncated description would hide
     the problem rather than answer it.
     """

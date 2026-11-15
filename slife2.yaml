@@ -193,10 +193,11 @@ tool_load:
     - baidu-search__chatCompletions
 
 tool_result:
-  # A result over this is kept whole as a dump; the conversation carries its
-  # head, the dump's size and its path relative to the data directory.
-  # `dump_read` and `dump_grep` obey the same budget. Minimum 512.
-  tokens: 8000
+  # A result larger than this many bytes is kept whole as a dump; the
+  # conversation carries its head, the dump's size and its path relative to the
+  # data directory.  `dump_read` and `dump_grep` obey the same byte budget.
+  # Minimum 2048.
+  bytes: 32768
 
 mcp:
   # External MCP servers. `command` starts a process; `url` connects to one

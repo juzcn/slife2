@@ -163,7 +163,7 @@ def as_tool_text(answer: Any) -> str:
     **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape
     every character outside ASCII — a note written in Chinese would reach the
     model as six characters per word, and be *counted* that way against
-    `tool_result.tokens`, which is a bound this system spends on purpose and not
+    `tool_result.bytes`, which is a bound this system spends on purpose and not
     on escapes.  The `backslashreplace` is the half that keeps the choice safe:
     a lone surrogate — which a provider's JSON can hand us in an argument, and
     which `json.dumps(ensure_ascii=False)` will happily put back in the string —
