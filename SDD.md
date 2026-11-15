@@ -2490,7 +2490,8 @@ agent's `media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork
 writes to its maker's. A caller that names an `output` path writes there instead
 — a relative path is relative to that directory, an absolute one is used as
 written. They never go to the process's working directory, which is the runtime
-directory and reconstructible.
+directory and reconstructible. Every media tool answers with the path as text;
+`transcribe_audio` without `output` answers the transcript.
 
 Two adapters are supported: `dashscope-aigc` (images, video, speech,
 transcription) and `openai-images` (image generation only; it refuses the other

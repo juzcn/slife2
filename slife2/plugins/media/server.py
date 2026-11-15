@@ -246,7 +246,7 @@ def build_server(
         size: str = "",
         image: str = "",
         output: str = "",
-    ) -> dict[str, Any]:
+    ) -> str:
         """Draw an image from a description, and answer where it was written.
 
         The picture is a file on this machine: copy it, or save it into the
@@ -265,7 +265,7 @@ def build_server(
                 media directory.
 
         Returns:
-            `path` — the file the picture was written to.
+            The file's path, as text.
         """
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
@@ -288,9 +288,9 @@ def build_server(
             ),
         )
         if target is None:
-            return {"path": written}
+            return written
         await _place(written, target)
-        return {"path": str(target)}
+        return str(target)
 
     @mcp.tool(name="generate_video", meta=FOR_THE_MODEL)
     async def generate_video(
@@ -306,7 +306,7 @@ def build_server(
         # schema's default, the tool reads it, and there is nothing here to
         # route through the registry.
         timeout: float = 0,  # timeouts: the model's number, not ours
-    ) -> dict[str, Any]:
+    ) -> str:
         """Render a video from a description, and answer where it was written.
 
         A render takes minutes: one that outruns `timeout` fails, with the
@@ -330,7 +330,7 @@ def build_server(
                 default.
 
         Returns:
-            `path` — the file the video was written to.
+            The file's path, as text.
         """
         provider, entry = media.resolve("video", model)
         given: dict[str, Any] = {}
@@ -359,14 +359,14 @@ def build_server(
             ),
         )
         if target is None:
-            return {"path": written}
+            return written
         await _place(written, target)
-        return {"path": str(target)}
+        return str(target)
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
         ctx: Context, text: str, model: str = "", voice: str = "", output: str = ""
-    ) -> dict[str, Any]:
+    ) -> str:
         """Say something out loud, into an audio file, and answer where it is.
 
         Args:
@@ -380,7 +380,7 @@ def build_server(
                 media directory.
 
         Returns:
-            `path` — the file the audio was written to.
+            The file's path, as text.
         """
         provider, entry = media.resolve("tts", model)
         target = _output_path(ctx, output)
@@ -400,9 +400,9 @@ def build_server(
             ),
         )
         if target is None:
-            return {"path": written}
+            return written
         await _place(written, target)
-        return {"path": str(target)}
+        return str(target)
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
     async def transcribe_audio(

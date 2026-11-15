@@ -193,7 +193,7 @@ async def test_an_image_call_reaches_the_configured_default() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "generate_image", prompt="a cat", size="1024*1024")
 
-    assert answer == {"path": "/media/a.png"}
+    assert answer == "/media/a.png"
     call = adapter.calls["image"]
     assert call["model"] == "img", "`defaults.image` names it"
     assert call["prompt"] == "a cat"
@@ -250,7 +250,7 @@ async def test_an_output_path_names_the_artifact(
         answer = await ask(client, tool, output=f"art/a.{suffix}", **arguments)
 
     target = agent_dir("jack") / "art" / f"a.{suffix}"
-    assert answer == {"path": str(target)}
+    assert answer == str(target)
     assert target.read_bytes() == suffix.encode()
     assert adapter.calls[call]["outputs_dir"] == agent_dir("jack") / "art"
 
@@ -262,7 +262,7 @@ async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "generate_image", prompt="x", output=str(target))
 
-    assert answer == {"path": str(target)}
+    assert answer == str(target)
     assert target.read_bytes() == b"png"
 
 
