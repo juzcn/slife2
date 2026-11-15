@@ -228,9 +228,9 @@ class Grace:
     #: How long one attempt at a lock waits before giving up.
     lock: float = 30.0
     #: How long `subagent_remove` waits for the target turn to release its lock
-    #: after asking the subagent network to stop it, before cancelling the
-    #: turn's own handler.  Short: the stop has already gone out, and a turn
-    #: still holding the lock is one the clean path did not reach; `drain`
+    #: after asking the subagent network to interrupt it, before cancelling the
+    #: turn's own handler.  Short: the interrupt has already gone out, and a
+    #: turn still holding the lock is one the clean path did not reach; `drain`
     #: bounds the forced one.
     turn: float = 2.0
 

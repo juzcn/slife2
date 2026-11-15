@@ -377,11 +377,11 @@ class Session:
     groups: group_store.GroupStore = field(default_factory=group_store.GroupStore)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: The member turns this session has in flight, by the A2A task each was
-    #: started for.  **A withdrawal on the local network stops the work rather
-    #: than describing it** (`on_peer_cancel`): the turn is this process's own,
-    #: so this is the lever that makes `subagent_cancel_task` immediate instead
-    #: of a note the model may or may not read.  A bare message has no id and
-    #: is not filed.
+    #: started for.  **A withdrawal on the local network interrupts the turn
+    #: that task started rather than describing it** (`on_peer_cancel`): the
+    #: turn is this process's own call, so this is the lever that makes
+    #: `subagent_cancel_task` immediate instead of a note the model may or may
+    #: not read.  A bare message has no id and is not filed.
     turn_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     #: Why the last connect attempt failed.  A failed mesh is discarded, so this
     #: is the only place the reason survives to `peer_agent_list` — otherwise it
@@ -855,15 +855,17 @@ def _wire(session: Session) -> None:
         )
 
     def on_peer_cancel(task_id: str, peer: str) -> None:
-        """A peer withdrew an inbound task — stop the work, or hand it over.
+        """A peer withdrew an inbound task — interrupt its turn, or hand it over.
 
-        **On the subagent network the work stops; on the peer network it is
-        described.**  A member's turn runs in this process (a subagent has no
-        window and never gets one — `run_turn`), so the maker's withdrawal has a
-        handle on the one call running it: the member turn is cancelled, and
-        the agent server ends the turn the way it ends one whose window's call
-        was abandoned.  The maker asked the work to stop, and waiting for a
-        model to read a note is not a stop.
+        **On the subagent network the turn that task started is interrupted; on
+        the peer network the withdrawal is described.**  A member's turn runs in
+        this process (a subagent has no window and never gets one — `run_turn`),
+        so the maker's withdrawal has a handle on the one call running it: the
+        member turn filed under that task is cancelled at its caller, and the
+        agent server ends it the way it ends one whose window's call was
+        abandoned.  The word for that is *interrupt* — the window's Escape has
+        the same one; `cancel` is the task operation.  Waiting for a model to
+        read a note is not an interrupt.
 
         A peer's turn is in another process, where nothing here can cancel
         anything.  The withdrawal is NOT a control signal: it reaches the model
@@ -3057,8 +3059,8 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "anything is sent; `{list}` reads the roster."
         ),
         "withdraw": (
-            "The member stops working on it: its running turn is cancelled,\n"
-            "and a later `task_response` for the task is refused."
+            "The member stops working on it: the turn this task started is\n"
+            "interrupted, and a later `task_response` for the task is refused."
         ),
     },
 }

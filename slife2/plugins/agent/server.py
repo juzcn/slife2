@@ -749,13 +749,13 @@ class Loop:
     #: ever.
     removed: bool = False
     #: The task running this conversation's turn, or None when it is idle — the
-    #: handle a **forced stop** cancels.  `subagent_remove` asks the subagent
-    #: network to end the member turn first (a clean cancellation the agent
-    #: server sees as a caller abandoning the call); one that outlasts that is
-    #: cancelled here, because removal is a forced cleanup whether it is idle or
-    #: mid-turn (SDD §4.5.4).  One turn runs at a time, so one slot is the whole
-    #: of it.  Set once the message is running its own turn, cleared on the way
-    #: out by the task that set it.
+    #: handle an **interrupt** cancels.  `subagent_remove` asks the subagent
+    #: network to interrupt the member turn first (a clean cancellation the
+    #: agent server sees as a caller abandoning the call); one that outlasts
+    #: that is interrupted here, because removal is a forced cleanup whether it
+    #: is idle or mid-turn (SDD §4.5.4).  One turn runs at a time, so one slot
+    #: is the whole of it.  Set once the message is running its own turn,
+    #: cleared on the way out by the task that set it.
     turn_task: asyncio.Task | None = None
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
@@ -3664,7 +3664,7 @@ def build_server(
                         f"{describe((agent, subagent))} was removed; this message "
                         f"was not delivered."
                     )
-                # **The handler holding the lock is the handle a forced stop
+                # **The handler holding the lock is the handle an interrupt
                 # cancels** (`Loop.turn_task`), registered for the whole of the
                 # locked region: a turn is the work under this lock, whatever
                 # step it is on.  A message that turns out to be folded clears
@@ -3992,8 +3992,8 @@ def build_server(
             # **Only the task that registered the handle clears it.**  A
             # message queued behind this turn reaches its own `finally` with
             # nothing registered; clearing unconditionally would erase the
-            # handle the *next* turn put there a moment later and leave a
-            # forced stop with nothing to cancel.
+            # handle the *next* turn put there a moment later and leave an
+            # interrupt with nothing to cancel.
             if loop.turn_task is asyncio.current_task():
                 loop.turn_task = None
             # **The one line a session is traced by**, on every ending.  It is
@@ -4453,7 +4453,7 @@ def build_server(
         ledger — is deleted. Removing a subagent that is not there is not an
         error: the caller wanted it gone, and it is gone. A name that exists but
         is not one of your subagents is refused rather than deleted. A turn it
-        is running is stopped first, so removal works mid-turn.
+        is running is interrupted first, so removal works mid-turn.
 
         Args:
             name: Which of your subagents.  The same name you made it with.
@@ -4476,12 +4476,13 @@ def build_server(
                     f"not yours to remove, and this call will not delete it."
                 )
             return {"name": directory.name, "removed": False}
-        # **The network is told first, and that is what stops a turn.**  A
+        # **The network is told first, and that is what interrupts a turn.**  A
         # member's turn runs in the subagent-network process (a subagent has no
-        # window), and giving up its place drops the session, which cancels
-        # that turn at the caller.  Waiting for the lock without that was the
+        # window), and giving up its place drops the session, which interrupts
+        # that turn at the caller — the same caller-abandoned ending a window's
+        # Escape gives its own turn.  Waiting for the lock without that was the
         # old order, and a mid-turn removal could only refuse: nothing else in
-        # this process can end a turn, so the maker had no lever at all
+        # this process can interrupt a turn, so the maker had no lever at all
         # (SDD §4.5.4 says this is a forced cleanup, idle or mid-turn).
         #
         # **And no `forget` against the store, which is the difference from
@@ -4507,21 +4508,21 @@ def build_server(
             await leave_the_mesh(maker, directory.name, client=mesh_client)
         else:
             if current().subagent.network.configured:
-                # A turn in flight is cancelled by this call; an idle one has
-                # nothing to cancel, and the later call below still gives up the
-                # place (a new session may have been created in between).
+                # A turn in flight is interrupted by this call; an idle one has
+                # nothing to interrupt, and the later call below still gives up
+                # the place (a new session may have been created in between).
                 await leave_the_mesh(maker, directory.name, client=mesh_client)
             try:
                 async with asyncio.timeout(_T.timeouts.grace.turn):
                     await loop.lock.acquire()
             except TimeoutError:
-                # **A turn the clean stop did not reach is stopped here.**  The
-                # network's cancel is a caller abandoning the call, which the
-                # agent server honours at its next checkpoint; a turn wedged
-                # somewhere that is not one is ended by cancelling its own
-                # handler.  It is the last step because it reaches into a
+                # **A turn the clean interrupt did not reach is interrupted
+                # here.**  The network's cancel is a caller abandoning the call,
+                # which the agent server honours at its next checkpoint; a turn
+                # wedged somewhere that is not one is ended by cancelling its
+                # own handler.  It is the last step because it reaches into a
                 # request the server does not own, and it is bounded so a turn
-                # that cannot be cancelled cannot hold the removal for ever.
+                # that cannot be interrupted cannot hold the removal for ever.
                 task = loop.turn_task
                 if task is not None:
                     task.cancel()
