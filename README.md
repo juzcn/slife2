@@ -882,10 +882,12 @@ is not the agent's to control, and meaning search over them is deferred until a
 RAG pass over their contents exists. `cabinet_summarize` writes a description
 for a document; a file's description is keyword text and re-embeds nothing,
 while a dump or an image is not described because it is not searched.
-`file_save` copies a local file (never moving it) or fetches an `http(s)` URL. A
-fetched URL reaches the public internet only: credentials, `localhost`, and
-literal addresses that are not globally routable are refused, and the response
-is capped at 50 MiB.
+`file_save` copies a local file (never moving it) or fetches an `http(s)` URL.
+One call may name several sources, and each is stored or refused on its own —
+the answer lists what was saved and what failed, with the reason. A fetched URL
+reaches the public internet only: credentials, `localhost`, and literal
+addresses that are not globally routable are refused, and the response is
+capped at 50 MiB.
 
 ### WeChat
 

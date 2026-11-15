@@ -13,7 +13,8 @@ cannot.
 call's parsed answer, an `ask` is the same call's raw text — the two the budget
 test needs, since what a model is handed is the text and what it reads is the
 fields in it.  A miss and a refusal both raise `ToolError`, so a test that used
-to read a sentence reads it off the raised error instead.
+to read a sentence reads it off the raised error instead — except a source
+`file_save` could not store, which is answered in the call's `failed` part.
 """
 
 from __future__ import annotations
@@ -846,11 +847,79 @@ async def test_a_fetch_is_stopped_at_the_size_cap(
 
 @pytest.mark.asyncio
 async def test_a_source_that_is_neither_a_path_nor_an_http_url_is_refused() -> None:
+    """A refused source is the answer's `failed` part, not a raised call.
+
+    `file_save` names several sources, and which of them were stored is what
+    the caller's next move depends on, so a refusal is answered rather than
+    raised — one source's failure cannot take the call's other half with it.
+    """
     async with Client(cabinet()) as client:
-        with pytest.raises(ToolError, match="not an http"):
-            await ask(client, "file_save", paths=["ftp://example.test/x"])
-        with pytest.raises(ToolError, match="no such file"):
-            await ask(client, "file_save", paths=["/no/such/file"])
+        ftp = await payload(client, "file_save", paths=["ftp://example.test/x"])
+        missing = await payload(client, "file_save", paths=["/no/such/file"])
+
+    assert ftp["saved"] == []
+    assert ftp["failed"][0]["source"] == "ftp://example.test/x"
+    assert "not an http" in ftp["failed"][0]["error"]
+    assert missing["saved"] == []
+    assert missing["failed"][0]["source"] == "/no/such/file"
+    assert "no such file" in missing["failed"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_source_does_not_take_the_saved_ones_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The answer says what was stored, so a retry starts from the truth.**
+
+    A later URL that cannot be fetched used to raise after the earlier files
+    were copied: the call said it failed while documents it did not mention
+    were in the cabinet, and a retry stored them again under `-1` names.
+    """
+    source = data_dir() / "first.txt"
+    source.write_bytes(b"the first\n")
+    url = "https://example.test/gone.txt"
+
+    async def fetch(entry: str) -> tuple[bytes, str]:
+        raise ToolError(f"could not fetch {entry}: the site is gone")
+
+    monkeypatch.setattr(cabinet_server, "_fetch_url", fetch)
+
+    async with Client(cabinet()) as client:
+        answer = await payload(client, "file_save", paths=[str(source), url])
+        listed = await payload(client, "file_list")
+
+    assert keys(answer["saved"]) == ["documents/first.txt"]
+    assert answer["failed"] == [
+        {"source": url, "error": f"could not fetch {url}: the site is gone"}
+    ]
+    assert keys(listed["entries"]) == ["documents/first.txt"], "the stored file is real"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_file_needs_no_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**A file is keyword text and has no vector**, so its save asks no model.
+
+    The store's write takes an embedder for the vectorized kinds only; a saved
+    file — like a dump and an image — passes none.  The cabinet is opened first,
+    so its one sync is already done, and asking for an embedder after that is
+    the failure this test would see: a save of bytes must not open an embedding
+    connection, let alone fail when the endpoint is down.
+    """
+    source = data_dir() / "no-model.txt"
+    source.write_bytes(b"stored without a model\n")
+
+    async def unreachable(connection: object) -> Any:
+        raise AssertionError("file_save asked for an embedder")
+
+    async with Client(cabinet()) as client:
+        await payload(client, "file_list")  # opens and syncs this cabinet
+        monkeypatch.setattr(
+            "slife2.clients.embedder.EmbedderConnection.get", unreachable
+        )
+        answer = await payload(client, "file_save", paths=[str(source)])
+
+    assert keys(answer["saved"]) == ["documents/no-model.txt"]
+    assert answer["failed"] == []
 
 
 # --- images: bytes, addressed by content ------------------------------------
@@ -1675,10 +1744,13 @@ async def test_a_category_is_one_folder_name() -> None:
     source.write_bytes(b"x")
     async with Client(cabinet()) as client:
         for category in ("./documents", "documents/", "NOTES", "a/b"):
-            with pytest.raises(ToolError) as refused:
-                await ask(client, "file_save", paths=[str(source)], category=category)
-            assert "not one folder name" in str(refused.value) or (
-                "cannot be filed under it" in str(refused.value)
+            answer = await payload(
+                client, "file_save", paths=[str(source)], category=category
+            )
+            assert answer["saved"] == [], category
+            error = answer["failed"][0]["error"]
+            assert "not one folder name" in error or (
+                "cannot be filed under it" in error
             ), category
     assert not (bag() / "notes").exists() or not list((bag() / "notes").glob("*.txt"))
 
@@ -1693,9 +1765,11 @@ async def test_a_reserved_category_cannot_be_reached_by_another_spelling() -> No
     source.write_bytes(b"x")
     async with Client(cabinet()) as client:
         for category in ("dumps", "notes.", "DIARY."):
-            with pytest.raises(ToolError) as refused:
-                await ask(client, "file_save", paths=[str(source)], category=category)
-            assert "cannot be filed under it" in str(refused.value), category
+            answer = await payload(
+                client, "file_save", paths=[str(source)], category=category
+            )
+            assert answer["saved"] == [], category
+            assert "cannot be filed under it" in answer["failed"][0]["error"], category
 
 
 # --- the rules the store keeps when nobody is watching ------------------------

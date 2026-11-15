@@ -1449,6 +1449,8 @@ schema.
 - **A refusal or a miss raises `ToolError`**, one sentence saying what is wrong
   and what to do instead. The failure is the call's status: the hub answers
   `ok: false`, the loop marks the call failed, and the window draws it as failed.
+  The one batch whose entries stand alone — `file_save` — answers each refusal
+  in its own part instead, and §8.3 says how.
 - **Two tools answer with text rather than JSON, because the text is the
   thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
   hands over the skill's whole `SKILL.md`.
@@ -1643,6 +1645,12 @@ public URL cannot hop to a private one. Names are left to the machine's
 resolver; a fake-ip proxy answers an address the proxy owns rather than the
 destination, so resolving one in the guard would test the proxy rather than the
 site.
+
+**One call's sources stand alone.** `file_save` takes several, and each is
+stored or refused on its own: the answer carries `saved` rows and `failed`
+entries — the source as the caller gave it, and the refusal that stopped it —
+so a later URL that cannot be fetched leaves the earlier files stored **and
+named in the answer**, and a retry knows what not to store again.
 
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
@@ -2608,20 +2616,14 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-1. **A multi-path `file_save` is not all-or-nothing.** Each entry is copied and
-   committed in turn, so a later URL that cannot be fetched leaves the earlier
-   files and rows stored while the call reports failure; a retry stores those
-   documents again under `-1` names. *Resolution would require:* resolving and
-   fetching every entry before the first write, or answering with the saved and
-   the failed parts instead of raising.
-2. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
+1. **The first tokenizer use blocks the shared loop.** `estimate_text_tokens` is
    synchronous and reached from deep in the greps and the compress; its first
    call fetches the tiktoken vocabulary over the network with no timeout, so a
    cold cache behind a blocked route stalls every conversation the daemon serves
    until the OS TCP timeout — the registered script fallback engages only after
    the fetch raises. *Resolution would require:* pre-warming the encoding
    off-loop, or an async measure seam the callers await.
-3. **A section's introduction and its first entry's comment share one slot.**
+2. **A section's introduction and its first entry's comment share one slot.**
    ruamel keeps the comment above a mapping's first key as the mapping's pending
    comment, so removing the first entry cannot tell the section's explanation
    (the shipped `slife2.yaml` style, which should survive) from the entry's own
@@ -2629,7 +2631,7 @@ the field arrives as a test that fails without the fix.
    and a checked-in test encodes the entry-comment reading. *Resolution would
    require:* a convention that puts the section explanation above the section key
    (a distinct slot), or a marker that tells the two apart.
-4. **A read recreates a removed subagent's directory.** `transcript`/`watch`
+3. **A read recreates a removed subagent's directory.** `transcript`/`watch`
    restore the conversation, and `restore` creates the store file and its
    directory for any name; after `subagent_remove`, a read of the stale name
    leaves a directory with no `subagent.yaml`, which `subagent_set` and
@@ -2637,45 +2639,45 @@ the field arrives as a test that fails without the fix.
    conversation is created lazily, so the record's absence is not an existence
    guard. *Resolution would require:* a tombstone for a removed name, or a
    read-only restore that creates nothing.
-5. **`schedule_set` runs outside the run lock.** The poll decides from a task
+4. **`schedule_set` runs outside the run lock.** The poll decides from a task
    snapshot read once per pass; a `schedule_set` that disables or re-crons a task
    mid-pass leaves the snapshot stale and the task fires once on its old
    definition. `schedule_remove` takes the lock for exactly this race; `set` does
    not. *Resolution would require:* the run lock around `schedule_set`, or
    re-reading the task under the lock before firing.
-6. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
+5. **An evicted inbound task is ghost-cancelled on retry.** Once the inbound
     store prunes a non-terminal record past its cap, a profile retry of the same
     task id builds a fresh record and cancels the old round, whose cancel handler
     reads the *new* record and publishes a terminal `cancelled`; the new round
     then finishes into a terminal state and drops its answer. *Resolution would
     require:* the cancel handler keying off its own round's record or generation.
-7. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
+6. **A cabinet `REPLACE` can index a dead rowid.** `write(REPLACE)` reads the row
    id, then awaits the vector step; a concurrent remove+create of the same key
    replaces the row and the update returns the old id, so the keyword text and
    chunks land under a rowid no live row has — the updated document is invisible
    to both search legs until a rebuild. *Resolution would require:* re-reading
    the rowid after the await, or indexing inside the write's transaction.
-8. **A share token is reused across conversations.** `expose_local_image`
+7. **A share token is reused across conversations.** `expose_local_image`
    returns an existing exposure when the pin matches without comparing owner, so
    a second conversation is handed a token owned by the first: it cannot revoke
    its own link, and the first conversation's revoke kills the second's —
    defeating the owner field's stated purpose. *Resolution would require:*
    comparing owner on reuse, or minting a per-owner token.
-9. **A late approval outlives its turn.** The cancel/failure flush applies a
+8. **A late approval outlives its turn.** The cancel/failure flush applies a
     queued `ToolApprovalRequested` after the turn is gone, mounting a prompt
     nobody will answer; and the approval row's y/n/Esc are focus-scoped priority
     bindings, so a keystroke that moves focus to the input leaves them inert and
     Esc cancels the whole turn instead of refusing the one call. *Resolution would
     require:* a turn-liveness guard on the approval event, and answering bindings
     that survive blur.
-10. **A tool-list change during the handover is un-believed.** The gateway's
+9. **A tool-list change during the handover is un-believed.** The gateway's
     `_refresh` awaits `on_listed`; an `invalidate()` in that window is overwritten
     when the refresh recomputes readiness from the pre-notification listing, so a
     tool added or removed during the merge stays wrong for up to `relist_after`.
     Only external legacy servers that send the notification reach it (ours
     advertise `listChanged: false`). *Resolution would require:* honouring an
     invalidate that lands during the merge.
-11. **A folded cut-in is delivered twice when its turn is cancelled.** The
+10. **A folded cut-in is delivered twice when its turn is cancelled.** The
     repaired batch keeps the cut-in pair and records it, but the cancelled turn's
     result stays `None`, so the parked caller runs its own turn with the same
     prompt — the message sits in the conversation twice and the model answers it

@@ -463,6 +463,110 @@ def _download_name(url: str, mime: str) -> str:
     return f"{stem[:80] or 'download'}{suffix}"
 
 
+async def _save_entry(
+    opened: CabinetStore,
+    entry: str,
+    *,
+    title: str,
+    tags: str,
+    summary: str,
+    category: str,
+) -> dict[str, Any]:
+    """Store one source, or raise the sentence that says why it was not stored.
+
+    **One entry is all-or-nothing**: the bytes are placed before the row is
+    written and taken back if the write refuses, so a failure leaves neither a
+    row without its file nor a file the cabinet has forgotten.  `file_save`
+    calls this once per source and keeps the failure as the answer's other part
+    — the caller decides what to do next from *which* sources were stored, so
+    the batch cannot stop at the first refusal.
+
+    **There is no embedder here.**  A saved file is keyword text and has no
+    vector (`Spec.vectorized`), so the write neither asks a model anything nor
+    opens an embedding connection.
+    """
+    scheme = urllib.parse.urlsplit(entry).scheme.casefold()
+    from_url = scheme in ("http", "https")
+    if not from_url and scheme and "://" in entry:
+        raise ToolError(f"{entry!r} is not an http(s) URL — only those are fetched.")
+    data: bytes | None = None
+    source: Path | None = None
+    if from_url:
+        data, mime = await _fetch_url(entry)
+        name = _download_name(entry, mime)
+        mime = mime or (mimetypes.guess_type(name)[0] or "")
+    else:
+        source = _local_path(entry)
+        if not source.is_file():
+            raise ToolError(f"no such file: {source}")
+        name = source.name
+        mime = mimetypes.guess_type(name)[0] or ""
+    chosen = category.strip() or category_for(name)
+    # Windows strips trailing dots and spaces from a path component, so
+    # `notes.` is the notes directory; normalize to the component that
+    # would actually be created before the guard, or the reserved names
+    # are reachable through that spelling.
+    chosen = chosen.rstrip(". ")
+    # **Two questions, and the first is the one the second depends on.**
+    # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
+    # an absolute path all name something else once a filesystem has
+    # normalised them, so a guard that compared the raw string against a
+    # set would let `"./notes"` through and file a saved attachment among
+    # the notes' own mirrors.  The second question is then asked of the
+    # component that would actually be created, and case-insensitively —
+    # this platform's filesystem is, so `"NOTES"` is the notes directory.
+    if not chosen or Path(chosen).name != chosen or ".." in Path(chosen).parts:
+        raise ToolError(
+            f"{chosen!r} is not one folder name — a category is a single "
+            f"name like `images`, not a path."
+        )
+    if chosen.casefold() in RESERVED_CATEGORIES:
+        raise ToolError(
+            f"{chosen!r} is where the cabinet keeps its "
+            f"{chosen.casefold()}, so a file cannot be filed under it — "
+            f"choose another category, or leave it out to file by extension."
+        )
+    target = unique_path(opened.root / chosen, name)
+    relative = target.relative_to(opened.root).as_posix()
+    try:
+        # The write is inside the `try` because `unique_path` has
+        # already created the destination: a copy that fails leaves an
+        # empty file where a failed copy used to leave nothing at all.
+        if from_url:
+            assert data is not None
+            await off_loop(target.write_bytes, data)
+            size = len(data)
+        else:
+            assert source is not None
+            await off_loop(shutil.copy2, source, target)
+            size = target.stat().st_size
+        written = await opened.write(
+            FILE,
+            relative,
+            # The path is the file's identity and `unique_path` has
+            # already claimed it: a row here is this document's, from an
+            # earlier save whose file went outside the cabinet, and
+            # replacing it is the repair rather than a second file.
+            mode=UPSERT,
+            title=title.strip() or Path(name).stem,
+            tags=parse_tags(tags),
+            summary=summary,
+            source=entry if from_url else str(source),
+            file_path=relative,
+            mime=mime,
+            size=size,
+        )
+    except Exception:
+        # **A save that raises stores nothing** — the same contract a
+        # turn's save keeps.  The bytes are already on disk by now, so
+        # they are what has to be taken back; a row without its file, or
+        # a file the cabinet has forgotten, are both worse than a refusal.
+        await off_loop(discard_file, target)
+        raise
+    assert written is not None, "an upsert always writes"
+    return written
+
+
 #: A byte as a reader sees it in a file that is not text: printable ASCII and
 #: tab/newline/carriage-return survive, every other byte becomes `\xNN`.  The
 #: mapping is one entry per byte, so a sentence inside a binary is still
@@ -962,12 +1066,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         summary: str = "",
         category: str = "",
     ) -> dict[str, Any]:
-        """Copy a local file, or fetch a URL, into the cabinet.
+        """Copy local files, or fetch URLs, into the cabinet.
 
-        A local file is copied and never moved, so what you point at stays
-        where it is. An `http(s)` URL is fetched and stored under the site's
-        filename. A search does not read inside the file: it matches the file's
-        name, where it came from and any `summary` you write.
+        Each source is stored or refused on its own: one that cannot be read,
+        fetched or filed does not take the others with it, and the answer says
+        which is which. A local file is copied and never moved, so what you
+        point at stays where it is. An `http(s)` URL is fetched and stored under
+        the site's filename. A search does not read inside the file: it matches
+        the file's name, where it came from and any `summary` you write.
 
         Args:
             paths: Local paths or `http(s)` URLs. A relative path is relative
@@ -981,112 +1087,47 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 and so on. Empty picks one from the extension.
 
         Returns:
-            `saved` — one row per file, with the fields a listing shows
+            `saved` — one row per file stored, with the fields a listing shows
             (including `path`, the file an agent's own tools can open), so the
             `key` is the path each file was stored under. A file already there
             under that name is stored beside it rather than over it, which is
-            why the key is worth reading.
+            why the key is worth reading. `failed` — one entry per source that
+            was not stored, with the `source` as you gave it and the `error`
+            that refused it; nothing was stored for that source.
         """
         opened = await cabinet(ctx)
         entries = [path.strip() for path in paths if path.strip()]
         if not entries:
             raise ToolError("name at least one local path or http(s) URL.")
-        local: list[Path] = []
-        for entry in entries:
-            scheme = urllib.parse.urlsplit(entry).scheme.casefold()
-            if scheme in ("http", "https"):
-                continue
-            if scheme and "://" in entry:
-                raise ToolError(
-                    f"{entry!r} is not an http(s) URL — only those are fetched."
-                )
-            local.append(_local_path(entry))
-        missing = [str(path) for path in local if not path.is_file()]
-        if missing:
-            raise ToolError("no such file: " + ", ".join(missing))
         saved: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
         for entry in entries:
-            from_url = urllib.parse.urlsplit(entry).scheme.casefold() in (
-                "http",
-                "https",
-            )
-            data: bytes | None = None
-            source: Path | None = None
-            if from_url:
-                data, mime = await _fetch_url(entry)
-                name = _download_name(entry, mime)
-                mime = mime or (mimetypes.guess_type(name)[0] or "")
-            else:
-                source = _local_path(entry)
-                name = source.name
-                mime = mimetypes.guess_type(name)[0] or ""
-            chosen = category.strip() or category_for(name)
-            # Windows strips trailing dots and spaces from a path component, so
-            # `notes.` is the notes directory; normalize to the component that
-            # would actually be created before the guard, or the reserved names
-            # are reachable through that spelling.
-            chosen = chosen.rstrip(". ")
-            # **Two questions, and the first is the one the second depends on.**
-            # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
-            # an absolute path all name something else once a filesystem has
-            # normalised them, so a guard that compared the raw string against a
-            # set would let `"./notes"` through and file a saved attachment among
-            # the notes' own mirrors.  The second question is then asked of the
-            # component that would actually be created, and case-insensitively —
-            # this platform's filesystem is, so `"NOTES"` is the notes directory.
-            if not chosen or Path(chosen).name != chosen or ".." in Path(chosen).parts:
-                raise ToolError(
-                    f"{chosen!r} is not one folder name — a category is a single "
-                    f"name like `images`, not a path."
-                )
-            if chosen.casefold() in RESERVED_CATEGORIES:
-                raise ToolError(
-                    f"{chosen!r} is where the cabinet keeps its "
-                    f"{chosen.casefold()}, so a file cannot be filed under it — "
-                    f"choose another category, or leave it out to file by extension."
-                )
-            target = unique_path(opened.root / chosen, name)
-            relative = target.relative_to(opened.root).as_posix()
             try:
-                # The write is inside the `try` because `unique_path` has
-                # already created the destination: a copy that fails leaves an
-                # empty file where a failed copy used to leave nothing at all.
-                if from_url:
-                    assert data is not None
-                    await off_loop(target.write_bytes, data)
-                    size = len(data)
-                else:
-                    assert source is not None
-                    await off_loop(shutil.copy2, source, target)
-                    size = target.stat().st_size
-                written = await opened.write(
-                    FILE,
-                    relative,
-                    # The path is the file's identity and `unique_path` has
-                    # already claimed it: a row here is this document's, from an
-                    # earlier save whose file went outside the cabinet, and
-                    # replacing it is the repair rather than a second file.
-                    mode=UPSERT,
-                    title=title.strip() or Path(name).stem,
-                    tags=parse_tags(tags),
+                written = await _save_entry(
+                    opened,
+                    entry,
+                    title=title,
+                    tags=tags,
                     summary=summary,
-                    source=entry if from_url else str(source),
-                    file_path=relative,
-                    mime=mime,
-                    size=size,
-                    embedder=await embedding.get(),
+                    category=category,
                 )
-            except Exception:
-                # **A save that raises stores nothing** — the same contract a
-                # turn's save keeps.  The bytes are already on disk by now, so
-                # they are what has to be taken back; a row without its file, or
-                # a file the cabinet has forgotten, are both worse than a refusal.
-                await off_loop(discard_file, target)
-                raise
-            assert written is not None, "an upsert always writes"
-            saved.append(facts(written))
-        logger.info("file_save count=%d", len(saved))
-        return {"saved": saved}
+            except ToolError as exc:
+                # **A refused source is the answer's other part, not the
+                # call's end.**  The caller's next move is decided by *which*
+                # sources were stored, so a later URL that cannot be fetched
+                # must not hide the files already stored — a retry that did
+                # not know them would store them again under `-1` names.
+                logger.info("file_save refused %r: %s", entry, exc)
+                failed.append({"source": entry, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - one source's failure is the answer's other half
+                logger.warning("file_save failed for %r: %s", entry, exc, exc_info=exc)
+                failed.append(
+                    {"source": entry, "error": f"{type(exc).__name__}: {exc}"}
+                )
+            else:
+                saved.append(facts(written))
+        logger.info("file_save saved=%d failed=%d", len(saved), len(failed))
+        return {"saved": saved, "failed": failed}
 
     @mcp.tool(name="file_remove", meta=FOR_THE_MODEL)
     async def file_remove(ctx: Context, path: str) -> dict[str, Any]:
@@ -1554,7 +1595,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             body=output,
             title=tool,
             source=tool,
-            embedder=await embedding.get(),
         )
         assert row is not None, "an upsert always writes"
         written = opened.root / str(row["mirror"])
@@ -1618,7 +1658,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 title=mime or "image",
                 source=url,
                 mime=mime,
-                embedder=await embedding.get(),
             )
             assert row is not None, "an upsert always writes"
             return {
@@ -1664,7 +1703,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 file_path=relative,
                 mime=mime,
                 size=len(data),
-                embedder=await embedding.get(),
             )
         except Exception:
             # **Only a file this call created is taken back.**  A content

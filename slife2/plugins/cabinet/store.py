@@ -1150,7 +1150,7 @@ class CabinetStore:
         summary: str = "",
         period_start: str = "",
         period_end: str = "",
-        embedder: Embedder,
+        embedder: Embedder | None = None,
     ) -> dict[str, Any] | None:
         """Write one row, its file and — for an agent-written kind — its vector.
 
@@ -1177,7 +1177,10 @@ class CabinetStore:
         cannot embed raises having stored nothing, which is what the plugin's
         `file_save` relies on when it takes back the bytes it copied.  A saved
         file is in the keyword corpus but has no vector; a dump and an image are
-        in neither, because the turn's marker is their address.
+        in neither, because the turn's marker is their address.  **The
+        `embedder` is therefore the vectorized kinds' argument**: a caller that
+        writes one of the other three passes none, and this method opens no
+        embedding connection for it.
         """
         if mode not in (CREATE, REPLACE, UPSERT):
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
@@ -1245,7 +1248,11 @@ class CabinetStore:
         # keep: the keyword text and the vector are derived from the file's
         # text, and they are written in the same transaction as the row.
         index_row = {**row, "body": body}
-        vectors = await self.vectors(index_row, embedder) if spec.vectorized else []
+        vectors: list[list[float]] = []
+        if spec.vectorized:
+            if embedder is None:
+                raise ValueError(f"a {kind} write is vectorized and needs an embedder")
+            vectors = await self.vectors(index_row, embedder)
         with self._connect() as connection:
             placed = self._store(connection, row, mode)
             if placed is None:
