@@ -418,9 +418,14 @@ class Responder(abc.ABC):
         peer = req.sender or "unknown"
 
         if message_type == "task_response":
-            # A response-typed frame on the request topic is not a new task:
-            # acknowledge it empty, as upstream does, and remember it so a
-            # duplicate is answered the same way.
+            # **A response-typed frame on the request topic is not a new task.**
+            # An id this process never held is acknowledged empty, as upstream
+            # does, and remembered so a duplicate is answered the same way.  An
+            # id it *does* hold is answered with that task's own state and never
+            # with `completed`: the frame is not the task's answer, and a
+            # terminal published for a task that is still `working` settles the
+            # requester's send — which forgets every routing entry for the task,
+            # so the real artifact, when it comes, has nowhere to go.
             record = self._inbound.get(task_id)
             if record is None:
                 self._inbound.add(
@@ -432,18 +437,19 @@ class Responder(abc.ABC):
                     text=text,
                 )
                 self._inbound.terminal(task_id, COMPLETED, "")
-            # A known task is left exactly as it is: this frame is not its
-            # answer, it is a stray response-typed message on the request
-            # topic.
-            await self._publish_status(
-                client,
-                response_topic,
-                correlation,
-                request_id,
-                task_id,
-                COMPLETED,
-                "",
-                context_id,
+                await self._publish_status(
+                    client,
+                    response_topic,
+                    correlation,
+                    request_id,
+                    task_id,
+                    COMPLETED,
+                    "",
+                    context_id,
+                )
+                return
+            await self._replay_status(
+                client, response_topic, correlation, request_id, record
             )
             return
 

@@ -323,6 +323,13 @@ class Deliver:
     #: One probe's whole task budget: a headless window may run the task for as
     #: long as its turns take, and the probe waits for its `task_response`.
     probe: float = 3600.0
+    #: How long a turn waits for the person to answer an `_approve` request.
+    #: The route is a progress event out and an `answer_approval` call back, and
+    #: the person may be reading the conversation before they answer: this is a
+    #: bound on "nobody is coming", not a hurry.  Past it the call is refused —
+    #: a turn parked for ever on a future no client will set is the one ending
+    #: worse than a denial, and the client learns the call did not run.
+    approval: float = 600.0
 
 
 @dataclass

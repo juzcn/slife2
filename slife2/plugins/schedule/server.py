@@ -226,8 +226,11 @@ class RunLocks:
 
     **Keyed by the task and not by the run**, because an empty `due_at` is
     "decide one now" and the moment it resolves to is what the operation is
-    computing.  The map is bounded by the schedule tasks anybody has named —
-    a handful — not by fires, which are unbounded.
+    computing.  **The table holds only what is in use**: an entry is leased
+    while a caller holds or waits for it and dropped when the last lease is
+    given back, so a task name that existed once and was removed does not keep
+    an `asyncio.Lock` for the process's life.  A fresh lock for a name nobody
+    holds is indistinguishable from the old one — nobody can be inside it.
 
     **The store's own writes are still guarded one level down** (`advance`,
     `settle`, `reopen`, `attach` are compare-and-sets): this lock is what makes
@@ -237,6 +240,9 @@ class RunLocks:
 
     def __init__(self) -> None:
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        #: How many callers hold or are waiting for each lock.  Zero is
+        #: "nobody", and that is when both entries go.
+        self._leases: dict[tuple[str, str, str], int] = {}
 
     def for_task(self, store: ScheduleStore, name: str) -> asyncio.Lock:
         """This task's lock, made on the first ask.
@@ -244,6 +250,9 @@ class RunLocks:
         The key is `home_key`'s canonical spelling rather than the caller's: a
         tool call and a poll resolve the same ledger through two spellings of
         one directory, and two locks for one task is the race this class is.
+
+        **A direct caller keeps the entry** — there is no lease to give back —
+        so production goes through `held`, which leases and prunes.
         """
         key = (home_key(store.home), store.agent, name)
         found = self._locks.get(key)
@@ -251,6 +260,34 @@ class RunLocks:
             found = asyncio.Lock()
             self._locks[key] = found
         return found
+
+    def _lease(
+        self, store: ScheduleStore, name: str
+    ) -> tuple[tuple[str, str, str], asyncio.Lock]:
+        """Take one lease on this task's lock, making it if nobody holds it."""
+        key = (home_key(store.home), store.agent, name)
+        found = self._locks.get(key)
+        if found is None:
+            found = asyncio.Lock()
+            self._locks[key] = found
+        self._leases[key] = self._leases.get(key, 0) + 1
+        return key, found
+
+    def _release(self, key: tuple[str, str, str]) -> None:
+        """Give one lease back; the last one drops the entry.
+
+        **Safe because a lease is taken before the wait.**  A caller waiting on
+        the lock has already leased, so the last holder's release always leaves
+        the waiter counted; only when nobody holds and nobody waits does the
+        lock go, and a new caller then builds a fresh one — which cannot be in
+        use, because there was nobody to use it.
+        """
+        held = self._leases.get(key, 0) - 1
+        if held > 0:
+            self._leases[key] = held
+            return
+        self._leases.pop(key, None)
+        self._locks.pop(key, None)
 
     @staticmethod
     @contextlib.asynccontextmanager
@@ -266,8 +303,12 @@ class RunLocks:
         if locks is None:
             yield
             return
-        async with locks.for_task(store, name):
-            yield
+        key, lock = locks._lease(store, name)
+        try:
+            async with lock:
+                yield
+        finally:
+            locks._release(key)
 
 
 # ── the ledgers ──────────────────────────────────────────────────────────────

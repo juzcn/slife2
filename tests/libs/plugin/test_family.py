@@ -74,6 +74,20 @@ cli:
 """
 )
 
+#: `MINE`, with a command added — the file being edited under a running plugin.
+EDITED = (
+    REQUIRED
+    + """
+cli:
+  mine-only:
+    command: mine
+    description: Recorded in this home.
+  later-only:
+    command: later
+    description: Added while the process was running.
+"""
+)
+
 
 async def list_from(client: Client, home: Path) -> Any:
     """`list_sources` as the caller in *home* — the meta a server reads it from."""
@@ -108,6 +122,36 @@ async def test_a_call_gets_the_section_of_the_home_it_names(
     assert "theirs-only" not in str(here.data)
     assert "theirs-only" in str(there.data)
     assert "mine-only" not in str(there.data)
+
+
+@pytest.mark.asyncio
+async def test_list_sources_follows_an_edit_made_while_the_process_runs(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The mirror is re-read, because the file is what the other half reads.**
+
+    `cli_list` reads the section from the file; `list_sources` served the mirror
+    copied when the home was first served.  An edit made while the process ran —
+    by another instance, or by hand — was therefore reported by one and not the
+    other, and a search built from the declaration never saw it.  The
+    declaration reads the config as it is now (`Documents.refreshed`), which is
+    the same rule Invariant 9 states for everything a turn can see.
+    """
+    mine = tmp_path / "mine"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+    config_file(mine, MINE)
+
+    server = build_cli(default_config(), source=load_cached)
+    async with Client(server) as client:
+        before = await list_from(client, mine)
+        config_file(mine, EDITED)
+        after = await list_from(client, mine)
+
+    assert "mine-only" in str(before)
+    assert "later-only" not in str(before)
+    assert "later-only" in str(after), (
+        "the declaration served the mirror built at the first ask"
+    )
 
 
 @pytest.mark.asyncio

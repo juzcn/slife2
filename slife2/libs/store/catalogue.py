@@ -650,7 +650,12 @@ class ToolStore:
 
         The stat is still the first look, and it catches the one thing the
         marker cannot: a *different* catalogue copied over the path.  Its marker
-        says it is ours, but it is not the file this store opened.
+        says it is ours, but it is not the file this store opened.  **And the
+        shape of its `tool` table catches the copy the stat cannot**: `cp` onto
+        the live path keeps the inode and the copy keeps the marker, so a stale
+        schema presents both while rejecting rows this build writes — and the
+        tool list fails one row at a time instead of the file being rebuilt
+        (`_holds_our_file`, `_tool_table`).
         """
         if self._holds_our_file(connection):
             return
@@ -661,11 +666,24 @@ class ToolStore:
             self._identity = self._file_identity()
 
     def _holds_our_file(self, connection: sqlite3.Connection) -> bool:
-        """Whether this connection is to the file this store opened and built."""
+        """Whether this connection is to the file this store opened and built.
+
+        **Three answers, because each alone can be copied.**  The identity pair
+        catches a *different* file at the path; the marker catches a replacement
+        the filesystem handed the freed inode to; and the schema itself catches
+        both when `cp` writes another build's catalogue *over the live path* —
+        `cp` keeps the inode and the copy keeps the marker, so the first two
+        agree while the `tool` table is the old one, and a row it rejects then
+        fails the tool list.  The DDL is what actually decides whether a write
+        is accepted, so it is the check that cannot be satisfied by a copy.
+        """
         if self._file_identity() != self._identity:
             return False
         marker = connection.execute("PRAGMA application_id").fetchone()[0]
-        return marker == _APPLICATION_ID
+        if marker != _APPLICATION_ID:
+            return False
+        present, reasons = self._tool_table(connection)
+        return present and not reasons
 
     def _file_identity(self) -> tuple[int, int] | None:
         """Which file the path holds now, or `None` when it holds none.
@@ -725,33 +743,15 @@ class ToolStore:
         Both directions are checked — a missing column cannot answer a query and
         an unknown one is a leftover nothing maintains.
         """
-        columns = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(tool)")
-        }
-        if not columns:  # no table yet: the schema creates it complete
-            return
-        ddl = str(_table_ddl(connection, "tool") or "")
-        missing = sorted(_TOOL_COLUMNS - columns)
-        unexpected = sorted(columns - _TOOL_COLUMNS)
-        short = [
-            f"no {column} value {'/'.join(sorted(wanted - allowed))}"
-            for column, wanted in _CHECKED_DOMAINS.items()
-            if (allowed := _check_values(ddl, column)) is not None and wanted - allowed
-        ]
-        if not missing and not unexpected and not short:
+        present, reasons = self._tool_table(connection)
+        if not present or not reasons:  # no table yet: the schema creates it
             return
         logger.warning(
             "%s holds a tool catalogue this build does not write (%s); it is "
             "rebuilt from the servers, which costs the model whatever it had "
             "loaded",
             self.path,
-            "/".join(
-                [
-                    *(f"no {name} column" for name in missing),
-                    *(f"unknown {name} column" for name in unexpected),
-                    *short,
-                ]
-            ),
+            "/".join(reasons),
         )
         # **One transaction, because SQLite does not roll DDL back** — a `DROP`
         # issued with no transaction open runs in autocommit, so a rebuild that
@@ -761,6 +761,33 @@ class ToolStore:
         begin_rebuild(connection)
         for table in ("tool_fts", "tool", "tool_chunk", "tool_vec", "meta"):
             connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+    def _tool_table(self, connection: sqlite3.Connection) -> tuple[bool, list[str]]:
+        """Whether a `tool` table is there, and why it is not this build's.
+
+        Shared by the open check (`_rebuild_if_stale`) and the per-connection
+        identity check (`_holds_our_file`), so a copied-over file is judged by
+        the same rule that would rebuild it.
+        """
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(tool)")
+        }
+        if not columns:
+            return False, []
+        ddl = str(_table_ddl(connection, "tool") or "")
+        missing = sorted(_TOOL_COLUMNS - columns)
+        unexpected = sorted(columns - _TOOL_COLUMNS)
+        short = [
+            f"no {column} value {'/'.join(sorted(wanted - allowed))}"
+            for column, wanted in _CHECKED_DOMAINS.items()
+            if (allowed := _check_values(ddl, column)) is not None and wanted - allowed
+        ]
+        reasons = [
+            *(f"no {name} column" for name in missing),
+            *(f"unknown {name} column" for name in unexpected),
+            *short,
+        ]
+        return True, reasons
 
     # --- what the hub writes --------------------------------------------------
 

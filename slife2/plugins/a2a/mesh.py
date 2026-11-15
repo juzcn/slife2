@@ -338,6 +338,7 @@ class _OutboundSend:
         "watchdog",
         "attempts",
         "delivered",
+        "cancelled",
         "first_landed",
         "loops",
         "record",
@@ -376,6 +377,11 @@ class _OutboundSend:
         self.watchdog: asyncio.Task | None = None
         self.attempts = 1
         self.delivered = False
+        #: Set by `cancel_task` when the caller withdraws the task.  The ladder
+        #: stops: a rung waking after the withdrawal would publish the request
+        #: again and start work on a peer this conversation has already told
+        #: the task was cancelled.
+        self.cancelled = False
         #: Set by `send_message` once its first publish has returned; `_deliver`
         #: waits on it before its first rung.  The ladder exists (and is in
         #: ``loops``) while that publish is in flight so a teardown can see the
@@ -395,12 +401,16 @@ class _OutboundSend:
 class _InboundWait:
     """One round's completion bridge: resolved out of band, once."""
 
-    __slots__ = ("outcome", "_event", "peer")
+    __slots__ = ("outcome", "_event", "peer", "serial")
 
     def __init__(self, peer: str = "") -> None:
         self.outcome: RoundOutcome | None = None
         self._event = asyncio.Event()
         self.peer = peer
+        #: Which round of its task this bridge serves.  Assigned by
+        #: `MeshResponder.on_request`; it is what tells this round's answer
+        #: from a retry of the answer to the round before it.
+        self.serial = 0
 
     def resolve(self, outcome: RoundOutcome) -> bool:
         if self.outcome is not None:
@@ -431,6 +441,26 @@ class MeshResponder(Responder):
         super().__init__(*args, inbound=inbound, max_concurrent=_MAX_INFLIGHT, **kwargs)
         self._mesh = mesh
         self._completion: dict[str, _InboundWait] = {}
+        #: The last answer applied to each task, as
+        #: `(round serial, outcome state, text)`.  **A client-level retry of an
+        #: old `task_response` is the same call re-sent** — same task id, same
+        #: outcome, same words — and the bridge it originally settled may have
+        #: been replaced by a continuation's round since.  A second settlement
+        #: that matches this record exactly is that retry, not a new answer:
+        #: settling the live round with it would end a task the peer is still
+        #: working through with the previous round's answer.  A fresh answer of
+        #: the same words for a genuinely new round is indistinguishable from a
+        #: retry, so it is refused as well and the model is told to say what it
+        #: means in words rather than silently lose the round.
+        self._settled: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
+        #: How many rounds this process has served per task id.  The serial is
+        #: what tells an old settlement's bridge from the live one.
+        self._serial: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
+
+    def _next_serial(self, task_id: str) -> int:
+        serial = int(self._serial.get(task_id, 0)) + 1
+        self._serial[task_id] = serial
+        return serial
 
     async def on_request(
         self,
@@ -442,6 +472,7 @@ class MeshResponder(Responder):
         task_id = str(request.task_id)
         peer = request.sender or "unknown"
         waiter = _InboundWait(peer)
+        waiter.serial = self._next_serial(task_id)
         self._completion[task_id] = waiter
 
         # TASK_RESPONSE continuity: keep the standard stream alive while the
@@ -464,9 +495,12 @@ class MeshResponder(Responder):
         try:
             message_type = request.variables.get("message_type", "task_request")
             if message_type == "task_response":
-                # A response-typed frame on the request topic is not a new
-                # task: the responder already answers it with an empty
-                # completed.  Kept as a belt-and-braces branch.
+                # **Unreachable, and kept as a guard rather than a path.**
+                # `Responder._on_send_message` answers a response-typed frame
+                # before a record or a round exists, so nothing here can be
+                # started for one.  If a future caller reaches this, an empty
+                # `completed` would be the terminal that path no longer invents
+                # for a known task — its comment has the whole argument.
                 logger.info(
                     "a2a_inbound_response_ignored task=%s from=%s",
                     task_id,
@@ -536,12 +570,35 @@ class MeshResponder(Responder):
 
         Returns ``"ok"``, or an error string.  Refuses unknown or
         already-settled task ids — each round settles exactly once.
+
+        **An answer that already settled an earlier round is not an answer for
+        this one.**  A client-level retry re-sends the same call; if the peer
+        has continued the task in the meantime, the bridge now waiting is the
+        continuation's, and applying the old words to it ends a task that is
+        still being worked through.  The record is per task id and written on
+        every settlement, so the comparison is exact for a retry — and a new
+        answer that happens to repeat the old words is refused too, which is the
+        safe side: the error says what to do instead of silently losing a round.
         """
         waiter = self._completion.get(task_id)
         if waiter is None:
             return self._mesh._unresolvable(task_id)
+        settled = self._settled.get(task_id)
+        if (
+            settled is not None
+            and settled[0] != waiter.serial
+            and settled[1] == outcome.state
+            and settled[2] == outcome.text
+        ):
+            return (
+                f"Error: task_id {task_id!r} already settled an earlier round "
+                f"of this task with this exact answer — a retried task_response "
+                f"is not an answer to the peer's continuation. If you mean to "
+                f"settle the new round, answer the continuation in its own words."
+            )
         if not waiter.resolve(outcome):
             return f"Error: task_id {task_id!r} already completed."
+        self._settled[task_id] = (waiter.serial, outcome.state, outcome.text)
         return "ok"
 
 
@@ -1703,6 +1760,13 @@ class A2AMesh:
         which ends it.  A mesh that is only being rebuilt is not a new ladder:
         the teardown `connect` makes is reviving, and the send rides over it.
 
+        **A cancellation ends the ladder**, and that is the caller's act rather
+        than a reply: `cancel_task` sets `send.cancelled` and stops the loops
+        (see its docstring for why), so a rung already asleep here wakes to a
+        send that is no longer being delivered.  It does not touch `delivered`:
+        "a reply arrived" and "the caller withdrew it" are different facts, and
+        the row says the second one.
+
         **The ladder waits for the first publish.**  ``after_first`` is how
         `send_message` starts it: its task is created before the send's own
         publish so that a teardown can see the send (``send.loops``), but no
@@ -1721,7 +1785,7 @@ class A2AMesh:
             except asyncio.CancelledError:
                 raise
             retry = _T.Backoff(_T.timeouts.pacing.requester_retry)
-            while not (self._ladder_over or send.delivered):
+            while not (self._ladder_over or send.delivered or send.cancelled):
                 if send.attempts >= _MAX_ATTEMPTS:
                     if send.prev_interrupt[0]:
                         # A continuation that never landed leaves the task
@@ -1750,7 +1814,7 @@ class A2AMesh:
                     )
                     return
                 await asyncio.sleep(retry.failed())
-                if self._ladder_over or send.delivered:
+                if self._ladder_over or send.delivered or send.cancelled:
                     return
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex)
@@ -1961,6 +2025,28 @@ class A2AMesh:
             return
         send.first_landed.set()
 
+    async def _stop_ladder(self, send: _OutboundSend) -> None:
+        """End a send's requester ladder, and wait for it to stop publishing.
+
+        **`cancelled` first, then the cancel** — a rung that has already passed
+        its sleep's wake check must find the flag before its publish, and a
+        rung inside a publish is cancelled at the await.  The wait is what makes
+        "no rung publishes after this returns" true for every rung that had not
+        reached the client yet; one already handed to the client is the
+        unavoidable remainder, which the withdrawal published next answers.
+
+        The flag is not `delivered`: that word means a reply confirmed the send,
+        and this one means the caller took it back.  `_deliver` reads both for
+        the same reason — either ends the ladder — and `delivered` is left alone
+        so the arrival bookkeeping still records what actually came back.
+        """
+        send.cancelled = True
+        running = [loop for loop in send.loops if not loop.done()]
+        for loop in running:
+            loop.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+
     async def cancel_task(self, agent: str, task_id: str) -> str:
         """Standard ``CancelTask``; returns the resulting status string.
 
@@ -1972,6 +2058,10 @@ class A2AMesh:
         withdrew.  `TaskStore.record_result`/`record_error` are what refuse to
         contradict a withdrawal, and they can only do it if the row says so —
         recording it is what makes that guard reachable from this path at all.
+
+        **And the requester ladder is stopped first** (`_stop_ladder`): a rung
+        already scheduled would otherwise publish the same request after the
+        cancellation and start work on a peer the caller has withdrawn it from.
         """
         record = get_store().get(task_id)
         if record is None:
@@ -1985,6 +2075,15 @@ class A2AMesh:
             # wrong peer, recorded the row cancelled, and let the real peer run
             # on — the sibling `continue_task` refuses the same mistake.
             return f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
+        # **The ladder stops before the withdrawal is published.**  A rung is
+        # asleep between attempts; waking after the cancel, it would publish the
+        # request again and start work on a peer that may just have been revived
+        # — while this row says `cancelled`, so the peer's ending is discarded.
+        # Stopping first is also why a failed withdrawal does not resume
+        # retrying: the caller asked the task to stop, and a request this
+        # process has already decided against is not one to repeat.
+        if send is not None:
+            await self._stop_ladder(send)
         session = uuid.uuid4().hex[:12]
         # A fresh correlation per request: the profile requires uniqueness
         # across concurrently in-flight requests on one reply topic, and the

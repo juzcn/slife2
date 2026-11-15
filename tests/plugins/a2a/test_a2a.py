@@ -40,6 +40,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness.handover import DeliveryFailed
 from slife2.libs.host.config import (
     BROADCAST,
     CANCEL_TASK,
@@ -1996,6 +1997,85 @@ async def test_one_bad_message_does_not_end_the_writer(
     )
 
 
+@pytest.mark.asyncio
+async def test_a_hand_over_that_did_not_come_back_leaves_the_task_round_open(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**An unverified delivery is not a rejection.**
+
+    A hand-over whose call did not come back may already have put the message
+    in the conversation (`DeliveryFailed.unknown`).  Settling that as `rejected`
+    told the peer a task it was working on was dead, and the model's later
+    `task_response` was then refused because the task was terminal.  A task
+    round therefore stays open — the model's own answer is what settles it —
+    while a bare message, which has no later answer, is still settled so the
+    peer knows whether to re-send.
+    """
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    async def did_not_come_back(*args: Any, **kwargs: Any) -> None:
+        raise DeliveryFailed(
+            AGENT,
+            "the hand-over did not come back, so it was not repeated",
+            unknown=True,
+        )
+
+    monkeypatch.setattr(a2a_server, "hand_over", did_not_come_back)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+
+    session = wired()
+    session.mesh.on_inbound_task(PEER, "hello", TASK)
+    await writer_until(
+        session,
+        lambda: any(
+            "a2a_delivery_unverified" in record.getMessage()
+            for record in caplog.records
+        ),
+    )
+
+    assert settled == [], "an unverified task round was settled as an outcome"
+    assert any(
+        "a2a_delivery_unverified" in record.getMessage()
+        and f"task={TASK}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_hand_over_did_not_come_back_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message has no later answer, so its round is where the truth ends.
+
+    The task case waits because the model's own `task_response` can still
+    settle it.  A bare message is owed only "the conversation has it", and no
+    `task_response` will come for one — so leaving it open would be a round
+    nobody ends, and `rejected` is the answer that tells its sender to re-send.
+    """
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    async def did_not_come_back(*args: Any, **kwargs: Any) -> None:
+        raise DeliveryFailed(AGENT, "the hand-over did not come back", unknown=True)
+
+    monkeypatch.setattr(a2a_server, "hand_over", did_not_come_back)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+
+    session = wired()
+    session.mesh.on_inbound_task(PEER, "hello", TASK, kind="message")
+    await drain_until_idle(session)
+
+    assert settled and settled[0][:2] == (TASK, REJECTED)
+
+
 # ── the orphan notice, which is nobody's but this plugin's ──────────────────
 #
 #  The one message here that no peer will ever re-send, and the one the plugin
@@ -2930,6 +3010,42 @@ async def test_a_withdrawal_that_could_not_be_published_is_not_recorded(
     assert await mesh.cancel_task(PEER, TASK) == "cancelled"
     assert get_store().get(TASK).status == "cancelled"
     assert len(published) == 2, "the retry published the withdrawal"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_stops_the_requester_retry_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A rung asleep between attempts is still a rung.**
+
+    `cancel_task` recorded the row and published the withdrawal, but the
+    requester ladder kept its own schedule: the next rung published the same
+    request after the cancellation and started work on a peer that had just
+    come back — while the row said `cancelled`, so the peer's ending was
+    discarded.  The ladder is stopped before the withdrawal is published, and
+    the wait for its loops is what makes "nothing publishes after this" true.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple[str, str]] = []
+
+    async def publish(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        published.append((topic, payload))
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
+    monkeypatch.setattr(
+        _T.timeouts.pacing,
+        "requester_retry",
+        _T.Retry(base=0.01, factor=1.0, cap=0.01),
+    )
+
+    task_id = await mesh.send_message(PEER, "do it")
+    await until(lambda: len(published) >= 3, "the ladder's retries")
+    assert await mesh.cancel_task(PEER, task_id) == "cancelled"
+
+    after = len(published)
+    await asyncio.sleep(0.1)  # timeouts: long enough for several rungs to have fired
+    assert len(published) == after, "a rung published after the withdrawal"
 
 
 @pytest.mark.asyncio

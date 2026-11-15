@@ -229,8 +229,13 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     """
 
     def home_entries() -> dict[str, SkillSettings]:
-        """This home's `skills:`, as the mirror holds it."""
-        return homes.current().entries
+        """This home's `skills:`, re-read from the config as it is now.
+
+        **The file is the whole truth** (`Documents.refreshed`): `skill_list`
+        and `list_sources` are two readers of one section, and a mirror frozen
+        at the first ask would report a hand edit by one and not the other.
+        """
+        return homes.current().refreshed()
 
     def supplied_for(name: str) -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""

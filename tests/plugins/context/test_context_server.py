@@ -429,6 +429,40 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_exact_word_match_is_evidence_even_when_meaning_also_scored_it() -> (
+    None
+):
+    """**`worded` was read off a missing similarity, which is not the same fact.**
+
+    A turn found by both legs carries its meaning score, so a page whose every
+    hit does contain the caller's words has no `None` similarity — and the old
+    answer reported `confidence: none` for an exact match whose cosine happened
+    to sit under the weak floor.  The keyword leg itself is asked now, over the
+    page's own ids, which is the only answer that is about the words.
+
+    The turn is built to have both: it carries `trump` (so the keyword leg
+    finds it) and repeats other vocabulary words heavily, which pulls its
+    cosine under the floor while leaving the word match exact.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("trump 计算 计算 计算 计算", "a0"))
+        found = await client.call_tool(
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
+        )
+
+    hit = found.data["results"][0]
+    assert hit["similarity"] is not None, (
+        "the premise: meaning scored this hit, so its similarity is not the "
+        "word-evidence signal"
+    )
+    assert found.data["best"] < 0.48, (
+        "the premise: the cosine is under the weak floor, so only the word "
+        "evidence can make this page weak rather than none"
+    )
+    assert found.data["confidence"] == "weak"
+
+
+@pytest.mark.asyncio
 async def test_search_reads_only_the_callers_conversation() -> None:
     """The same boundary `turn_list` has: no argument names whose memory."""
 

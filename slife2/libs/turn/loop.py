@@ -970,15 +970,22 @@ class AgentLoop:
                     logger.debug("closing the chunk stream failed", exc_info=True)
 
     @staticmethod
-    async def _emit(observer: TurnObserver, event: TurnEvent) -> None:
+    async def _emit(observer: TurnObserver, event: TurnEvent) -> bool:
         """Hand an event to the observer, swallowing its failures.
 
         A UI that throws must not end a turn — the answer is still correct and
         still returned.  `CancelledError` is deliberately not caught: it derives
         from BaseException precisely so that cancellation cannot be swallowed,
         and the loop depends on that.
+
+        **`True` means the observer took it**, and the one caller that reads the
+        answer is the approval request: a request nobody could be told about is
+        a turn parked on a future no client saw, so the caller refuses the call
+        instead of waiting (see `slife2.plugins.agent.server`'s `ask`).
         """
         try:
             await observer.on_event(event)
         except Exception:  # noqa: BLE001
             logger.warning("observer failed on %s", type(event).__name__, exc_info=True)
+            return False
+        return True

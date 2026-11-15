@@ -1102,9 +1102,10 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(DeliveryFailed, match="could not be reached"):
+    with pytest.raises(DeliveryFailed, match="could not be reached") as failed:
         await made.plugin._deliver_to_window("jack", "hello")
 
+    assert failed.value.unknown is False, "a refusal proves nothing was written"
     assert attempts == _T.timeouts.stream.handover
 
 
@@ -1641,9 +1642,10 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(DeliveryFailed, match="was not repeated"):
+    with pytest.raises(DeliveryFailed, match="was not repeated") as failed:
         await made.plugin._deliver_to_window("jack", "hello")
 
+    assert failed.value.unknown is True, "a call that did not come back may have landed"
     assert attempts == 1, "an unclassified failure is not retried"
 
 

@@ -2367,10 +2367,12 @@ def build_server(
             nobody will ever resolve.
 
             Emitting the event *before* awaiting is the whole of the handshake:
-            a client that never hears the request cannot answer it, and the case
-            that matters is the client that hears it and does not answer — which
-            is what the turn's own cancellation is for, and why this method does
-            not invent a bound of its own.
+            a client that never hears the request cannot answer it, so a request
+            the stream would not take is a refusal of the call rather than a
+            wait.  A client that hears it and does not answer is bounded by
+            `deliver.approval`: a turn parked for ever on a future nobody sets
+            is worse than a denial.  Both endings are logged and both leave the
+            turn running — the call is what failed.
             """
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             loop.approvals[call.id] = future
@@ -2386,11 +2388,32 @@ def build_server(
                 # `TextDelta` would have been swallowed one layer down.  It is a
                 # staticmethod, so the class is asked rather than an instance: this
                 # closure is built before `agent_loop` and must not depend on it.
-                await AgentLoop._emit(
+                # **The answer, unlike every other event's, is read.**  Nobody
+                # can answer a request that was not written, so that failure
+                # refuses the call instead of parking the turn on it.
+                if not await AgentLoop._emit(
                     observer,
                     ToolApprovalRequested(call.id, call.name, call.arguments),
+                ):
+                    logger.error(
+                        "the approval request for %s (%s) could not be written "
+                        "to the progress stream — the call is refused",
+                        call.id,
+                        call.name,
+                    )
+                    return False
+                return await asyncio.wait_for(
+                    future, timeout=_T.timeouts.deliver.approval
                 )
-                return await future
+            except TimeoutError:
+                logger.error(
+                    "the approval request for %s (%s) was not answered in %.0f "
+                    "seconds — the call is refused",
+                    call.id,
+                    call.name,
+                    _T.timeouts.deliver.approval,
+                )
+                return False
             finally:
                 loop.approvals.pop(call.id, None)
 
@@ -4430,17 +4453,13 @@ def build_server(
                     f"not yours to remove, and this call will not delete it."
                 )
             return {"name": directory.name, "removed": False}
-        # **The network first, and before anything is taken away.**  A place on
-        # the subagent network outlives the directory it was held for: the plugin
-        # has a responder subscribed to this name, so a removal that only stopped
-        # the loop and deleted the files would leave something still answering for
-        # a subagent that no longer exists — and a notification that cannot be
-        # made has to leave the subagent exactly as it was, which is why it is
-        # this first (`leave_the_mesh`).
-        await leave_the_mesh(maker, directory.name, client=mesh_client)
-        # The loop next — in-process, and before the files: a loop left behind
-        # writes its store again on the next message to a name that is supposed
-        # to have stopped existing.
+        # **The conversation is stopped before the network is told, and that is
+        # the order.**  A turn holding the lock is waited for (bounded), a record
+        # it detached is awaited, and only once nothing can refuse any more is
+        # the subagent's place given up — a refusal after `leave_the_mesh` left
+        # the subagent alive but unreachable from the network until the removal
+        # was retried.  The lock is held across the mesh call so a turn cannot
+        # start between the two halves.
         #
         # **And no `forget` against the store, which is the difference from
         # `reset`.**  What `reset` clears is the *stored* live-context list, and
@@ -4449,14 +4468,21 @@ def build_server(
         # its way out, and on Windows the asking is not free: opening a store
         # that does not exist *creates* it, and the handle that created it can
         # hold the file against the `rmtree` that follows.
-        # **The conversation is stopped before the files are taken.**  A turn
-        # holding the lock is waited for (bounded), a record it detached is
-        # awaited, and the loop is marked removed before it is dropped — so a
-        # message already queued behind the lock cannot run and save a turn into
-        # the directory after the delete, recreating it without a record.
+        #
+        # **The loop is marked removed before it is dropped**, so a message
+        # already queued behind the lock cannot run and save a turn into the
+        # directory after the delete, recreating it without a record.
         key = conversation_key(maker, directory.name)
         loop = loops.get(key)
-        if loop is not None:
+        if loop is None:
+            # **The network before the files, for a subagent with no loop.**  A
+            # place on the subagent network outlives the directory it was held
+            # for: the plugin has a responder subscribed to this name, so a
+            # removal that only deleted the files would leave something still
+            # answering for a subagent that no longer exists
+            # (`leave_the_mesh`).
+            await leave_the_mesh(maker, directory.name, client=mesh_client)
+        else:
             try:
                 async with asyncio.timeout(_T.timeouts.grace.turn):
                     await loop.lock.acquire()
@@ -4488,6 +4514,11 @@ def build_server(
                         ) from None
                     except Exception:  # noqa: BLE001 — a refused write writes nothing
                         pass
+                # **Every refusal has run, so the network may be told.**  A
+                # failure here leaves the subagent exactly as it was: nothing
+                # has been deleted and the loop is untouched, because
+                # `leave_the_mesh` raises before the record is dropped.
+                await leave_the_mesh(maker, directory.name, client=mesh_client)
                 loop.removed = True
                 loops.pop(key, None)
             finally:

@@ -1213,12 +1213,38 @@ class Documents:
     assembling the envelope itself, because every key in it is a claim to the
     hub — `up`, `transport`, `category` — and a second copy of the envelope is a
     second place one of them can come out wrong.
+
+    **`live` is what keeps the mirror from freezing at the first ask.**  The
+    entries are copied when the home is first served, and the config file is
+    the only description of what exists (SDD Invariant 9): a `cli_set` from
+    another process, or a hand edit, lands on the file while this one runs.
+    `cli_list` and `cli_get` read the file directly, so a mirror that never
+    re-read it reported the edit by one half of the family and not the other.
+    `reload` runs on every `list_sources` — the declaration a search is built
+    from — and on the document families' own list tool, so the two answers
+    cannot disagree.  **A server built with a config handed in passes no
+    reader**: there is no live file for it, and the tools' own writes update
+    this mirror rather than the injected object — a refresh there would undo
+    the switch it just set.
     """
 
     source: str
     category: str
     section: str
     entries: dict[str, Any]
+    reload: Callable[[], Mapping[str, Any]] | None = None
+
+    def refreshed(self) -> dict[str, Any]:
+        """Re-read this home's section from the config as it is *now*.
+
+        The mirror is replaced rather than patched: the file is the whole truth
+        and a patch would have to know what changed.  A caller that already
+        holds the dict keeps the snapshot it holds; every tool body asks
+        `homes.current().entries` afresh, which is the contract `Homes` states.
+        """
+        if self.reload is not None:
+            self.entries = dict(self.reload())
+        return self.entries
 
     def declare(self, description: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         """This server's whole holding, as `list_sources` answers it.
@@ -1380,7 +1406,10 @@ def build_document_server(
     `build_family_server` gives: the section belongs to a home), and copied into
     a mirror **one per home** (`Homes`); `rows` turns a mirror into catalogue
     rows, which is the one thing a family cannot share because a playbook's row
-    *is* its document and a command's is its invocation.
+    *is* its document and a command's is its invocation.  The mirror is
+    **re-read from the config on every `list_sources`**, because the file is
+    what `cli_list` and `skill_list` read and the two must report the same edit
+    (`Documents.refreshed`).
 
     A document family has nothing to start and nothing to close — the mirror is
     a dictionary — so a home's copy is made when it is first asked for and
@@ -1396,6 +1425,16 @@ def build_document_server(
             category=category,
             section=section,
             entries=dict(entries(theirs)),
+            # **The reader, not the config object.**  `for_the_call` resolves at
+            # refresh time and in the caller's home, which is the same rule
+            # `Homes.current` builds by.  An injected config has no reader: the
+            # tools' own writes update the mirror and the object is not what
+            # they were told to change, so re-reading it would undo them.
+            reload=(
+                (lambda: entries(for_the_call(source, config)))
+                if source is not None
+                else None
+            ),
         ),
         source,
         config,
@@ -1412,8 +1451,13 @@ def build_document_server(
         whole list rather than a difference, because that is what makes a
         deleted document stop being a hit — a merge reads an absent name as a row
         the source no longer has.
+
+        **The section is re-read first**, so a `cli_set` in another process or a
+        hand edit is in front of the search that follows rather than only in
+        front of `cli_list`.
         """
         held = family.current()
+        held.refreshed()
         return held.declare(description, rows(held.entries))
 
     management(mcp, family)

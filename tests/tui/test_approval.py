@@ -26,12 +26,18 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from fakes import FakeAgentClient
+from fakes import FakeAgentClient, FakeWatchClient
 from textual.app import App
 
 from slife2.libs.turn.events import ToolApprovalRequested
 from slife2.tui.app import SlifeApp
-from slife2.tui.widgets import ApprovalPrompt, HistoryInput
+from slife2.tui.watch import WatchScreen
+from slife2.tui.widgets import (
+    WINDOW_CHANNEL,
+    ApprovalPrompt,
+    ConversationPicker,
+    HistoryInput,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -69,16 +75,41 @@ def make_row(
     return Harness(name, arguments or {"path": "/tmp/notes.md"}, future), future
 
 
-def make_app(respond) -> tuple[SlifeApp, FakeAgentClient]:
+def make_app(respond, watch=None) -> tuple[SlifeApp, FakeAgentClient]:
     """A window with a scripted client, as `tests/tui/test_tui.py` builds one."""
     client = FakeAgentClient(respond)
     app = SlifeApp(
         "http://test/mcp",
         client_factory=lambda: client,
+        watch_client_factory=(lambda _name: watch) if watch is not None else None,
         model_label="deepseek/deepseek-flash",
         agent="jack",
     )
     return app, client
+
+
+async def wait_for(pilot, predicate, what: str) -> None:
+    """Wait for the app to have done something, or fail saying what never was."""
+    for _ in range(500):
+        if predicate():
+            return
+        await pilot.pause(0.01)
+    raise AssertionError(what)
+
+
+async def open_a_watch(pilot, app, client: FakeAgentClient) -> None:
+    """Push the watch screen the way `Ctrl+O` does: the list, then the choice."""
+    client.subagents_answer = [{"name": "scout"}]
+    await pilot.press("ctrl+o")
+    await wait_for(
+        pilot,
+        lambda: len(app.query(ConversationPicker)) == 1,
+        "the subagent picker never opened",
+    )
+    await pilot.press("enter")
+    await wait_for(
+        pilot, lambda: isinstance(app.screen, WatchScreen), "the watch never opened"
+    )
 
 
 def asking(call_id: str = "call-1", name: str = "sensitive"):
@@ -282,6 +313,107 @@ async def test_an_approval_flushed_after_its_turn_failed_does_not_mount_a_prompt
 
         assert app._approval is None, "a prompt nobody could answer was mounted"
         assert not app.query(ApprovalPrompt)
+
+
+async def test_an_approval_over_a_watch_screen_is_drawn_where_it_can_be_seen() -> None:
+    """**The row goes on the screen in front, not the hidden window.**
+
+    `_ask_approval` mounted the prompt in the window's own transcript.  With a
+    watch screen up that transcript is behind it, so the row and its arguments
+    were invisible and the turn stayed parked until the watch closed or somebody
+    pressed the app-level `y`/`n` blind.  `_active_transcript` is the same answer
+    the scroll keys use: the screen that is showing is the one that is read.
+    """
+    watch = FakeWatchClient(())
+    app, client = make_app(asking(), watch=watch)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await open_a_watch(pilot, app, client)
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        assert isinstance(app.screen, WatchScreen)
+
+        # The prompt is submitted from the window's turn, which is running
+        # underneath the watch — the ordinary way an approval arrives while
+        # somebody is looking at a subagent.
+        app._submit("do it", WINDOW_CHANNEL)
+        await wait_for(
+            pilot, lambda: app._approval is not None, "the approval never arrived"
+        )
+
+        assert list(app.screen.query(ApprovalPrompt)), (
+            "the row was mounted on the hidden transcript"
+        )
+        assert app._approval.pending is True
+
+        await pilot.press("y")
+        await wait_for(pilot, lambda: app._approval is None, "the answer never left")
+
+    assert client.answers == [("call-1", True)]
+
+
+async def test_a_pending_approval_comes_back_when_the_watch_closes() -> None:
+    """**The row is a view of the question, and a second screen is a second view.**
+
+    A prompt mounted on the watch screen is unmounted with it.  The turn is
+    still parked on the same future, so a row that vanished with the screen
+    leaves the person with nothing to answer; the dismissal re-mounts it on the
+    window's transcript, and the app-level answer still answers it.
+    """
+    watch = FakeWatchClient(())
+    app, client = make_app(asking(), watch=watch)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await open_a_watch(pilot, app, client)
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+
+        app._submit("do it", WINDOW_CHANNEL)
+        await wait_for(
+            pilot, lambda: app._approval is not None, "the approval never arrived"
+        )
+        assert list(app.screen.query(ApprovalPrompt))
+
+        # The screen goes away without a key — the route the dismissal callback
+        # is registered for (`WatchScreen.action_close_watch` dismisses; the
+        # callback and the pop are what a close does).  The question is still
+        # pending on the same future.
+        assert isinstance(app.screen, WatchScreen)
+        app.screen.dismiss(None)
+        await wait_for(
+            pilot, lambda: not isinstance(app.screen, WatchScreen), "the watch stayed"
+        )
+        await wait_for(
+            pilot,
+            lambda: bool(list(app.screen.query(ApprovalPrompt))),
+            "the pending row was not re-mounted on the window",
+        )
+        assert app._approval is not None and app._approval.pending
+
+        await pilot.press("y")
+        await wait_for(pilot, lambda: app._approval is None, "the answer never left")
+
+    assert client.answers == [("call-1", True)]
+
+
+async def test_ctrl_o_does_not_open_a_watch_over_a_pending_approval() -> None:
+    """**A watch opened over the row hides it**, which is the same defect again.
+
+    The key is one key away after the answer, so the answer comes first; the
+    guard is the one `Ctrl+O` already applies to a watch in front.
+    """
+    app, client = make_app(asking())
+    client.subagents_answer = [{"name": "scout"}]
+    async with app.run_test() as pilot:
+        await submit(pilot, "do it")
+        await pilot.pause()
+        assert app._approval is not None
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert not app.query(ConversationPicker)
+        assert len(app.screen_stack) == 1, "a watch was pushed over the question"
+        assert app._approval is not None and app._approval.pending, (
+            "the question was answered by the key"
+        )
 
 
 async def test_a_cancelled_turn_denies_the_prompt_it_was_holding() -> None:

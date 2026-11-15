@@ -1006,6 +1006,15 @@ async def _drain(
     Nothing is softened into a state here: this plugin has no record of its own
     and no right to claim the work happened.
 
+    **Except where the outcome is unknown.**  A hand-over that did not come back
+    may already have put the words in the conversation
+    (`DeliveryFailed.unknown`), and settling that as `rejected` tells the peer a
+    task it is working on is dead — then refuses the model's answer because the
+    task is terminal.  So a task round whose delivery is unverified stays open,
+    and the model's own `task_response` is what settles it.  A bare message has
+    no later answer of its own, so it is still settled: the peer's only choice
+    is whether to re-send it.
+
     **A member's turn is delivered to its conversation, and the harness does
     not speak for the member.**  The inbound message becomes a turn there
     (`run_turn`); a reply is the member's own `subagent_send_message` or
@@ -1098,8 +1107,6 @@ async def _drain(
                 # answer `peer` and they went nowhere.**  Its own key rather
                 # than the handler's below, which is about this plugin's own
                 # fault: this one is a conversation that could not be reached.
-                # The round is settled for the same reason: the peer already
-                # has the acknowledgment and has stopped re-sending.
                 logger.error(
                     "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
                     describe((session.agent, session.subagent)),
@@ -1107,7 +1114,24 @@ async def _drain(
                     len(text),
                     exc,
                 )
-                session.settle(task_id, mesh.REJECTED, exc.reason)
+                if exc.unknown and kind != "message":
+                    # **A hand-over that did not come back is not a refusal.**
+                    # The words may be in the conversation already, so the
+                    # round is left open: the model's own `task_response` is
+                    # what settles it, and recording `rejected` here would tell
+                    # the peer a task it is working on is dead and then refuse
+                    # that answer because the task is terminal.  A message has
+                    # no later answer of its own, so only a task round can
+                    # wait.
+                    logger.error(
+                        "a2a_delivery_unverified agent=%s task=%s — the message "
+                        "may have landed, so its round stays open for the "
+                        "model's answer",
+                        describe((session.agent, session.subagent)),
+                        task_id,
+                    )
+                else:
+                    session.settle(task_id, mesh.REJECTED, exc.reason)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad turn must not end the writer
@@ -1125,11 +1149,26 @@ async def _drain(
                     describe((session.agent, session.subagent)),
                     peer,
                 )
-                session.settle(
-                    task_id,
-                    mesh.REJECTED,
-                    "the agent's harness failed before the turn could run",
-                )
+                if not isinstance(exc, ToolError) and kind != "message":
+                    # **A call that did not come back may have landed.**  A
+                    # `ToolError` is the server's own answer — the turn ran and
+                    # failed — while every other exception is a broken link
+                    # whose write may already be down the stream.  Only the
+                    # first may be settled as a rejection; the second leaves
+                    # the round for the member's own answer.
+                    logger.error(
+                        "a2a_delivery_unverified agent=%s task=%s — a transport "
+                        "failure may have landed, so its round stays open for "
+                        "the model's answer",
+                        describe((session.agent, session.subagent)),
+                        task_id,
+                    )
+                else:
+                    session.settle(
+                        task_id,
+                        mesh.REJECTED,
+                        "the agent's harness failed before the turn could run",
+                    )
                 if not isinstance(exc, ToolError):
                     await drop_member_client()
         finally:
@@ -1210,9 +1249,7 @@ async def _drain(
                     # **An error, because the words are the only thing that
                     # could answer `peer` and they went nowhere.**  Its own key
                     # rather than the handler's below, which is about this
-                    # plugin's own fault; and the round is settled, because the
-                    # peer already has the acknowledgment and its requester
-                    # ladder has stopped — nothing else would tell it.
+                    # plugin's own fault.
                     logger.error(
                         "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
                         describe((session.agent, session.subagent)),
@@ -1220,7 +1257,24 @@ async def _drain(
                         len(text),
                         exc,
                     )
-                    session.settle(task_id, mesh.REJECTED, exc.reason)
+                    if exc.unknown and kind != "message":
+                        # **A hand-over that did not come back is not a
+                        # refusal.**  The words may be in the conversation
+                        # already, so the round is left open: the model's own
+                        # `task_response` settles it, and recording `rejected`
+                        # here would tell the peer a task it is working on is
+                        # dead and then refuse that answer because the task is
+                        # terminal.  A message has no later answer of its own,
+                        # so only a task round can wait.
+                        logger.error(
+                            "a2a_delivery_unverified agent=%s task=%s — the "
+                            "message may have landed, so its round stays open "
+                            "for the model's answer",
+                            describe((session.agent, session.subagent)),
+                            task_id,
+                        )
+                    else:
+                        session.settle(task_id, mesh.REJECTED, exc.reason)
                 else:
                     if kind == "message":
                         # A bare message owes its sender no answer, so its

@@ -335,6 +335,13 @@ class SlifeApp(App[None]):
         #: refuse the call it was holding: the loop is parked on that future, and
         #: a prompt nothing ever answers would keep the turn from ending.
         self._approval: ApprovalPrompt | None = None
+        #: What the row is asking, kept beside it: `(name, arguments, future)`,
+        #: so a prompt whose screen goes away can be mounted again on the one
+        #: that is showing.  The verdict is the future, so a second widget is a
+        #: second view of one question rather than a second question.
+        self._approval_question: (
+            tuple[str, dict[str, Any], asyncio.Future[bool]] | None
+        ) = None
         #: Set while a cancelled or failed turn's queued events are being
         #: flushed.  The turn is gone, so an approval among them has nobody left
         #: to answer it — `_apply` drops it rather than mounting the row.
@@ -1330,6 +1337,12 @@ class SlifeApp(App[None]):
         # how you leave a watch; the next `Ctrl+O` then opens the picker again.
         if self.screen is not self.screen_stack[0]:
             return
+        # **And not over a question the person has to answer.**  The approval row
+        # would be covered by the watch screen, which is the hidden-prompt state
+        # `_ask_approval` exists to prevent; the call is one key away after the
+        # answer, so the answer comes first.
+        if self._approval is not None and self._approval.pending:
+            return
         self._choosing = True
         self.run_worker(self._choose_subagent(), group="watch", exit_on_error=False)
 
@@ -1362,9 +1375,27 @@ class SlifeApp(App[None]):
             self.query_one(HistoryInput).focus()
             if choice is None:
                 return  # cancelled — the picker's own line is the whole answer
+
+            def show_window(_result: None) -> None:
+                """The watch is gone; put a pending question back in front."""
+                # The refresh is what makes this run after the screen has
+                # actually gone: during the dismissal it is still the app's
+                # current one.
+                self.call_after_refresh(self._rehome_approval)
+
             self.push_screen(
-                WatchScreen(choice, lambda: self._watch_client_factory(choice))
+                WatchScreen(choice, lambda: self._watch_client_factory(choice)),
+                # **A question the watch was covering comes back with the
+                # window.**  The row was mounted on the watch screen (it is the
+                # one in front), so dismissing that screen takes it; the turn is
+                # still parked on the same future and the row is mounted again
+                # on the window's transcript (`_rehome_approval`).
+                show_window,
             )
+            # **And a question that arrived while the picker was open follows
+            # the screen** — the one race the guard above cannot cover, since
+            # the request landed after the key did.
+            self.call_after_refresh(self._rehome_approval)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
@@ -1380,20 +1411,68 @@ class SlifeApp(App[None]):
         very pump that has to deliver the `y` or the `Esc` that gives it.  The
         answer is awaited by a worker instead.
 
+        **The row goes on the screen in front, not the window's own.**  With a
+        watch screen up the default transcript is hidden, so a row mounted there
+        asks a question nobody can see and parks the turn until the watch closes
+        — `_active_transcript` is the same answer the scroll keys use.  The
+        answer is the app's (`action_approve_request`), so it works wherever the
+        row was drawn; what the row adds is that there *is* something to answer.
+
         **One at a time, structurally.**  The loop runs a batch's calls one after
         another and waits on each answer before the next, so two prompts cannot
         arrive together — no lock is needed, because the shape of the loop is
         the guarantee.
         """
         future: asyncio.Future[bool] = asyncio.Future()
-        prompt = self._transcript.add_approval(ApprovalPrompt(name, arguments, future))
-        self._approval = prompt
-        prompt.focus()
+        self._approval_question = (name, dict(arguments), future)
+        self._mount_approval()
         self.run_worker(
             self._finish_approval(call_id, future),
             group="approval",
             exit_on_error=False,
         )
+
+    def _mount_approval(self) -> None:
+        """Mount the pending question on the transcript in front, and focus it.
+
+        **A row being re-homed is removed from where it was.**  The question is
+        one, and two widgets showing it would leave a stale row `pending` for
+        ever on the screen it was first drawn on — the state the re-home exists
+        to end.  The old widget cannot answer anything on its own: the verdict
+        is the future, and the new row is handed the same one.
+        """
+        assert self._approval_question is not None
+        name, arguments, future = self._approval_question
+        previous = self._approval
+        if previous is not None and previous.is_mounted:
+            previous.remove()
+        prompt = self._active_transcript().add_approval(
+            ApprovalPrompt(name, arguments, future)
+        )
+        self._approval = prompt
+        prompt.focus()
+
+    def _rehome_approval(self) -> None:
+        """Put a still-pending question back on the screen that is showing.
+
+        **A watch screen closing takes the row with it.**  The turn is parked on
+        the same future, so the question is not lost — but a row that vanished
+        with the screen it was drawn on leaves the person with nothing to
+        answer, which is the state this re-mount is here to end.  A decided
+        question is not re-mounted: its verdict has been given and its row
+        stays the status line it became.
+
+        Called after the refresh that finishes a dismissal, because during the
+        dismissal callback the outgoing screen is still the app's current one.
+        """
+        if self._approval_question is None:
+            return
+        prompt = self._approval
+        if prompt is not None and not prompt.pending:
+            return
+        if prompt is not None and prompt in list(self.screen.query(ApprovalPrompt)):
+            return
+        self._mount_approval()
 
     async def _finish_approval(
         self, call_id: str, future: asyncio.Future[bool]
@@ -1406,10 +1485,15 @@ class SlifeApp(App[None]):
         """
         approved = await future
         self._approval = None
-        # The prompt takes the focus back, whether or not anything was approved:
-        # the row had it while it asked, and what the person did before `y` was
-        # type.
-        self.query_one(HistoryInput).focus()
+        self._approval_question = None
+        # The prompt takes the focus back, whether or not anything was approved,
+        # when the screen in front has a draft to take it: what the person did
+        # before `y` was type.  A watch screen has none — a subagent has no
+        # prompt — and taking focus to the hidden window's draft would leave
+        # the watched view unable to receive the keys its own bindings carry.
+        draft = self._active_transcript().screen.query_one_optional(HistoryInput)
+        if draft is not None:
+            draft.focus()
         assert self._client is not None
         try:
             await self._require_connected()

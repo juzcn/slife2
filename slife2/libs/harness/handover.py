@@ -277,12 +277,26 @@ class DeliveryFailed(RuntimeError):
 
     It carries the agent and the reason, since those are what a caller logs or
     records — not the words, which are the conversation's business.
+
+    **`unknown` is the difference between "not delivered" and "cannot tell".**
+    A refusal proves nothing was written (`submit_to` saw the terminal answer),
+    while a call that did not come back may already have put the words in the
+    conversation.  Both are failures a caller must not carry on past, but a
+    caller that records an outcome must not record the second as the first: a
+    peer told `rejected` for a message its conversation took has been lied to,
+    and its later answer is refused because the task is already terminal.  So
+    the flag is here rather than a second exception type — the difference is one
+    fact about the same failure, not a different failure.
     """
 
-    def __init__(self, agent: str, reason: str) -> None:
+    def __init__(self, agent: str, reason: str, *, unknown: bool = False) -> None:
         super().__init__(f"{agent}'s conversation could not be reached: {reason}")
         self.agent = agent
         self.reason = reason
+        #: Whether the words may already be in the conversation.  True for a
+        #: call that did not come back; False for a refusal, which proves it
+        #: did not.
+        self.unknown = unknown
 
 
 async def hand_over(
@@ -321,11 +335,14 @@ async def hand_over(
             # come back says nothing either way — so this is not repeated, and
             # the count is logged rather than the words: the words are the
             # conversation's business and the log's line is only "this much of it
-            # went nowhere we can prove".
+            # went nowhere we can prove".  `unknown` carries the same fact to a
+            # caller that records an outcome: it is the one failure here that may
+            # have landed, so it must not be reported as a refusal.
             raise DeliveryFailed(
                 agent,
                 f"the hand-over did not come back, so it ({len(text)} characters) "
                 f"was not repeated",
+                unknown=True,
             )
         if attempt < _T.timeouts.stream.handover:
             await asyncio.sleep(_T.timeouts.pacing.reconnect)

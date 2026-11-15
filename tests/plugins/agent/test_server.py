@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import socket
 import sqlite3
 from collections import deque
@@ -76,6 +77,7 @@ from slife2.libs.turn.events import (
     TurnFinished,
     decode,
 )
+from slife2.libs.turn.loop import DENIED
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.libs.turn.tools import INTERRUPTED
 from slife2.libs.turn.watch import (
@@ -3718,19 +3720,17 @@ async def test_a_broken_observer_does_not_lose_the_message(
 
 
 @pytest.mark.asyncio
-async def test_a_broken_observer_does_not_kill_an_approval_request(
-    context, hub, monkeypatch
+async def test_an_approval_request_that_cannot_be_written_refuses_the_call(
+    context, hub, monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The other server-side raise: the `_approve` request, from inside the turn.
+    """**A request nobody was told about is a call nobody may wait for.**
 
-    The request is announced to whoever is watching before the turn waits for the
-    answer, and a broken stream throws from that announcement.  Left to
-    propagate it would kill the very turn that is waiting for the answer — a tool
-    call the model is entitled to make, refused because a *display* failed —
-    where the same observer failing on a `TextDelta` is swallowed.  Routed through
-    `AgentLoop._emit`, the request is still registered in `loop.approvals`, so an
-    answer arriving by the ordinary route (`answer_approval`) is taken and the
-    turn runs on.
+    The request is announced to whoever is watching before the turn waits for
+    the answer, and a broken stream throws from that announcement.  Swallowing
+    the throw protected the turn but left it parked on a future no client saw:
+    the approval had no deadline, so that turn never ended.  The emission's
+    answer is read now — a request that could not be written, or one not
+    answered within `deliver.approval`, refuses the call and the turn runs on.
     """
     from slife2.plugins.agent import server as server_module
 
@@ -3741,6 +3741,7 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
             raise RuntimeError("the progress stream is closed")
 
     monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent.server")
 
     backend = FakeBackend(
         ScriptedTurn(
@@ -3759,25 +3760,29 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    turn = asyncio.create_task(send(server, "one", watched=True))
-    await wait_for_streams(backend)
-    # Answer the request the way a watching client does: a call of its own.  The
-    # announcement never reached anyone (the observer is broken), so the test
-    # polls for the future to exist — which is itself the claim, since it is the
-    # emit that threw before.
-    async with Client(server) as client:
-        for _ in range(500):
-            answer = await client.call_tool(
-                "answer_approval",
-                {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
-            )
-            if answer.data["answered"]:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("the approval request never reached the loop")
+    # **Bounded, because the way this fails is a turn that never ends.**  The
+    # turn is watched, so it asks; the stream is broken, so nobody can answer.
+    turn = await asyncio.wait_for(
+        send(server, "one", watched=True),
+        timeout=_T.timeouts.deliver.approval,  # timeouts: the defect was having no bound
+    )
+    assert turn.data["text"] == "done"
 
-    assert (await turn).data["text"] == "done"
+    # The model was told the call was refused, so the turn is a model's answer
+    # and not a hang; and nothing is left waiting for an answer that would now
+    # be late.
+    assert any(DENIED in line for line in prompts_seen(backend, 1)), (
+        "the unemitted approval did not refuse the call"
+    )
+    assert any(
+        "could not be written" in record.getMessage() for record in caplog.records
+    )
+    async with Client(server) as client:
+        answer = await client.call_tool(
+            "answer_approval",
+            {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
+        )
+    assert answer.data["answered"] is False, "a future was left waiting"
 
 
 @pytest.mark.asyncio
@@ -4192,6 +4197,12 @@ async def test_removing_a_subagent_mid_turn_is_refused(
     `subagent.yaml`, so the name is blocked for `subagent_set` and untouchable
     for `subagent_remove` for ever.  The wait is short: a turn parked on an
     approval is one to come back to, not to wait out.
+
+    **And the refusal comes before the network is told.**  The mesh place used
+    to be given up first, so a turn that outlasted `grace.turn` made this call
+    refuse after the place was gone: the subagent was alive but unreachable
+    until the removal was retried.  The recorder proves the order — no `forget`
+    reached it while the removal was refused.
     """
     monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
     backend = FakeBackend(
@@ -4201,23 +4212,43 @@ async def test_removing_a_subagent_mid_turn_is_refused(
             delay=0.2,  # timeouts: the value this test is built around, not a budget
         )
     )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await set_subagent(server, "researcher")
-    turn = asyncio.create_task(send(server, "one", subagent="researcher"))
-    for _ in range(200):
-        if backend.calls:
-            break
-        await asyncio.sleep(0.01)
+    told: list[dict[str, Any]] = []
+    mcp: FastMCP = FastMCP("mesh")
 
-    with pytest.raises(ToolError, match="still running a turn"):
-        await remove_subagent(server, "researcher")
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        told.append({"agent": agent, "subagent": subagent})
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
 
-    assert subagent_of(DEFAULT_AGENT, "researcher").exists(), "nothing was deleted"
-    await turn
-    done = await remove_subagent(server, "researcher")
-    assert done.data["removed"] is True
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=backend,
+            mesh_client=mesh,
+        )
+        await set_subagent(server, "researcher")
+        turn = asyncio.create_task(send(server, "one", subagent="researcher"))
+        for _ in range(200):
+            if backend.calls:
+                break
+            await asyncio.sleep(0.01)
+
+        with pytest.raises(ToolError, match="still running a turn"):
+            await remove_subagent(server, "researcher")
+        assert told == [], "the place on the network was given up by a refused removal"
+
+        assert subagent_of(DEFAULT_AGENT, "researcher").exists(), "nothing was deleted"
+        await turn
+        done = await remove_subagent(server, "researcher")
+        assert done.data["removed"] is True
+
+    assert told == [{"agent": DEFAULT_AGENT, "subagent": "researcher"}]
     assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
 

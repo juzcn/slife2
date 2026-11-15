@@ -666,10 +666,24 @@ def build_server(
             entry = record.to_listing()
             entry["similarity"] = similarity
             entries.append(entry)
+        # **Word evidence comes from the keyword leg, not from a missing
+        # score.**  A hit found by both legs carries the meaning score, so a
+        # page whose every hit really does contain the words has no `None`
+        # similarity — and reporting `confidence: none` for an exact match
+        # hides the one certain fact the page has.  The page's own ids are what
+        # is asked about: evidence outside the page is not evidence about it.
+        worded = bool(
+            words
+            and await off_loop(
+                store.matched_words,
+                query,
+                [entry["turn_id"] for entry in entries],
+            )
+        )
         return search_answer(
             entries,
             scores=[entry["similarity"] for entry in entries],
-            worded=any(entry["similarity"] is None for entry in entries),
+            worded=worded,
             limit=page_limit(limit),
         )
 

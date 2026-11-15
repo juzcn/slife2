@@ -536,6 +536,41 @@ def test_a_recreated_file_that_reuses_its_identity_is_still_rebuilt(
     assert store.count() == 0, "the replacement is rebuilt despite the same pair"
 
 
+def test_a_catalogue_copied_over_the_live_path_is_rebuilt(tmp_path) -> None:
+    """**`cp` keeps the inode and the marker, so neither is an identity.**
+
+    A file from another build written over the live path presents the identity
+    pair this store recorded and the `application_id` it stamped — so the
+    file-identity check waved it through and every write its schema rejected
+    failed the tool list, one row at a time.  The `tool` table's shape is what
+    actually decides whether a write is accepted, so the open check reads it
+    too (`_holds_our_file`, `_tool_table`).
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    path = tmp_path / "tools.db"
+    row_before = store.count()
+    assert row_before == 1
+
+    # The copy: same file (so the same device/inode), same marker, an older
+    # schema, and a row in it.
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE tool")
+        connection.execute(
+            "CREATE TABLE tool (name TEXT PRIMARY KEY, description TEXT)"
+        )
+        connection.execute("INSERT INTO tool (name, description) VALUES ('old', 'x')")
+        connection.execute("PRAGMA application_id = 0x534C4632")
+
+    assert store.count() == 0, (
+        "the stale schema was served: a row the old table held was still there"
+    )
+    # The rebuild is whole: this build's columns are back, and a write the old
+    # CHECK would have refused lands.
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    assert rows_in(store) == [("arxiv__search", STATUS_ENABLED, UNLOADED)]
+
+
 def test_a_catalogue_without_the_marker_is_adopted_rather_than_rebuilt(
     tmp_path,
 ) -> None:

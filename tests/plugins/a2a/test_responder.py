@@ -242,6 +242,95 @@ async def test_a_continuation_is_a_new_round_on_the_same_task(
 
 
 @pytest.mark.asyncio
+async def test_a_stray_task_response_does_not_publish_a_terminal_for_a_working_task(
+    mesh: A2AMesh, client: RecordingClient
+) -> None:
+    """**A response-typed frame is not the task's answer**, and it must not end
+    the task either.
+
+    The responder acknowledged one empty as `completed` whatever the id's own
+    state was.  For an id it was still working on, that `completed` went back to
+    the sender — and a requester that took it settles its send and forgets every
+    routing entry for the task, so the real artifact, when it came, had nowhere
+    to go.  A known id is answered with its own state now; only an id this
+    process never held gets the empty acknowledgment.
+    """
+    task_id = _new_task()
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "do it")))
+    await _until(lambda: client.sent, "the submitted ack")
+    assert mesh._inbound.get(task_id).state == "working"
+
+    before = len(client.sent)
+    await mesh._responder.dispatch(
+        client,
+        _message(
+            _send(task_id, "m2", "a stray answer", message_type="task_response"),
+            corr="corr-2",
+        ),
+    )
+
+    assert _states(client)[before:] == ["TASK_STATE_WORKING"], (
+        "a stray response-typed frame published a terminal for a working task"
+    )
+    assert mesh._inbound.get(task_id).state == "working"
+
+    # And the real round still settles, which is what the bogus terminal broke.
+    await _settle(mesh, task_id, "completed", "the real answer")
+    assert _states(client)[-2:] == [
+        "artifact:the real answer",
+        "TASK_STATE_COMPLETED",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_retried_task_response_does_not_settle_the_next_round(
+    mesh: A2AMesh, client: RecordingClient
+) -> None:
+    """**A client-level retry is the same call re-sent**, not a new answer.
+
+    Round one ends `input_required`; the peer continues the task and round two's
+    bridge is waiting.  A retried `task_response` — same task id, same outcome,
+    same words — matches what settled round one exactly, and settling round two
+    with it would end a task the peer is still working through with the previous
+    round's answer.  The bridge is still open afterwards, so the model can give
+    the continuation its own answer.
+    """
+    task_id = _new_task()
+    handed: list[tuple[str, str, str, str]] = []
+    mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
+        (source, content, tid, kind)
+    )
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "翻译")))
+    await _settle(mesh, task_id, "input_required", "简体还是繁体?")
+
+    await mesh._responder.dispatch(
+        client,
+        _message(
+            _send(task_id, "m2", "简体", message_type="task_input"),
+            corr="corr-2",
+        ),
+    )
+    await _until(
+        lambda: (
+            len(handed) == 2
+            and mesh._responder._completion.get(task_id) is not None
+            and mesh._responder._completion[task_id].serial == 2
+        ),
+        "the continuation's bridge",
+    )
+
+    refused = mesh.task_response(task_id, "input_required", "简体还是繁体?")
+    assert "earlier round" in refused
+    assert mesh._responder._completion[task_id].outcome is None, (
+        "the retried answer settled the continuation's round"
+    )
+
+    assert mesh.task_response(task_id, "completed", "译文") == "ok"
+    await asyncio.sleep(0.01)
+    assert _states(client)[-2:] == ["artifact:译文", "TASK_STATE_COMPLETED"]
+
+
+@pytest.mark.asyncio
 async def test_a_retry_with_the_same_message_id_replays_working(
     mesh: A2AMesh, client: RecordingClient
 ) -> None:

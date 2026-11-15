@@ -1495,6 +1495,33 @@ class TurnStore:
             (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
         ]
 
+    async def matched_words(self, query: str, turn_ids: Sequence[int]) -> set[int]:
+        """Which of *turn_ids* the keyword leg finds for *query*.
+
+        **Word evidence is not the absence of a similarity.**  A turn found by
+        both legs keeps the meaning score, so a page whose every hit was found
+        by words *and* meaning has no `None` similarity — and a caller that read
+        only that reported `confidence: none` for an exact match.  This asks the
+        leg itself, over the page it returned: which is the only answer that is
+        about the words rather than about which list a hit survived.
+
+        Raises `textindex.EmptyQuery` when the query has no term; the caller
+        has already dropped words that carry none (`turn_search`).
+        """
+        expression = textindex.match_expression(query)
+        wanted = normalise_ids(turn_ids)
+        found: set[int] = set()
+        with self._connect() as connection:
+            for start in range(0, len(wanted), MAX_SQL_VARS):
+                chunk = wanted[start : start + MAX_SQL_VARS]
+                rows = connection.execute(
+                    "SELECT f.rowid AS turn_id FROM turn_fts f"
+                    f" WHERE turn_fts MATCH ? AND f.rowid IN ({_marks(chunk)})",
+                    (expression, *chunk),
+                ).fetchall()
+                found |= {int(row["turn_id"]) for row in rows}
+        return found
+
     def count(self) -> int:
         with self._connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM turn").fetchone()[0])

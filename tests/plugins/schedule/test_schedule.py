@@ -68,6 +68,7 @@ from slife2.plugins.schedule.server import (
     SCHEDULE_RUN_SKIP,
     SCHEDULE_RUNS,
     SCHEDULE_SET,
+    RunLocks,
     agent_task_name,
     build_server,
     due,
@@ -1020,6 +1021,63 @@ async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING, "the work in flight was closed"
     assert run.agent_task_id == f"agent-task:daily@{run.due_at}"
+
+
+async def test_a_run_lock_is_dropped_when_nobody_holds_it(tmp_path: Path) -> None:
+    """**One `asyncio.Lock` per task name ever used was a table that never shrank.**
+
+    The registry serves a process's whole life, so a task that was removed kept
+    its lock until a restart.  A lease is taken before the wait and given back
+    after the release, and the last one drops both entries: a caller holds or
+    waits for one, or nobody does — and nobody means there is nothing to keep.
+    """
+    locks = RunLocks()
+    store = SimpleNamespace(home=tmp_path, agent="jack")
+    key = (str(tmp_path.resolve()), "jack", "nightly")
+
+    async with RunLocks.held(locks, store, "nightly"):
+        assert key in locks._locks, "the held task has no lock"
+    assert locks._locks == {} and locks._leases == {}, (
+        "a released lock stayed in the table for the process's life"
+    )
+
+
+async def test_a_waiter_keeps_the_lock_its_holder_is_about_to_release(
+    tmp_path: Path,
+) -> None:
+    """**The lease is taken before the wait**, which is what makes pruning safe.
+
+    The holder releases first; a waiter already counted is what keeps the entry
+    alive for it, and both callers really do share one lock rather than each
+    getting a fresh one around a different critical section.
+    """
+    locks = RunLocks()
+    store = SimpleNamespace(home=tmp_path, agent="jack")
+    first_in, second_in, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    seen: dict[str, asyncio.Lock] = {}
+    key = (str(tmp_path.resolve()), "jack", "nightly")
+
+    async def holder(tag: str, inside: asyncio.Event) -> None:
+        async with RunLocks.held(locks, store, "nightly"):
+            seen[tag] = locks.for_task(store, "nightly")
+            inside.set()
+            await release.wait()
+
+    first = asyncio.create_task(holder("first", first_in))
+    await first_in.wait()
+    second = asyncio.create_task(holder("second", second_in))
+    for _ in range(100):
+        if locks._leases.get(key) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert not second_in.is_set(), "the second caller did not wait for the first"
+    assert locks._leases[key] == 2, "the waiter was not counted before its wait"
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert seen["first"] is seen["second"], "the two callers used different locks"
+    assert locks._locks == {} and locks._leases == {}
 
 
 async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(
