@@ -1105,13 +1105,19 @@ async def test_a_bare_message_is_marked_task_less(window: Window) -> None:
 async def test_a_peer_withdrawal_is_a_message_and_not_a_control_signal(
     window: Window,
 ) -> None:
-    """Only the model knows whether it is still working on that task."""
+    """Only the model knows whether it is still working on that task.
+
+    **The id rides the marker**, as it does on every task-shaped envelope: the
+    model reading the line has to be able to tell which of its tasks the
+    withdrawal names, or "stop working on it" has nothing to stop.
+    """
     session = wired(window=window)
     session.mesh.on_peer_cancel(TASK, PEER)
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
     assert a2a_message_type(text, REMOTE) == "cancel_task"
+    assert f'"task_id": "{TASK}"' in text, "the withdrawal did not name its task"
     assert "withdrew this task" in text
     assert window.handed[-1]["channel"] == f"peer_agent:{PEER}"
 
