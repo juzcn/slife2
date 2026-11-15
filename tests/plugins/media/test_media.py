@@ -262,6 +262,36 @@ async def test_a_long_transcript_is_answered_whole() -> None:
     assert "do not fit" not in answer
 
 
+@pytest.mark.asyncio
+async def test_a_transcript_can_be_written_to_a_named_file() -> None:
+    """The optional output path: the text is still the answer, and the file is a
+    copy the caller can hand to a person or another tool.
+    """
+    async with Client(server_for(Says("hello home"))) as client:
+        answer = await ask(
+            client, "transcribe_audio", path="a.wav", output="transcripts/meeting.txt"
+        )
+
+    assert answer == "hello home"
+    written = agent_dir("jack") / "media" / "transcripts" / "meeting.txt"
+    assert written.read_text(encoding="utf-8") == "hello home"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_cannot_be_written_outside_the_media_directory() -> None:
+    """**A model-written path is contained, like an artifact's folder.**  The
+    agent's home holds its turn log and cabinet; a transcript path is not a
+    write target anywhere in it.
+    """
+    async with Client(server_for(FakeAdapter())) as client:
+        answer = await refused(
+            client, "transcribe_audio", path="a.wav", output="../outside.txt"
+        )
+
+    assert "media directory" in answer
+    assert not (agent_dir("jack") / "outside.txt").exists()
+
+
 # --- the refusals -------------------------------------------------------------
 
 

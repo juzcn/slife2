@@ -647,7 +647,7 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
 - `text_to_speech`——把文本写成语音文件。
-- `transcribe_audio`——转写音频文件；长转写会存成 dump。
+- `transcribe_audio`——转写音频文件；`output` 可把 transcript 写进媒体目录，长转写会存成 dump。
 
 每个模型声明自己的用途：
 

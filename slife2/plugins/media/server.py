@@ -29,6 +29,7 @@ a new call.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -39,6 +40,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.helpers.fs import confined
 from slife2.libs.host.config import (
     MEDIA_SERVER_NAME,
     Config,
@@ -329,7 +331,9 @@ def build_server(
         return {"path": output}
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
-    async def transcribe_audio(path: str, model: str = "") -> str:
+    async def transcribe_audio(
+        ctx: Context, path: str, model: str = "", output: str = ""
+    ) -> str:
         """Write down what an audio file says, and answer the text.
 
         A transcript is a tool output like any other: if it is too large for
@@ -341,11 +345,14 @@ def build_server(
             path: The audio file, as a local path.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
+            output: A file path inside your media directory to write the
+                transcript to; it cannot leave that directory. Empty answers
+                the text only. A file already there is replaced.
         """
         if not path.strip():
             raise ToolError("no audio file was named — pass the path of the recording.")
         provider, entry = media.resolve("asr", model)
-        return await _run(
+        text = await _run(
             "transcript",
             lambda: media.adapter(provider).transcribe_audio(
                 model=entry.model,
@@ -355,6 +362,9 @@ def build_server(
                 extra_params=dict(entry.params),
             ),
         )
+        if output.strip():
+            await _write_transcript(ctx, output, text)
+        return text
 
     return mcp
 
@@ -389,6 +399,30 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
         raise ToolError(f"the {noun} call failed: {exc}") from exc
     except FileNotFoundError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def _write_transcript(ctx: Context, relative: str, text: str) -> None:
+    """Write a transcript to a path inside the caller's media directory.
+
+    **Contained, like an artifact's folder.**  The path is model-written, so it
+    is resolved and refused rather than rewritten; the media directory is the
+    one place an artifact of this plugin goes, and the rest of the agent's home
+    — its turn log included — is not a model-chosen write target.  An explicit
+    path replaces the file it names.
+    """
+    agent, subagent = conversation_of(ctx)
+    target = confined(media_dir(agent, subagent), relative)
+    if target is None:
+        raise ToolError(f"{relative!r} is not a file path inside your media directory")
+
+    def write() -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    try:
+        await asyncio.to_thread(write)
+    except OSError as exc:
+        raise ToolError(f"could not write {relative!r}: {exc}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:

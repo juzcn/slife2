@@ -738,7 +738,7 @@ The `media:` section provides four capabilities:
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
 - `text_to_speech` — write speech to an audio file.
-- `transcribe_audio` — transcribe an audio file; a long transcript is kept as a dump.
+- `transcribe_audio` — transcribe an audio file; `output` writes the transcript to a file in the media directory, and a long transcript is kept as a dump.
 
 Each model declares what it is for:
 
