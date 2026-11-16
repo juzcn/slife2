@@ -761,9 +761,9 @@ The `media:` section provides four capabilities:
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
 - `text_to_speech` — say `text`, or read a text file named in `input`, into an audio file.
-- `transcribe_audio` — transcribe the audio file named in `input`; `output` writes the transcript to the path you name (a relative path is relative to your working directory) and answers that path, while without `output` the transcript is the answer and a long one is kept as a dump.
+- `transcribe_audio` — transcribe the audio file named in `input`; `output` writes the transcript to the path you name (a relative path is relative to this conversation's work directory) and answers that path, while without `output` the transcript is the answer and a long one is kept as a dump.
 
-Each generation tool writes into the agent's media directory by default; `output` names the file instead (a relative path is relative to the working directory). Every tool answers with the file's path as text, or — for `transcribe_audio` without `output` — the transcript.
+Each generation tool writes into the agent's media directory by default; `output` names the file instead (a relative path is relative to this conversation's work directory). Every tool answers with the file's path as text, or — for `transcribe_audio` without `output` — the transcript.
 
 Each model declares what it is for:
 
@@ -790,7 +790,7 @@ does not support the requested kind is refused.
 
 Generated files are written under `<data>/agents/<agent>/media/` by default. Each
 generation tool also takes an `output` path: a relative one is relative to the
-agent's working directory, an absolute one is used as written, and the artifact
+conversation's work directory, an absolute one is used as written, and the artifact
 is written there instead. A long-running video call that exceeds its timeout is
 refused with the provider's job id rather than its result.
 

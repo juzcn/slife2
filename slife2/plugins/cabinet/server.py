@@ -2644,10 +2644,14 @@ def _diary_key(value: str) -> str:
     """
     day = value.strip() or _today()
     try:
-        _day(day)
+        parsed = _day(day)
     except ValueError as exc:
         raise ToolError(f"{day!r} is not a date — write it as `YYYY-MM-DD`.") from exc
-    return day
+    # **The key is the canonical spelling, not the caller's.**  `fromisoformat`
+    # accepts `20260105`, `2026-W02-1` and `2026W021` as the same day, and
+    # returning the argument made each of them a separate diary row — one day
+    # in two documents, and rows that sort outside the `YYYY-MM-DD` order.
+    return parsed.isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:

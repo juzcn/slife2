@@ -141,7 +141,11 @@ def read(agent: str, subagent: str = "") -> list[PlanItem]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A `UnicodeDecodeError` is a `ValueError`, not an `OSError`, and it
+        # escaped this module's promise of a `PlanError` naming the path: a
+        # hand-edited file in another encoding failed the turn with the codec's
+        # complaint about a byte and no file.
         raise PlanError(f"{path}: {exc}") from exc
     try:
         document = statefile.reader().load(text)

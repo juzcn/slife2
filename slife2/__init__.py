@@ -42,7 +42,8 @@ agent task instead, and the task's delivered message is the answer.
 
 `--help` lists the options, and the flags may be written before or after the
 command.  `--data-dir` is the one worth knowing about on its own: it decides
-which config, which runtime state and which databases everything else reads.
+which home everything reads — its config, agents, skills, jobs and databases.
+The runtime directory (records, locks, logs) is machine-wide and not under it.
 
 `--lang` is the window's language, and **the window's only** (`slife2.tui.i18n`):
 the model never reads a translated string, the logs stay English whatever the
@@ -406,7 +407,7 @@ def _ensure(config: Config, config_path) -> int:
                 "running  -> ",
                 outcome.spec.name,
                 outcome.spec.url,
-                "reusing",
+                f"reusing ({outcome.detail})" if outcome.detail else "reusing",
                 outcome.seconds,
             )
         else:
@@ -474,6 +475,7 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
     is still a traceback rather than a start-up message about the catalogue.
     """
     from fastmcp.exceptions import ToolError
+    from mcp.shared.exceptions import MCPError
 
     from slife2.libs.host.launcher import open_catalogue
     from slife2.libs.host.paths import catalogue_db
@@ -481,11 +483,13 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
     started = time.monotonic()
     try:
         counts = open_catalogue(config)
-    except (ConnectionError, ToolError) as exc:
+    except (ConnectionError, ToolError, MCPError) as exc:
         # A `ConnectionError` is a hub that could not be reached or read; a
         # `ToolError` is the hub refusing the call — the home named by this
         # instance is not a path on the machine that would serve it (a Windows
-        # client attached to a WSL server, say).  Both are start-up answers, not
+        # client attached to a WSL server, say); an `MCPError` is the MCP
+        # client's own timeout or JSON-RPC failure, which the run budget can
+        # produce on a cold catalogue.  All three are start-up answers, not
         # tracebacks; the message names the fix.
         print(f"slife2: the tool catalogue could not be built: {exc}", file=sys.stderr)
         return None
@@ -562,13 +566,13 @@ def control_url(config: Config) -> str:
 
 
 def task_url(config: Config) -> str:
-    """Where the window lists and watches agent tasks, or `""` for not there.
+    """Where the window lists and watches agent tasks, or `""` when absent.
 
-    **A config with no agent-task server has no tasks to watch**, and that is
-    the absence this answers rather than an error: the plugin is an optional
-    `servers:` row, and a window whose machine does not run it should still
-    offer its subagents under `Ctrl+O`.  The empty string is what the app reads
-    as "do not ask", the same way `mesh_url`'s empty is "not on the mesh".
+    **The config loader seeds every plugin's `servers:` row**, so a loaded
+    config always has one; the empty answer is for a hand-built `Config` (a
+    test, an embedding) and is what the app reads as "do not ask", the same way
+    `mesh_url`'s empty is "not on the mesh".  The window still offers its
+    subagents under `Ctrl+O` when there is no task server to ask.
     """
     try:
         return config.server("agent-task").url
@@ -616,6 +620,30 @@ def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     return f"{name}/{model.model}", model
 
 
+def _broker_settings(config: Config) -> list[Any]:
+    """Every broker this config says it is on, one per address.
+
+    **Both networks may be configured, and each has its own address.**  The
+    local server starts `subagent.network`'s broker; reading only `peer_agent`
+    here left a local-only config's broker invisible to `status`, `down` and
+    `logs`.  The same address named by both sections is one broker, so it is
+    returned once.
+    """
+    from slife2.plugins.a2a.broker import log_url
+
+    found: list[Any] = []
+    seen: set[str] = set()
+    for settings in (config.peer_agent, config.subagent.network):
+        if not settings.configured:
+            continue
+        url = log_url(settings)
+        if url in seen:
+            continue
+        seen.add(url)
+        found.append(settings)
+    return found
+
+
 def _broker_status(config: Config) -> dict[str, Any] | None:
     """The A2A broker's row, or `None` when the config is not on the mesh.
 
@@ -623,7 +651,8 @@ def _broker_status(config: Config) -> dict[str, Any] | None:
     cannot see it.  It is read the way `down` reads it: a record proves the
     process is ours, and a port that answers proves there is a broker at all.
     """
-    if not config.peer_agent.configured:
+    brokers = _broker_settings(config)
+    if not brokers:
         return None
     from slife2.libs.host.runtime import (
         log_path,
@@ -633,7 +662,7 @@ def _broker_status(config: Config) -> dict[str, Any] | None:
     )
     from slife2.plugins.a2a.broker import BROKER_NAME, log_url
 
-    settings = config.peer_agent
+    settings = brokers[0]
     url = log_url(settings)
     listening = tcp_listening(settings.broker_host, settings.broker_port)
     record = read_record(url)
@@ -733,14 +762,15 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     return 0
 
 
-def _down(config: Config, *, force: bool = False) -> int:
+def _down(config: Config, *, force: bool = False, everything: bool = False) -> int:
     """Stop the servers this config names, and the broker.
 
     **A stop is not a broadcast.**  The servers are shared, so another live
     client is another conversation with a turn in flight; `down` refuses while
     one exists and asks for `--force`.  The last client out reaches here with
     `others_running()` already empty, which is why the normal exit path needs no
-    flag.
+    flag — and passes `everything=True`, because "the last client" is the
+    *machine's*, and a daemon another config started is still one to stop.
     """
     from slife2.libs.host.launcher import Status, others_running, stop
 
@@ -758,7 +788,7 @@ def _down(config: Config, *, force: bool = False) -> int:
             )
         return 2
 
-    outcomes = list(stop(config))
+    outcomes = list(stop(config, everything=everything))
     failed = False
     anything = False
     for outcome in outcomes:
@@ -768,6 +798,12 @@ def _down(config: Config, *, force: bool = False) -> int:
                 "", outcome.spec.name, outcome.spec.url, outcome.detail or "stopped"
             )
         elif outcome.status is not Status.NOT_RUNNING:
+            # **Anything reported is something running** — failed to stop,
+            # running but not ours, in conflict — so "nothing running" after
+            # these lines would contradict the line above it.  The flag used to
+            # be set by STOPPED alone, and a `down` that could not stop a
+            # server ended by telling the operator nothing was there.
+            anything = True
             _report(
                 "",
                 outcome.spec.name,
@@ -785,14 +821,31 @@ def _down(config: Config, *, force: bool = False) -> int:
     # what keeps a broker *slife2 did not start* out of it: no record, no
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
-    if config.peer_agent.configured:
-        from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
-        from slife2.plugins.a2a.broker import stop as stop_broker
+    from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
+    from slife2.plugins.a2a.broker import stop as stop_broker
+    from slife2.plugins.a2a.broker import stop_url as stop_broker_url
 
-        said = stop_broker(config.peer_agent)
+    targets: list[tuple[str, Any | None]] = [
+        (log_url(settings), settings) for settings in _broker_settings(config)
+    ]
+    if everything:
+        # **The broker records are the machine's list too.**  A last client whose
+        # own config is not on a mesh must still stop a broker another config
+        # started; one left running is an orphan at a port the next start
+        # adopts without owning.
+        from slife2.libs.host.runtime import records
+
+        known = {url for url, _settings in targets}
+        targets += [
+            (record.url, None)
+            for record in records()
+            if record.url.startswith("mqtt://") and record.url not in known
+        ]
+    for url, settings in targets:
+        said = stop_broker(settings) if settings is not None else stop_broker_url(url)
         if said:
             anything = True
-            _report("", BROKER_NAME, log_url(config.peer_agent), said)
+            _report("", BROKER_NAME, url, said)
             if stop_failed(said):
                 failed = True
     if not anything:
@@ -820,11 +873,15 @@ def _log_targets(
         targets.append(
             (spec.name, spec.url, log_path(spec.url), tuple(sorted(aliases)))
         )
-    if config.peer_agent.configured:
-        from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+    from slife2.plugins.a2a.broker import BROKER_NAME, log_url
 
-        url = log_url(config.peer_agent)
-        targets.append((BROKER_NAME, url, log_path(url), (BROKER_NAME, "broker")))
+    for index, settings in enumerate(_broker_settings(config)):
+        url = log_url(settings)
+        # The first broker also owns the bare word `broker`; a second one is
+        # addressed by its name, which `_log_target` then reports as ambiguous
+        # when both configured — the honest answer for a word with two logs.
+        aliases = (BROKER_NAME, "broker") if index == 0 else (BROKER_NAME,)
+        targets.append((BROKER_NAME, url, log_path(url), aliases))
     return targets
 
 
@@ -958,6 +1015,18 @@ def _probe(
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `slife2` console script."""
+    # **UTF-8 on both streams, whatever the console codepage is.**  A redirect
+    # on Windows uses the locale encoding strictly, and `slife2 logs` reads with
+    # `errors="replace"`: one undecodable byte in a log becomes U+FFFD, which is
+    # unencodable in cp936 and cp1252, so the command a person redirects to a
+    # file died with a `UnicodeEncodeError`.  The daemons already get
+    # `PYTHONIOENCODING=utf-8`; this is the same answer for the CLI itself.
+    for stream in (sys.stdout, sys.stderr):
+        # `getattr` because a test may hand us a stream that is not a
+        # `TextIOWrapper`, and `reconfigure` is the text layer's option.
+        configure = getattr(stream, "reconfigure", None)
+        if configure is not None:
+            configure(encoding="utf-8", errors="replace")
     # **Before any loop is made**, because every command may make one and none
     # of them owns the Windows Proactor's close: `probe` and `_open_catalogue`
     # each run their own `asyncio.run`, and the window's loop is Textual's.
@@ -982,6 +1051,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = find_config_path()
         config: Config = load()
+        if args.a2a_broker and not config.peer_agent.configured:
+            # **The flag cannot make a mesh**, because the section's presence is
+            # the switch (`A2ASettings`).  Refused here, against the file this
+            # command was told to read, rather than in the loader — a shared
+            # daemon loads other homes' files too, where the process-wide env
+            # var must not turn into a refusal of a config it does not describe.
+            print(
+                f"slife2: --a2a-broker {args.a2a_broker} names a broker to use, "
+                f"but this machine is not on the peer network: there is no "
+                f"`peer_agent:` section in {config_path}",
+                file=sys.stderr,
+            )
+            return 2
 
         # **`status`, `down` and `logs` run before the model is resolved.**
         # They are what an operator runs to recover from a stale `default:`;
@@ -1117,5 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
         # that was killed — and so never deregistered — cannot keep them alive.
         if claimed and not args.keep_servers and not others_running():
             print("  last instance out; stopping the shared servers")
-            _down(config)
+            # **`everything` is what "the shared servers" means.**  This is the
+            # machine's last client, not this config's: a backend another
+            # config started is still a daemon with nobody left to stop it.
+            _down(config, everything=True)
     return code

@@ -325,3 +325,37 @@ async def test_a_misspelled_job_suggests_the_one_it_meant(
     assert called.data["ok"] is False
     assert "did you mean" in called.data["text"]
     assert "slugify" in called.data["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_exits_at_import_is_refused(isolated_runtime: Path) -> None:
+    """**`sys.exit()` is a failed job, not a failed server.**  `SystemExit` is a
+    `BaseException`; it escaped the loader's `except Exception`, so `job_set`
+    never reached its rollback and `scan_jobs_dir` could take the jobs plugin —
+    a required hub upstream — down for every home.
+    """
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "job_set", {"name": "oops", "code": "import sys\nsys.exit(0)\n"}
+            )
+        listed = await ask(client, "job_list")
+
+    assert listed["jobs"] == []
+    assert not (isolated_runtime / "jobs" / "oops.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_exits_when_called_answers_a_failure(
+    isolated_runtime: Path,
+) -> None:
+    config_on_disk(isolated_runtime)
+    code = (
+        'def bail() -> str:\n    """Exit only this job."""\n    raise SystemExit(3)\n'
+    )
+    async with Client(build_server(load())) as client:
+        await ask(client, "job_set", name="bail", code=code)
+        answer = await ask(client, "job_run", name="bail", arguments={})
+
+    assert answer["text"].startswith("SystemExit")

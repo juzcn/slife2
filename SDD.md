@@ -230,7 +230,8 @@ those, and the loop does not know where they come from.
   the same protocol share a model server.
 - **Shared servers.** Every server is machine-wide infrastructure. A second
   slife2 instance attaches to the running servers rather than starting a second
-  set. The last client to exit stops the running servers, unless
+  set. The last client to exit stops every server record on the machine —
+  including a model backend another configuration started — unless
   `--keep-servers` is used.
 - **One mesh per agent.** The peer network and the subagent network are separate
   namespaces, but each agent has one MQTT identity per network.
@@ -559,15 +560,20 @@ not a silent reset.
 `--a2a-broker HOST:PORT` overrides `peer_agent.broker` for one run, through the
 environment so a server started by this command reads the same address. It
 overrides the address only; `org`/`unit` remain the file's, and it cannot enable
-a network whose section is absent. If the A2A server is already running, the
-flag is refused rather than silently ignored.
+a network whose section is absent — the command that owns the flag refuses it
+against its own config. The *loader* leaves the override alone for a file with
+no section, because the environment is process-wide and a shared daemon loads
+other homes' configs. If the A2A server is already running, the flag is refused
+rather than silently ignored.
 
 ### 4.2 Shared servers and launcher
 
 `libs/host/launcher.py` starts the servers a configuration needs and attaches to
 those already running. Servers are daemons: a client exiting never stops one,
-but the last client out does. `others_running` counts by process liveness, so a
-killed client cannot keep the stack alive.
+but the last client out does — and it stops the *machine's* records, not only
+the exiting config's endpoints, because a backend another configuration started
+is still a daemon with nobody left to stop it. `others_running` counts by
+process liveness, so a killed client cannot keep the stack alive.
 
 The lifecycle rules are:
 
@@ -2346,7 +2352,10 @@ named; both are gone.
 A present but invalid section is refused by name at load: an unknown provider, an
 unknown `api`, a port that is not a port, a `servers:` host that is not a host or
 not loopback, or a switch written as anything other than `true` or `false`
-(YAML 1.2 made `no` and `off` plain strings).
+(YAML 1.2 made `no` and `off` plain strings). **A key no reader takes is refused
+too**, including in the hand-written sections: a misspelt `max_iterations`
+loaded as "no cap", and a silent ignore is the one behaviour the loader's own
+error class says it must not have.
 
 **Loopback is the security boundary, and it is a check.** Every plugin is
 unauthenticated Streamable HTTP, so `servers.<name>.host` takes `localhost` or a
@@ -2750,7 +2759,47 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-None.
+Each is verified against the code and, where reachability allows, reproduced.
+None blocks the shipped flows; each is a state the design has not closed.
+
+- **An agent task's conversation id aliases the maker's live loop.**
+  `agent_task` calls the hub as `(agent, "")`, and agent-server tools resolve a
+  conversation's loop by that id alone. A task that calls `attach_image`
+  attaches to the *maker's* next model call and tells the task it can see the
+  picture; `_check_new_input` called from a task can take a message queued for
+  the maker's turn. The task's own message list never receives either.
+- **`turn_summarize` without an id inside an agent task.** The tool answers
+  `captured` and writes nothing at the save point — and a task records no turn,
+  so the annotation has no row to land on. An explicit earlier `turn_id` works.
+- **A rebuild's non-writing exits do not compare with the store.** The
+  `no_decision` and `context_sufficient` branches return the caller's snapshot
+  without reading the live-context list, and the compare-and-set only runs on
+  the write path. A render or reset from another process in that window leaves
+  the loop's list ahead of the store until its next rebuild.
+- **A member's `USED` taken during the mesh departure wait is dropped.** The
+  departure timer removes `USED` and disconnects without distinguishing a
+  holder that arrived after it started; a send accepted in that window is
+  cancelled or reported unreachable. The window is `pacing.mesh_departure`.
+- **An edited mesh address reaches new members only.** `mesh_for` reads the
+  section when a session is first built; an existing member keeps its broker
+  and namespace until a restart, while a member built later joins the new one.
+- **A watch can draw a finished turn twice.** `Tap.recorded_turn` is written
+  after the store's save answers, not atomically with it; a watcher whose
+  snapshot is read in that window sees the turn in both the snapshot and the
+  replay.
+- **An inherited file-tunnel URL does not share its tokens.**
+  `SLIFE2_FILE_TUNNEL_URL` makes the child publish through another process's
+  listener, but `Exposed` is per process: a token minted in the child is not in
+  the parent's map, so the parent answers 403 for it.
+- **`os.replace` on Windows while a reader holds the file.** The atomic-swap
+  writes used by `configfile`, `statefile` and the runtime can raise
+  `PermissionError` when another process has the destination open. A config
+  edit whose validation then fails can have its rollback refused too, leaving
+  the refused file on disk for the next start.
+- **A foreign model server's nulls are read as empties.** `StreamChatResult`
+  checks key presence, not value shape: `tool_calls: null`, `thinking: null`
+  and `usage: null` are accepted as no calls, no reasoning and zero tokens
+  rather than refused as an unreadable answer from another build.
 
 ### 14.2 Deferred capabilities
 

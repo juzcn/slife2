@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -30,6 +31,7 @@ from slife2.libs.host.config import (
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
 from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CANCEL,
     AGENT_TASK_CHANNEL,
     CANCELLED,
     FAILED,
@@ -47,6 +49,8 @@ from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_STATUS as STATUS,
 )
 from slife2.libs.store.db import message_text
+
+logger = logging.getLogger(__name__)
 
 #: The states in which a task has stopped without an answer to read.
 _ENDED = frozenset({FAILED, CANCELLED})
@@ -128,6 +132,12 @@ async def probe_tui(
     meta = conversation_meta(agent)
     task_server = None
     agent_server = None
+    #: **A probe that gives up still owns the work it started.**  The agent-task
+    #: server deliberately outlives its callers, so a timeout left a full agent
+    #: turn running — and later delivering an unsolicited `agent-task:probe-…`
+    #: message into the conversation the probe had already reported failed.
+    #: This is cleared on the one exit that has an answer.
+    cancel_task = False
     try:
         try:
             task_server = await open_server(
@@ -141,6 +151,7 @@ async def probe_tui(
                     START, {"name": name, "description": prompt}, meta=meta
                 )
             )
+            cancel_task = True
         except Exception as exc:  # noqa: BLE001 - the start is the whole gate
             raise ProbeError(f"the agent task could not be started: {exc}") from exc
 
@@ -187,6 +198,7 @@ async def probe_tui(
                 raise ProbeError("the agent server answered with no turn list")
             text = _answer(turns, task_id)
             if text is not None:
+                cancel_task = False
                 return ProbeResult(text=text, task_id=task_id)
             if loop.time() >= deadline:
                 if _unreadable_marker(turns):
@@ -201,6 +213,16 @@ async def probe_tui(
                 )
             await asyncio.sleep(_T.timeouts.pacing.probe_poll)
     finally:
+        if cancel_task and task_server is not None:
+            try:
+                await task_server.call_tool(
+                    AGENT_TASK_CANCEL, {"name": name}, meta=meta
+                )
+            except Exception as exc:  # noqa: BLE001 - the probe already failed
+                # The failure being reported is the probe's; a cancel that could
+                # not be sent is a line in the log, not a second exception that
+                # hides the first.
+                logger.debug("the probe's agent task could not be cancelled: %s", exc)
         if agent_server is not None:
             await close_server(agent_server)
         if task_server is not None:

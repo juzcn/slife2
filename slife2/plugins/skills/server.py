@@ -461,15 +461,25 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             if env is not None
             else None
         )
+        # **Replace the installed skill, whichever of its two names was used.**
+        # `skill_list` prints the frontmatter name, while a skill may live in a
+        # directory called something else (`find` accepts both because both are
+        # real).  Installing under the caller's string created a second
+        # directory: `find(name)` kept returning the first, so `skill_use` served
+        # the OLD document and the catalogue kept the old row while the call
+        # reported success.  Resolving first makes "replaced in one step" true.
+        wanted = name.strip()
+        existing = skills.find(wanted)
+        target = existing.directory.name if existing is not None else wanted
         try:
-            installed = skills.install(name.strip(), files)
+            installed = skills.install(target, files)
         except ValueError as exc:
             raise ToolError(f"{name!r} was not installed: {exc}") from exc
         except OSError as exc:
             raise ToolError(f"could not write {name!r}: {exc}") from exc
         if env is not None:
-            _write_env(name.strip(), env, supplied or {})
-        key = _key_for(name.strip(), skills.find(name.strip()), home_entries())
+            _write_env(target, env, supplied or {})
+        key = _key_for(target, skills.find(target), home_entries())
         current = home_entries().get(key)
         logger.info("skill_set name=%s dir=%s", name, installed)
         return {
@@ -575,16 +585,26 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         skill = skills.find(name.strip())
         if skill is None:
             raise ToolError(f"'{name}' is not installed — see `skill_list`.")
-        key = _key_for(name.strip(), skill, home_entries())
-        # **The entry first.**  It is the half a lock or an unreadable file can
-        # refuse, and a call that failed there must leave the folder for the
+        # **Every entry that can describe this skill goes.**  A skill answers to
+        # its frontmatter name and its directory name, and an operator may have
+        # written an entry under either (or both).  Removing only the
+        # `_key_for` winner left the other one behind — a `skills:` entry for a
+        # playbook nobody can read, which is the state this tool says it does
+        # not leave.
+        keys = sorted(
+            {key for key in (skill.name, skill.directory.name, name.strip()) if key}
+        )
+        # **The entries first.**  One is the half a lock or an unreadable file
+        # can refuse, and a call that failed there must leave the folder for the
         # next attempt; the folder is gone one step later and a retry of *it*
         # has nothing to find.
         try:
-            configfile.remove(SECTION, key)
+            for key in keys:
+                configfile.remove(SECTION, key)
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
-        homes.current().forgotten(key)
+        for key in keys:
+            homes.current().forgotten(key)
         try:
             # **The directory, not the name the caller used.**  `find` prefers
             # the frontmatter `name:`, which need not equal the folder's; the

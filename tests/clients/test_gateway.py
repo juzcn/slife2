@@ -868,3 +868,43 @@ def test_the_client_speaks_the_handshake_era() -> None:
     """
     client = gateway.make_client(server(), lambda _message: None)
     assert client.mode == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_a_shared_attempt_cancelled_by_management_does_not_cancel_the_waiter() -> (
+    None
+):
+    """**A reconfigure must not cancel somebody's tool call.**  `ready` waits on
+    one attempt every caller shares; `close` cancels it, and `asyncio.shield`
+    raises that cancellation in each waiter.  The waiter did not ask to stop, so
+    the answer is the unready link — while a waiter that *is* being cancelled
+    still propagates, which the second half asserts.
+    """
+    link = connection()
+    started = asyncio.Event()
+
+    async def hang() -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    link._attempt = asyncio.create_task(hang())
+    await started.wait()
+    reading = asyncio.create_task(link.ready())
+    await asyncio.sleep(0)
+    link._attempt.cancel()
+
+    assert await asyncio.wait_for(reading, 2) is False
+
+    link._attempt = asyncio.create_task(hang())
+    await started.wait()
+    reading = asyncio.create_task(link.ready())
+    await asyncio.sleep(0)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    assert link._attempt is not None
+    link._attempt.cancel()
+    try:
+        await link._attempt
+    except asyncio.CancelledError:
+        pass

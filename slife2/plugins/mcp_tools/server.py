@@ -258,8 +258,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled: True connects it; False stops it and keeps the entry.
 
         Returns:
-            The same payload `mcp_set` answers with: `name`, `enabled`, `state`,
-            and `tools` or `error` when the link has one of them.
+            `name`, `enabled`, `state`, and `tools` or `error` when the link has
+            one of them. Unlike `mcp_set` there is no `config`: this call changes
+            only the switch.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
 

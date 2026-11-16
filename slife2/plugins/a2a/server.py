@@ -204,28 +204,17 @@ MEMBER = "member"
 #: word the marker below opens with.
 CHANNEL = REMOTE.channel
 
-#: What the marker opens with.  A constant because the marker is *read* as well
-#: as written: stored text carries it into a transcript, and the window takes it
-#: back off by this string rather than by a second copy of the spelling.
-#:
-#: **Word-shaped, like every other name this build writes into a row.**
-#: Capitals are the convention for the *other* kind of bracket — `[TURN:{…}]`,
-#: which says "this is what the process knows about the conversation, not what
-#: was said" (`slife2.plugins.wechat.server`'s module docstring, SDD §5.5).
-#: This one *is* what was said: it goes into the turn's row and comes back out
-#: of it verbatim, so capitals would tell the model the opposite of the truth
-#: about it.  What is *not* renamed is anything that names
-#: the plugin — the `a2a` channel and its config key — because those are this
-#: plugin's own name rather than a word in somebody's conversation.
+#: The marker's spelling is `Net.marker`'s (`config.REMOTE`), and the window
+#: strips it from the same table rather than through a constant here: the name
+#: is written by `marker` below and read by `slife2.tui.widgets.MARKERS`.
 #:
 #: **`PeerAgent`, because `Agent` alone is the one word this marker must not
 #: say.**  Its `from` field is a peer and never the receiver, for the reason the
 #: marker's own docstring gives — receivers read the sender as themselves — and
-#: a name that says "an agent did this" reintroduces exactly
-#: that ambiguity on the line where the model is told who spoke.  `Peer` is what
-#: settles it, and it is the word the window's bubble uses too
+#: a name that says "an agent did this" reintroduces exactly that ambiguity on
+#: the line where the model is told who spoke.  `Peer` is what settles it, and
+#: it is the word the window's bubble uses too
 #: (`slife2.tui.widgets.channel_prefix`).
-MARKER_PREFIX = REMOTE.marker
 
 #: How many inbound messages may be waiting for a hand-over.  A peer flooding a
 #: conversation must not grow this process without limit.  Past the bound the
@@ -242,10 +231,6 @@ MAX_QUEUED = 500
 #: order.  It is not the agent server's constant because a plugin does not import
 #: another plugin's internals: 8 is the smaller number on purpose.
 MAX_MEMBER_TURNS = 8
-
-#: What a call that does not say which agent it is for is told.  A shared process
-#: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
-#: the agent's own name.
 
 
 def marker(
@@ -317,8 +302,8 @@ def peer_phrase(net: Net, peer: str) -> str:
 
     **`Peer` is the remote network's word and the subagent network's is nothing**,
     which is why this is a function rather than a hole in a template — the hole
-    would be empty.  The remote network needs the word for the reason
-    `MARKER_PREFIX` is `PeerAgent`: its `from` must not be read as the receiver.
+    would be empty.  The remote network needs the word for the reason its marker
+    is `PeerAgent`: its `from` must not be read as the receiver.
 
     On the subagent network the same sentence has two possible readers — a maker
     reading about one of its subagents, and a subagent reading about its maker or
@@ -1347,9 +1332,13 @@ def build_server(
         """This network's settings, as the config has them *now*.
 
         Read per use rather than once at build, which is `current`'s rule for
-        the model config and for the same reason: the section is a file an
-        operator edits, and a mesh that kept the address it started with would
-        be the one thing in this process that could not be corrected.
+        the model config: the section is a file an operator edits, and whether
+        this machine is on the network at all is a live answer.  The address a
+        member's mesh was **built** with is not re-read (`mesh_for` runs on the
+        session's first ask), so an edit reaches a member that has not been
+        built yet and a restart reaches the rest; two members of one network can
+        therefore be on two addresses until it.  SDD §14.1 records the
+        limitation rather than pretending the per-use read rebinds a live mesh.
         """
         return net_settings(live(), net)
 
@@ -1434,10 +1423,10 @@ def build_server(
         key = (home_key(where), agent, subagent)
         found = sessions.get(key)
         if found is None:
-            # Both of these resolve a home's own files — the mesh opens the
-            # member's ledger at `agents/<agent>/<ledger>`, or one level in for a
-            # subagent — so the home goes around the build rather than being read
-            # off whatever directory the daemon happens to be started in.
+            # Both of these resolve a home's own files — the member's groups
+            # file under `agents/`, one level in for a subagent — so the home
+            # goes around the build rather than being read off whatever
+            # directory the daemon happens to be started in.
             with in_home(where):
                 found = Session(
                     agent=agent,
@@ -1685,14 +1674,22 @@ def build_server(
             elif peer in membership(agent):
                 await connected(agent, MEMBER, peer)
 
-    def start_broker(config_now: Config) -> None:
-        """Bring the mesh's broker up, or refuse the start.
+    def start_broker(settings: A2ASettings) -> None:
+        """Bring **this network's** broker up, or refuse the start.
 
-        A machine whose config says `peer_agent:` has said it wants the mesh, so
-        an absent broker is a missing dependency rather than a preference.  One
-        that will not serve raises out of the lifespan — this plugin failing to
-        start, which is `slife2` refusing to start rather than handing the model
-        tools attached to nothing (`slife2/plugins/a2a/broker.py`).
+        A machine whose config says `peer_agent:` — or whose `subagent:` names a
+        network — has said it wants the mesh, so an absent broker is a missing
+        dependency rather than a preference.  One that will not serve raises out
+        of the lifespan — this plugin failing to start, which is `slife2`
+        refusing to start rather than handing the model tools attached to
+        nothing (`slife2/plugins/a2a/broker.py`).
+
+        **The settings are the network's, not the file's remote section.**  This
+        process serves one network, chosen by `net`; the local one reads
+        `subagent.network`, and handing `peer_agent` to `ensure` started a broker
+        at the remote address while every local mesh dialled its own — a stack
+        whose every subagent tool timed out, with a stray broker left behind.
+        `mesh_settings()` is the same answer the gate below uses.
 
         **Nothing else happens at start.**  Nothing joins the mesh (a window does
         that, `join`), and nothing is announced: a restart has no inbound bridges
@@ -1700,7 +1697,7 @@ def build_server(
         which arrives as a fresh request with a fresh bridge, so the loop closes
         without the harness remembering anything.
         """
-        logger.info("a2a_broker %s", ensure_broker(config_now.peer_agent))
+        logger.info("a2a_broker %s", ensure_broker(settings))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -1728,8 +1725,9 @@ def build_server(
         session exists rather than after the last one succeeded.
         """
         try:
-            if connecting and mesh_settings().configured:
-                start_broker(live())
+            settings = mesh_settings()
+            if connecting and settings.configured:
+                start_broker(settings)
             yield {}
         finally:
             for session in sessions.values():
@@ -1769,12 +1767,13 @@ def build_server(
         should be decided by whether anyone is there, not by which process
         happened to be running.
 
-        **This is the enrollment.**  The ledger at `agents/<agent>/inbound.yaml` is
-        the record of inbound tasks a process died holding, which is a fact about
-        work already received rather than a claim about who is here; a window is
-        the only thing that is both true while somebody is present and untrue the
-        moment they leave.  An A2A call still joins its agent lazily, for as
-        long as the task it started may be answered.
+        **This is the enrollment.**  The inbound task table is a fact about work
+        this process is holding, not a claim about who is here — and it is
+        in-memory (`slife2.plugins.a2a.inbound_store`), so it dies with the
+        process that received the work.  A window is the only thing that is both
+        true while somebody is present and untrue the moment they leave.  An A2A
+        call still joins its agent lazily, for as long as the task it started
+        may be answered.
 
         **Nobody is told that the agent itself arrived.**  A window showing *jack*
         is jack; a line reading `⚡ jack online` in it is the harness telling
@@ -1884,11 +1883,22 @@ def build_server(
             # dropping the member's own session reaches neither.  Left open,
             # each is a `pending` row in `task_list` — a row claiming work whose
             # member no longer exists — and a sent task's live round would hold a
-            # responder slot against a sender that can never answer.  Every
-            # session in this process is the maker's or a sibling's, so both
-            # sweeps are one scan.
+            # responder slot against a sender that can never answer.  The
+            # sweep is the maker's own conversations (its session and its
+            # siblings'), because that is the network the removed member was
+            # on; the process also serves other agents and other homes.
             withdrawn = 0
-            for other in list(sessions.values()):
+            # **This maker's sessions, not every session in the process.**  The
+            # table is keyed by `(home, agent, subagent)` because one process
+            # serves every home and every agent — and a member name is only
+            # unique *within* one maker's network.  Two agents may each have a
+            # `tester`; sweeping the whole table withdrew jack's outstanding
+            # task when jill removed hers, and cancelled the tasks jack's
+            # tester had sent.  The home is part of the key for the same
+            # reason: two homes may each run an agent called `jack`.
+            for other_key, other in list(sessions.items()):
+                if other_key[0] != key[0] or other_key[1] != agent:
+                    continue
                 withdrawn += await other.mesh.withdraw_sends_to(subagent)
                 withdrawn += await other.mesh.withdraw_inbound_from(subagent)
             if withdrawn:

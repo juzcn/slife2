@@ -149,7 +149,7 @@ class TurnRuntime:
         #: every provider that uses it — and one backend per model reference,
         #: because the reference is what the backend must match.
         self._clients: dict[str, Client] = {}
-        self._backends: dict[str, MCPBackend] = {}
+        self._backends: dict[tuple[str, str], MCPBackend] = {}
         #: One opener at a time for the lazily-built connections and backends,
         #: so two turns starting together do not build two clients for one
         #: server and leak the loser.
@@ -238,22 +238,26 @@ class TurnRuntime:
     async def model(self, identity: ConversationId, model: ModelRef) -> LLMBackend:
         """A backend bound to one conversation, opened on first use.
 
-        **Keyed by the model reference**, because the `MCPBackend` carries the
-        model id it was built with and a cache keyed by provider would hand the
-        second of two conversations on one provider the first one's model.
-        The connection behind it is keyed by URL and kept for the process; the
-        key is not cached: `with_key` hands back a view of the shared backend
-        carrying this conversation's `(agent, subagent)`, so the key reaches
-        the model server on every call without splitting the cache.
+        **Keyed by the model reference and the server URL**, because the
+        `MCPBackend` carries the model id it was built with and a cache keyed by
+        provider would hand the second of two conversations on one provider the
+        first one's model.  The URL is half of the key because one process serves
+        every home: two homes may use the same `provider/model` reference while
+        their configs point `servers.<api>.url` at different daemons — and a
+        cache keyed by the reference alone sent one home's history to the
+        other's endpoint (or kept an edited URL's old backend for ever).  The
+        conversation key is not cached: `with_key` hands back a view of the
+        shared backend carrying this conversation's `(agent, subagent)`, so it
+        reaches the model server on every call without splitting the cache.
         """
         if self._backend is not None:
             return self._backend
-        held = self._backends.get(model.reference)
+        url = self.current().server(model.api).url
+        held = self._backends.get((model.reference, url))
         if held is None:
             async with self._opening:
-                held = self._backends.get(model.reference)
+                held = self._backends.get((model.reference, url))
                 if held is None:
-                    url = self.current().server(model.api).url
                     client = self._clients.get(url)
                     if client is None:
                         client, _ = await open_backend(
@@ -274,7 +278,7 @@ class TurnRuntime:
                         provider=model.provider,
                         name=model.reference,
                     )
-                    self._backends[model.reference] = held
+                    self._backends[(model.reference, url)] = held
                     logger.info("model %s via %s", model.reference, url)
         return held.with_key(*identity)
 
@@ -472,8 +476,10 @@ class TurnRuntime:
         because the agent server deliberately does not hand its observer to the
         first build — a display has no turn to report on yet — and a change to
         either must reach the same place.  A task passes the same factory for
-        both.  `deliver` stays None for a task, which is what makes its loop
-        refuse a background call with a sentence the model can act on.
+        both.  `deliver` stays None for a task: a task is one turn, so there is
+        no later turn for a background result to arrive in.  The result is kept
+        for `check_async` instead, and the startup sentence says so
+        (`slife2.libs.harness.async_tasks.started`).
         """
         backend = await self.model(identity, model)
         return AgentLoop(

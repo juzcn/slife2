@@ -40,8 +40,10 @@ from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
     HARNESS_PREFIX,
     INTERRUPTED,
+    Meta,
     ToolRegistry,
     bind_timeout,
+    is_harness,
     split_meta,
 )
 
@@ -274,6 +276,7 @@ class AgentLoop:
         *,
         auto: Callable[[], AutoCall | None] | None = None,
         folded: Callable[[], tuple[str, str] | None] | None = None,
+        folded_commit: Callable[[], None] | None = None,
         injected: Callable[[], int] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
@@ -408,9 +411,9 @@ class AgentLoop:
                 # and a caller cancelled in that window takes its entry out of
                 # the inbox: the tool then delivers the next message while this
                 # pair would wear the first one's bubble.  `folded` is the
-                # message that was really taken, and asking it here is also the
-                # commit point — the server marks the entry delivered inside
-                # this call, with no await before the appends below.
+                # message that was really taken; it peeks, and the commit is
+                # `folded_commit` after the pair is in the list — a take whose
+                # pair the loop never wrote must stay undelivered.
                 found = folded() if took and folded is not None else None
                 channel, receipt = (
                     found if found is not None else (wanted.channel, wanted.receipt)
@@ -431,6 +434,8 @@ class AgentLoop:
                         channel=channel if took else "",
                     )
                 )
+                if took and folded_commit is not None:
+                    folded_commit()
                 # **Said after the pair is written**, so a screen is told about
                 # a message the conversation already holds.  It carries the
                 # tool's own answer, and the receipt the submitting window
@@ -546,6 +551,7 @@ class AgentLoop:
             #
             answers: list[Message] = []
             cutins: list[tuple[str, str, str]] = []
+            took_any = False
             for index, call in enumerate(result.tool_calls):
                 text: str | None = None
                 #: Filled by `_one` *before* it emits its closing event, because
@@ -554,9 +560,7 @@ class AgentLoop:
                 answered: list[tuple[str, bool]] = []
                 before = injected() if injected is not None else 0
                 try:
-                    text, _ok = await self._one(
-                        call, observer, iteration, messages, answered
-                    )
+                    text, _ok = await self._one(call, observer, iteration, answered)
                     fitted = await self._fit(call, text)
                 except asyncio.CancelledError:
                     # **The batch is completed on the way out, not dropped.**
@@ -567,11 +571,27 @@ class AgentLoop:
                     # flight, and the next checkpoint would cancel this cleanup
                     # before it was written.
                     returned = answered[0][0] if answered else text
+                    # **A take before the cancellation is a delivery**, because
+                    # the completed batch writes its answer.  Without this the
+                    # entry stayed undelivered and its caller ran its own turn
+                    # with the same prompt: the words appeared once as the
+                    # interrupted call's result and again as a user message.
+                    if (
+                        folded is not None
+                        and injected is not None
+                        and injected() > before
+                    ):
+                        folded()
+                        took_any = True
                     answers.extend(
                         interrupted_results(result.tool_calls[index:], returned)
                     )
                     messages.append(answer)
                     messages.extend(answers)
+                    # The completed batch is a written pair, so the take is a
+                    # delivery even though the turn is ending.
+                    if took_any and folded_commit is not None:
+                        folded_commit()
                     raise
                 channel = ""
                 receipt = ""
@@ -590,9 +610,17 @@ class AgentLoop:
                     )
                 )
                 if took:
+                    took_any = True
                     cutins.append((text or "", channel, receipt))
             messages.append(answer)
             messages.extend(answers)
+            # **The commit follows the pair, and the whole batch is the pair.**
+            # Marking delivered inside the per-call loop was before the appends:
+            # a later call's `_fit` raising lost every answer in the batch while
+            # the person's message stayed marked delivered, so its caller was
+            # answered as folded with words the conversation never received.
+            if took_any and folded_commit is not None:
+                folded_commit()
             # After the batch is in the conversation, as the auto path's event
             # is after its pair: a screen is told about a message the
             # conversation already holds, and a rebuilt transcript can draw the
@@ -633,7 +661,6 @@ class AgentLoop:
         call: ToolCall,
         observer: TurnObserver,
         iteration: int,
-        messages: Sequence[Message],
         answered: list[tuple[str, bool]],
     ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
@@ -647,13 +674,6 @@ class AgentLoop:
         which iteration of the turn this is (shown as `(3/30)` in the panel),
         and this is the only place that knows both the call and the iteration it
         was made in.
-
-        `messages` travels no further than a background call needs it, and it
-        is passed rather than read off an attribute because the loop does not
-        own the conversation (the module docstring's "pure function over a
-        message list"): it is handed one, and a call that outlives the turn it
-        was made in is the one case where the *later* state of that list is what
-        has to be reachable — see `_background`.
 
         * **Nothing is announced before the gate answers.**  A call the operator
           refused never happened as far as the transcript is concerned, and the
@@ -686,6 +706,15 @@ class AgentLoop:
             return await self._tools.execute(call)
 
         arguments, meta = split_meta(call.arguments)
+        if is_harness(call.name):
+            # **The harness's tools take none of the meta-parameters.**  They
+            # are the machinery's calls, and backgrounding or gating one is not
+            # a model's decision to make.  The schema no longer offers them
+            # (`tools.advertised`); this is the same rule for a model that wrote
+            # them anyway — and it is what keeps a `_check_new_input` from
+            # running in the background, where its take could be credited to
+            # whichever foreground call was running when it landed.
+            meta = Meta(timeout=None, background=False, approve=False)
         if meta.timeout_error is not None:
             return await self._tools.execute(_not_run(call, meta.timeout_error))
         # **A name outside the list is resolved before the timeout is bound**,
@@ -860,7 +889,15 @@ class AgentLoop:
         # (`slife2.libs.harness.async_tasks.started`): the sentence is what the model acts on,
         # and the marker is what a screen and a reader of the transcript pair
         # this call's two halves by.
-        return started(task_id, dispatch.id, dispatch.name), True
+        return (
+            started(
+                task_id,
+                dispatch.id,
+                dispatch.name,
+                delivered=self._deliver is not None,
+            ),
+            True,
+        )
 
     async def _timed(self, dispatch: ToolCall, bound: float | None) -> tuple[str, bool]:
         """One background call's answer, under the model's own bound if it set one.
@@ -905,8 +942,10 @@ class AgentLoop:
         """Forward a stream's chunks to the observer, closing it either way.
 
         The `finally` matters on cancellation: an abandoned async generator
-        keeps whatever the provider left open.  Closing is best-effort, since a
-        generator that is already finished raises on a second close.
+        keeps whatever the provider left open.  Closing is best-effort — a
+        close can raise for the provider's own reasons, and that must not mask
+        the cancellation that is unwinding this — while closing an already
+        exhausted generator is a no-op.
         """
         try:
             async for chunk in chunks:

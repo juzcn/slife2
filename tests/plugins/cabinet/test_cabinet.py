@@ -2131,16 +2131,17 @@ async def test_a_folder_filter_matches_only_the_folder_named() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_search_caps_the_shortlist_it_hands_to_sql(
+async def test_a_search_does_not_cap_the_shortlist_it_hands_to_sql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The union is capped where it is built, which is what `MAX_SQL_VARS` says.
+    """**`MAX_SQL_VARS` is a binding limit, not a depth cap.**
 
-    Nothing the caller passes bounds the shortlist — every sentence contributes
-    its meaning leg's ids and the keyword leg's — while the query that reads the
-    rows binds one value per id.  The cap is small here so that the property is
-    visible on a corpus of five: what the search hands on is the top of the
-    union rather than all of it, and the page is what the caller asked for.
+    The union is built from every sentence's meaning leg and the keyword leg;
+    the query that reads its rows binds one value per id and already chunks
+    them (`rows_in_order`).  Truncating the union where it was built hid rows
+    behind the caller's filters — an `unloaded_only` search could be empty while
+    a match existed — so the page, not the binding number, is what bounds the
+    answer.  The cap is small here to make the property visible on five rows.
     """
     monkeypatch.setattr(store_index, "MAX_SQL_VARS", 2)
     store = store_of(index_path("jack"))
@@ -2151,7 +2152,7 @@ async def test_a_search_caps_the_shortlist_it_hands_to_sql(
 
     answer = await store.search(keywords=[WORD], embedder=embedder)
 
-    assert len(answer["results"]) == 2, "the shortlist, not the corpus"
+    assert len(answer["results"]) == 5, "the page, not the binding cap"
 
 
 # --- the dump, and the two readers that have to stay inside the budget --------
@@ -2787,3 +2788,15 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
     assert int(indexed) == int(chunks) == int(embedded) == 0
     assert status["ready"] is True, status["problems"]
     assert status["documents"] == 1, "the corpus, not the rows in the directory"
+
+
+def test_every_spelling_of_a_day_is_one_diary_key() -> None:
+    """**One day is one document.**  `date.fromisoformat` accepts `20260105`,
+    `2026-W02-1` and `2026W021`; keeping the caller's spelling made each a
+    separate row that also sorted outside the `YYYY-MM-DD` order, so
+    `diary_list` could show 2020 above 2030 and a `since` window could exclude
+    the day it named.
+    """
+    assert cabinet_server._diary_key("20260105") == "2026-01-05"
+    assert cabinet_server._diary_key("2026-W02-1") == "2026-01-05"
+    assert cabinet_server._diary_key("2026-01-05") == "2026-01-05"

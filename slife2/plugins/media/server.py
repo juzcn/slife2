@@ -75,7 +75,7 @@ CONFIG_KEY = "media"
 INSTRUCTIONS = (
     "Generation: images, video, speech and transcripts, from the `media:` "
     "providers. Each tool writes where `output` names — a relative path is "
-    "relative to your working directory — or into the media directory. The two "
+    "relative to this conversation's work directory — or into the media directory. The two "
     "file-to-file tools are `transcribe_audio` (an audio `input`, answered as "
     "text or written to `output`) and `text_to_speech` (a text file in `input` "
     "when `text` is empty). `generate_video` can take minutes; a long render "
@@ -185,7 +185,21 @@ def _input_path(ctx: Context, value: str) -> Path:
     """
     agent, subagent = conversation_of(ctx)
     path = Path(value).expanduser()
-    return path if path.is_absolute() else work_dir(agent, subagent) / path
+    if path.is_absolute():
+        return path
+    base = work_dir(agent, subagent)
+    # **A drive-relative path is not a relative path.**  `D:voice.mp3` means
+    # "voice.mp3 under the current directory on D:", and `Path` joining discards
+    # the base when the drives differ — so the file opened is one the caller did
+    # not name.  The same drive resolves under the base, which is the anchor this
+    # tool promises; another drive is refused with the fix.
+    if path.drive and path.drive.casefold() != base.drive.casefold():
+        raise ToolError(
+            f"{value!r} is relative to drive {path.drive}, and this conversation's "
+            f"work directory is on {base.drive or 'another drive'} — write an "
+            f"absolute path, or a path relative to the media directory"
+        )
+    return base / path
 
 
 def _reference_path(ctx: Context, value: str) -> str:
@@ -293,7 +307,7 @@ def build_server(
                 `data:` URI. A relative path is relative to your working
                 directory. For models that take a reference image.
             output: A file path for the image. A relative path is relative to
-                your working directory. Empty writes a generated name into your
+                this conversation's work directory. Empty writes a generated name into your
                 media directory.
 
         Returns:
@@ -352,13 +366,13 @@ def build_server(
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for video.
             image: A first frame to animate, as a local path or a URL. A
-                relative path is relative to your working directory. For
+                relative path is relative to this conversation's work directory. For
                 image-to-video models.
             resolution: `720P`, `1080P`. Empty uses the model's own default.
             ratio: `16:9`, `9:16`, `1:1`. Empty uses the model's own default.
             duration: Seconds. Zero uses the model's own default.
             output: A file path for the video. A relative path is relative to
-                your working directory. Empty writes a generated name into your
+                this conversation's work directory. Empty writes a generated name into your
                 media directory.
             timeout: How long to wait, in seconds. Zero or less uses the
                 default.
@@ -416,9 +430,9 @@ def build_server(
         Args:
             text: What to say.
             input: A text file to say when `text` is empty. A relative path is
-                relative to your working directory.
+                relative to this conversation's work directory.
             output: A file path for the audio. A relative path is relative to
-                your working directory. Empty writes a generated name into your
+                this conversation's work directory. Empty writes a generated name into your
                 media directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for speech.
@@ -471,11 +485,11 @@ def build_server(
 
         Args:
             input: The audio file, as a local path. A relative path is relative
-                to your working directory.
+                to this conversation's work directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
             output: A file path to write the transcript to instead of answering
-                it. A relative path is relative to your working directory. The
+                it. A relative path is relative to this conversation's work directory. The
                 answer is the file's path. Empty answers the text itself. A
                 file already there is replaced.
         """

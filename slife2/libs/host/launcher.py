@@ -30,6 +30,7 @@ from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2 import __version__
@@ -58,6 +59,7 @@ from slife2.libs.host.runtime import (
     process_start_token,
     read_claim,
     read_record,
+    records,
     register_client,
     same_process,
     spawn,
@@ -865,8 +867,11 @@ def _status_of(spec: ServerSpec) -> Outcome:
     The record is read exactly the way `stop` reads it, and it has to be: a
     server answering with no record of ours was started by hand, so `status`
     calling it merely "running" while `down` refuses to stop it is two commands
-    disagreeing about one process.  The `UNMANAGED` branch in `slife2 status`'s
-    output — "(not started by slife2)" — is what this makes reachable.
+    disagreeing about one process.  That includes a record whose pid is gone or
+    now belongs to somebody else: printing that pid as the running server's is
+    the same disagreement in a subtler spelling, so ownership is proved here,
+    not just presence.  The `UNMANAGED` branch in `slife2 status`'s output —
+    "(not started by slife2)" — is what this makes reachable.
     """
     if probe(spec):
         record = read_record(spec.url)
@@ -874,13 +879,33 @@ def _status_of(spec: ServerSpec) -> Outcome:
             return Outcome(
                 spec, Status.UNMANAGED, detail="no record; not started by slife2"
             )
+        # **A record that proves a different process is stale; one that proves
+        # nothing is still a record.**  `same_process` answers False for both a
+        # dead/reused pid and an empty start token, deliberately — it is the
+        # question "may I signal this?".  For a *report*, a live pid with no
+        # token is the one fact there is (a platform without tokens), while a
+        # dead pid or a token that differs is the stale record whose pid must
+        # not be printed as the running server's.
+        stale = not pid_alive(record.pid) or (
+            bool(record.start_token)
+            and process_start_token(record.pid) not in (None, record.start_token)
+        )
+        if stale:
+            return Outcome(
+                spec,
+                Status.UNMANAGED,
+                detail=(
+                    f"its record names pid {record.pid}, which is not that "
+                    f"process now; the record is stale"
+                ),
+            )
         return _reuse(spec)
     if tcp_listening(spec.host, spec.port):
         return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
     return Outcome(spec, Status.NOT_RUNNING)
 
 
-def stop(config: Config) -> Iterator[Outcome]:
+def stop(config: Config, *, everything: bool = False) -> Iterator[Outcome]:
     """Stop the servers this config names, and only ones we can prove are ours.
 
     "Prove" is doing real work in that sentence.  A record holds a pid, and
@@ -894,8 +919,42 @@ def stop(config: Config) -> Iterator[Outcome]:
     ordering to keep at all.  Yielded as each lands for `ensure_all`'s reason —
     the one that is stuck in `terminate` for five seconds should appear while it
     is stuck, which is the opposite of what a list assembled in silence shows.
+
+    **`everything=True` is the last client's take-down.**  The daemons are the
+    machine's: another config may have started a model backend this one never
+    names, and stopping only `specs(config)` left it running with no `status` or
+    `down` in either config able to find it.  The records are the machine-wide
+    list, so the ones this config's specs did not already cover are stopped too
+    (the overlap is skipped rather than stopped twice).
     """
     yield from _concurrently(_stop_one, specs(config))
+    if everything:
+        named = {spec.url for spec in specs(config)}
+        extra = [
+            _spec_from_record(record)
+            for record in records()
+            if record.url.startswith("http") and record.url not in named
+        ]
+        if extra:
+            yield from _concurrently(_stop_one, extra)
+
+
+def _spec_from_record(record: ServerRecord) -> ServerSpec:
+    """A record's endpoint as a spec, for a stop whose config does not name it.
+
+    Only the fields `_stop_one` reads are meaningful here: the record already
+    proves ownership, so the probe and the expected MCP identity are not used.
+    """
+    parts = urlsplit(record.url)
+    return ServerSpec(
+        name=record.name,
+        module="",
+        url=record.url,
+        host=parts.hostname or "",
+        port=parts.port or 0,
+        expected_name="",
+        expected_tool="",
+    )
 
 
 def _stop_one(spec: ServerSpec) -> Outcome:

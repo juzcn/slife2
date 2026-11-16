@@ -257,7 +257,7 @@ def test_status_exits_nonzero_when_a_server_is_not_usable(
     monkeypatch.setattr(
         launcher,
         "statuses",
-        lambda _config: iter(
+        lambda _config, **_kwargs: iter(
             [
                 launcher.Outcome(first, launcher.Status.RUNNING),
                 launcher.Outcome(second, launcher.Status.FAILED),
@@ -304,7 +304,7 @@ def test_down_refuses_while_another_client_is_live(
     )
     called: list[bool] = []
     monkeypatch.setattr(
-        launcher, "stop", lambda _config: called.append(True) or iter(())
+        launcher, "stop", lambda _config, **_kwargs: called.append(True) or iter(())
     )
 
     assert slife2._down(config) == 2
@@ -329,7 +329,9 @@ def test_down_force_stops_while_another_client_is_live(
     monkeypatch.setattr(
         launcher,
         "stop",
-        lambda _config: iter([launcher.Outcome(spec, launcher.Status.STOPPED)]),
+        lambda _config, **_kwargs: iter(
+            [launcher.Outcome(spec, launcher.Status.STOPPED)]
+        ),
     )
 
     assert slife2._down(config, force=True) == 0
@@ -346,7 +348,7 @@ def test_down_exits_nonzero_when_a_server_did_not_stop(
     monkeypatch.setattr(
         launcher,
         "stop",
-        lambda _config: iter(
+        lambda _config, **_kwargs: iter(
             [
                 launcher.Outcome(
                     spec, launcher.Status.FAILED, detail="pid 1 did not exit"
@@ -716,7 +718,7 @@ def test_the_take_down_is_what_stops_the_broker(
 
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(
         broker, "stop", lambda _settings: "stopped mosquitto on localhost:1883"
     )
@@ -737,7 +739,7 @@ def test_a_broker_that_did_not_stop_is_a_failure(
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
     monkeypatch.setattr(launcher, "others_running", lambda: [])
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(
         broker,
         "stop",
@@ -761,7 +763,7 @@ def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(
 
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(broker, "stop", lambda _settings: "")
 
     assert slife2._down(config) == 0

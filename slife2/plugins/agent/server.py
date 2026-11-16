@@ -77,7 +77,7 @@ import contextlib
 import contextvars
 import json
 import logging
-import shutil
+import os
 import time
 from collections import deque
 from collections.abc import (
@@ -134,6 +134,7 @@ from slife2.libs.host.model_config import (
     to_reference,
 )
 from slife2.libs.host.paths import (
+    SUBAGENT_RECORD,
     agent_dir,
     home,
     subagent_dirs,
@@ -160,7 +161,7 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
-from slife2.libs.plugin.vocabulary import FORGET, TRANSCRIPT
+from slife2.libs.plugin.vocabulary import FORGET, NOTHING_WAITING, TRANSCRIPT
 from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
     turn_failed_note,
@@ -306,12 +307,6 @@ SUBAGENT_PROMPT = "subagent.j2"
 #: (`slife2.libs.turn.attachments.image_note`), which is also what the repair below leaves
 #: when a provider refuses the picture.
 
-#: What that tool answers when there is nothing to hand over — an empty queue, or
-#: a head that carries images and so cannot ride a tool result.  A sentence and
-#: not an empty string: it lands in a tool result, and a blank one reads as a
-#: failure rather than as "nothing had arrived".
-NOTHING_WAITING = "Nothing waiting: no message has arrived since the last boundary."
-
 INSTRUCTIONS = (
     "A conversational agent. Call `send_message` with an agent name and what was "
     "said; assistant output arrives as progress notifications on that call, and "
@@ -368,7 +363,7 @@ class Pending:
 
     It is held here, and *not* appended to the loop's messages as a user message,
     until its turn begins.  What may happen to it in between is the running
-    turn **folding it in** (`inject`): the message goes to the model at that
+    turn **folding it in** (`take_waiting` -> `folded_message`): the message goes to the model at that
     turn's next iteration boundary as a harness tool pair, and this entry's `result`
     is set to that turn's answer.  It is never appended as a user message
     mid-turn, which is what would be steering nobody asked for — the model reads
@@ -850,6 +845,15 @@ def build_server(
     #: stale loop, it answers it with *the other home's history*: its prompt, its
     #: turns, and a `remember` that writes there.
     loops: dict[ConversationKey, Loop] = {}
+
+    #: Conversations whose directory is being deleted.  **A synchronous
+    #: claim, taken before the removal's first await**, so a message that
+    #: arrives while the network notification or the delete is in flight cannot
+    #: create a loop for a name that is going away — its turn would run against
+    #: a directory the removal then deletes, and its save would recreate the
+    #: record-less tree.  The record check alone was that race: it is read
+    #: before the removal's awaits, and the directory still exists then.
+    removing: set[ConversationKey] = set()
 
     #: One opener at a time for the cabinet, the one peer this server still
     #: opens itself: two turns that both need it would otherwise build two
@@ -1436,6 +1440,16 @@ def build_server(
         `Loop.restored` is the claim, and it is made under the lock.
         """
         client = conversation_key(agent, subagent)
+        if client in removing:
+            # **A name being removed is not a conversation that can start.**
+            # The check is on the synchronous path that creates the loop, and
+            # the removal's claim is taken synchronously before its first
+            # await, so the two cannot interleave into a turn whose save
+            # recreates the directory the removal just deleted.
+            raise ToolError(
+                f"{describe((agent, subagent))} is being removed; wait for the "
+                f"removal to finish, or make it again with {SUBAGENT_CREATE}."
+            )
         loop = loops.get(client)
         if loop is None:
             # **The record is the membership, and a message does not make one.**
@@ -2046,14 +2060,15 @@ def build_server(
         def folded_message() -> tuple[str, str] | None:
             """The channel and receipt of the message taken most recently.
 
-            **This is the delivery's commit point.**  The loop asks it after the
-            tool ran — `take_waiting` appends the entry after it pops it, so the
-            last one is the message the call just took — and then writes the
-            assistant/tool pair with no await between this call and the
-            appends.  Marking `delivered` here rather than at take time is what
-            keeps the flag honest: a take whose pair the turn never wrote (a
-            cancelled or failed `_fit`, a turn that died before appending) has
-            not been delivered, and its parked caller must run its own turn.
+            **A peek, not the commit.**  The loop asks it after the tool ran —
+            `take_waiting` appends the entry after it pops it, so the last one
+            is the message the call just took — and then writes the
+            assistant/tool pair.  Marking `delivered` here marked the take
+            before the pair existed: a later call in the same batch failing its
+            `_fit` lost every answer while the person's message stayed delivered,
+            and its caller was answered as folded with words the conversation
+            never received.  `folded_commit` is the one place that marks, and
+            the loop calls it only after the pair is in the list.
 
             A `_check_new_input` that answered "nothing waiting" must not wear
             the previous message's bubble, which is why the loop asks only when
@@ -2062,8 +2077,12 @@ def build_server(
             if not loop.injected:
                 return None
             item = loop.injected[-1]
-            item.delivered = True
             return item.channel, item.receipt
+
+        def folded_commit() -> None:
+            """The pair is in the conversation: every take it carries is delivered."""
+            for item in loop.injected:
+                item.delivered = True
 
         # The monotonic clock is the duration's, and `started_at` the row's:
         # both are needed, and neither can be derived from the other without
@@ -2083,7 +2102,12 @@ def build_server(
         # Resolved through the same encoder for the reason that tool exists, and
         # gated on the same question: a model whose config lists only `text` gets
         # the text and a refusal, not parts its provider would reject.
-        pairs, refusals = attachments.resolve(item.images)
+        # **A local path is relative to the caller's data directory**, the same
+        # three sources `attach_image` takes — and the same base the model's own
+        # route uses.  Left to `Path`'s default, a relative path resolved
+        # against the daemon's working directory (the runtime directory), so a
+        # path that works in `file_save` named a different file here.
+        pairs, refusals = attachments.resolve(item.images, base=home())
         if pairs and not loop.accepts_images:
             # **Extended, not replaced**: a caller who passed one unreadable
             # source and one the model cannot see is owed both reasons, and a
@@ -2275,6 +2299,7 @@ def build_server(
                 observer,
                 auto=auto_invoke,
                 folded=folded_message,
+                folded_commit=folded_commit,
                 injected=injected_count,
             )
         except asyncio.CancelledError:
@@ -2355,7 +2380,7 @@ def build_server(
                         # take whose pair was never written is not in this
                         # turn's messages, so handing it this result would tell
                         # its caller it was delivered and answered by a turn
-                        # that never read it.  `folded_message` marks the ones
+                        # that never read it.  `folded_commit` marks the ones
                         # that were; the others run their own turn.
                         if not folded.delivered:
                             continue
@@ -2909,7 +2934,7 @@ def build_server(
                 f"will retry",
             }
         if outcome.ok:
-            return {"api": api, "up": True, "detail": ""}
+            return {"api": api, "up": True, "detail": outcome.detail}
         return {
             "api": api,
             "up": False,
@@ -3315,7 +3340,7 @@ def build_server(
 
         **A message sent to a busy conversation waits rather than displacing
         anything** — and what it waits *for* is the running turn's next
-        iteration boundary, where it is folded in (see `inject`).  Turns on one
+        iteration boundary, where it is folded in (see `take_waiting`).  Turns on one
         key run one at a time, in the order they were submitted; a message the
         running turn did not reach before it ended becomes a turn of its own
         when its place comes up.  Nothing is dropped and nothing is cancelled —
@@ -3384,6 +3409,17 @@ def build_server(
             same whichever path answered — `_reply` builds it in one place — so
             a caller reads them without having to know which one it got.
         """
+        # **A message with neither words nor an image is nothing.**  It used to
+        # enter the inbox, be taken by a running turn, and leave `take_waiting`
+        # with an empty prompt: the tool answered "Nothing waiting" while the
+        # entry was marked delivered, so the model was told no message arrived
+        # and the caller was answered as folded with no words.  Refused at the
+        # boundary instead.
+        if not prompt.strip() and not images:
+            raise ToolError(
+                "a message needs some words or an image; this one carries "
+                "neither, so there is nothing to send."
+            )
         # Asked before anything is spent.  A context plugin that is not there is
         # a broken system rather than a degraded one, and the moment to find that
         # out is *before* the first model call has been paid for — not at the
@@ -3456,7 +3492,7 @@ def build_server(
                 # **The turn that just released the lock may have taken this
                 # message with it**, folding it in at one of its iteration
                 # boundaries
-                # (`inject`).  Then there is no turn here to run: the model was
+                # (`take_waiting`).  Then there is no turn here to run: the model was
                 # handed this message inside that one and its answer is the
                 # answer to this, so the caller is given exactly what that turn's
                 # own caller got.  Asked of the *entry* rather than inferred from
@@ -3958,6 +3994,21 @@ def build_server(
                 break
         watcher = watching.watch(key)
         replay = watching.replay(key)
+        if subagent and not subagent_file(agent, subagent).is_file():
+            # **A watcher registered after the removal's `close` was never
+            # told.**  The removal reads the store, closes every watcher and
+            # drops the key; a watcher that joins after that synchronous block
+            # waits on a queue nothing will ever write.  The record is the
+            # membership, so its absence here is the answer the removal would
+            # have given — and it is checked *after* registration, which is the
+            # order that cannot be raced: a removal either closed us, or the
+            # record is gone by this read.
+            watching.close(
+                key,
+                f"{subagent} is not a subagent of {agent}'s — it was never made "
+                f"or has been removed",
+            )
+            watching.drop(key)
         known = {
             turn["turn_id"]
             for turn in stored.turns
@@ -4035,15 +4086,24 @@ def build_server(
         Returns:
             `reset`: whether there was a conversation there to forget.
         """
+        if subagent and not subagent_file(agent, subagent).is_file():
+            # **A name with no record is not a conversation.**  `forget_context`
+            # opens the conversation's store, and opening one *creates* its
+            # directory — the record-less directory this server refuses
+            # everywhere else because it blocks the name for both subagent
+            # tools.  There is nothing to forget, so this is the idempotent
+            # answer rather than a file.
+            return {"reset": False}
         key = conversation_key(agent, subagent)
         loop = loops.get(key)
         if loop is None:
-            # **The plan is local and goes first.**  The context clear is the
-            # remote half; a failure there is a reset that did not happen, and
-            # a retry is the answer rather than a conversation left with one
-            # half of it gone and the other still there.
-            plan.clear(agent, subagent)
+            # **The remote half goes first.**  The plan is local and the context
+            # clear is a hop that can fail; clearing the plan first left a
+            # conversation that had lost its plan but not its context — one half
+            # gone with nothing saying so.  A failed reset is a reset that did
+            # not happen, and a retry is the answer.
             await forget_context(agent, subagent)
+            plan.clear(agent, subagent)
             logger.debug("reset: %s was not running", describe((agent, subagent)))
             return {"reset": False}
         try:
@@ -4077,10 +4137,10 @@ def build_server(
                     ) from None
                 except Exception:  # noqa: BLE001 — a refused write writes nothing
                     pass
-            # The plan first, for the reason the branch above gives; this is the
-            # same two halves under the lock.
-            plan.clear(agent, subagent)
+            # The context first, for the reason the branch above gives; this is
+            # the same two halves under the lock.
             await forget_context(agent, subagent)
+            plan.clear(agent, subagent)
             loop.removed = True
             loops.pop(key, None)
         finally:
@@ -4176,6 +4236,58 @@ def build_server(
                 "created_at": record.get("created_at") or made_at,
             },
         )
+        if not created:
+            # **A live conversation takes the new settings now.**  `subagent_spec`
+            # is read when a loop is built, so without this a second
+            # `subagent_create` rewrote the file and answered `model: B` while the
+            # running conversation kept model A and its old role — the list and
+            # the conversation disagreeing about the same subagent.  The lock is
+            # the turn's, so the update lands between turns; a turn that will not
+            # yield is left for the idle reap (which rebuilds from the file) and
+            # is named in the log rather than blocking this call for ever.
+            live_loop = loops.get(conversation_key(maker, directory.name))
+            if live_loop is not None:
+                spec = SubagentSpec(model=model, role=role or DEFAULT_ROLE)
+                try:
+                    async with asyncio.timeout(_T.timeouts.grace.turn):
+                        await live_loop.lock.acquire()
+                except TimeoutError:
+                    logger.info(
+                        "subagent %s is mid-turn; its new settings apply from "
+                        "the next conversation",
+                        describe((maker, directory.name)),
+                    )
+                else:
+                    try:
+                        try:
+                            name, provider, settings = current().resolve(
+                                model or spec.model
+                            )
+                        except ConfigError as exc:
+                            # The record is written and this conversation cannot
+                            # move to it yet; saying so where the operator looks
+                            # keeps a successful edit from reading as a failed
+                            # call, and the next conversation starts from the
+                            # file (where the same reference fails its turn).
+                            logger.warning(
+                                "subagent %s: the new model was not applied: %s",
+                                describe((maker, directory.name)),
+                                exc,
+                            )
+                        else:
+                            live_loop.model = f"{name}/{settings.model}"
+                            live_loop.provider = name
+                            live_loop.api = provider.api
+                            live_loop.model_id = settings.model
+                            live_loop.accepts_images = settings.accepts_images
+                            live_loop.context_window = settings.context_window
+                            head = opening_messages(
+                                maker, directory.name, current(), spec
+                            )
+                            if head and live_loop.messages:
+                                live_loop.messages[0] = head[0]
+                    finally:
+                        live_loop.lock.release()
         logger.info(
             "subagent %s %s (model %s, role %s)",
             describe((maker, directory.name)),
@@ -4242,103 +4354,123 @@ def build_server(
         # already queued behind the lock cannot run and save a turn into the
         # directory after the delete, recreating it without a record.
         key = conversation_key(maker, directory.name)
-        loop = loops.get(key)
-        if loop is None:
-            # **The network before the files, for a subagent with no loop.**  A
-            # place on the subagent network outlives the directory it was held
-            # for: the plugin has a responder subscribed to this name, so a
-            # removal that only deleted the files would leave something still
-            # answering for a subagent that no longer exists
-            # (`leave_the_mesh`).
-            await leave_the_mesh(maker, directory.name, client=mesh_client)
-        else:
-            if current().subagent.network.configured:
-                # A turn in flight is interrupted by this call; an idle one has
-                # nothing to interrupt, and the later call below still gives up
-                # the place (a new session may have been created in between).
+        # **The claim is synchronous and comes before the first await.**  A
+        # message that arrives during the network notification or the delete
+        # checks this set on the loop-creating path, so it cannot start a turn
+        # whose save recreates the directory.
+        removing.add(key)
+        try:
+            loop = loops.get(key)
+            if loop is None:
+                # **The network before the files, for a subagent with no loop.**  A
+                # place on the subagent network outlives the directory it was held
+                # for: the plugin has a responder subscribed to this name, so a
+                # removal that only deleted the files would leave something still
+                # answering for a subagent that no longer exists
+                # (`leave_the_mesh`).
                 await leave_the_mesh(maker, directory.name, client=mesh_client)
-            try:
-                async with asyncio.timeout(_T.timeouts.grace.turn):
-                    await loop.lock.acquire()
-            except TimeoutError:
-                # **A turn the clean interrupt did not reach is interrupted
-                # here.**  The network's cancel is a caller abandoning the call,
-                # which the agent server honours at its next checkpoint; a turn
-                # wedged somewhere that is not one is ended by cancelling its
-                # own handler.  It is the last step because it reaches into a
-                # request the server does not own, and it is bounded so a turn
-                # that cannot be interrupted cannot hold the removal for ever.
-                task = loop.turn_task
-                if task is not None:
-                    task.cancel()
-                    try:
-                        async with asyncio.timeout(_T.timeouts.grace.drain):
-                            await loop.lock.acquire()
-                    except TimeoutError:
+            else:
+                if current().subagent.network.configured:
+                    # A turn in flight is interrupted by this call; an idle one has
+                    # nothing to interrupt, and the later call below still gives up
+                    # the place (a new session may have been created in between).
+                    await leave_the_mesh(maker, directory.name, client=mesh_client)
+                try:
+                    async with asyncio.timeout(_T.timeouts.grace.turn):
+                        await loop.lock.acquire()
+                except TimeoutError:
+                    # **A turn the clean interrupt did not reach is interrupted
+                    # here.**  The network's cancel is a caller abandoning the call,
+                    # which the agent server honours at its next checkpoint; a turn
+                    # wedged somewhere that is not one is ended by cancelling its
+                    # own handler.  It is the last step because it reaches into a
+                    # request the server does not own, and it is bounded so a turn
+                    # that cannot be interrupted cannot hold the removal for ever.
+                    task = loop.turn_task
+                    if task is not None:
+                        task.cancel()
+                        try:
+                            async with asyncio.timeout(_T.timeouts.grace.drain):
+                                await loop.lock.acquire()
+                        except TimeoutError:
+                            raise ToolError(
+                                f"{directory.name!r} is still running a turn that "
+                                f"will not stop; nothing was deleted — try again."
+                            ) from None
+                    else:
                         raise ToolError(
-                            f"{directory.name!r} is still running a turn that "
-                            f"will not stop; nothing was deleted — try again."
+                            f"{directory.name!r} is still running a turn; wait for "
+                            f"it, then remove it again — removing it now would let "
+                            f"that turn write the directory back."
                         ) from None
-                else:
-                    raise ToolError(
-                        f"{directory.name!r} is still running a turn; wait for "
-                        f"it, then remove it again — removing it now would let "
-                        f"that turn write the directory back."
-                    ) from None
-            try:
-                if loops.get(key) is not loop:
-                    raise ToolError(
-                        f"{directory.name!r} changed while it was being removed; "
-                        f"try again."
-                    )
-                pending = loop.record_pending
-                if pending is not None:
-                    # **The detached write is not under the lock.**  It is a
-                    # cancelled turn's record already on its way to the context
-                    # store; letting the tree go before it lands recreates the
-                    # directory.  A refused write has nothing more to wait for.
-                    try:
-                        async with asyncio.timeout(_T.timeouts.grace.drain):
-                            await asyncio.shield(pending.written)
-                    except TimeoutError:
+                try:
+                    if loops.get(key) is not loop:
                         raise ToolError(
-                            f"{directory.name!r} is still recording its last "
-                            f"turn; try again in a moment."
-                        ) from None
-                    except Exception:  # noqa: BLE001 — a refused write writes nothing
-                        pass
-                # **The place is given up again under the lock.**  The call
-                # above was what stopped a turn; this one is what makes the
-                # state true at the moment of the delete — a message that
-                # arrived while the lock was being taken may have placed a
-                # fresh session.  A failure here leaves the files alone: the
-                # loop is untouched, because `leave_the_mesh` raises before the
-                # record is dropped.
-                await leave_the_mesh(maker, directory.name, client=mesh_client)
-                loop.removed = True
-                loops.pop(key, None)
-            finally:
-                loop.lock.release()
-        # The retry loop sleeps up to `storage.sqlite_busy` between attempts;
-        # on the event loop that stalls every turn, stream and approval in this
-        # shared server, so the whole removal runs on a thread.
-        await asyncio.to_thread(_remove_tree, directory)
-        # **A watcher is told, not left on a stream that will never write
-        # again**, and it is told after the directory is gone: a delete that
-        # failed leaves the conversation there (`_remove_tree` raises rather
-        # than half-removing it), and a watcher told it was gone would have been
-        # told something untrue.  A stream that simply stopped, on the other
-        # hand, would be indistinguishable from an idle conversation, so the
-        # last frame says why and the call returns after it (`WatchHub.close`).
-        watching.close(
-            conversation_key(maker, directory.name),
-            f"{directory.name} was removed",
-        )
-        watching.drop(conversation_key(maker, directory.name))
-        logger.info("subagent %s removed", describe((maker, directory.name)))
-        return {"name": directory.name, "removed": True}
+                            f"{directory.name!r} changed while it was being removed; "
+                            f"try again."
+                        )
+                    pending = loop.record_pending
+                    if pending is not None:
+                        # **The detached write is not under the lock.**  It is a
+                        # cancelled turn's record already on its way to the context
+                        # store; letting the tree go before it lands recreates the
+                        # directory.  A refused write has nothing more to wait for.
+                        try:
+                            async with asyncio.timeout(_T.timeouts.grace.drain):
+                                await asyncio.shield(pending.written)
+                        except TimeoutError:
+                            raise ToolError(
+                                f"{directory.name!r} is still recording its last "
+                                f"turn; try again in a moment."
+                            ) from None
+                        except Exception:  # noqa: BLE001 — a refused write writes nothing
+                            pass
+                    # **The place is given up again under the lock.**  The call
+                    # above was what stopped a turn; this one is what makes the
+                    # state true at the moment of the delete — a message that
+                    # arrived while the lock was being taken may have placed a
+                    # fresh session.  A failure here leaves the files alone: the
+                    # loop is untouched, because `leave_the_mesh` raises before the
+                    # record is dropped.
+                    await leave_the_mesh(maker, directory.name, client=mesh_client)
+                    loop.removed = True
+                    loops.pop(key, None)
+                finally:
+                    loop.lock.release()
+            # The retry loop sleeps up to `storage.sqlite_busy` between attempts;
+            # on the event loop that stalls every turn, stream and approval in this
+            # shared server, so the whole removal runs on a thread.
+            await asyncio.to_thread(_remove_tree, directory)
+            # **A watcher is told, not left on a stream that will never write
+            # again**, and it is told after the directory is gone: a delete that
+            # failed raises out of `_remove_tree` with the record still there (it is
+            # removed last), so the conversation is still a subagent — and a watcher
+            # told it was gone would have been told something untrue.  A stream that
+            # simply stopped, on the other
+            # hand, would be indistinguishable from an idle conversation, so the
+            # last frame says why and the call returns after it (`WatchHub.close`).
+            watching.close(
+                conversation_key(maker, directory.name),
+                f"{directory.name} was removed",
+            )
+            watching.drop(conversation_key(maker, directory.name))
+            logger.info("subagent %s removed", describe((maker, directory.name)))
+            return {"name": directory.name, "removed": True}
+        finally:
+            removing.discard(key)
 
     return mcp
+
+
+def _delete_file(path: Path) -> None:
+    """Remove one file a removal owns; the seam a test holds open.
+
+    Windows refuses this for a file another process holds, and the retry loop
+    around `_remove_tree` is what waits that out.  A function rather than
+    `path.unlink` inline so the held-file test can raise the OS's own failure
+    at the exact call the removal makes.
+    """
+    path.unlink(missing_ok=True)
 
 
 def _remove_tree(directory: Path) -> None:
@@ -4355,20 +4487,51 @@ def _remove_tree(directory: Path) -> None:
     holder that is a write in flight lets go in milliseconds, and one that
     outlasts this is not a write.
 
+    A recursive delete cannot be atomic, so the *record* is what is made last:
+    a failed removal leaves the remaining files and `subagent.yaml` — still a
+    subagent, and one a second `subagent_remove` can finish.  Previous versions
+    removed the record in `rmtree`'s own order, so a locked `turns.db` could
+    leave a directory no caller could own.
+
     Raises:
         ToolError: With the file named and nothing else.  A `WinError 32`, in the
             OS's own words and in the OS's own *language*, is not an answer a
-            model can act on; "it is open, try again" is.  Refused rather than
-            half-done: the directory is one subagent, and a removal that deleted
-            most of it would leave something that is neither a subagent nor a
-            directory anybody can finish removing.
+            model can act on; "it is open, try again" is.
     """
+    # **The record goes last.**  A recursive delete is not atomic anywhere, and
+    # `rmtree` walks in its own order: a Windows `PermissionError` on the open
+    # `turns.db` could leave the directory with `subagent.yaml` already gone —
+    # neither a subagent nor a directory nobody can create, refused by both
+    # `subagent_create` and `subagent_remove` until somebody cleans the tree by
+    # hand.  Removing the record at the end makes a failed delete leave a
+    # *subagent* (one still removable), not a locked name.
+    if not directory.exists():
+        # Another process finished the removal between the caller's check and
+        # this hop; the directory being gone is the outcome asked for.
+        return
+    record = directory / SUBAGENT_RECORD
     deadline = time.monotonic() + _T.timeouts.storage.sqlite_busy
     while True:
         try:
-            shutil.rmtree(directory)
+            for root, dirs, files in os.walk(directory, topdown=False):
+                base = Path(root)
+                for name in files:
+                    path = base / name
+                    if path != record:
+                        _delete_file(path)
+                for name in dirs:
+                    try:
+                        (base / name).rmdir()
+                    except OSError:
+                        # A file inside is still held; the parent rmdir below
+                        # reports the one failure this loop retries.
+                        pass
+            # The record is the last thing to go; the retrying seam is for the
+            # conversation's bulky files, which are the ones a writer holds.
+            record.unlink(missing_ok=True)
+            directory.rmdir()
             return
-        except PermissionError as e:
+        except OSError as e:
             if time.monotonic() >= deadline:
                 raise ToolError(
                     f"{directory.name!r} could not be removed: {e.filename} is "
@@ -4479,9 +4642,10 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
 def _image_url(part: Any) -> str | None:
     """The URL of one `image_url` content part, or `None` for any other part.
 
-    One reader of the wire shape, because two places ask: `keep_images` when it
-    records a turn and `attach_image` when it resolves a marker.  A part that is
-    not the shape is left alone rather than guessed at — an unreadable part is
+    The one reader of the wire shape, for `keep_images` when it records a turn.
+    (`attach_image` resolves a marker through `attach_sources`, which asks the
+    cabinet for the part's key rather than reading the wire shape.)  A part that
+    is not the shape is left alone rather than guessed at — an unreadable part is
     the store's note's business, not this function's.
     """
     if not isinstance(part, dict) or part.get("type") != "image_url":

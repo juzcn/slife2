@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 
+from slife2.libs.store.index import storable
 from slife2.libs.turn.messages import ToolCall
 
 #: How the harness fits one tool result into a conversation: the call it came
@@ -89,6 +90,12 @@ def window(*, call: str, text: str, where: str, size: int, budget: int) -> str:
     the head length says where this window stops, and `dump_read` answers how
     many lines and characters there are when a model asks to read them.
     """
+    # **The head is measured in the units the file holds.**  The cabinet writes
+    # `storable(body)`, and a surrogate pair is two code units in the raw string
+    # but one character in the file — so slicing before the normalization made
+    # the announced "first N characters" name a different offset than
+    # `dump_read(mode="char")` uses, and an odd cut could leave half a pair.
+    text = storable(text)
     total_chars = len(text)
     head = (
         f"{MARKER}"

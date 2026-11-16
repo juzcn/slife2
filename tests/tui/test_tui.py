@@ -742,16 +742,16 @@ async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
 
 
 async def test_tool_panels_do_not_pile_up_across_turns() -> None:
-    """Every panel stays on screen; only the current turn's calls stay addressable.
+    """Every panel stays on screen; the map holds only calls still in flight.
 
     The map the transcript keeps is what a result finds its panel through, and it
     was never pruned: one widget handle per call, for the life of the window, so
     a day of agent work — thousands of calls, each with its own id — retained
-    thousands of handles that nothing would ever look up again.  It is bounded by
-    the turn now, which is also what settles what a reused id means: a call id is
-    unique only within the turn that used it (`add_user` clears the map as each
-    turn opens), so a later turn registering `c1` cannot complete the earlier
-    turn's panel of the same name.
+    thousands of handles that nothing would ever look up again.  A completed call
+    is removed when its result lands, and a new turn clears whatever is left
+    (`add_user`), which is also what settles what a reused id means: a call id is
+    unique only within the turn that used it, so a later turn registering `c1`
+    cannot complete the earlier turn's panel of the same name.
 
     Distinct ids per turn are the point of the count — one id reused five times
     overwrites itself and would read as bounded even while leaking.
@@ -781,7 +781,7 @@ async def test_tool_panels_do_not_pile_up_across_turns() -> None:
         panels = list(app.query(ToolCallWidget))
 
     assert len(panels) == 5, "the transcript is still the whole conversation"
-    assert len(chat._tools) == 1, "but only the last turn's call is still addressable"
+    assert len(chat._tools) == 0, "no completed call is still addressable"
 
 
 # --- scrolling the transcript -------------------------------------------------
@@ -2978,7 +2978,7 @@ async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
         await pilot.pause()
 
         assert client.switches == ["local/small"]
-        assert "Switched to local/small" in shown(app), "the picker's own line"
+        assert "Selected local/small" in shown(app), "the picker's own line"
         # And the window's note, drawn from the server's *facts* — which model it
         # is now, which it was, and how many conversations moved, which is the
         # half only the server knows.
@@ -3740,7 +3740,7 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
         # The picker left its decision line in the window's transcript — that
         # is the window's own record of the key — and nothing the watched
         # conversation said is in it.
-        assert "Watching scout" in shown(app)
+        assert "Selected scout" in shown(app)
         assert "what is 6*7?" not in shown(app)
         assert "It is 42." not in shown(app)
 
@@ -3841,6 +3841,6 @@ async def test_choosing_a_task_watches_its_brief_and_its_turn() -> None:
 
         await pilot.press("escape")
         assert await settled(pilot, lambda: len(app.screen_stack) == 1)
-        assert "Watching task research" in shown(app)
+        assert "Selected task research" in shown(app)
 
     assert watch.closed is True, "leaving the screen is the detach"

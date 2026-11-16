@@ -5,10 +5,12 @@ snapshot, a turn's start, its events, and the closing frame.  This module is the
 state behind that vocabulary — the turn in flight, kept so a watcher that joins
 mid-turn is handed its start, and the watchers themselves, each with a queue.
 One implementation, because every server that runs a turn and lets somebody
-else read it faces the same race: a `watch` call registers a reader and copies
-the tap in one synchronous step, while `publish` appends to the tap before it
-serves the readers, so an event between the two is seen once rather than lost or
-doubled.  A copy per server would be two answers to one race.
+else read it faces the same race: `watch` registers a reader and `replay` copies
+the tap, and the servers call the two with no await between them, while
+`publish` appends to the tap before it serves the readers — so an event between
+the two is seen once rather than lost or doubled.  A copy per server would be
+two answers to one race; the pair being two calls is caller discipline, and the
+one contract this table cannot enforce.
 
 **A tap is replaced when the next turn starts**, so the table holds at most one
 turn per key.  `Tap.recorded_turn` is the store id a conversation's turn was

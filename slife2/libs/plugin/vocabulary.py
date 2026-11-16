@@ -179,6 +179,14 @@ def refused(error: Exception) -> bool:
 # An agent task (`agent-task`)
 # ═══════════════════════════════════════════════════════════════════════
 
+#: What the harness's `_check_new_input` answers when it took nothing: an empty
+#: queue, or a head that carries images and cannot ride a tool result.  **A
+#: sentence, not an empty string** — it lands in a tool result, where a blank
+#: one reads as a failure — and it is here because two readers compare it: the
+#: agent server writes it, and `slife2.tui.restore` must not draw that pair as a
+#: message somebody sent.
+NOTHING_WAITING = "Nothing waiting: no message has arrived since the last boundary."
+
 #: The four tools, named once.  They are the whole surface, and the vocabulary
 #: they share is one: `agent_task_cancel` answers with the same `status` field
 #: `agent_task_status` does, so stopping a task needs no second set of outcomes.

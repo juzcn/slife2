@@ -373,9 +373,10 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled: True serves it; False stops it and keeps the entry.
 
         Returns:
-            The same payload `rest_api_set` answers with, and no `unresolved`:
-            writing the entry is what put the credential there, and this call
-            changed only the switch.
+            `name`, `enabled`, `state`, and `operations` or `error` when the link
+            has one of them. Unlike `rest_api_set` there is no `config` — this
+            call changed only the switch — and no `unresolved`, because writing
+            the entry is what put the credential there.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
 

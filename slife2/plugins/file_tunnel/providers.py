@@ -1118,12 +1118,11 @@ class _CliTunnelProvider(_TunnelProviderBase):
         the number of live edge connections — so it answers the question the
         scraped ``_registered`` set only approximates.
 
-        ``None`` means *there was no metrics server to ask* (the child announced
-        none), which is the one case that licenses the caller to fall back to
-        what it scraped.  A probe that was attempted and could not be answered is
-        a different case and reaches the caller the same way — ``None`` — so
-        :meth:`_transport_alive` tells the two apart by ``_metrics_base`` being
-        set, and neither answer is "alive".
+        ``None`` means *there was no answer to read*: no metrics server was
+        announced, or one was and the probe failed.  :meth:`_transport_alive`
+        tells the two apart by ``_metrics_base``: no base falls back to what it
+        scraped, while a base with no answer is treated as **alive** — a metrics
+        server that hiccuped is not evidence that the tunnel is down.
         """
         base = self._metrics_base
         if not base:
@@ -1150,7 +1149,9 @@ class _CliTunnelProvider(_TunnelProviderBase):
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         else:
-            # Own process group, so a stuck child can be killed as a group.
+            # Its own session, so the child does not share this daemon's
+            # controlling terminal or signal group.  `_kill_proc` signals the
+            # child's pid; a process it spawned itself is not walked.
             kwargs["start_new_session"] = True
 
         self._recent.clear()

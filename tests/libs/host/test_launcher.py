@@ -1288,3 +1288,65 @@ def test_stop_keeps_the_record_of_a_process_that_did_not_exit(
     assert runtime.read_record(SPEC.url) is not None, (
         "the record is the only thing that can find that pid again"
     )
+
+
+def test_the_last_client_stops_a_backend_another_config_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The last client is the machine's, not one config's.**  The servers are
+    shared, so another configuration may have started a model backend this file
+    never names; stopping only `specs(config)` left it running with no `status`
+    or `down` in either config able to find it.  `everything=True` is the exit
+    path, and the record is the machine-wide list.
+    """
+    seen: list[str] = []
+
+    def fake_stop(spec: launcher.ServerSpec) -> launcher.Outcome:
+        seen.append(spec.url)
+        return launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "_stop_one", fake_stop)
+    monkeypatch.setattr(launcher, "specs", lambda _config: [SPEC])
+    monkeypatch.setattr(
+        launcher,
+        "records",
+        lambda: [
+            runtime.ServerRecord(
+                name="llm:openai-completions",
+                url="http://127.0.0.1:24999/mcp",
+                pid=123,
+                config="",
+            )
+        ],
+    )
+
+    list(launcher.stop(default_config(), everything=True))
+
+    assert SPEC.url in seen
+    assert "http://127.0.0.1:24999/mcp" in seen
+
+
+def test_a_plain_stop_stays_with_this_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`slife2 down` is not a broadcast: only the last client's exit passes
+    `everything`."""
+    seen: list[str] = []
+
+    def fake_stop(spec: launcher.ServerSpec) -> launcher.Outcome:
+        seen.append(spec.url)
+        return launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "_stop_one", fake_stop)
+    monkeypatch.setattr(launcher, "specs", lambda _config: [SPEC])
+    monkeypatch.setattr(
+        launcher,
+        "records",
+        lambda: [
+            runtime.ServerRecord(
+                name="other", url="http://127.0.0.1:24999/mcp", pid=123, config=""
+            )
+        ],
+    )
+
+    list(launcher.stop(default_config()))
+
+    assert seen == [SPEC.url]

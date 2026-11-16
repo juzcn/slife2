@@ -1174,10 +1174,11 @@ class CabinetStore:
         **An agent-written document embeds before anything is written.**  The
         model is asked first (`vectors`), and only then does one transaction
         write the row, its keyword text and its vectors — so a write that
-        cannot embed raises having stored nothing, which is what the plugin's
-        `file_save` relies on when it takes back the bytes it copied.  A saved
-        file is in the keyword corpus but has no vector; a dump and an image are
-        in neither, because the turn's marker is their address.  **The
+        cannot embed raises having stored nothing, which is what a vectorized
+        kind's caller relies on.  A saved file is in the keyword corpus but has
+        no vector (it passes no embedder, so nothing can fail there); a dump and
+        an image are in neither, because the turn's marker is their address.
+        **The
         `embedder` is therefore the vectorized kinds' argument**: a caller that
         writes one of the other three passes none, and this method opens no
         embedding connection for it.
@@ -1191,6 +1192,11 @@ class CabinetStore:
         # is what makes the mirror and the keyword text agree, and what lets a
         # body the turn store stores be stored here.
         body = storable(body)
+        # **The key is normalised too.**  A lone surrogate in a subject is the
+        # same input class the body's comment names; binding the raw key raised
+        # `UnicodeEncodeError` out of the SELECT, and the mirror stem's UTF-8
+        # encode raised the same way.
+        key = storable(key)
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
@@ -1390,6 +1396,7 @@ class CabinetStore:
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
+        key = storable(key)
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
@@ -1441,6 +1448,7 @@ class CabinetStore:
             raise ValueError(_KIND_HINT)
         if not spec.searchable:
             raise ValueError(CORPUS_KIND_HINT)
+        key = storable(key)
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
@@ -1450,14 +1458,18 @@ class CabinetStore:
         row = self._with_body(dict(found))
         row["summary"] = summary or row.get("summary") or ""
         row["tags"] = tags or row.get("tags") or ""
-        row["updated_at"] = now()
+        # **`updated_at` is the document's own time, not the annotation's.**
+        # Notes report and sort by it ("when it was last written"), so
+        # describing one re-dated it — a `cabinet_summarize` moved an old note
+        # above a newer one in `note_list` and changed the `time` the model
+        # reads.  The summary and tags are found by the keyword index, which is
+        # rewritten below; the time axis is not theirs.
         with self._connect() as connection:
             connection.execute(
-                "UPDATE cabinet_doc SET summary = ?, tags = ?, updated_at = ? WHERE id = ?",
+                "UPDATE cabinet_doc SET summary = ?, tags = ? WHERE id = ?",
                 (
                     storable(str(row["summary"])),
                     storable(str(row["tags"])),
-                    row["updated_at"],
                     int(row["id"]),
                 ),
             )
@@ -1468,6 +1480,7 @@ class CabinetStore:
 
     def get(self, kind: str, key: str) -> dict[str, Any] | None:
         """One document by its kind and key, or `None`."""
+        key = storable(key)
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
@@ -1745,10 +1758,24 @@ class CabinetStore:
         where = filter_clause(clauses)
 
         if not keywords and not any(sentence.strip() for sentence in sentences):
+            # **The order is the axis the row's `time` reports.**  A kind-
+            # filtered browse ordered by `updated_at` while each row's `time` is
+            # that kind's own axis, so a diary page could show 2020 above 2030
+            # and disagree with `diary_list` about the same documents.  With no
+            # kind there is no shared axis but the document's timestamp, and
+            # that is what the window uses too.
+            if kind:
+                order = (
+                    f"d.{SPECS[kind].time}"
+                    if SPECS[kind].day
+                    else f"julianday(d.{SPECS[kind].time})"
+                )
+            else:
+                order = "julianday(d.updated_at)"
             with self._connect() as connection:
                 rows = connection.execute(
                     f"SELECT d.* FROM cabinet_doc d {where}"
-                    f" ORDER BY julianday(d.updated_at) DESC, d.id DESC LIMIT ?",
+                    f" ORDER BY {order} DESC, d.id DESC LIMIT ?",
                     (*values, limit),
                 ).fetchall()
             return {

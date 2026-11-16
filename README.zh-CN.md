@@ -663,9 +663,9 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
 - `text_to_speech`——把 `text` 或 `input` 指定的文本文件读成语音文件。
-- `transcribe_audio`——转写 `input` 指定的音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于你的工作目录）并回答该路径；不指定 `output` 时回答 transcript，长文本会存成 dump。
+- `transcribe_audio`——转写 `input` 指定的音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于该对话的工作目录）并回答该路径；不指定 `output` 时回答 transcript，长文本会存成 dump。
 
-生成工具默认写进 agent 的 media 目录；`output` 改为指定文件（相对路径相对于工作目录）。每个工具都以文本回答文件路径；`transcribe_audio` 不指定 `output` 时回答 transcript 本身。
+生成工具默认写进 agent 的 media 目录；`output` 改为指定文件（相对路径相对于该对话的工作目录）。每个工具都以文本回答文件路径；`transcribe_audio` 不指定 `output` 时回答 transcript 本身。
 
 每个模型声明自己的用途：
 
@@ -690,7 +690,7 @@ media:
 （仅图片生成）。选择不支持所请求 kind 的模型会被拒绝。
 
 生成的文件默认写在 `<data>/agents/<agent>/media/` 下。每个生成工具还接受一个
-`output` 路径：相对路径相对于 agent 的工作目录，绝对路径按原样使用，产物写到那里。
+`output` 路径：相对路径相对于该对话的工作目录，绝对路径按原样使用，产物写到那里。
 超时仍未完成的长时间视频调用会带着 provider 的 job id 被拒绝，而不是返回结果。
 
 ### 文件隧道

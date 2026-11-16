@@ -101,10 +101,12 @@ class ToolCall:
         the wire format requires — the awkwardness is theirs, and this method is
         the single place it is dealt with.
 
-        `ensure_ascii=True` keeps the payload pure ASCII.  It crosses a UTF-8
-        JSON-RPC boundary either way, but the same string can also land in a
-        server log on a console whose codepage is not UTF-8, and a mojibake log
-        line is a worse failure than an escaped one.
+        **The encoding we do is ASCII**, so a payload this serializer builds
+        survives a server log on a console whose codepage is not UTF-8 — a
+        mojibake log line is a worse failure than an escaped one.  A damaged
+        call's `raw_arguments` is the exception: it is the wire's own text,
+        kept so the stored turn records what the model actually wrote, and it
+        is forwarded as it arrived.
         """
         rendered = (
             self.raw_arguments

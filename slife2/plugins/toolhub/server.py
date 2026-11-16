@@ -284,7 +284,7 @@ JOB = "job"
 #: opt-in and there was never a mark to forget.
 #:
 #: So a declaration cannot mint a `plugin` source, and a declared source's name
-#: may not collide with an upstream's either — which `Upstream.declare` checks
+#: may not collide with an upstream's either — which `refresh_declared` checks
 #: against what this process is actually connected to.
 DECLARABLE_CATEGORIES = frozenset({SKILL, CLI, MCP, REST, JOB})
 
@@ -491,7 +491,8 @@ class Catalogue:
         reaches `list_tools`, which fails the whole list with it, and `servers`,
         which reports it (`build_server`).
 
-        **Keyed by source, because one source's success is not another's health.**
+        **Keyed by home and then by source, because one source's success is not
+        another's health** — and a write is to one home's file.
         A single slot would be cleared by the next merge that worked — a plugin
         whose rows are all unchanged, or one that offers no tool at all, embeds
         nothing and so writes nothing — and the hub would be back to reporting a
@@ -853,7 +854,7 @@ class Catalogue:
         Its failure is forgotten here with its rows, because this is the one
         write after which no merge can clear it: nothing will declare the source
         again, so `failure` would carry it for the life of the process.  The
-        deletion is this home's — `declare` is asked about one home's section and
+        deletion is this home's — `fetch` is asked about one home's section and
         the rows are in that home's file — so the entry forgotten is this home's
         too.
         """
@@ -1047,6 +1048,12 @@ def _server_row(
     counted source keeps its number, so a reader that compares the two still can.
     """
     counted = counts or {}
+    # **A ready source with no count row answered with zero tools.**  The
+    # catalogue has a row only for a source with tools, so an empty list and a
+    # source that never answered both produced `NOT_COUNTED`; the state word is
+    # the fact that tells them apart.  An unreachable source keeps the silence
+    # this row's docstring is about.
+    empty = 0 if state == "ready" else NOT_COUNTED
     return {
         "name": name,
         "kind": kind,
@@ -1056,8 +1063,8 @@ def _server_row(
         #: source with ninety tools and none loaded is a healthy server the model
         #: has not asked anything of — and that is a different answer from a
         #: server that has stopped offering them.
-        "tools": counted.get("tools", NOT_COUNTED),
-        "loaded": counted.get("loaded", NOT_COUNTED),
+        "tools": counted.get("tools", empty),
+        "loaded": counted.get("loaded", empty),
         "description": description,
         "error": error,
         #: Ours rather than somebody else's: the answer to "why did a whole turn
@@ -1188,12 +1195,12 @@ class Upstream:
         #: **Whether this source declares catalogue rows**, which is a fact
         #: about the listing and not a second copy of it: the one tool name
         #: `LIST_SOURCES` either is or is not in what the server offered.  See
-        #: `declare`, which is the only thing that reads it.
+        #: `fetch`, which is the only thing that reads it.
         self._declares = False
         #: The source names it declared last time, **per home**, so that one it
-        #: has stopped holding can be forgotten — see `declare`.
+        #: has stopped holding can be forgotten — see `record`.
         #:
-        #: Per home because *the answer* is: `declare` asks the plugin for the
+        #: Per home because *the answer* is: `fetch` asks the plugin for the
         #: calling home's section (`Connection._call_once` attaches the caller's
         #: identity, so the plugin's `family.current()` answers that home's
         #: entries), and a set held for the process is therefore one home's
@@ -1283,10 +1290,6 @@ class Upstream:
         wait on attempts it did not start."""
         return self._connection.attempt
 
-    async def ready(self) -> bool:
-        """Whether the link is usable, starting one and waiting if it is not."""
-        return await self._connection.ready()
-
     # --- what the gateway hands over ------------------------------------------
 
     async def _listed(self, listed: list[Any]) -> None:
@@ -1316,7 +1319,7 @@ class Upstream:
         #: a source has that the model must never be given, so the audience gate
         #: is exactly what removes it from the filtered list.  A bool and not a
         #: set of names, for the reason this class keeps no tool list at all —
-        #: the question `declare` asks is a yes-or-no about one name.
+        #: the question `fetch` asks is a yes-or-no about one name.
         #:
         #: **`required` is half the answer**, and the half that is not about the
         #: listing.  A declared row is merged without passing the audience gate
@@ -1430,7 +1433,7 @@ class Upstream:
 
         **This is the only way into the model's list that asks.**  A source the
         operator configured arrives by declaration instead, and is not gated,
-        because the entry in the config is the opt-in — see `Upstream.declare`.
+        because the entry in the config is the opt-in — see `refresh_declared`.
         """
         # **There is no other case.**  A source the operator configured is not an
         # upstream of this process — a plugin holds it and declares it, and what
@@ -1453,45 +1456,6 @@ class Upstream:
     ) -> tuple[str, bool]:
         """Run one of this server's tools.  See `slife2.clients.gateway.Connection`."""
         return await self._connection.call(tool, arguments, meta)
-
-    async def declare(self) -> list[DeclaredSource]:
-        """Hand over the sources this plugin holds, and record what they are.
-
-        **A second kind of thing a plugin can offer, beside its own tools.**  A
-        plugin that fronts somebody else's servers holds *sources*: the entries
-        the operator wrote down, each with its own name, its own tools and its
-        own health.  So does one whose family is not a tool at all — a skill is a
-        document and a `cli:` entry is a command, and `tool_search` reads the
-        catalogue, so a family no row describes is a family only a model that
-        already knew a name could find.
-
-        **The hub merges; the plugin does not write.**  That is the whole reason
-        this is a call and not a connection from the plugin to the catalogue: one
-        writer of the tool table, one place where two sources' claim on a name is
-        settled, and one process holding the catalogue open.
-
-        **Asked only of a plugin that is already usable, and only of one of
-        ours.**  Usable is what keeps it off the session path — `start()` runs
-        per session and `tool_search` per search, and neither may wait for a
-        connect; a plugin that is not up yet contributes nothing and is asked
-        again on the next ask, and the rows it declared last time are still in
-        the catalogue, so a late plugin is a delay rather than a loss.  Ours is
-        the permission: see `_listed`, which is where `_declares` is decided.
-
-        **A plugin that serves this tool and cannot answer it is a fault**, and
-        it is raised as one.  A family that quietly contributed no sources would
-        take every one of its tools out of the model's list without anything
-        reporting a failure — which is precisely the invisible break the
-        required-plugin rule exists to prevent.
-
-        Returns:
-            One `DeclaredSource` per source it holds, which is the hub's address
-            book for calls it cannot make itself — and what `servers()` reports.
-        """
-        held = await self.fetch()
-        if held is None:
-            return []
-        return await self.record(held)
 
     async def fetch(self) -> list[Any] | None:
         """The round trip alone: what this plugin says it holds.
@@ -1537,6 +1501,16 @@ class Upstream:
             raise ConnectionError(
                 f"{self.settings.name} answered with something that is not JSON"
             ) from exc
+        if not isinstance(answer, dict):
+            # **A list is not an answer either.**  `.get` on it raised
+            # `AttributeError` out of `fetched`, which catches `ConnectionError`
+            # only — so one stale plugin answering `[]` failed the whole
+            # catalogue listing instead of being carried as one source's
+            # failure.
+            raise ConnectionError(
+                f"{self.settings.name} answered with a {type(answer).__name__}, "
+                f"not the object that carries `sources`"
+            )
         held = answer.get("sources")
         if not isinstance(held, list):
             raise ConnectionError(
@@ -1544,14 +1518,27 @@ class Upstream:
             )
         return held
 
-    async def record(self, held: list[Any]) -> list[DeclaredSource]:
+    async def record(
+        self, held: list[Any], *, allowed: list[Any] | None = None
+    ) -> list[DeclaredSource]:
         """Merge one fetched answer and report what it leaves in the catalogue.
 
-        The writing half of `declare`, run one plugin's answer at a time:
+        The writing half of a refresh, run one plugin's answer at a time:
         `_record` merges into the catalogue, and a second merge of one source is
         what the refresh lock and this order exist to keep apart.
+
+        **`allowed` is what may be merged; `held` is what the plugin says it
+        holds.**  The refresh filters a colliding source out before this call, and
+        the difference matters: a filtered source is not a source the plugin
+        stopped holding, so it must not be forgotten.  Comparing the previous
+        answer against only the merged rows made the loser's refresh delete the
+        winner's rows on the first recovery — the mutual purge the filter exists
+        to prevent, reintroduced through the bookkeeping.
         """
-        declared = [one for raw in held if (one := await self._record(raw)) is not None]
+        merged = held if allowed is None else allowed
+        declared = [
+            one for raw in merged if (one := await self._record(raw)) is not None
+        ]
         # **A source it held and does not any more.**  The entry left the
         # section, so nothing will declare it again and its rows go with it —
         # deleted, not marked.  `error` is the verdict for a source that is
@@ -1564,7 +1551,12 @@ class Upstream:
         # sections and delete one of this home's rows.
         here = home_key()
         last = self._declared.get(here, set())
-        for source in sorted(last - {one.name for one in declared}):
+        present = {
+            str(raw.get("name") or "")
+            for raw in held
+            if isinstance(raw, dict) and raw.get("name")
+        }
+        for source in sorted(last - present):
             gone = await self._catalogue.forget_source(source)
             logger.info(
                 "%s: %r is no longer in its section — %d tool(s) removed",
@@ -1572,7 +1564,7 @@ class Upstream:
                 source,
                 len(gone),
             )
-        self._declared[here] = {one.name for one in declared}
+        self._declared[here] = present
         return declared
 
     async def _record(self, raw: Any) -> DeclaredSource | None:
@@ -1633,7 +1625,7 @@ class Upstream:
                     # caller that asked: aborting the declaration is what keeps a
                     # source whose rows failed to merge from being read as one
                     # the plugin has stopped holding — which would delete its
-                    # rows (`declare`, at the end of its own loop).
+                    # rows (`record`, at the end of its own loop).
                     raise
                 # Refused rows are this *source's* problem: it is the thing that
                 # offered a name somebody else already owns, and the rest of the
@@ -1657,10 +1649,6 @@ class Upstream:
             description=str(raw.get("description") or ""),
             transport=str(raw.get("transport") or ""),
         )
-
-    async def disconnect(self) -> None:
-        """Drop the connection, keeping the configuration and the error."""
-        await self._connection.disconnect()
 
     async def close(self) -> None:
         await self._connection.close()
@@ -1927,13 +1915,13 @@ def local_tools(
     a listing is where a family that declares rows has to be current: dropping a
     directory into `<data>/skills/` is the whole of installing a skill, and a row
     that appeared only at the next hub start would make a new playbook readable
-    and unfindable at the same time.  See `Upstream.declare`.
+    and unfindable at the same time.  See `refresh_declared`.
     """
 
     async def search(arguments: dict[str, Any]) -> dict[str, Any]:
         # Every family that owns rows is asked for its list on the way in,
         # because a search is exactly where something that arrived since the hub
-        # started has to be findable — see `Upstream.declare`.  Nothing is
+        # started has to be findable — see `refresh_declared`.  Nothing is
         # written when nothing changed, and nothing is waited for: a source that
         # is not up yet is asked again on the next search.
         await refresh_declared()
@@ -2490,7 +2478,7 @@ def _load_refusal(
 
     The three refusals that are not a fault say so, because the model acts on
     them differently: a switched-off entry is the operator's decision, a server
-    that is not answering is one to try later (`servers` says which), and the two
+    that is not answering is one to try later (`tool_list` shows its status), and the two
     document families are findable and not loadable — `skill_use` reads a
     playbook, and an installed command is run through the shell (SDD §7.3).
     """
@@ -2502,8 +2490,8 @@ def _load_refusal(
             close,
             missing=f"unknown tool {name!r}",
             finder=(
-                "`tool_search` searches by what a tool does; `servers` says "
-                "which sources are answering"
+                "`tool_search` searches by what a tool does; `tool_list` shows "
+                "each row's status"
             ),
             absent="in the catalogue",
         )
@@ -2536,7 +2524,7 @@ def _load_refusal(
     if outcome == "error":
         return (
             f"{name!r} cannot be loaded: the server that owns it is not "
-            f"answering. It is in the catalogue, and `servers` says why"
+            f"answering. It is in the catalogue, and `tool_list` shows its status"
         )
     return f"{name!r} could not be loaded ({outcome or 'no answer'})"
 
@@ -2968,7 +2956,7 @@ def build_server(
         sources into the swap (`carried`), so neither `live_sources` nor the
         route a call takes loses a source because one report was late.
 
-        **And that rule is enforced, not assumed.**  `Upstream.declare` has a
+        **And that rule is enforced, not assumed.**  `Upstream.fetch` has a
         bound of its own (`ready.connect_tools`) and raises when a plugin that is
         up does not answer within it — a real state in a cold container, where
         `mcp-tools` is still installing the external servers it holds.  The
@@ -3092,7 +3080,7 @@ def build_server(
                         continue
                     allowed.append(raw)
                 try:
-                    declared = await upstream.record(allowed)
+                    declared = await upstream.record(held, allowed=allowed)
                 except Exception as exc:  # noqa: BLE001 — one source, one state
                     # **The catalogue's health is a state, not a raise.**  A
                     # non-refusal is already kept in `catalogue.failure` by
@@ -3517,7 +3505,7 @@ def build_server(
             # A source the config still names and no plugin declares is a plugin
             # that is not answering: `refresh_declared` skips a plugin that is down
             # whole, so its sources leave this home's address book while their
-            # rows stay on purpose (`Upstream.declare`).  The other shape is an
+            # rows stay on purpose (`refresh_declared`).  The other shape is an
             # entry taken out of the section while the plugin that held it was
             # silent: `forget_source` is that plugin's deletion to ask for, and it
             # has not been asked.
@@ -3532,7 +3520,7 @@ def build_server(
                         f"{name!r} belongs to {source!r}, which is still in this "
                         f"home's config — no plugin is declaring it right now, "
                         f"and the plugin that serves its section is the one that "
-                        f"would. `servers` says whether it is answering."
+                        f"would. `tool_list` shows its status."
                     ),
                     "ok": False,
                 }
@@ -3592,8 +3580,8 @@ def build_server(
             missing=f"unknown tool {name!r}",
             finder=(
                 "`tool_search` searches by what it does, then `func_tool_load` "
-                "puts the one you meant in your list; `servers` says which "
-                "sources are answering"
+                "puts the one you meant in your list; `tool_list` shows each "
+                "row's status"
             ),
             absent="in the catalogue",
         )

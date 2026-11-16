@@ -965,6 +965,15 @@ def refusal(config: Config, name: str) -> str | None:
     **One sentence, with no marker in front of it.**  `prepare_entry` raises it,
     so the failure is the call's status and the sentence is only the reason.
     """
+    if not name.strip():
+        # **The hub refuses an empty source name before it can be declared.**
+        # The write succeeded, so the call reported a server added — while
+        # `refresh_declared` dropped the blank name and no tool ever appeared.
+        # The refusal belongs where every other unusable name is refused.
+        return (
+            "a source needs a name — it is how the model's tools are addressed "
+            "and how the entry is found in the section. Choose one."
+        )
     if name in config.plugins():
         return (
             f"'{name}' is a server slife2 itself runs, so its tools "

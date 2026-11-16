@@ -625,6 +625,12 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         params = dict(extra_params or {})
         if size:
             params["size"] = _size_for(size, "*")
+        elif isinstance(params.get("size"), str):
+            # **The vendor's separator is the last word either way.**  A
+            # `params.size` from the model's config went out verbatim while the
+            # call's own argument was normalised — the same field, two
+            # spellings, and the vendor 400 that `_size_for` exists to prevent.
+            params["size"] = _size_for(params["size"], "*")
         output = await self._generate(model, content, params)
         for item in self._content(output):
             if url := item.get("image"):

@@ -11,7 +11,7 @@ A method-per-event handler would need eight methods (`on_text_chunk`,
 `on_tool_call`, `on_tool_approval`, ...).  The cost shows up the moment a ninth
 event is added: every observer in the codebase — the TUI, the tests, the
 recorder — has to grow a method, whether or not it cares about the new event.
-Here, adding a variant is one dataclass and one line in `_DECODERS`; observers
+Here, adding a variant is one dataclass and one `case` in `decode`; observers
 that do not match on it keep working untouched.
 
 The price is that observers pattern-match (`case TextDelta():`) rather than

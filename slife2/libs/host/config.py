@@ -110,7 +110,7 @@ import platform
 import re
 import stat as _stat
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -806,14 +806,14 @@ _BY_KEY: dict[str, Plugin] = {one.key: one for one in PLUGINS}
 
 
 def plugin(key: str) -> Plugin:
-    """The row *key* names.  **Never raises**, and that is on purpose.
+    """The row *key* names, or `KeyError` when there is none.
 
     The keys that reach here are the ones this module wrote down — a `Net`'s own
     key, a constant's own key — so an unknown one is a programming error inside
-    this file rather than anything a config can cause, and a `KeyError` traceback
-    naming the key is a better answer than a config refusal nobody can act on.
-    A key from *outside* is checked against `Config.server` first, which is the
-    one place a word somebody typed is judged.
+    this file rather than anything a config can cause.  It is raised as the
+    `KeyError` the lookup already is rather than turned into a config refusal
+    nobody can act on; a key from *outside* is checked against `Config.server`
+    first, which is the one place a word somebody typed is judged.
     """
     return _BY_KEY[key]
 
@@ -2094,6 +2094,14 @@ def broker_address(text: str) -> tuple[str, int]:
     address can be written down.
     """
     host, _, port = text.rpartition(":")
+    # **An IPv6 address may be written with the brackets a URL needs.**  The
+    # host is what the broker is dialled at, so `[::1]` and `::1` are one
+    # machine and one address; keeping the brackets made the loopback address
+    # a "remote" host in `slife2.plugins.a2a.broker` and refused to start the
+    # broker that the bare spelling starts.  `log_url` puts the brackets back
+    # where a URL needs them.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host or not port:
         raise ConfigError(
             f"--a2a-broker {text!r} is not `host:port` — write it as "
@@ -2425,7 +2433,7 @@ def _with_port_offset(config: Config, offset: int) -> Config:
     is for.
     """
     if offset == 0:
-        return replace(config, port_offset=0) if config.port_offset else config
+        return config
     servers = {
         name: replace(
             server, port=_shift_port(server.port, offset, f"servers.{name}.port")
@@ -2622,6 +2630,23 @@ def _mapping(raw: Any, where: str) -> dict[str, Any]:
     return raw
 
 
+def _refuse_unknown(raw: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
+    """Refuse a key this reader does not take, naming the ones it does.
+
+    **A key nobody reads is a switch nobody throws.**  Most of these sections are
+    read key by key, so a misspelt `max_iteration` loaded cleanly and meant "no
+    cap" — the most expensive reading of a value the operator wrote to be safe.
+    The refusal is the rule the module states at the top; the sections that were
+    written before it are brought in line here rather than one at a time.
+    """
+    unknown = sorted(set(raw) - set(allowed))
+    if unknown:
+        raise ConfigError(
+            f"{where}: unknown key(s) {', '.join(unknown)} — known keys are "
+            f"{', '.join(sorted(allowed))}"
+        )
+
+
 def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     """Assemble a Config from a parsed mapping, defaulting what is absent.
 
@@ -2629,6 +2654,30 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     template can sit next to the config that names it.
     """
     base = default_config()
+    _refuse_unknown(
+        raw,
+        {
+            "wsl_port_offset",
+            "servers",
+            "providers",
+            "default",
+            "agent",
+            "agent-task",
+            "subagent",
+            "embeddings",
+            "context",
+            "tool_load",
+            "tool_result",
+            "mcp",
+            "rest-api",
+            "cli",
+            "skills",
+            "media",
+            "file-tunnel",
+            "peer_agent",
+        },
+        "slife2.yaml",
+    )
 
     servers = dict(base.servers)
     for name, spec in _mapping(raw.get("servers"), "servers").items():
@@ -2656,6 +2705,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     }
 
     agent_raw = _mapping(raw.get("agent"), "agent")
+    _refuse_unknown(agent_raw, {"max_iterations", "system_prompt"}, "agent")
     max_iterations = _int_or(
         agent_raw.get("max_iterations"),
         base.agent.max_iterations,
@@ -2791,15 +2841,23 @@ def _a2a(
     # somebody else's broker, and its own broker would no longer be started.  A
     # subagent has no business on anybody else's broker.
     override = os.environ.get(override, "").strip() if override else ""
-    if raw is None and override:
-        raise ConfigError(
-            f"--a2a-broker {override!r} names a broker to use, but this machine "
-            f"is not on the peer network: there is no `peer_agent:` section, and "
-            f"that section is what being on one means"
-        )
     if raw is None:
+        # **The override is not a section.**  The env var is process-wide, and a
+        # shared daemon loads every home's config: failing here made one home's
+        # `--a2a-broker` refuse every *other* home's file, which has no
+        # `peer_agent:` section because it is not on the mesh.  The command
+        # that owns the flag refuses it against its own config instead
+        # (`slife2.main`), which is the only file the operator asked about.
         return base
     found = _mapping(raw, section)
+    # `subagent:` also carries its cap, which `_subagent` reads; the network
+    # keys are this reader's, and a key outside both is refused here.
+    _refuse_unknown(
+        found,
+        {"provider", "broker", "org", "unit"}
+        | ({"max_running"} if section not in (PEER_AGENT_KEY,) else set()),
+        section,
+    )
 
     provider = str(found.get("provider") or base.provider).strip()
     if provider != base.provider:
@@ -2816,6 +2874,7 @@ def _a2a(
     if broker is None:
         broker = {}
     broker = _mapping(broker, f"{section}.broker")
+    _refuse_unknown(broker, {"host", "port"}, f"{section}.broker")
 
     # The address a key left out means — the caller's, or this build's own.  Both
     # halves are read here rather than at their two use sites so the default a
@@ -2825,6 +2884,10 @@ def _a2a(
         base.broker_port,
     )
     host = str(broker.get("host") or default_host)
+    # The same bracket fold `broker_address` makes for the flag: a broker's
+    # host is an address, and `[::1]` and `::1` are one machine.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     port = _int_or(broker.get("port"), default_port, f"{section}.broker.port")
     if not 0 < port < 65536:
         # **The flag refused this and the file did not.**  `broker_address`
@@ -2865,6 +2928,7 @@ def _agent_task(raw: Any, base: AgentTaskSettings) -> AgentTaskSettings:
     if raw is None:
         return base
     section = _mapping(raw, "agent-task")
+    _refuse_unknown(section, {"max_running"}, "agent-task")
     max_running = _int_or(
         section.get("max_running"), base.max_running, "agent-task.max_running"
     )
@@ -2906,6 +2970,7 @@ def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
             f"network is one mesh per agent, so its unit is the agent's own name "
             f"(the org is this network's, and may be written to group meshes)"
         )
+    _refuse_unknown(section, {"max_running", "provider", "broker", "org"}, "subagent")
     max_running = _int_or(
         section.get("max_running"), base.max_running, "subagent.max_running"
     )
@@ -3183,6 +3248,18 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     if raw is None:
         return base
     section = _mapping(raw, "context")
+    _refuse_unknown(
+        section,
+        {
+            "ceiling",
+            "recall_page_limit",
+            "timeout",
+            "min_similarity",
+            "keyword_weight",
+            "rerank_min_score",
+        },
+        "context",
+    )
     ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
     ceiling = base.ceiling if ceiling is None else ceiling
     if not 0 < ceiling <= 1:
@@ -3297,6 +3374,11 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
     """
     if not isinstance(raw, dict):
         raise ConfigError(f"embeddings.providers.{name}: expected a mapping")
+    _refuse_unknown(
+        raw,
+        {"base_url", "model", "api_key", "rerank_model"},
+        f"embeddings.providers.{name}",
+    )
 
     base_url = str(raw.get("base_url") or "")
     model = str(raw.get("model") or "")
@@ -3463,8 +3545,6 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
 
     env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")
     args = _string_list(raw.get("args"), f"rest-api.{name}.args")
-    if spec:
-        env = {OPENAPI_SPEC_URL: spec, **env}
 
     # These two are the proxy's, and they are written from the entry rather than
     # into `env:` because they are what the entry is *about*: which API, and
@@ -3542,6 +3622,7 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     for name, spec in entries.items():
         if not isinstance(spec, dict):
             raise ConfigError(f"skills.{name}: expected a mapping")
+        _refuse_unknown(spec, {"env", "enabled"}, f"skills.{name}")
     return {
         str(name): SkillSettings(
             env=_secrets(spec.get("env"), f"skills.{name}.env"),

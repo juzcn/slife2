@@ -593,12 +593,12 @@ class SlifeApp(App[None]):
         is killed is reported to every peer as `✗ offline` without anything being
         sent.
 
-        **The agent's own `⚡ online` line is the plugin's, not this worker's.**
-        There is nothing here to draw it from: the call succeeds by *not
-        returning*, so a window that waited for a return to draw a line would
-        report a successful join as a silence.  The plugin draws it — the same
-        function that draws every peer's arrival — and this worker's business is
-        only what went wrong.
+        **A successful join draws nothing, on purpose.**  The call succeeds by
+        *not returning*, so a window that waited for a return to draw a line
+        would report a successful join as a silence.  And the agent's own
+        arrival is not news to its own window (`join`: `⚡ jack online` in
+        jack's window would be the harness telling somebody what they already
+        are).  What this worker draws is what went wrong.
 
         Retried rather than fatal, for `_connect`'s reason: a plugin that is not
         answering must not make the window unusable, and what is lost while it is
@@ -608,7 +608,12 @@ class SlifeApp(App[None]):
         would otherwise write the same line every two seconds.
         """
         assert self._mesh is not None
-        complained = False
+        #: A transport failure and a refusal are two different facts: an early
+        #: connection error used to set the one flag a later refusal was gated
+        #: on, so the line a person could act on — a name taken, a broker that
+        #: is not there — was only logged at debug.
+        unreachable = False
+        refusal_said = False
         while True:
             try:
                 await self._mesh.connect()
@@ -620,19 +625,20 @@ class SlifeApp(App[None]):
                 # because it is the one failure the person can act on — a name
                 # another instance is holding, a broker that is not running —
                 # and because the window would otherwise look exactly like one
-                # on a mesh that is working.
-                if not complained:
+                # on a mesh that is working.  Said once: the reason does not
+                # change between attempts.
+                if not refusal_said:
                     self._transcript.add_note(notes.not_on_the_mesh(str(exc)))
-                    complained = True
+                    refusal_said = True
                 else:
                     logger.debug("A2A mesh still refusing %s: %s", self._agent, exc)
                 await self._mesh.close()
                 await asyncio.sleep(_T.timeouts.pacing.reconnect)
             except Exception as exc:  # noqa: BLE001 - a missing mesh is operational
-                (logger.debug if complained else logger.warning)(
+                (logger.debug if unreachable else logger.warning)(
                     "A2A mesh unavailable: %s", exc
                 )
-                complained = True
+                unreachable = True
                 await self._mesh.close()
                 await asyncio.sleep(_T.timeouts.pacing.reconnect)
             else:
@@ -1152,6 +1158,15 @@ class SlifeApp(App[None]):
             self._ask_approval(event.call_id, event.name, event.arguments)
             return
         if isinstance(event, TurnFinished):
+            # **A turn's end settles its pending approval.**  The server refuses
+            # an unanswered request after its own bound and continues without a
+            # tool event, so the window could keep a row "requests approval"
+            # after the turn was over — leaving y/n live and Ctrl+O refused for
+            # a question nobody was waiting on.  Denying it is the same answer
+            # the cancel path gives, and the worker's `answer_approval` reports
+            # that the turn had already moved on.
+            if self._approval is not None and self._approval.pending:
+                self._approval.action_deny()
             # Two numbers, two questions.  `last_usage` is how large the
             # conversation had become by the end — the only thing a context
             # percentage can be a percentage of.  `usage` is the turn's bill
@@ -1276,7 +1291,10 @@ class SlifeApp(App[None]):
         implementation of "switch the model" and one answer as to whether it
         worked.
         """
-        if self._switching:
+        if self._switching or self._choosing:
+            # The two inline pickers share the tail of the transcript and the
+            # focus.  Opening one over the other blurred and cancelled both —
+            # Ctrl+S then Ctrl+O left two "Cancelled" rows and no switch.
             return
         # **Only the window's own screen offers this**, for `action_watch`'s
         # reason: with a watch up, the picker would mount in the transcript
@@ -1305,14 +1323,16 @@ class SlifeApp(App[None]):
             try:
                 rows = await self._client.models()
             except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-                self._transcript.add_error(t("model_list_failed", err=exc))
+                self._transcript.add_error(
+                    t("model_list_failed", err=exc), ends_turn=False
+                )
                 return
             choices = model_choices(rows)
             if not choices:
                 # Said rather than shown as an empty picker: a list with no
                 # rows is a key that looks broken, and the tool that would fix
                 # it is the thing to name.
-                self._transcript.add_error(t("no_models"))
+                self._transcript.add_error(t("no_models"), ends_turn=False)
                 return
             future: asyncio.Future[ModelChoice | None] = asyncio.Future()
             picker = self._transcript.add_picker(
@@ -1330,7 +1350,9 @@ class SlifeApp(App[None]):
             try:
                 answer = await self._client.switch_model(choice.ref)
             except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-                self._transcript.add_error(t("model_switch_failed", err=exc))
+                self._transcript.add_error(
+                    t("model_switch_failed", err=exc), ends_turn=False
+                )
                 return
             # **A note, and it is this window's sentence.**  What the server said
             # is the *facts* — which model it is now, which it was, how many
@@ -1354,7 +1376,7 @@ class SlifeApp(App[None]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("model_list_failed", err=exc))
+            self._transcript.add_error(t("model_list_failed", err=exc), ends_turn=False)
         finally:
             self._switching = False
 
@@ -1368,7 +1390,8 @@ class SlifeApp(App[None]):
         choice there would block the pump that has to deliver the `Enter` that
         resolves the picker.  A worker does both.
         """
-        if self._choosing:
+        if self._choosing or self._switching:
+            # See `action_switch_model`: one picker at a time.
             return
         # **Only the window's own screen offers this.**  With a watch screen
         # up, the picker would mount in the transcript underneath it — invisible
@@ -1419,7 +1442,9 @@ class SlifeApp(App[None]):
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - the other half of the picker still works
-                    self._transcript.add_error(t("tasks_failed", err=exc))
+                    self._transcript.add_error(
+                        t("tasks_failed", err=exc), ends_turn=False
+                    )
                 finally:
                     await tasks.close()
 
@@ -1455,7 +1480,8 @@ class SlifeApp(App[None]):
                 task_watch = self._task_watch_client_factory
                 if task_watch is None:
                     self._transcript.add_error(
-                        t("tasks_failed", err="no task watch client is configured")
+                        t("tasks_failed", err="no task watch client is configured"),
+                        ends_turn=False,
                     )
                     return
                 screen = WatchScreen(
@@ -1481,7 +1507,7 @@ class SlifeApp(App[None]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("subagents_failed", err=exc))
+            self._transcript.add_error(t("subagents_failed", err=exc), ends_turn=False)
         finally:
             self._choosing = False
 
@@ -1581,7 +1607,9 @@ class SlifeApp(App[None]):
             await self._require_connected()
             answer = await self._client.answer_approval(call_id, approved)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("approval_undelivered", err=exc))
+            self._transcript.add_error(
+                t("approval_undelivered", err=exc), ends_turn=False
+            )
             return
         # **A sentence means nobody was waiting for it**: the turn ended while
         # the prompt was up — a cancel, or another window answering the same

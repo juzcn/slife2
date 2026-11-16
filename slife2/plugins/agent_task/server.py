@@ -211,12 +211,6 @@ class AgentTask:
     #: the answer travels by message, so that a result cannot enter the
     #: conversation twice (SDD §9.3).
     text: str = ""
-    #: Whether the answer reached the conversation.  Kept because "was it handed
-    #: over" is the one fact about a task that nothing else can reconstruct — the
-    #: delivery log is the process's, and the conversation cannot be asked
-    #: whether something arrived.  `finished` implies `True`; a `failed` task may
-    #: have delivered its failure message or may have delivered nothing.
-    delivered: bool = False
     #: The sentence its last watch frame carried, kept while the task is still
     #: answerable.  A watch that arrives after the end has no events to replay;
     #: this is what lets the screen say what happened rather than open on a
@@ -515,8 +509,7 @@ def build_server(
         twice, under a description that is a rendered template rather than anything the
         person said.  A task reads the agent's context and adds nothing to it:
         what the conversation gains is the answer, which is the thing it asked
-        for.  The agent server's `Loop.records` is its switch for the opposite
-        case; there is no switch here because there is nothing to switch.
+        for.  There is no switch here because there is nothing to switch.
         """
         current = runtime.current()
         name, provider, settings = current.resolve("")
@@ -656,8 +649,7 @@ def build_server(
     #: transcript twice, under a description that is a rendered template rather than
     #: anything the person said.  A task reads the agent's context and adds
     #: nothing to it; what the conversation gains is the answer, which is the
-    #: thing it asked for.  `Loop.records` is the agent server's switch for the
-    #: opposite case, and there is no switch here because there is nothing to
+    #: thing it asked for.  There is no switch here because there is nothing to
     #: switch.
 
     async def run(task: AgentTask) -> None:
@@ -830,7 +822,6 @@ def build_server(
                 exc,
             )
             return False
-        task.delivered = True
         return True
 
     # ── whose task ───────────────────────────────────────────────────────

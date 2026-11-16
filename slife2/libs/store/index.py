@@ -101,7 +101,8 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
 #: to one row.
 #:
 #: **The turn store's recall is the exception.**  Each of its legs asks for
-#: exactly `limit + len(excluded)` turns, and the union is returned uncut.
+#: `limit + len(excluded) + excluded_chunks` candidates — the KNN counts chunks,
+#: and a kept turn's chunks occupy its places — and the union is returned uncut.
 _OVERFETCH = 4
 
 
@@ -452,15 +453,14 @@ def rows_in_order(
 ) -> list[sqlite3.Row]:
     """Those rows, in the order they were ranked, filtered and cut.
 
-    **One function, because three stores ask one question.**  A search's order
+    **One function, because two stores ask one question.**  A search's order
     comes from a fusion in Python and its rows come from a table, so the ids
     travel as an `IN` list and the order is put back here — SQLite would return
-    them in whatever order it liked.  The turn store, the catalogue and the
-    cabinet each had their own copy of that, differing in the table's name, the
-    column the id is called and which store opens the connection; the last of
-    those is why this takes a connection rather than opening one, because the
-    two stores that read on a thread hop and the one that reads inline disagree
-    about where a connection may be opened and nothing else.
+    them in whatever order it liked.  The catalogue and the cabinet each had
+    their own copy of that, differing in the table's name, the column the id is
+    called and which store opens the connection; the last of those is why this
+    takes a connection rather than opening one, because the catalogue reads on a
+    thread hop and the cabinet reads inline.
 
     `select` is the whole `SELECT … FROM …` head (it is the part that differs),
     `column` the id's name *in SQL* — qualified where the query needs it — and
@@ -1016,9 +1016,11 @@ def fuse_shortlist(
     things the caller can read off it — the words first, because a row whose own
     text contains them is certain where a cosine is graded, and then by meaning.
 
-    The union is capped at `MAX_SQL_VARS` because nothing the caller passes
-    bounds it: every sentence brings its own leg, and the final query binds one
-    value per id.  Every row gets its number, the word-matched ones included —
+    **The union is not capped here.**  `MAX_SQL_VARS` bounds how many values one
+    statement may bind, and the final read binds in chunks (`rows_in_order`);
+    truncating the union before the caller's filters run hid matching rows
+    behind a page of rows the filter was about to drop.  Every row gets its
+    number, the word-matched ones included —
     without one they would be the strongest evidence on the page reading as the
     weakest.  A row several sentences found takes the **nearest** of them, and
     `NO_SIMILARITY` rather than `0.0` keeps an unmeasured row below a measured
@@ -1041,7 +1043,6 @@ def fuse_shortlist(
                 shortlist.append(rowid)
         for rowid, measured in hits:
             meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-    shortlist = shortlist[:MAX_SQL_VARS]
     for rowid, value in meaning_of(
         [rowid for rowid in shortlist if rowid not in meaning], queries
     ).items():

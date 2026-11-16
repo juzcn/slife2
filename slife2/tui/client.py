@@ -1,15 +1,17 @@
-"""How the TUI talks to the servers it needs: the agent, its inbox, and the mesh.
+"""How the TUI talks to the servers it needs.
 
-Three clients, because a window holds three conversations with the outside: it
-*asks* the agent server for turns (:class:`AgentClient`), it *is asked* by the
-plugin that hands it messages from other channels (:class:`WindowClient`), and it
-*holds a place* for its agent on the A2A mesh (:class:`MeshClient`).  The last two
-point the other way round from the first, which is why both are calls held open
-rather than anything polled — and why the window's own liveness is what they
-report: a window that goes away drops both, and a peer sees the agent leave the
+Five protocols, because a window holds five conversations with the outside: it
+*asks* the agent server for turns (:class:`AgentClient`); it *is asked* by the
+plugin that hands it messages from other channels (:class:`WindowClient`); it
+*holds a place* for its agent on the A2A mesh (:class:`MeshClient`); it lists
+the agent tasks the picker offers (:class:`AgentTaskClient`); and a watch screen
+*reads* a conversation or task it is not running (:class:`WatchClient`).  The
+last four point the other way round from the first — a call held open rather
+than anything polled — which is why the window's own liveness is what they
+report: a window that goes away drops them, and a peer sees the agent leave the
 mesh at the same moment the inbox closes.
 
-All three are Protocols, so the TUI never imports FastMCP at the point of use and
+All five are Protocols, so the TUI never imports FastMCP at the point of use and
 tests can inject scripted clients.  That seam is the whole reason the widgets can
 be built and verified without a server running.
 """

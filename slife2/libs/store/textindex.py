@@ -53,7 +53,9 @@ from collections.abc import Sequence
 #: `slife2.libs.store.index` stamps all three of this system's corpora with it — because an
 #: index built by one version of `normalize` cannot be searched by another: the
 #: recorded version is how the index learns that it has to be built again.  Bump
-#: it with any change to what `normalize` or `terms` produces.
+#: it with any change to what `normalize` produces — the indexed text.  A change
+#: to query parsing alone (`terms`) does not make an existing index wrong, and a
+#: bump would rebuild every index for nothing.
 #:
 #: This is the *only* such constant, which is the point of it being here rather
 #: than in each store: it was documented as this lever while nothing read it and
@@ -108,9 +110,16 @@ _CJK_RUN_RE = re.compile(f"[{_CJK_CLASS}]+")
 #: `unicode61`, and a term holding one is one word".  Measured against the
 #: pinned SQLite, it is neither.)
 _SEPARATOR_RE = re.compile(
-    "[\u0000-/:-@[-`{-¿"
+    "[\u0000-/:-@[-`"
+    # `{-¿`, **minus the alphanumerics `unicode61` tokenises**.  The single
+    # range treated `ª ² ³ µ ¹ º ¼ ½ ¾` as punctuation, so `5µm` became the
+    # terms `5` and `m` while the index held `5µm`, and a query made only of
+    # `µ` was refused as empty.  Symbols around them are still separators.
+    "{-©«-±´¶-¸»¿"
     "‐-‧"  # dashes, quotes, ellipsis
-    "　-〿"  # 、。〈〉《》「」『』【】
+    # `　-〿`, minus the ideographic letters and numbers: `々` (Lm), `〇` (Nl),
+    # `〡-〩` (Nl) and `〱-〼` (Lm) are token characters to `unicode61`.
+    "　-〄〆〈-〠〪-〰〽-〿"
     "！-／：-＠［-｀｛-･"
     "]+"
 )

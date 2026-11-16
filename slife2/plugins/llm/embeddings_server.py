@@ -8,11 +8,12 @@ reached at `{base_url}/embeddings`, speaks no chat protocol, and is configured
 under its own `embeddings:` section rather than under `providers:`.  A chat
 server built from the chat providers has no chat provider to attach it to.
 
-**Two tools, neither of them the model's.**  `embed` and `describe` carry no
-`meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the same
-standing as the context plugin's `remember`.  They are the stores' plumbing:
-every index needs vectors and needs to know how wide they are, and this is where
-both questions are answered.
+**Three tools, none of them the model's.**  `embed`, `describe` and `rerank`
+carry no `meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the
+same standing as the context plugin's `remember`.  They are the stores'
+plumbing: every index needs vectors and needs to know how wide they are, and the
+recall's cross-encoder needs scores; this is where all three questions are
+answered.
 
 **The width is discovered and never configured.**  `vec0` fixes a table's width
 in its DDL and cannot be altered afterwards, so the number has to be right

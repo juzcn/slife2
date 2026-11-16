@@ -1,7 +1,7 @@
 """The one containment rule for a path a model wrote.
 
-`skill_set`, `media_dir` and the cabinet's `resolve` all take a relative name
-from a model and turn it into a path on the operator's machine.  The rule is the
+`skill_set` and the cabinet's `resolve` take a relative name from a model and
+turn it into a path on the operator's machine.  The rule is the
 same one every time: resolve first, then require the result to be the root or
 beneath it — a string check passes `scripts/../../..`, and a symlink only
 escapes once it has been resolved.  What was being named differs, so each caller

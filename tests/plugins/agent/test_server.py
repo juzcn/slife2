@@ -4535,28 +4535,29 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     wait out a write that is still landing (milliseconds) and then, if it is
     still held, to say the file is open in another process and to ask again.
 
-    Refused as a whole rather than half-done: a removal that deleted most of a
-    subagent would leave something that is neither one nor a directory anybody
-    can finish removing.
+    **The record is removed last**, so the refused attempt leaves a directory
+    that is still a *subagent* — one a second `subagent_remove` can finish —
+    rather than a locked name no tool can own.
     """
-    import shutil
+    from slife2.plugins.agent import server as server_module
 
-    real_rmtree = shutil.rmtree
     directory = tmp_path / "subagents" / "researcher"
     directory.mkdir(parents=True)
     busy = directory / "turns.db"
     busy.write_bytes(b"")
+    record = directory / "subagent.yaml"
+    record.write_text("name: researcher\n", encoding="utf-8")
 
     def busy_error() -> PermissionError:
         return PermissionError(32, "The process cannot access the file", str(busy))
 
     attempts: list[int] = []
 
-    def always_held(path, *args, **kwargs):
+    def always_held(path):
         attempts.append(1)
         raise busy_error()
 
-    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", always_held)
+    monkeypatch.setattr(server_module, "_delete_file", always_held)
     monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 0.05)
     with pytest.raises(ToolError) as refused:
         _remove_tree(directory)
@@ -4567,23 +4568,25 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     assert "another process" in said and "Ask again" in said
     assert "WinError" not in said, "the OS's own words are not an answer"
     assert directory.exists(), "a refused removal leaves the directory alone"
+    assert record.exists(), "the record goes last, so the name is still a subagent"
 
     # A holder that lets go inside the budget is waited out rather than reported:
     # the first attempt finds the file busy, the second finds it free.
     monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 5.0)
     calls: list[int] = []
 
-    def goes_quiet(path, *args, **kwargs):
+    def goes_quiet(path):
         calls.append(1)
         if len(calls) == 1:
             raise busy_error()
-        real_rmtree(path)
+        path.unlink(missing_ok=True)
 
-    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", goes_quiet)
+    monkeypatch.setattr(server_module, "_delete_file", goes_quiet)
     _remove_tree(directory)
 
     assert len(calls) == 2, "a holder that let go was not waited out"
     assert not directory.exists()
+    assert not record.exists()
 
 
 @pytest.mark.asyncio

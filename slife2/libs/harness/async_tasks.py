@@ -228,19 +228,33 @@ def channel_for(tool: str) -> str:
     return f"{CHANNEL}:{tool}"
 
 
-def started(task_id: str, call_id: str, tool: str) -> str:
+def started(task_id: str, call_id: str, tool: str, *, delivered: bool = True) -> str:
     """What the model reads when a call has been handed to the background.
 
     The sentence under the marker is what the model acts on (it names the two
     calls that work on the id), and the marker is what everything else acts on.
     It does not say "poll for the result": the result comes back on its own.
+
+    **`delivered=False` is a loop with no hand-back** — an agent task, whose
+    turn ends before a background result could arrive.  Its result is kept for
+    `check_async` instead, so the sentence names that road rather than promising
+    a message that will never come.
     """
+    if delivered:
+        landing = (
+            "  Its result will be handed back to this conversation when it is done.\n"
+        )
+    else:
+        landing = (
+            "  No later turn will receive it: read the result with "
+            f'{CHECK_ASYNC}(task_id="{task_id}") once it is finished.\n'
+        )
     return (
         f"{marker(RUNNING, call_id=call_id, tool=tool, task_id=task_id)}\n"
         f"✓ Async task started.\n"
         f"  task_id: {task_id}\n"
         f"  tool: {tool}\n"
-        f"  Its result will be handed back to this conversation when it is done.\n"
+        f"{landing}"
         f'  Ask where it stands with {CHECK_ASYNC}(task_id="{task_id}").\n'
         f'  Abandon it with {CANCEL_ASYNC}(task_id="{task_id}").'
     )

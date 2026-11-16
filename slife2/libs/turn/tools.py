@@ -155,27 +155,28 @@ def as_tool_text(answer: Any) -> str:
     tool's whole output once vanished from a request with nothing said.
 
     `None` is the empty string rather than the text `"null"`, which is a result
-    that is not there; a `str` passes through byte for byte; everything else is
-    JSON, with `default=str` so that an object the encoder does not know becomes
-    text instead of failing the turn (SDD Appendix C's register, where what
-    that gives up is named).
+    that is not there; everything else is JSON, with `default=str` so that an
+    object the encoder does not know becomes text instead of failing the turn
+    (SDD Appendix C's register, where what that gives up is named).  **The one
+    rewrite is a lone surrogate**, on the string path too: a provider's JSON can
+    hand us one in an argument, it is not encodable as UTF-8, and passing it
+    through made the next request fail on the transport rather than render.
 
     **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape
     every character outside ASCII — a note written in Chinese would reach the
     model as six characters per word, and be *counted* that way against
     `tool_result.bytes`, which is a bound this system spends on purpose and not
     on escapes.  The `backslashreplace` is the half that keeps the choice safe:
-    a lone surrogate — which a provider's JSON can hand us in an argument, and
-    which `json.dumps(ensure_ascii=False)` will happily put back in the string —
-    cannot be encoded at all, so a turn would fail on the transport rather than
-    render.  It becomes the `\\uXXXX` escape it would have been, which is text
-    the model reads and a request that is still sendable.
+    a lone surrogate becomes the `\\uXXXX` escape it would have been, which is
+    text the model reads and a request that is still sendable.
     """
     if answer is None:
         return ""
-    if isinstance(answer, str):
-        return answer
-    text = json.dumps(answer, ensure_ascii=False, default=str)
+    text = (
+        answer
+        if isinstance(answer, str)
+        else json.dumps(answer, ensure_ascii=False, default=str)
+    )
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
@@ -307,6 +308,13 @@ def advertised(spec: ToolSpec) -> ToolSpec:
     what the tool says about itself; this one is what every function tool is
     also offered.
     """
+    # **A harness tool takes none of the three.**  The machinery calls these
+    # (`_check_new_input`, `_func_tool_unload`) and the design says a harness
+    # tool's meta-parameters do nothing; advertising them invited a model to
+    # background `_check_new_input`, which took a message outside any foreground
+    # call and let whichever call happened to be running wear its cut-in.
+    if is_harness(spec.name):
+        return spec
     parameters = dict(spec.parameters)
     properties = dict(parameters.get("properties") or {})
     # The tool's own descriptions win a name collision, and there is no such

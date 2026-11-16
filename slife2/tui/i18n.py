@@ -110,7 +110,7 @@ def set_language(lang: str) -> None:
 #: key → {lang: text}.  Every user-facing string of the window lives here.
 #:
 #: **The glyphs are not in these strings.**  `slife2.tui.theme.GLYPHS`' marks
-#: (▸ ▾ ⟐ ↑ ✗ ✅ …) are attached as their own spans at the call site, so a
+#: (▸ ▾ ⟐ ↑ ✗ ✓ …) are attached as their own spans at the call site, so a
 #: translation cannot drop one, and no entry carries a symbol that is not a word.
 #: The one thing that *is* inside the text is a trailing or leading space where
 #: the string is a fragment of a line rather than a line — `" requests
@@ -363,10 +363,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Cancelled",
         "zh": "已取消",
     },
-    # Trailing space: the reference the conversation moved onto follows it.
+    # Trailing space: the reference the person chose follows it.  **"Selected",
+    # not "Switched to"**: the picker draws this the moment Enter resolves it,
+    # and the switch is a call that can still fail — the success line is the
+    # window's note after the server answers.
     "picker_switched": {
-        "en": "Switched to ",
-        "zh": "已切换到 ",
+        "en": "Selected ",
+        "zh": "已选择 ",
     },
     # ── the conversation picker (`slife2.tui.widgets.ConversationPicker`) ─
     "conversation_picker_title": {
@@ -383,15 +386,17 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "task",
         "zh": "task",
     },
-    # The decision line, once a row has been chosen.  The screen opens on it,
-    # so the wording is "watching" rather than "opened".
+    # The decision line, once a row has been chosen.  **"Selected", not
+    # "Watching"**: the line is drawn when Enter resolves the picker, and the
+    # watch call that follows can fail; the screen that opens is the one that
+    # says it is watching.
     "conversation_watching": {
-        "en": "Watching {name}",
-        "zh": "正在观看 {name}",
+        "en": "Selected {name}",
+        "zh": "已选择 {name}",
     },
     "conversation_watching_task": {
-        "en": "Watching task {name}",
-        "zh": "正在观看 task {name}",
+        "en": "Selected task {name}",
+        "zh": "已选择 task {name}",
     },
     # `Ctrl+O` with nothing to offer.  Said rather than shown as an empty
     # picker, for `no_models`'s reason: a list with no rows is a key that looks

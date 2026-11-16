@@ -1377,9 +1377,10 @@ class TurnStore:
         the sparse leg (`_fuse_questions`).
 
         **`limit` is each leg's page, and the answer is their fusion.**  Each
-        meaning question's leg brings up to `limit + len(excluded)` candidates,
-        the keyword leg as many, and what is returned is their fused union —
-        twice `limit` for one question, more for several — never cut here.
+        meaning question's leg brings up to `limit + len(excluded) +
+        excluded_chunks` candidates — the kept context's *chunks* are what
+        occupy the KNN — the keyword leg as many, and what is returned is their
+        fused union, never cut by this store.
         The similarity floor, the rerank floor and the token budget are the
         *caller's* — they depend on a model's window and on what the decision
         kept, neither of which this store knows — and the split is deliberate:
@@ -1442,7 +1443,13 @@ class TurnStore:
         excluded_chunks = (
             await off_loop(self._chunks_of, list(excluded)) if excluded else 0
         )
-        over = min(limit + len(excluded) + excluded_chunks, MAX_SQL_VARS)
+        # **Not capped by `MAX_SQL_VARS`.**  That number is how many values one
+        # statement may *bind*; this is a count of candidates for a KNN's `k`
+        # and a SQL `LIMIT`, both plain numbers.  Capping it starved the recall:
+        # a large kept context filled all 900 places with turns the caller
+        # already had, the filter below removed them, and a semantic recall came
+        # back empty while a matching turn sat beyond the page.
+        over = limit + len(excluded) + excluded_chunks
         keyword: list[int] = []
         if words:
             try:
@@ -1472,6 +1479,10 @@ class TurnStore:
             for turn_id, similarity in found:
                 if similarity > nearest.get(turn_id, float("-inf")):
                     nearest[turn_id] = similarity
+        # The fused list is bound in chunks below (`_ids_in_window`), so it is
+        # not truncated here: a cut before the filter would decide membership by
+        # rank, and a cut after it would hide candidates the caller's own
+        # floors and budget are meant to choose between.
         fused = [
             turn_id
             for turn_id in _fuse_questions(
@@ -1480,7 +1491,7 @@ class TurnStore:
                 keyword_weight=keyword_weight,
             )
             if turn_id not in excluded
-        ][:MAX_SQL_VARS]
+        ]
         allowed = await off_loop(self._ids_in_window, fused, clauses, params)
         # **Not cut to `limit`.**  The legs' pages fuse to a union that is not
         # this store's to cut, and the caller's floors and budget decide what

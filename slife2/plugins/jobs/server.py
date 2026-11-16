@@ -25,6 +25,7 @@ the credentials — the same isolation every other plugin keeps.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -264,7 +265,14 @@ class Registry:
         with runtime.running(context):
             try:
                 result = await job.tool.run(dict(arguments or {}))
-            except Exception as exc:  # noqa: BLE001 — a job failure is a result
+            except BaseException as exc:  # noqa: BLE001 — a job failure is a result
+                # **A job may call `sys.exit()`.**  `SystemExit` and
+                # `KeyboardInterrupt` are `BaseException`, so they walked past
+                # this handler and out of the tool — `asyncio` re-raises
+                # `SystemExit`, taking the jobs plugin (a required hub upstream)
+                # down for every home.  A job that exits is a failed job.
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 logger.warning("job_failed name=%s err=%s", job.name, exc)
                 return f"{type(exc).__name__}: {exc}", False
         text = jobs.result_text(result)

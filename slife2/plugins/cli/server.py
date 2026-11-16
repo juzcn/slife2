@@ -217,13 +217,18 @@ def _missing_program(command: str) -> str:
     `python -m mytool` is a program plus its arguments and the program is what
     has to exist.  Running the line is the shell's, not this split's.
 
-    **The split cannot fail here**, and there is deliberately no `try` for it:
-    `_prepare` has already refused a line `shlex` cannot take apart, so the only
-    caller that reaches this has one that splits.  The `except ValueError` this
-    used to carry answered `""` — the same silence as "the program is on PATH" —
-    for a failure that by then could not happen.
+    **The split can fail on a hand-written line.**  `_prepare` refuses an
+    unbalanced quote at the moment an entry is *written*, but `cli_list` and
+    `cli_get` read entries straight from the file — and a person's edit can
+    carry one.  An untried `shlex.split` made one such entry raise out of the
+    whole listing, so every healthy row beside it was lost.  The split answers
+    `""` there: the row still shows the command it cannot parse, and the next
+    `cli_set` is where the line is refused with the loader's words.
     """
-    words = shlex.split(command, posix=False)
+    try:
+        words = shlex.split(command, posix=False)
+    except ValueError:
+        return ""
     program = words[0].strip("\"'") if words else ""
     if not program or shutil.which(program):
         return ""

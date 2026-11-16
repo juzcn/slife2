@@ -58,7 +58,12 @@ from starlette.routing import Route
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
 from slife2.libs.host.paths import local_path
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_conversation
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    ConversationKey,
+    conversation_key,
+    request_conversation,
+)
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
     TunnelProvider,
@@ -146,7 +151,7 @@ class Exposure:
 
     __slots__ = ("token", "path", "owner", "dev", "ino", "size", "mtime_ns")
 
-    def __init__(self, token: str, path: str, owner: tuple[str, str] | None) -> None:
+    def __init__(self, token: str, path: str, owner: ConversationKey | None) -> None:
         self.token = token
         self.path = path
         self.owner = owner
@@ -212,9 +217,12 @@ class Exposed:
     capability, so the map is keyed by it and cannot be partitioned by a caller
     that the route never sees.
 
-    What is held per agent is the *owner*, which is what lets one conversation
-    refuse to revoke another's link (see :meth:`revoke`) — the one place the
-    identity is available and can be made to matter.  The reuse key is
+    What is held per conversation is the *owner*, which is what lets one
+    conversation refuse to revoke another's link (see :meth:`revoke`) — the one
+    place the identity is available and can be made to matter.  The owner is
+    `(home, agent, subagent)`: this process serves every home, so two homes'
+    `jack` are two conversations (`slife2.libs.plugin.audience.conversation_key`).
+    The reuse key is
     `(path, owner)` for that reason: two conversations exposing one file are two
     links, and a single `path` key would hand the second the first's token,
     which it cannot revoke, and let the first's revoke kill the second's.
@@ -222,9 +230,9 @@ class Exposed:
 
     def __init__(self) -> None:
         self._by_token: dict[str, Exposure] = {}
-        self._by_path: dict[tuple[str, tuple[str, str] | None], str] = {}
+        self._by_path: dict[tuple[str, ConversationKey | None], str] = {}
 
-    def register(self, path: str, owner: tuple[str, str] | None) -> Exposure:
+    def register(self, path: str, owner: ConversationKey | None) -> Exposure:
         """Publish *path*, reusing this owner's token when the file has not changed.
 
         The token is 30 hex characters (``secrets.token_hex(15)``) —
@@ -256,19 +264,28 @@ class Exposed:
         logger.debug("exposed path=%s token=%s", path, token)
         return exposure
 
+    def token_for(self, path: str, owner: ConversationKey | None) -> str:
+        """The token this owner already holds for *path*, or `""`.
+
+        A publish that fails after registering must not revoke a link the owner
+        already had and may already have handed out; this is what tells the two
+        apart.
+        """
+        return self._by_path.get((path, owner), "")
+
     def lookup(self, token: str) -> Exposure | None:
         """The exposure behind *token*, or ``None`` if this process never
         minted it.
         """
         return self._by_token.get(token)
 
-    def revoke(self, token: str, owner: tuple[str, str] | None) -> Revoked:
+    def revoke(self, token: str, owner: ConversationKey | None) -> Revoked:
         """Withdraw *token*, unless it belongs to somebody else.
 
         An exposure made by a call that named no conversation has no owner and
         anyone may revoke it.  One that named a conversation may be revoked by
         that conversation and no other: the tokens are in one map, so without
-        this rule any agent could kill any other's link.
+        this rule any conversation could kill any other's link.
         """
         found = self._by_token.get(token)
         if found is None:
@@ -285,6 +302,20 @@ class Exposed:
 
     def __len__(self) -> int:
         return len(self._by_token)
+
+
+def _owner(ctx: Any) -> ConversationKey | None:
+    """The conversation that owns a link, **with its home**.
+
+    The ambient home is the caller's around a served call
+    (`slife2.libs.plugin.protocol.ServeTheCallersHome`), and the servers are
+    shared across homes — two homes may each run an agent called `jack`.  The
+    pair alone made the second home's jack the same owner as the first's, so it
+    could revoke a link it never made (and re-exposing one absolute path handed
+    it the first home's token).
+    """
+    conversation = request_conversation(ctx)
+    return conversation_key(*conversation) if conversation else None
 
 
 def _stat(path: str) -> os.stat_result | None:
@@ -312,13 +343,27 @@ def content_disposition(filename: str) -> str:
         filename.encode("latin-1")
     except UnicodeEncodeError:
         ascii_fallback = re.sub(r"[^ -~]", "_", filename)
-        ascii_fallback = ascii_fallback.replace('"', "_").replace("\\", "_")
+        ascii_fallback = _header_safe(ascii_fallback)
         ascii_fallback = ascii_fallback[:80] or "file"
         return (
             f"inline; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
         )
-    safe = filename.replace('"', "_").replace("\\", "_")
-    return f'inline; filename="{safe}"'
+    return f'inline; filename="{_header_safe(filename)}"'
+
+
+def _header_safe(filename: str) -> str:
+    """A filename with the characters an HTTP header value cannot carry.
+
+    **A control character is not a filename.**  CR and LF end a header line, and
+    a POSIX name may legally contain them (`"a\\nb.png"`); h11 rejects the value
+    while uvicorn writes it and the share fails instead of serving.  The quote
+    and backslash are escaped by this header's own syntax, so they are folded
+    to `_` as before.
+    """
+    folded = "".join(
+        "_" if ord(char) < 32 or ord(char) == 127 else char for char in filename
+    )
+    return folded.replace('"', "_").replace("\\", "_")
 
 
 def _content_type(path: Path) -> str:
@@ -669,9 +714,17 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "HTTP 530. `tunnel_status` has the detail; try again shortly."
             )
 
-        found = exposed.register(str(served), request_conversation(ctx))
+        owner = _owner(ctx)
+        previous = exposed.token_for(str(served), owner)
+        found = exposed.register(str(served), owner)
         url = tunnel.share_url_for(found.token)
         if url is None:
+            # **A token minted for a publish that failed is nobody's.**  Left in
+            # the map it was counted by `tunnel_status` and revocable only by
+            # guessing a token no caller was given.  A *reused* token is the
+            # owner's existing link and is left alone.
+            if found.token != previous:
+                exposed.revoke(found.token, owner)
             raise ToolError("the tunnel went away as the file was published.")
         return {"url": url, "token": found.token, "file": found.name}
 
@@ -693,7 +746,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             raise ToolError(
                 "no token was given — it is the last part of the share URL."
             )
-        outcome = exposed.revoke(wanted, request_conversation(ctx))
+        outcome = exposed.revoke(wanted, _owner(ctx))
         if outcome is Revoked.UNKNOWN:
             raise ToolError(f"no link with the token {wanted!r} is being served.")
         if outcome is Revoked.FOREIGN:

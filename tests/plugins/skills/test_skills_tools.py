@@ -777,3 +777,36 @@ async def test_an_edit_cannot_write_outside_the_skill_either(
     assert (isolated_runtime / "skills" / "search" / "SKILL.md").read_text(
         encoding="utf-8"
     ) == before
+
+
+@pytest.mark.asyncio
+async def test_a_reinstall_by_the_header_name_replaces_its_directory(
+    isolated_runtime: Path,
+) -> None:
+    """**A skill answers to two names, and a replacement must respect both.**
+
+    `skill_list` prints the frontmatter `name:`, while the folder may be called
+    something else.  Installing under the caller's string created a second
+    directory — `find` kept returning the first, so `skill_use` served the OLD
+    document and the catalogue kept the old row while the call reported success.
+    """
+    config_on_disk(isolated_runtime)
+    folder = isolated_runtime / "skills" / "the-folder"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(manifest("the-name", body="old"), encoding="utf-8")
+
+    async with Client(build_server(load())) as client:
+        answer = await ask(
+            client,
+            "skill_set",
+            name="the-name",
+            files=files(manifest("the-name", body="new")),
+        )
+
+    assert answer == {"name": "the-name", "state": "on", "files": 1}
+    assert not (isolated_runtime / "skills" / "the-name").exists()
+    found = playbooks.find("the-name")
+    assert found is not None and found.directory.name == "the-folder"
+    assert "new" in (isolated_runtime / "skills" / "the-folder" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )

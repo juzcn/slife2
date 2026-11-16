@@ -285,17 +285,37 @@ def read_record(url: str) -> ServerRecord | None:
     The reading rules are `_read_json_dataclass`'s; what belongs to a record is
     its shape — every field `ServerRecord.now` writes.
     """
-    return _read_json_dataclass(
-        record_path(url),
-        lambda raw: ServerRecord(
-            name=str(raw["name"]),
-            url=str(raw["url"]),
-            pid=int(raw["pid"]),
-            start_token=str(raw["start_token"] or ""),
-            config=str(raw["config"] or ""),
-            version=str(raw["version"] or ""),
-            started_at=str(raw["started_at"] or ""),
-        ),
+    return _read_json_dataclass(record_path(url), _record_from)
+
+
+def records() -> list[ServerRecord]:
+    """Every server record on this machine, readable ones only.
+
+    **A take-down that is the last client's stops the machine's daemons, not
+    one config's.**  The servers are shared, so another config may have started
+    a backend this one never names — and a last client that stopped only its own
+    `specs` left that daemon running, invisible to both `status` and `down`.  The
+    files are the only machine-wide list there is; a record this reader cannot
+    parse is skipped, exactly as `read_record` answers it.
+    """
+    found: list[ServerRecord] = []
+    for path in sorted(_sub("servers").glob("*.json")):
+        record = _read_json_dataclass(path, _record_from)
+        if record is not None:
+            found.append(record)
+    return found
+
+
+def _record_from(raw: dict[str, Any]) -> ServerRecord:
+    """One record's fields, as `read_record` requires them."""
+    return ServerRecord(
+        name=str(raw["name"]),
+        url=str(raw["url"]),
+        pid=int(raw["pid"]),
+        start_token=str(raw["start_token"] or ""),
+        config=str(raw["config"] or ""),
+        version=str(raw["version"] or ""),
+        started_at=str(raw["started_at"] or ""),
     )
 
 
@@ -683,12 +703,16 @@ def _start_token_windows(pid: int) -> str | None:
     try:
         created = wintypes.FILETIME()
         exited = wintypes.FILETIME()
+        # **All four are `LPFILETIME`.**  `GetProcessTimes` writes an 8-byte
+        # FILETIME through each pointer; passing a 4-byte `DWORD` buffer for
+        # the two unused kernel/user times made the API write past the end of
+        # a ctypes temporary — undefined behaviour, on every start-token read.
         ok = kernel32.GetProcessTimes(
             handle,
             ctypes.byref(created),
             ctypes.byref(exited),
-            ctypes.byref(wintypes.DWORD()),
-            ctypes.byref(wintypes.DWORD()),
+            ctypes.byref(wintypes.FILETIME()),
+            ctypes.byref(wintypes.FILETIME()),
         )
         if not ok:
             # ctypes does not raise on a Win32 call that failed, and a FILETIME

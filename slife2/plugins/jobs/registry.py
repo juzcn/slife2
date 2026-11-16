@@ -21,6 +21,7 @@ bytecode cache keyed on the same mtime would otherwise serve the old code.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import sys
@@ -79,7 +80,15 @@ def load_module(path: Path, name: str) -> types.ModuleType:
         source = path.read_text(encoding="utf-8-sig")
         code = compile(source, str(path), "exec")
         exec(code, module.__dict__)  # noqa: S102 — job files are code, by design
-    except Exception as exc:
+    except BaseException as exc:  # noqa: BLE001 — `sys.exit()` is a failed job
+        # **Model-written code can raise `SystemExit`/`KeyboardInterrupt`**, and
+        # both are `BaseException`: a job file that calls `sys.exit()` escaped
+        # the loader's `except Exception`, so `job_set` never reached its
+        # restore-previous path and the jobs plugin's `scan_jobs_dir` could take
+        # the process down.  A job's exit is the job failing, not the server's.
+        # `CancelledError` is not the job's to raise and is re-raised untouched.
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         sys.modules.pop(module_name, None)
         raise JobLoadError(
             f"importing {path.name} failed: {type(exc).__name__}: {exc}"
@@ -155,15 +164,18 @@ def result_text(result: Any) -> str:
     A job returns whatever Python it likes; FastMCP converts that to content
     blocks here, and the tool result the model reads is those blocks' text.  The
     structured form is the fallback for a return the SDK kept only there.
+
+    **A non-text block is described, not dropped.**  A job returning an image or
+    another MCP block used to answer `""` with `ok: true` — an empty success the
+    model cannot act on, where `slife2.clients.gateway.flatten` names what came
+    back.  One rule, one place: this reads blocks the same way the hub's own
+    proxy does.
     """
     blocks = getattr(result, "content", None) or ()
-    parts = [
-        text
-        for block in blocks
-        if isinstance(text := getattr(block, "text", None), str)
-    ]
-    if parts:
-        return "\n".join(parts)
+    if blocks:
+        from slife2.clients.gateway import flatten
+
+        return flatten(list(blocks))
     structured = getattr(result, "structured_content", None)
     if structured is not None:
         return json.dumps(structured, ensure_ascii=False)

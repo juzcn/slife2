@@ -143,16 +143,17 @@ def add_data_dir_argument(parser: argparse.ArgumentParser) -> None:
 
     Here rather than written into each parser because there are two of them —
     the CLI's and the servers' — and a flag whose help text and meaning are
-    copied into both is a flag that drifts.  It is also the flag that decides
-    which config, which runtime state and which databases everything else reads,
-    so it belongs beside :func:`data_dir` rather than in either caller.
+    copied into both is a flag that drifts.  It decides which home everything
+    reads — its `slife2.yaml`, agents, skills, jobs and databases.  The
+    machine-wide runtime directory is *not* under it (`runtime_dir`): records,
+    locks and logs belong to the machine, not to a home.
     """
     parser.add_argument(
         "--data-dir",
         default=None,
         help=(
-            "where slife2 keeps everything: slife2.yaml, the runtime state of "
-            "what is running, and the turns it produced"
+            "where this home lives: slife2.yaml, skills, jobs, agents and the "
+            "databases they write (the runtime records are machine-wide)"
         ),
     )
 
@@ -246,7 +247,31 @@ def data_dir() -> Path:
         # marker that cannot be read does not refuse a home the caller named.
         else (checkout_root() or Path.home() / ".slife2")
     )
-    path.mkdir(parents=True, exist_ok=True)
+    return _made(path, "the data directory", DATA_ENV_VAR, flag="`--data-dir`")
+
+
+def _made(path: Path, what: str, variable: str, *, flag: str = "") -> Path:
+    """*path* as a directory, or the one-line configuration refusal.
+
+    **A path that exists and is not a directory is a configuration mistake, not
+    a crash.**  `mkdir` answers it with a bare `FileExistsError`, which reached
+    the CLI before any `ConfigError` handler and printed a traceback — for the
+    one mistake whose fix ("point it at a directory") is already known here.
+    The import is at the call because `config.py` imports this module at load;
+    by the time a directory is resolved, the config module is complete.
+    """
+    from slife2.libs.host.config import ConfigError
+
+    if path.exists() and not path.is_dir():
+        named = f"{flag} or {variable}" if flag else variable
+        raise ConfigError(
+            f"{what} {path} exists and is not a directory — "
+            f"point {named} at a directory"
+        )
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(f"{what} {path} could not be created: {exc}") from exc
     return path
 
 
@@ -268,8 +293,7 @@ def runtime_dir() -> Path:
     """
     override = os.environ.get(RUNTIME_ENV_VAR)
     path = Path(override) if override else Path.home() / ".slife2" / "runtime"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _made(path, "the runtime directory", RUNTIME_ENV_VAR)
 
 
 #: The data directory the files being resolved belong to, when a call named one.
@@ -747,7 +771,11 @@ SUBAGENTS_DIR = "subagents"
 
 #: The file that makes a directory a subagent's.  Spelt once for the reason
 #: `_SCHEDULE_DB` is: one function writes it and one walk finds them by it.
-_SUBAGENT_YAML = "subagent.yaml"
+#: The file inside a subagent's directory that makes it one.  Public because a
+#: removal deletes the *record* last (`slife2.plugins.agent.server._remove_tree`)
+#: and must not spell the name a second time.
+SUBAGENT_RECORD = "subagent.yaml"
+_SUBAGENT_YAML = SUBAGENT_RECORD
 
 
 def work_path(agent: str, subagent: str = "") -> Path:

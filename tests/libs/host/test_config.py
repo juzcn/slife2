@@ -638,20 +638,24 @@ providers:
 def test_the_ceiling_is_bounded(tmp_path) -> None:
     """The ceiling is a window fraction, and the one budget the two halves share.
 
-    An old key beside it is ignored rather than carried across versions: the
-    file is edited with the system, not migrated into it.
+    **A key this reader does not take is refused**, not ignored: `floor` and
+    `recall_limit` are spellings a previous build said and this one does not, and
+    a silent ignore is how an operator's edit means nothing while looking
+    applied.  The config module's own rule (its `ConfigError` docstring) is that
+    silently ignoring a value is the worst of the behaviours.
     """
     for ceiling in ("0", "1.5"):
         with pytest.raises(ConfigError, match="context.ceiling"):
             load(write(tmp_path, f"context:\n  ceiling: {ceiling}\n"))
 
-    kept = load(
-        write(
-            tmp_path,
-            "context:\n  ceiling: 0.6\n  floor: 0.2\n  recall_limit: 40\n",
+    with pytest.raises(ConfigError, match="unknown key"):
+        load(
+            write(
+                tmp_path,
+                "context:\n  ceiling: 0.6\n  floor: 0.2\n  recall_limit: 40\n",
+            )
         )
-    )
-    assert kept.context.ceiling == 0.6
+    assert load(write(tmp_path, "context:\n  ceiling: 0.6\n")).context.ceiling == 0.6
 
 
 def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:
@@ -2121,14 +2125,19 @@ def test_the_broker_flag_cannot_turn_the_mesh_on(tmp_path, monkeypatch) -> None:
     """The section's presence is the switch, and the flag is not a second one.
 
     A machine with no `peer_agent:` is a machine that is not on that network —
-    that is the
-    design's whole off switch (`A2ASettings`) — so a flag naming a broker is
-    refused by name rather than answered with a mesh the file never described.
+    that is the design's whole off switch (`A2ASettings`).  The *loader* leaves
+    the flag alone for such a file: the environment variable is process-wide,
+    and a shared daemon loads other homes' configs, so raising here refused a
+    file the flag does not describe.  The command that owns the flag refuses it
+    against its own config (`slife2.main`), which is the file the operator asked
+    about.
     """
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
 
-    with pytest.raises(ConfigError, match="not on the peer network"):
-        load(write(tmp_path, A_PROVIDER))
+    loaded = load(write(tmp_path, A_PROVIDER))
+
+    assert loaded.peer_agent.configured is False
+    assert loaded.peer_agent.overridden is False
 
 
 @pytest.mark.parametrize(

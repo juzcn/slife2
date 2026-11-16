@@ -509,8 +509,21 @@ class Connection:
             # Shielded because another caller may be waiting on the same task,
             # and a cancellation here is about *this* caller giving up rather
             # than about the connection being unwanted.
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                # **The shared attempt was cancelled, not this caller.**  A
+                # management call that reconfigures or releases the entry closes
+                # the connection, which cancels the one attempt every waiter
+                # shares — and `shield` raises that cancellation in each waiter.
+                # Re-raising it cancelled the model's tool call for something it
+                # did not do.  A waiter that is itself being cancelled has
+                # `cancelling()` non-zero and still propagates.
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    raise
+            except Exception:  # noqa: BLE001 — the attempt records the reason
+                pass
         return self._ready
 
     async def _establish(self) -> None:

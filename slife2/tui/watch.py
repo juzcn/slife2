@@ -10,9 +10,12 @@ the one transcript would have to stop drawing the window's turn to do that.
 `slife2.tui.restore.restore`, the live events through `slife2.tui.draw.draw` — the
 function the window itself calls — so a watched turn and a typed turn cannot
 come to look different.  What is missing is the half that is the window's: there
-is no prompt (a subagent has no window, and this is not one), no approval row
-(a watched turn runs unattended by design), and no status bar (the bar describes
-the window's conversation, not this one).  An agent task adds a brief block
+is no prompt (a subagent has no window, and this is not one) and no status bar
+(the bar describes the window's conversation, not this one).  An approval row
+can appear here, because the *window's* turn can ask while this screen is up:
+the app mounts the question on whichever screen is in front
+(`slife2.tui.app._ask_approval`), and a watched turn itself runs unattended and
+emits none.  An agent task adds a brief block
 above the turn: its description is the whole of what it was given, and nobody
 in the conversation said it.
 
@@ -136,7 +139,11 @@ class WatchScreen(Screen[None]):
             if self._is_task
             else t("watch_header", subagent=self._name)
         )
-        yield Static(header, id="watch-header")
+        # `Text`, not a string: a task's name is model-chosen, and Rich markup
+        # would read a `[...]` in it as a style — a name like `review [/]`
+        # raised out of layout, and a benign `fix [draft]` silently lost its
+        # brackets (SDD §10.2: model output is plain text).
+        yield Static(Text(header), id="watch-header")
         # The task's description, as the block the person is watching.  Hidden
         # until a `TaskBrief` arrives; a subagent watch never shows it.
         yield Static("", id="watch-brief")
@@ -220,6 +227,12 @@ class WatchScreen(Screen[None]):
                 # block rather than a user bubble: nobody in the conversation
                 # said it, so signing it with a sender would be a lie about who.
                 self._show_brief(name, description, status)
+                # **A task's start frame is its brief**, where a subagent's is
+                # `TurnStarted`; without this the turn was never opened and every
+                # live delta was dropped (`append_text` is gated on it).  The
+                # screen showed nothing until `TurnFinished` drew the whole
+                # answer, and a cancelled task showed nothing at all.
+                chat.begin_assistant()
             case TurnStarted(text=text, channel=channel):
                 # **The message the turn is answering**, which its caller sent
                 # and a watcher never saw.  `add_user` also closes any turn left

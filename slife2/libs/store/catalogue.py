@@ -45,7 +45,6 @@ from slife2.helpers.clock import now
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
-    MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
     _marks,
@@ -68,6 +67,7 @@ from slife2.libs.store.index import (
     rows_in_order,
     set_index_meta,
     storable,
+    table_exists,
     vector_identity,
     where_clause,
 )
@@ -503,14 +503,12 @@ class ToolStore:
     the hub serves every conversation and cannot tell them apart, so what is
     installed and what has been loaded belongs to the data directory.
 
-    **A row goes in with its search text, and its vector right after.**  The
-    keyword row is written in the same transaction as the row it indexes, so the
-    two cannot disagree; the vector needs a call to a model, which belongs on
-    the event loop and not inside a transaction, so a row can be left without
-    one for as long as that call takes.  It is not a hole: a vector is derived
-    from the row, and `sync_indexes` puts back whatever a crash lost — where a
-    *turn* with no vector would be a turn nothing could ever find, which is why
-    that store embeds before it writes and refuses to store otherwise.
+    **A merge embeds before it writes.**  The vector needs a call to a model,
+    which belongs on the event loop and not inside a transaction — so the call
+    happens first and the row, its keyword text and its vector are written
+    together.  That is what makes a merge that cannot embed write nothing;
+    `sync_indexes` is for vectors a crash lost, not for rows this path left
+    behind.
     """
 
     def __init__(
@@ -1762,7 +1760,13 @@ class ToolStore:
         if keywords and not any(s.strip() for s in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
-        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
+        # **`MAX_SQL_VARS` is not a depth cap.**  It bounds how many values one
+        # statement binds, and both the KNN's `k` and the keyword `LIMIT` are
+        # plain numbers.  Capping the depth starved `unloaded_only` searches: a
+        # machine with ~900 chunks of loaded tools filled the page with rows the
+        # filter then dropped, and the answer was a confident empty page while
+        # matching unloaded tools existed beyond it.
+        over = limit * _OVERFETCH
         # **A filter the KNN cannot apply costs the page places too.**  The
         # semantic leg is a `vec0` KNN and every filter — a category, a status,
         # `unloaded_only` — is re-applied to its answer afterwards
@@ -1775,7 +1779,7 @@ class ToolStore:
         # the unfiltered page uses.
         if clauses:
             excluded = await asyncio.to_thread(self._excluded_chunks, clauses, values)
-            over = min(over + excluded, MAX_SQL_VARS)
+            over += excluded
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
@@ -2080,6 +2084,13 @@ class ToolStore:
         first one cannot reach.
         """
         with self._connect() as connection:
+            # **A store whose file was rebuilt or deleted has no vector table.**
+            # `_ensure_file` recreates the schema without one (its width needs
+            # the embedder), so a live hub whose `tools.db` was deleted answered
+            # `tool_search` with `no such table: tool_vec`.  The cabinet treats
+            # the same state as an empty meaning leg; so does this.
+            if not table_exists(connection, "tool_vec"):
+                return []
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, t.name AS name, v.distance AS distance"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
@@ -2235,6 +2246,12 @@ class ToolStore:
         with self._connect(write=True) as connection:
             if index_meta(connection, "meta").get("text_version", "") == stamp:
                 return
+            # **The DDL goes inside the transaction.**  `sqlite3`'s legacy
+            # control does not open one for a `DROP`/`CREATE`, so a failure
+            # between the drop and the stamp commit left `tool_fts` empty with
+            # the old version recorded — the exact DDL-rollback hazard
+            # `begin_rebuild` exists for, and the other two rebuilds use it.
+            begin_rebuild(connection)
             connection.execute("DROP TABLE IF EXISTS tool_fts")
             connection.execute(_FTS_SCHEMA)
             for row in connection.execute("SELECT rowid AS rowid, * FROM tool"):

@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
@@ -209,6 +210,16 @@ def _draw_answer(
     for call in calls:
         text, channel = results.get(call.id, ("", ""))
         if call.name == CHECK_NEW_INPUT:
+            # **A pair that took nothing is not a line somebody sent.**  The
+            # loop writes the harness pair even when the queue was empty (or
+            # the head carried images), and the tool's answer is the
+            # `NOTHING_WAITING` sentence.  Restore drew it as a cut-in, so a
+            # rebuilt transcript opened with a message the person never sent.
+            # The stored channel is the second half: a real cut-in has one, and
+            # a record from before that field is why the sentence alone is not
+            # trusted when a channel is present.
+            if text == NOTHING_WAITING and not channel:
+                continue
             # **The one harness call a rebuild draws.**  The pair is how a
             # message that arrived mid-turn entered the conversation, and the
             # tool's answer is the message's own words.  `add_cut_in` keeps the

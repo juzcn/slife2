@@ -130,14 +130,6 @@ _INSTANCE_EXT = "instance"
 #: before dialling rather than letting the broker answer with a lesser error.
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-# How long `connect()` waits for both connections to be live.  The caller has
-# already decided the machine is on the mesh, so a failure to connect is
-# reported by this deadline.
-
-# How long the pre-join name probe listens for a retained card.  MQTT has no
-# end-of-retained marker, so silence within this budget *is* the answer "no
-# card".
-
 # A2A-over-MQTT requester retry profile (the profile's standard defaults,
 # implemented by the SDK's Requester — mirrored here for the push model):
 # first reply within 15 s, at most 3 attempts, with the pause between them
@@ -401,12 +393,11 @@ class _OutboundSend:
 class _InboundWait:
     """One round's completion bridge: resolved out of band, once."""
 
-    __slots__ = ("outcome", "_event", "peer", "serial")
+    __slots__ = ("outcome", "_event", "serial")
 
-    def __init__(self, peer: str = "") -> None:
+    def __init__(self) -> None:
         self.outcome: RoundOutcome | None = None
         self._event = asyncio.Event()
-        self.peer = peer
         #: Which round of its task this bridge serves.  Assigned by
         #: `MeshResponder.on_request`; it is what tells this round's answer
         #: from a retry of the answer to the round before it.
@@ -471,7 +462,7 @@ class MeshResponder(Responder):
     ) -> RoundOutcome:
         task_id = str(request.task_id)
         peer = request.sender or "unknown"
-        waiter = _InboundWait(peer)
+        waiter = _InboundWait()
         waiter.serial = self._next_serial(task_id)
         self._completion[task_id] = waiter
 
@@ -848,20 +839,6 @@ class A2AMesh:
         return f"{self._config.broker_host}:{self._config.broker_port}"
 
     @property
-    def namespace(self) -> tuple[str, str]:
-        """The `(org, unit)` this mesh actually publishes and subscribes in.
-
-        **The pair is the mesh** — a caller that reported the *section's* pair
-        would name a namespace nobody is in, and on a subagent network the two
-        are not the section's at all: `Net.namespace` makes the unit the agent's
-        name and the org this network's word, so the answer here is also which
-        network this is and whose mesh it is.  The `default` folds are this
-        object's own too: a section that named neither would otherwise report an
-        empty segment.
-        """
-        return self._topics.org, self._topics.unit
-
-    @property
     def collision(self) -> str:
         """Why this mesh refused the name — empty when it holds it.
 
@@ -1027,8 +1004,9 @@ class A2AMesh:
         logger.error("a2a_name_collision %s", claim)
 
     async def disconnect(self, *, reviving: bool = False) -> None:
-        """Stop both connections; inflight inbound tasks get cancelled by the
-        SDK (their cancel noise is suppressed by the ``_closing`` gate).
+        """Stop both connections; the local responder's ``run`` cancels the
+        rounds it holds, and its ``_stopping``/``_closing`` guards keep that
+        teardown from being reported as a peer withdrawal.
 
         Never cancels its own caller: a mesh task tearing the mesh down (the
         outbound loop, on a name collision) must be skipped, or it would
@@ -1418,10 +1396,35 @@ class A2AMesh:
         data = _decode_payload(msg)
         if data is None:
             return
-        if send is not None:
-            send.delivered = True  # any classified reply confirms delivery
-            send.updated = time.monotonic()
         kind, content = classify_reply(data)
+        if send is not None:
+            # **A reply arrived, but "arrived" is not "classified".**  Setting
+            # `delivered` before `classify_reply` made an unreadable answer
+            # indistinguishable from an acknowledged one: the ladder stopped,
+            # nothing was settled, and `task_list` reported the task `pending`
+            # for ever.  `delivered` still stops the ladder — republishing would
+            # ask again for work that was answered — and the unreadable answer
+            # becomes the task's ending, which is the one fact this process can
+            # state about it (SDD Appendix C: a value that cannot be read is not
+            # read as success).
+            send.delivered = True
+            send.updated = time.monotonic()
+        if not kind:
+            logger.warning(
+                "a2a_reply_unclassified task=%s peer=%s payload=%r",
+                task_id,
+                send.agent if send is not None else "?",
+                data,
+            )
+            self._settle_terminal(
+                send,
+                task_id,
+                FAILED,
+                "the peer answered with a reply this build cannot read",
+                route,
+            )
+            self._forget_send(task_id)
+            return
 
         # A direct Message reply is a valid answer to a SendMessage in core
         # A2A.  `classify_reply` reports it as REPLY_TEXT, the same word a

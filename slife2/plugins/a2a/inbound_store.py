@@ -11,8 +11,10 @@ now" — the responder, ``task_list`` and the dedup path all read it.
 Lifetime:
 
 - ``working`` — a round is live.  A dropped connection kills the round and the
-  record: the model's bridge died with it, and the peer's requester profile
-  will retry (a fresh request, a fresh round).
+  record: the model's bridge died with it.  The requester does not re-send — its
+  ladder stopped at the responder's ``submitted`` acknowledgement — so the work
+  is lost and its own task row is left for that peer to notice, cancel, or
+  report as never answered.
 - ``interrupted`` / terminal — kept for process life.  A reconnect keeps them,
   so a continuation or a retry can still be answered.  A **restart** starts
   empty: the bridge and the reply topic are process-local, exactly as before,

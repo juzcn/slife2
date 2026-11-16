@@ -381,6 +381,11 @@ class ChatView(VerticalScroll):
         self._agent = agent
         self._streaming: AssistantMessage | None = None
         self._streaming_text = ""
+        #: The part of this turn's answer already drawn in blocks a note closed
+        #: mid-turn.  A note lands between two pieces of a streaming answer, so
+        #: the authoritative `finish_assistant` text is written as its suffix —
+        #: writing it whole drew the prefix a second time.
+        self._turn_drawn = ""
         #: What this turn's bill turned out to be, held until there is a block to
         #: print it under.  `set_usage` is called by `TurnFinished`, which arrives
         #: *before* the turn's answer does, so a turn that has streamed no text
@@ -552,6 +557,7 @@ class ChatView(VerticalScroll):
         so the two cannot answer differently.
         """
         self._turn_open = False
+        self._turn_drawn = ""
         self._close_block()
         # **A new turn, so the previous turn's panels are no longer addressable.**
         # This is the one place a turn begins on this view — live and rebuilt go
@@ -661,6 +667,10 @@ class ChatView(VerticalScroll):
         """
         if ends_turn:
             self._turn_open = False
+        elif self._turn_open:
+            # The note lands inside the answer; remember what the block it
+            # closes already holds so the final text is not drawn twice.
+            self._turn_drawn += self._streaming_text
         self._close_block()
         self._add(Static(plain(f"[{text}]", PALETTE["dim"])), "system-message")
 
@@ -693,7 +703,7 @@ class ChatView(VerticalScroll):
         """
         return self._add(prompt, "approval-prompt")
 
-    def add_error(self, text: str) -> None:
+    def add_error(self, text: str, *, ends_turn: bool = True) -> None:
         """A harness line whose news is bad — `add_note`'s shape, in red.
 
         **The same bracket as a note, on purpose.**  Both are the harness
@@ -701,8 +711,16 @@ class ChatView(VerticalScroll):
         says that without a second format for a reader to learn.  The glyph sits
         inside the bracket, where the bracket is the format rather than part of
         the message.
+
+        `ends_turn` is `add_note`'s: a management error (a model list that
+        failed, a switch that did not land) arrives in the middle of a streaming
+        answer and must not end it; a turn's own failure does.  Keeping the turn
+        open records the drawn prefix so `finish_assistant` writes only the rest.
         """
-        self._turn_open = False
+        if ends_turn:
+            self._turn_open = False
+        elif self._turn_open:
+            self._turn_drawn += self._streaming_text
         self._close_block()
         line = Text.assemble(
             (f"[{GLYPHS['failed']} ", f"bold {PALETTE['red']}"),
@@ -730,6 +748,7 @@ class ChatView(VerticalScroll):
         """
         self._close_block()
         self._turn_open = True
+        self._turn_drawn = ""
         # A turn opens with no bill of its own.  `set_usage` fills this in, and
         # a count left over from a turn that never closed (a cancel, an error)
         # would otherwise print under this one's answer.
@@ -787,6 +806,11 @@ class ChatView(VerticalScroll):
         previous turn's block (see :meth:`set_usage`).
         """
         self._turn_open = False
+        # The authoritative text covers what the closed blocks already hold;
+        # only its remainder belongs to the block this call finishes.
+        drawn, self._turn_drawn = self._turn_drawn, ""
+        if drawn and text.startswith(drawn):
+            text = text[len(drawn) :]
         if self._streaming is None and not text:
             self._pending_usage = 0
             self._close_block()
@@ -862,10 +886,12 @@ class ChatView(VerticalScroll):
         elapsed_ms: int,
     ) -> None:
         # A miss is a result with no panel of *this* turn to complete: an id this
-        # turn never started, or the same id twice.  The map is cleared as each
-        # turn opens (`add_user`), so a call id reused by a later turn can never
-        # find the earlier turn's panel here.
-        widget = self._tools.get(call_id)
+        # turn never started, or the same id twice.  The panel is removed as it
+        # is completed — leaving it in the map made the second result complete
+        # the same widget again, a claim the "twice" half of this comment says
+        # cannot happen.  The map is cleared as each turn opens (`add_user`), so
+        # a call id reused by a later turn cannot find the earlier panel either.
+        widget = self._tools.pop(call_id, None)
         if widget is None:  # pragma: no cover - a result without a start
             return
         # `ok` is the positive phrasing and `set_complete` wants the negative

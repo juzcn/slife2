@@ -2008,7 +2008,7 @@ async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> Non
     answer for a call to one of them named the two shapes that *cannot* be
     reached: a switched-off entry is still declared, and refused by its plugin
     instead, and an entry whose plugin did answer has had its rows deleted
-    (`Upstream.declare`'s `forget_source`).  So the sentence was false about the
+    (`Upstream.record`'s `forget_source`).  So the sentence was false about the
     one case it is reached in — the config still names `fake`, and the thing to
     go and look at is the plugin — which is a wrong diagnosis handed to whoever
     reads it, and the reason the hub may not answer a routing failure with a
@@ -2033,7 +2033,9 @@ async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> Non
     assert answer["ok"] is False
     assert "not a server this hub is configured with any more" not in answer["text"]
     assert "'fake'" in answer["text"], "the answer names what the call belongs to"
-    assert "`servers`" in answer["text"], "and where the plugin's health is reported"
+    assert "`tool_list`" in answer["text"], (
+        "and where the model can read the row's status"
+    )
 
 
 @pytest.mark.asyncio
@@ -2659,10 +2661,11 @@ async def test_the_waiting_ask_re_asks_a_dial_that_failed_while_it_waited(
     """
     # The real bound is five seconds.  It is compressed here so the test does
     # not spend them, but the third dial still has to finish inside this
-    # window — and a full suite running `-n auto` can spend half a second on
-    # the catalogue write alone.  A second is the compression that stays a
-    # compression without turning scheduling jitter into a failure.
-    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 1.0)
+    # window — and a full suite running `-n auto` can spend a second on the
+    # catalogue write alone.  Two seconds is the compression that stays one
+    # without turning scheduling jitter into a failure; the slow dial below is
+    # still 1.5× it, so it still outlasts the wait it must.
+    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 2.0)
     attempts = 0
 
     class SlowFailure(FakeClient):

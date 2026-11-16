@@ -1021,9 +1021,16 @@ async def use(
     if not name:
         return "skill_use needs the name of a skill to read.", False
 
-    skill = find(name)
+    try:
+        skill = find(name)
+        names = [one.name for one in scan()] if skill is None else []
+    except OSError as exc:
+        # **A folder that cannot be listed is an answer, not a raise.**  The
+        # promise is `(text, ok)` for anything the skills directory can be, and
+        # `find`/`scan` run before the `document` try: an unreadable `skills/`
+        # (a permission, a file where the folder should be) escaped the tool.
+        return f"the skills folder cannot be read: {exc}", False
     if skill is None:
-        names = [one.name for one in scan()]
         if not names:
             return f"no skill called {name!r}. (none installed)", False
         # **A typo and an absence are two answers**, and the reader needs to

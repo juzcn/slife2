@@ -683,6 +683,16 @@ class Responder(abc.ABC):
             async with self._semaphore:
                 outcome = await self.on_request(req, stream, continuation=continuation)
         except asyncio.CancelledError:
+            # **A cancellation by a replacement round is not a withdrawal.**
+            # `_start_round` pops the old round and registers the new one before
+            # cancelling the old, so a round that is no longer the registered
+            # one was cancelled by its successor — not by the peer.  Recording
+            # `cancelled` here would end the task the successor is working on:
+            # its answer is then dropped as terminal, and the requester gets a
+            # spurious cancel instead of its continuation's result.
+            me = asyncio.current_task()
+            if self._rounds.get(task_id) is not me:
+                raise
             current = ours()
             if (
                 current is not None
