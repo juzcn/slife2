@@ -1593,10 +1593,10 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
     None
 ):
     """Printing unsettled runs into every turn's prompt would be one plugin
-    reaching into a prompt another plugin owns, and a note to the window is
-    deferred rather than half-built (SDD §14.2). What the agent gets instead is
-    a ledger it can read — which is what makes "did it run?" a question with an
-    answer rather than a message nobody asked for."""
+    reaching into a prompt another plugin owns; the shipped `AGENTS.md` tells
+    the model to read the ledger instead. What the agent gets is a ledger it
+    can read — which is what makes "did it run?" a question with an answer
+    rather than a message nobody asked for."""
     async with Client(build()) as client:
         await write(client)
     store = ledger()

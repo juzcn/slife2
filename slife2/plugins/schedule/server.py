@@ -52,9 +52,9 @@ did; a run the scheduler could not start or follow is `failed` too; and a run a
 stopped process left `pending` is closed by the next start's sweep — `missed` if
 it never started, `failed` if it had.  The poll also records the newest fire
 each task missed while nothing was running — and **nothing is announced**: a
-note handed over would be a second thing said to a conversation, and it is
-deferred rather than half-built (SDD §14.2).  The ledger is where the answer is
-and `schedule_runs` is how it is read.
+note handed over would be a second thing said to a conversation.  The ledger is
+where the answer is and `schedule_runs` is how it is read; the shipped
+`AGENTS.md` tells the model to look.
 """
 
 from __future__ import annotations
@@ -928,11 +928,10 @@ async def sweep_once(
     here: a `missed` or `failed` run from before is still a decision, and a
     decision is not this process's to make.
 
-    **Nothing is announced.**  A note to the window would announce one, and it
-    is deferred rather than half-built (SDD §14.2) because the ledger already
-    holds the answer and `schedule_runs` is how it is read — which is what
-    makes "did it run?" a question with an answer rather than a message nobody
-    asked for.
+    **Nothing is announced.**  A note to the window would announce one, and the
+    shipped `AGENTS.md` tells the model to read the ledger instead:
+    `schedule_runs` holds the answer, which is what makes "did it run?" a
+    question with an answer rather than a message nobody asked for.
     """
     did: list[str] = []
     for store in ledgers():

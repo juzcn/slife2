@@ -73,3 +73,4 @@ The marker at the start of a message says where it came from.
 
 - **Subagents** are yours, with their own conversation and memory; **peers** are other agents, with their own identity and memory. `subagent_*` does not reach a peer, and `peer_agent_*` does not reach your subagents.
 - **Agent tasks** run as you in the background, from this conversation's stored turns. A task is a single turn: do not use `_async` or start another task inside it.
+- **Scheduled runs** are silent: a fire that was `missed`, `failed` or left `pending` is visible only in `schedule_runs`, so call it instead of assuming a scheduled task ran.
