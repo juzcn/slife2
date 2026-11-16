@@ -368,32 +368,66 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Switched to ",
         "zh": "已切换到 ",
     },
-    # ── the subagent picker (`slife2.tui.widgets.ConversationPicker`) ─────
+    # ── the conversation picker (`slife2.tui.widgets.ConversationPicker`) ─
     "conversation_picker_title": {
-        "en": "Watch a subagent",
-        "zh": "观看 subagent",
+        "en": "Watch a subagent or agent task",
+        "zh": "观看 subagent 或 agent task",
     },
-    # The decision line, once a name has been chosen.  The screen opens on it,
+    # The two kinds of row.  A subagent and a task may share a name, so the
+    # kind is what says which server the row belongs to.
+    "picker_kind_subagent": {
+        "en": "subagent",
+        "zh": "subagent",
+    },
+    "picker_kind_task": {
+        "en": "task",
+        "zh": "task",
+    },
+    # The decision line, once a row has been chosen.  The screen opens on it,
     # so the wording is "watching" rather than "opened".
     "conversation_watching": {
         "en": "Watching {name}",
         "zh": "正在观看 {name}",
     },
+    "conversation_watching_task": {
+        "en": "Watching task {name}",
+        "zh": "正在观看 task {name}",
+    },
     # `Ctrl+O` with nothing to offer.  Said rather than shown as an empty
     # picker, for `no_models`'s reason: a list with no rows is a key that looks
-    # broken, and the tool that would fix it is the thing worth naming.
-    "no_subagents": {
-        "en": "{agent} has no subagents yet; the model makes one with `subagent_create`",
-        "zh": "{agent} 还没有 subagent；模型可用 `subagent_create` 创建",
+    # broken, and the tools that would fix it are the things worth naming.
+    "nothing_to_watch": {
+        "en": (
+            "{agent} has nothing to watch yet; the model makes a subagent with "
+            "`subagent_create` or starts a task with `agent_task_start`"
+        ),
+        "zh": (
+            "{agent} 还没有可观看的 subagent 或 agent task；模型可用 "
+            "`subagent_create` 创建，或用 `agent_task_start` 启动"
+        ),
     },
     "subagents_failed": {
         "en": "the subagents could not be listed: {err}",
         "zh": "无法列出 subagent：{err}",
     },
+    "tasks_failed": {
+        "en": "the agent tasks could not be listed: {err}",
+        "zh": "无法列出 agent task：{err}",
+    },
     # ── the watch screen (`slife2.tui.watch`) ─────────────────────────────
     "watch_header": {
         "en": "watching {subagent} — Esc closes",
         "zh": "正在观看 {subagent} — Esc 关闭",
+    },
+    "watch_task_header": {
+        "en": "watching task {task} — Esc closes",
+        "zh": "正在观看 task {task} — Esc 关闭",
+    },
+    # The task's brief, above the live turn.  The status is the server's word
+    # (`running`, `finished`, ...), drawn as it was written rather than mapped.
+    "task_brief_title": {
+        "en": "task {name} — {status}",
+        "zh": "task {name} — {status}",
     },
     "watch_failed": {
         "en": "the conversation could not be watched: {err}",
@@ -485,8 +519,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # — because they are what is printed on the keyboard and a translated one
     # breaks the key-to-action scan; the words after them are the words.
     "status_keybinds": {
-        "en": "Esc/Ctrl+C interrupt  Ctrl+S model  Ctrl+O subagents  Ctrl+C quit",
-        "zh": "Esc/Ctrl+C 中断  Ctrl+S 模型  Ctrl+O subagent  Ctrl+C 退出",
+        "en": "Esc/Ctrl+C interrupt  Ctrl+S model  Ctrl+O watch  Ctrl+C quit",
+        "zh": "Esc/Ctrl+C 中断  Ctrl+S 模型  Ctrl+O 观看  Ctrl+C 退出",
     },
 }
 

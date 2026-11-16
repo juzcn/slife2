@@ -561,6 +561,21 @@ def control_url(config: Config) -> str:
     return config.server("tui").url
 
 
+def task_url(config: Config) -> str:
+    """Where the window lists and watches agent tasks, or `""` for not there.
+
+    **A config with no agent-task server has no tasks to watch**, and that is
+    the absence this answers rather than an error: the plugin is an optional
+    `servers:` row, and a window whose machine does not run it should still
+    offer its subagents under `Ctrl+O`.  The empty string is what the app reads
+    as "do not ask", the same way `mesh_url`'s empty is "not on the mesh".
+    """
+    try:
+        return config.server("agent-task").url
+    except ConfigError:
+        return ""
+
+
 def mesh_url(config: Config) -> str:
     """Where the window puts its agent on the A2A mesh, or `""` for not on one.
 
@@ -1062,6 +1077,10 @@ def main(argv: list[str] | None = None) -> int:
                     # online, so the address has to reach the window rather
                     # than the plugin that was already started without it.
                     mesh_url=mesh_url(config),
+                    # The tasks the picker offers beside the subagents.  A
+                    # machine without the plugin gets `""`, and the key then
+                    # asks only the agent server.
+                    task_url=task_url(config),
                 )
                 # **The whole of `--headless`, and it is the window either
                 # way.**  Nothing is passed in and nothing above changes: the

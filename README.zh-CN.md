@@ -324,7 +324,7 @@ subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_s
 | `Esc` | 打断正在运行的轮次。 |
 | `Ctrl+C` | 有选中内容时复制；否则打断；再否则退出。 |
 | `Ctrl+S` | 打开模型选择器。`↑`/`↓` 移动，`Enter` 选择，`Esc` 关闭。 |
-| `Ctrl+O` | 打开 subagent 选择器；选中后打开只读视图。`Esc` 关闭。 |
+| `Ctrl+O` | 打开 subagent 和正在运行的 agent task 的选择器；选中后打开只读视图。`Esc` 关闭。 |
 | `Ctrl+Q` | 退出（Textual 的标准绑定；不在状态栏显示，因为带流控的终端可能先截获它）。 |
 | `PageUp` / `PageDown` | 翻页。 |
 | `Home` / `End` | 跳到对话开头或结尾。 |
@@ -353,13 +353,18 @@ subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_s
 调用的 `model_switch`。对话保留历史，在下一轮切到新模型；进行中的轮次在它启动时的
 模型上跑完。
 
-### 观看 subagent
+### 观看 subagent 或 agent task
 
-`Ctrl+O` 列出本 agent 创建的 subagent，并打开其中一个的只读视图。视图先显示已存储
-的对话，再显示正在进行的轮次——包括打开时已经在运行的那一轮。`Esc` 返回。视图是
-只读的：观看不会让你成为该 subagent 的窗口，prompt 不显示，审批请求也不会交给你。
-在被观看的对话中，唤醒它的消息显示为 `Agent(<name>)>`；来自兄弟 subagent 的消息
-显示为 `Subagent(<name>)>`。
+`Ctrl+O` 列出本 agent 创建的 subagent 和正在运行的 agent task，并打开选中项的只读
+视图。视图先显示已存储的对话，再显示正在进行的轮次——包括打开时已经在运行的那一轮。
+task 没有已存储的对话：它的视图以收到的 description 开头，然后是它唯一的一轮。
+`Esc` 返回。视图是只读的：观看不会让你成为该 subagent 的窗口，prompt 不显示，审批
+请求也不会交给你。在被观看的对话中，唤醒它的消息显示为 `Agent(<name>)>`；来自兄弟
+subagent 的消息显示为 `Subagent(<name>)>`；task 的话显示为 `AsyncTask(<name>)>`。
+
+只列出正在运行的 task。task 如果在 picker 打开后停止，视图会以最终状态和结局说明
+打开——task 不记录任何东西，所以没有事件可以重放。观看不会让 task 变成 `finished`：
+答案仍然通过 hand-over 回到会话。
 
 ### 恢复对话
 

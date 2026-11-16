@@ -201,6 +201,7 @@ from slife2.libs.turn.watch import (
 from slife2.libs.turn.watch import (
     encode as encode_watch,
 )
+from slife2.libs.turn.watchhub import Tap, WatchHub
 
 logger = logging.getLogger(__name__)
 
@@ -449,60 +450,6 @@ class Pending:
     #: the receipt is what makes that an identity rather than a guess at the
     #: words.  The server never reads it.
     receipt: str = ""
-
-
-@dataclass
-class Tap:
-    """The last or current turn of one conversation, kept for a watcher.
-
-    **A watcher arrives mid-turn by definition** — that is when somebody wants
-    to look — and the store has nothing for the turn in flight: a turn is written
-    when it ends (`record`).  So the turn's own display events are kept here from
-    the moment it opens, and a watcher that joins is handed them before it joins
-    the live queue.  The alternative was showing a turn's tail without its head,
-    which is the one thing the main window never does.
-
-    `recorded_turn` is the store id the turn was given, once it has one.  A
-    watcher uses it to tell whether the snapshot it has just read already
-    contains this turn: the same turn may be both in the store and here, and
-    drawing it twice is the duplicate this field exists to prevent.
-
-    **One per conversation, replaced when the next turn starts.**  A turn's
-    record is awaited before its lock is released (or picked up by the next
-    turn's `settle_record`), so by the time a replacement happens the store has
-    the old one — which is why nothing here outlives the turn it describes by
-    more than one.
-    """
-
-    started: TurnStarted
-    events: list[TurnEvent] = field(default_factory=list)
-    recorded_turn: int | None = None
-
-
-@dataclass(eq=False)
-class Watcher:
-    """One open `watch` call, and the queue its frames are passed through.
-
-    **The queue is the Context seam**, and it is not an optimisation.  A
-    watcher's frames must be reported from the watcher's own handler task:
-    `Context.report_progress` resolves its progress token from the request that
-    is current when it is called, so an observer reporting from a *turn's* task
-    would push into the turn caller's stream (`slife2.plugins.tui.server._push`
-    is the same arrangement).  The handler owns the reporting; everything else
-    only `put_nowait`s.
-
-    Unbounded because every entry is a display frame for one connected client,
-    and the client is a local terminal reading as fast as it is written.  A
-    watcher that genuinely falls behind is the client's problem to fix by
-    closing the view; the turn it is watching never waits for it.
-
-    **`eq=False` because this is a session rather than a value**: two readers
-    are two watchers however alike their queues look, and the set they are kept
-    in is a set of readers — the generated equality would make the second one
-    the first, and a removal would take the wrong one out.
-    """
-
-    queue: asyncio.Queue[WatchItem] = field(default_factory=asyncio.Queue)
 
 
 @dataclass
@@ -933,73 +880,12 @@ def build_server(
     #: mid-flight, and drained on the way out.
     background: set[asyncio.Task[None]] = set()
 
-    #: The last or current turn of each conversation, for a watcher that joins
-    #: while it is running — see `Tap`.  Replaced at the next turn's start, so
-    #: the table holds at most one turn per conversation that has ever run.
-    taps: dict[ConversationKey, Tap] = {}
-
-    #: Every open `watch` call, by the conversation it is watching.  **A set**,
-    #: because watching is a read and two readers are ordinary: the window is one
-    #: client of this server, but nothing makes it the only one.
-    watchers: dict[ConversationKey, set[Watcher]] = {}
-
-    def publish(key: ConversationKey, event: TurnEvent) -> None:
-        """Offer one turn event to the tap, and to whoever is watching.
-
-        **Synchronous by contract, not by accident.**  It is called from the
-        turn's observer, between model calls, and `put_nowait` is the whole of
-        the cost a watcher may add: a display that cannot keep up is dropped by
-        its own client, never waited for here.
-
-        The tap is appended before the watchers are served, so a watcher that
-        registers between the two sees the event in the tap rather than not at
-        all — there is no await between the append and the enqueues, and the
-        registration is one synchronous step too (`watch`).
-        """
-        tap = taps.get(key)
-        if tap is not None:
-            tap.events.append(event)
-        for watcher in tuple(watchers.get(key, ())):
-            watcher.queue.put_nowait(event)
-
-    def announce(key: ConversationKey, item: WatchItem) -> None:
-        """Hand a watcher-only frame to every watcher of a conversation.
-
-        `TurnStarted` and `Closed` are not turn events — one is a fact the turn's
-        own caller already has, the other is the end of the read — so they go to
-        the watchers directly and never into the tap's event list.
-        """
-        for watcher in tuple(watchers.get(key, ())):
-            watcher.queue.put_nowait(item)
-
-    def start_tap(key: ConversationKey, started: TurnStarted) -> Tap:
-        """Open a turn for watchers, and replace the conversation's last one.
-
-        Called immediately before the turn's first observable step
-        (`rebuild_into`, which may emit `ContextChosen`), so the tap is the turn
-        and not the one before it.  The replacement is what bounds the table: a
-        turn's record has been awaited (or taken up by `settle_record`) before
-        another turn can start, so the old tap is already in the store.
-        """
-        tap = Tap(started=started)
-        taps[key] = tap
-        # A watcher of an idle conversation learns a turn has begun from this,
-        # not from its first delta: the message itself is the half of a turn a
-        # watcher never sent and cannot otherwise see.
-        announce(key, started)
-        return tap
-
-    def close_watchers(key: ConversationKey, reason: str) -> None:
-        """End every watch of a conversation, with the reason as its last frame.
-
-        **The frame rather than a cancelled call**, because the watcher is owed a
-        sentence: a stream that simply stops is indistinguishable from one that
-        is quiet between turns, and the two mean opposite things.  The watcher's
-        handler sends this and returns, which is what makes the far end's call
-        come back normally.
-        """
-        for watcher in watchers.pop(key, set()):
-            watcher.queue.put_nowait(Closed(reason))
+    #: The turn in flight and every open `watch` call, keyed by conversation.
+    #: **The mechanism is `slife2.libs.turn.watchhub`'s**, shared with the
+    #: agent-task server: the key is this server's `(home, agent, subagent)`
+    #: triple, and the table itself holds at most one turn per conversation,
+    #: replaced at the next turn's start.
+    watching: WatchHub[ConversationKey] = WatchHub()
 
     async def cabinet() -> Client:
         """The client for the cabinet, opened on first use.
@@ -1563,7 +1449,7 @@ def build_server(
                 # still attached reads what it needs from that store and then
                 # from the live queue.  Keeping it would be memory for a
                 # conversation nothing is running.
-                taps.pop(key, None)
+                watching.drop(key)
 
     def conversation(agent: str, subagent: str, model: str) -> Loop:
         """The conversation for this key, created on demand.
@@ -3813,8 +3699,12 @@ def build_server(
                         else:
                             await restore_into(loop)
                         loop.restored = True
-                    tap = start_tap(key, TurnStarted(item.prompt, item.channel))
-                    observer = ProgressObserver(ctx, publish=partial(publish, key))
+                    tap = watching.start_tap(
+                        key, TurnStarted(item.prompt, item.channel)
+                    )
+                    observer = ProgressObserver(
+                        ctx, publish=partial(watching.publish, key)
+                    )
                     # **The rebuild is inside this `try` too**, and not for
                     # tidiness: when the discriminator is asked a question it
                     # makes a model call carrying these same messages
@@ -3957,8 +3847,8 @@ def build_server(
                                 exc_info=refusal,
                             )
                             roll_back(loop, outcome)
-                            if tap is not None and taps.get(key) is tap:
-                                taps.pop(key, None)
+                            if tap is not None:
+                                watching.drop_if(key, tap)
                         else:
                             if turn_id is not None and loop.covered == began:
                                 loop.covered += len(loop.messages) - began
@@ -4001,8 +3891,7 @@ def build_server(
                             exc_info=refusal,
                         )
                         roll_back(loop, outcome)
-                        if taps.get(key) is tap:
-                            taps.pop(key, None)
+                        watching.drop_if(key, tap)
                         raise
                     # The store has this turn now (or it never will: a fork has
                     # no row).  Recorded on the tap so a watcher's snapshot can
@@ -4234,7 +4123,7 @@ def build_server(
 
         The person watching never slows the turn: the observer appends to the
         tap and `put_nowait`s for each watcher, and the reporting happens on this
-        call's own task (see `Watcher` for why it must).
+        call's own task (see the hub's `Watcher` for why it must).
 
         Args:
             agent: Whose conversation.
@@ -4263,16 +4152,12 @@ def build_server(
         # the tap in place; `recorded_turn` decides whether the snapshot already
         # has it, which is the same check the replay makes.
         while True:
-            before = taps.get(key)
+            before = watching.tap(key)
             stored = await stored_conversation(agent, subagent)
-            if taps.get(key) is before:
+            if watching.tap(key) is before:
                 break
-        watcher = Watcher()
-        watchers.setdefault(key, set()).add(watcher)
-        tap = taps.get(key)
-        replay = (
-            None if tap is None else (tap.started, list(tap.events), tap.recorded_turn)
-        )
+        watcher = watching.watch(key)
+        replay = watching.replay(key)
         known = {
             turn["turn_id"]
             for turn in stored.turns
@@ -4284,22 +4169,21 @@ def build_server(
             nonlocal count
             count += 1
             # **Reported from this handler's own task**, which is what makes the
-            # progress token this call's: see `Watcher`.
+            # progress token this call's: see the hub's `Watcher`.
             await ctx.report_progress(count, None, encode_watch(item))
 
         try:
             await send(Snapshot(stored.turns, stored.plan))
             if replay is not None:
-                started, events, recorded = replay
                 # **The tap is the turn in flight, or the one that just ended.**
                 # It is skipped only when the snapshot provably contains it —
                 # the store answered with an id the snapshot has.  A turn whose
                 # write has not answered has no id, and the read above cannot
                 # have included it either, so replaying it is the missing half
                 # rather than a duplicate.
-                if recorded is None or recorded not in known:
-                    await send(started)
-                    for event in events:
+                if replay.recorded_turn is None or replay.recorded_turn not in known:
+                    await send(replay.started)
+                    for event in replay.events:
                         await send(event)
             while True:
                 item = await watcher.queue.get()
@@ -4309,11 +4193,7 @@ def build_server(
                     # and there is nothing after it to wait for.
                     return {"closed": True}
         finally:
-            found = watchers.get(key)
-            if found is not None:
-                found.discard(watcher)
-                if not found:
-                    watchers.pop(key, None)
+            watching.unwatch(key, watcher)
 
     @mcp.tool
     async def reset(agent: str, subagent: str = "") -> dict[str, Any]:
@@ -4668,12 +4548,12 @@ def build_server(
         # than half-removing it), and a watcher told it was gone would have been
         # told something untrue.  A stream that simply stopped, on the other
         # hand, would be indistinguishable from an idle conversation, so the
-        # last frame says why and the call returns after it (`close_watchers`).
-        close_watchers(
+        # last frame says why and the call returns after it (`WatchHub.close`).
+        watching.close(
             conversation_key(maker, directory.name),
             f"{directory.name} was removed",
         )
-        taps.pop(conversation_key(maker, directory.name), None)
+        watching.drop(conversation_key(maker, directory.name))
         logger.info("subagent %s removed", describe((maker, directory.name)))
         return {"name": directory.name, "removed": True}
 

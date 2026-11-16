@@ -15,12 +15,14 @@ import re
 import pytest
 from fakes import (
     FakeAgentClient,
+    FakeAgentTaskClient,
     FakeMeshClient,
     FakeWatchClient,
     FakeWindowClient,
     RefusingMeshClient,
 )
 from fastmcp.exceptions import ToolError
+from textual.widgets import Static
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
@@ -38,7 +40,7 @@ from slife2.libs.turn.events import (
     TurnFinished,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.watch import Snapshot, TurnStarted
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -3652,7 +3654,8 @@ async def test_ctrl_o_offers_the_subagents_the_server_lists() -> None:
 
         listing = app.query_one(ConversationPicker).plain_text()
         assert "scout" in listing and "researcher" in listing
-        assert "Watch a subagent" in listing
+        assert "Watch a subagent or agent task" in listing
+        assert "subagent" in listing
 
         # Escape is the cancel, and it leaves a line saying so rather than a
         # picker that vanished.
@@ -3662,7 +3665,7 @@ async def test_ctrl_o_offers_the_subagents_the_server_lists() -> None:
         assert "Cancelled" in shown(app)
 
 
-async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
+async def test_ctrl_o_with_nothing_to_watch_names_the_tools_that_make_one() -> None:
     """An empty list is said, not shown as a picker with no rows."""
     client = FakeAgentClient(answering("ok"))
     app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
@@ -3670,9 +3673,10 @@ async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+o")
-        assert await settled(pilot, lambda: "no subagents yet" in shown(app))
+        assert await settled(pilot, lambda: "nothing to watch yet" in shown(app))
         assert not app.query(ConversationPicker)
         assert "`subagent_create`" in shown(app)
+        assert "`agent_task_start`" in shown(app)
 
 
 async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window() -> (
@@ -3739,5 +3743,104 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
         assert "Watching scout" in shown(app)
         assert "what is 6*7?" not in shown(app)
         assert "It is 42." not in shown(app)
+
+    assert watch.closed is True, "leaving the screen is the detach"
+
+
+async def test_ctrl_o_offers_running_tasks_beside_subagents() -> None:
+    """The picker is one question over two servers.
+
+    Tasks are read from the agent-task server and only the running ones are
+    offered: a stopped task has no events left to watch.  The list client is
+    the picker's own and is closed when the read is done.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}]
+    tasks = FakeAgentTaskClient()
+    tasks.tasks_answer = [
+        {"name": "research", "status": "running"},
+        {"name": "done", "status": "finished"},
+    ]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        task_client_factory=lambda: tasks,
+        agent="jack",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+
+        listing = app.query_one(ConversationPicker).plain_text()
+        assert "subagent  scout" in listing
+        assert "task  research" in listing
+        assert "done" not in listing, "a stopped task has nothing left to watch"
+
+    assert tasks.closed is True, "the picker's list connection is its own lifetime"
+
+
+async def test_choosing_a_task_watches_its_brief_and_its_turn() -> None:
+    """A task's screen is its description, then the one turn it runs.
+
+    `TaskBrief` is drawn as a block above the transcript rather than as a user
+    message: the description is what the task was given, and nobody in the
+    conversation said it.  The assistant's words wear the task's bubble, the
+    same `AsyncTask(name)>` the window uses for its answer.
+    """
+    client = FakeAgentClient(answering("ok"))
+    tasks = FakeAgentTaskClient()
+    tasks.tasks_answer = [{"name": "research", "status": "running"}]
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TaskBrief(
+                "research",
+                "Find the retry policy.",
+                "running",
+            ),
+            TextDelta("The policy is in retry.py."),
+            TurnFinished(
+                text="The policy is in retry.py.",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            ),
+            Closed("the task finished; its answer was delivered to the conversation"),
+        )
+    )
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        task_client_factory=lambda: tasks,
+        task_watch_client_factory=lambda name: watch,
+        agent="jack",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+        await pilot.press("enter")
+        assert await settled(pilot, lambda: isinstance(app.screen, WatchScreen))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        header = str(app.screen.query_one("#watch-header", Static).content)
+        assert "watching task research" in header
+        brief = str(app.screen.query_one("#watch-brief", Static).content)
+        assert "task research — running" in brief
+        assert "Find the retry policy." in brief
+
+        text = app.screen.query_one(ChatView).plain_text()
+        assert "AsyncTask(research)>" in text
+        assert "The policy is in retry.py." in text
+        assert "the task finished" in text
+
+        await pilot.press("escape")
+        assert await settled(pilot, lambda: len(app.screen_stack) == 1)
+        assert "Watching task research" in shown(app)
 
     assert watch.closed is True, "leaving the screen is the detach"

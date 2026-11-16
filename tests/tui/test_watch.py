@@ -13,6 +13,7 @@ import asyncio
 import pytest
 from fakes import FakeWatchClient
 from textual.app import App
+from textual.widgets import Static
 
 from slife2.libs.turn.events import (
     TextDelta,
@@ -21,7 +22,7 @@ from slife2.libs.turn.events import (
     TurnFinished,
 )
 from slife2.libs.turn.messages import Message, Usage
-from slife2.libs.turn.watch import Closed, Snapshot, TurnStarted
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.watch import WatchScreen
 from slife2.tui.widgets import ChatView, HistoryInput, PlanView
 
@@ -107,6 +108,46 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         await pilot.pause()
         assert len(app.screen_stack) == 1, "back to the window"
         assert watch.closed is True, "the watch call was cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_task_watch_draws_the_brief_and_signs_with_the_task() -> None:
+    """A task's description is a block, not a user message.
+
+    Nobody in the conversation said it, so it does not wear `You>` or any
+    sender's bubble; the assistant's words wear the task's own bubble, the same
+    `AsyncTask(name)>` the window uses for its answer.  The description is model
+    text and is drawn as `Text`, so brackets in it are not markup.
+    """
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TaskBrief("research", "Find [the] retry policy.", "running"),
+            TextDelta("It is in retry.py."),
+            finished("It is in retry.py."),
+            Closed("the task finished"),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("research", lambda: watch, task=True))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        header = str(app.screen.query_one("#watch-header", Static).content)
+        assert "watching task research" in header
+        brief = app.screen.query_one("#watch-brief", Static)
+        assert brief.display is True, "the brief is shown only when it arrives"
+        brief_text = str(brief.content)
+        assert "task research — running" in brief_text
+        assert "Find [the] retry policy." in brief_text, "markup in model text is text"
+
+        text = app.screen.query_one(ChatView).plain_text()
+        assert "AsyncTask(research)>" in text
+        assert "It is in retry.py." in text
+
+        await pilot.press("escape")
+        await pilot.pause()
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,11 @@
 """Test doubles.
 
-Five seams get faked, and each one exists because something real and slow sits
+Six seams get faked, and each one exists because something real and slow sits
 behind it: the model (an HTTP call to a provider), the embedding model (another
-one), the agent server (a socket), the window's own inbox (another socket, and
-one the window *holds open* rather than calls), and the observer (nothing — but a
-recorder is how a test reads what happened).
+one), the agent server (a socket), the agent-task server's list (another
+socket), the window's own inbox (another socket, and one the window *holds
+open* rather than calls), and the observer (nothing — but a recorder is how a
+test reads what happened).
 
 Plus one that is not a seam but a *shape*: the set of plugins a toolhub will
 ask for tools.  It is here because three test modules need it and none of them
@@ -351,6 +352,40 @@ class FakeWatchClient:
         """Push one item, as the server's progress stream does."""
         assert self.on_item is not None, "nothing has started watching"
         self.on_item(item)
+
+
+class FakeAgentTaskClient:
+    """An :class:`~slife2.tui.client.AgentTaskClient` with a scripted list.
+
+    The list is what the picker reads; the watch screen is handed a
+    `FakeWatchClient` separately, because the app opens a connection of its own
+    for the stream.  The two fakes are two lifetimes, which is the design the
+    real clients have.
+    """
+
+    def __init__(self, *, connect_error: Exception | None = None) -> None:
+        self.connect_error = connect_error
+        self.connected = False
+        self.closed = False
+        #: What `tasks` answers with — the rows `agent_task_list` returns.
+        #: Empty is the real answer for an agent running nothing.
+        self.tasks_answer: list[dict[str, Any]] = []
+        self.reads = 0
+
+    async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+        self.closed = True
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.reads += 1
+        return [dict(one) for one in self.tasks_answer]
 
 
 class FakeWindowClient:

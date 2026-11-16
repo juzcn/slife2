@@ -133,6 +133,21 @@ WatchScreen {
     color: $slife-dim;
 }
 
+/* The task's brief, above its turn.  Hidden until a `TaskBrief` arrives — a
+   subagent watch never has one — and auto height because a description is as
+   long as the model wrote it. */
+#watch-brief {
+    display: none;
+    height: auto;
+    padding: 0 1;
+    background: $slife-panel;
+    color: $slife-text;
+}
+
+#watch-brief.visible {
+    display: block;
+}
+
 /* ── The approval row ───────────────────────────────────────────────────── */
 
 /* The second thing in the transcript that asks something, and it wears the

@@ -358,7 +358,7 @@ it, and it is ignored outside mirrored mode.
 | `Esc` | Interrupt the running turn. |
 | `Ctrl+C` | Copy when something is selected; otherwise interrupt; otherwise quit. |
 | `Ctrl+S` | Open the model picker. `↑`/`↓` move, `Enter` selects, `Esc` closes. |
-| `Ctrl+O` | Open the subagent picker; choosing one opens a read-only view. `Esc` closes it. |
+| `Ctrl+O` | Open the picker for subagents and running agent tasks; choosing one opens a read-only view. `Esc` closes it. |
 | `Ctrl+Q` | Quit (Textual's binding; not shown because terminals with flow control may consume it). |
 | `PageUp` / `PageDown` | Page the transcript. |
 | `Home` / `End` | Jump to the start or end of the transcript. |
@@ -393,15 +393,22 @@ Selecting one calls the same `model_switch` tool the model can call. The
 conversation keeps its history and moves to the new model on its next turn; a
 turn in progress finishes on the model it started with.
 
-### Watching a subagent
+### Watching a subagent or agent task
 
-`Ctrl+O` lists the subagents this agent has made and opens a read-only view of
-one. The view shows the stored conversation and then the live turn — including a
-turn already in progress when you open it. `Esc` returns. The view is read-only:
-watching does not make you the subagent's window, the prompt is not shown, and an
-approval request is not put to you. In the watched conversation the message that
-woke it wears `Agent(<name>)>`; a message from a sibling wears
-`Subagent(<name>)>`.
+`Ctrl+O` lists the subagents this agent has made and the agent tasks it is
+running, and opens a read-only view of the one you choose. The view shows the
+stored conversation and then the live turn — including a turn already in
+progress when you open it. A task has no stored conversation: its view opens
+with the description it was given, then its one turn. `Esc` returns. The view
+is read-only: watching does not make you the subagent's window, the prompt is
+not shown, and an approval request is not put to you. In the watched
+conversation the message that woke it wears `Agent(<name>)>`; a message from a
+sibling wears `Subagent(<name>)>`; a task's words wear `AsyncTask(<name>)>`.
+
+Only running tasks are offered. A task that stops between the picker and the
+choice opens on its final status and the sentence its ending carried — a task
+records nothing, so there are no events left to replay. Watching never makes a
+task finished: its answer still reaches the conversation by hand-over.
 
 ### Restoring a conversation
 

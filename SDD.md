@@ -786,6 +786,21 @@ Watching is a read: it starts no turn, chooses no context, spends no model call,
 and never answers an approval request. The watched turn remains unattended
 (`watched=false`), exactly as it is when nobody watches. A display that falls
 behind loses frames; the turn never waits for it.
+
+**An agent task is watched through the same vocabulary** (§9.3), from the task
+server's own held-open `watch(name)` tool. A task stores no turns, so its first
+frame is an empty `Snapshot` carrying the agent's plan; `TaskBrief` follows with
+the description the task was given, then the one turn's events from its start,
+then `Closed` when it stops. A task that has already stopped is answered with
+the brief, its final status and the sentence its ending carried; a name the
+registry no longer holds is a refusal. Both servers keep their taps and
+watchers in `libs/turn/watchhub.py`, so the join-mid-turn race is one
+implementation.
+
+`Ctrl+O` offers the agent's subagents and its **running** agent tasks in one
+picker; a stopped task has no events left to replay. Watching a task starts no
+turn and does not make it `finished` — the answer still reaches the conversation
+by hand-over.
 ## 5. Turn execution
 
 ### 5.1 Loop contract
@@ -2071,6 +2086,16 @@ reached a window**: if no window is showing the conversation, it ends `failed`
 and the log records why — the answer is the product, and an answer nobody
 received is not a finished task.
 
+**A task can be watched while it runs.** The task server's management tool
+`watch(name)` is the same read a subagent's conversation has (§4.5.6): an empty
+`Snapshot` with the agent's plan (a task stores no turns), a `TaskBrief` with
+the description it was given, the one turn's events from its start, and
+`Closed` with its ending. A stopped task is answered with the brief and the
+sentence its ending carried; a name the registry no longer holds is a refusal.
+The turn publishes through the shared watch hub, so a watcher that joins
+mid-turn is handed the events already produced. Watching starts no turn, spends
+no model call, and never changes the `finished` rule.
+
 **The acknowledgement is the write, not the record.**  `finished` means the
 window took the answer: `hand_over` returns when the words are on their way down
 the window's stream, and the window submits them into the conversation, which
@@ -2763,7 +2788,6 @@ The following are not implemented in this version:
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
 | A cap on total agent-task work | `max_running` bounds concurrency; a rate is the missing number. | Total work over time is unbounded. |
 | A cap on the number of conversations | The inbox is capped; the number of loops is not. | A client can create conversations without a machine-wide limit. |
-| A visible agent-task progress line | The four tools are the model's; the window has no line for a running task. | A person's only lever is to ask the model. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |

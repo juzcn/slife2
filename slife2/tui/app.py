@@ -68,7 +68,7 @@ from textual.worker import Worker
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import DEFAULT_AGENT
-from slife2.libs.plugin.vocabulary import NOTE, Handover
+from slife2.libs.plugin.vocabulary import NOTE, RUNNING, Handover
 from slife2.libs.turn.events import (
     MessageCutIn,
     ToolApprovalRequested,
@@ -79,7 +79,9 @@ from slife2.libs.turn.events import (
 from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,
+    AgentTaskClient,
     MCPAgentClient,
+    MCPAgentTaskClient,
     MCPMeshClient,
     MCPWindowClient,
     MeshClient,
@@ -102,6 +104,7 @@ from slife2.tui.widgets import (
     ModelPicker,
     PlanView,
     StatusBar,
+    WatchChoice,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,11 +248,12 @@ class SlifeApp(App[None]):
         # rather than two that can drift apart.
         Binding("ctrl+s", "switch_model", "Switch model", show=False),
         # The conversation switcher: `Ctrl+O` opens the list of this agent's
-        # subagents, and choosing one pushes a read-only screen that watches it
-        # (`slife2.tui.watch`).  `o` for open; not a tab bar, because a subagent
-        # is a place to look rather than a second prompt to type into, and a
-        # screen leaves the window's own conversation running underneath it.
-        Binding("ctrl+o", "watch_subagent", "Watch a subagent", show=False),
+        # subagents and its running agent tasks, and choosing one pushes a
+        # read-only screen that watches it (`slife2.tui.watch`).  `o` for open;
+        # not a tab bar, because a subagent or a task is a place to look rather
+        # than a second prompt to type into, and a screen leaves the window's
+        # own conversation running underneath it.
+        Binding("ctrl+o", "watch", "Watch a subagent or task", show=False),
         # Home/End go to the transcript rather than to the draft, and
         # `priority` is what makes that true: the priority pass runs *before*
         # the focused widget, and the focused widget is the prompt, whose
@@ -284,10 +288,13 @@ class SlifeApp(App[None]):
         tool_counts: ToolCounts | None = None,
         control_url: str = "",
         mesh_url: str = "",
+        task_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
         window_factory: Callable[[], WindowClient] | None = None,
         mesh_factory: Callable[[], MeshClient] | None = None,
         watch_client_factory: Callable[[str], WatchClient] | None = None,
+        task_client_factory: Callable[[], AgentTaskClient] | None = None,
+        task_watch_client_factory: Callable[[str], WatchClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
@@ -380,6 +387,23 @@ class SlifeApp(App[None]):
         self._watch_client_factory = watch_client_factory or (
             lambda name: MCPAgentClient(url, agent=agent, subagent=name)
         )
+        #: The task half of the same key, and **the fifth and sixth connections**
+        #: for the same reason as the fourth: the list is read on one short-lived
+        #: client and the screen gets another, so a watch that drops cannot take
+        #: the list with it.  Empty `task_url` is a machine whose config has no
+        #: agent-task server: the picker then offers subagents only, and there is
+        #: no key that looks broken because a plugin is not there.
+        self._task_client_factory = task_client_factory
+        self._task_watch_client_factory = task_watch_client_factory
+        if task_url:
+            if self._task_client_factory is None:
+                self._task_client_factory = lambda: MCPAgentTaskClient(
+                    task_url, agent=agent
+                )
+            if self._task_watch_client_factory is None:
+                self._task_watch_client_factory = lambda name: MCPAgentTaskClient(
+                    task_url, agent=agent, name=name
+                )
         self._client: AgentClient | None = None
         self._window: WindowClient | None = None
         self._mesh: MeshClient | None = None
@@ -752,7 +776,7 @@ class SlifeApp(App[None]):
         """Connect, restore, and raise when a server still cannot be reached.
 
         `_ensure_connected` plus the check it leaves to its caller, written once:
-        `_send`, `_switch_model`, `_finish_approval` and `_choose_subagent` all
+        `_send`, `_switch_model`, `_finish_approval` and `_choose_watch` all
         need the same two statements, and the sentence the raise carries is a
         fact about this window rather than about any one of them — so it is
         stated here once, with the reason the caller wants it: a turn, a switch,
@@ -1254,7 +1278,7 @@ class SlifeApp(App[None]):
         """
         if self._switching:
             return
-        # **Only the window's own screen offers this**, for `action_watch_subagent`'s
+        # **Only the window's own screen offers this**, for `action_watch`'s
         # reason: with a watch up, the picker would mount in the transcript
         # underneath it — invisible — and the latch would make the key look dead
         # until the watch closed.
@@ -1334,13 +1358,13 @@ class SlifeApp(App[None]):
         finally:
             self._switching = False
 
-    # --- watching a subagent -------------------------------------------------
+    # --- watching a subagent or a task ---------------------------------------
 
-    def action_watch_subagent(self) -> None:
-        """Open the subagent picker; the choice pushes a read-only screen.
+    def action_watch(self) -> None:
+        """Open the watch picker; the choice pushes a read-only screen.
 
         **Sync, for the model picker's reason** (`action_switch_model`): an
-        action runs inside the key handler, so awaiting the list and then the
+        action runs inside the key handler, so awaiting the lists and then the
         choice there would block the pump that has to deliver the `Enter` that
         resolves the picker.  A worker does both.
         """
@@ -1359,27 +1383,56 @@ class SlifeApp(App[None]):
         if self._approval is not None and self._approval.pending:
             return
         self._choosing = True
-        self.run_worker(self._choose_subagent(), group="watch", exit_on_error=False)
+        self.run_worker(self._choose_watch(), group="watch", exit_on_error=False)
 
-    async def _choose_subagent(self) -> None:
-        """Read the list, ask which one, and push the screen that watches it.
+    async def _choose_watch(self) -> None:
+        """Read both lists, ask which one, and push the screen that watches it.
 
-        The list is the agent server's (`subagents`) and not the mesh's: a
-        subagent is a directory, and the roster that connects the network and
-        wakes members is a different question (`slife2.tui.client.AgentClient`).
+        **Each list comes from the server that owns it.**  Subagents are the
+        agent server's (`subagents`) and not the mesh's: a subagent is a
+        directory, and the roster that connects the network and wakes members is
+        a different question (`slife2.tui.client.AgentClient`).  Tasks are the
+        agent-task server's, because that process holds the running turns; a
+        window asking the agent server about them would be reading a table that
+        does not hold them.  Only running tasks are offered — a stopped task has
+        no events left to watch.
+
+        The two reads are independent: a task server that cannot answer must not
+        take the subagents away, so its failure is said and the picker still
+        opens with what is there.
         """
         try:
             await self._require_connected()
             assert self._client is not None
             found = await self._client.subagents()
-            if not found:
+
+            running: list[dict[str, Any]] = []
+            if self._task_client_factory is not None:
+                tasks = self._task_client_factory()
+                try:
+                    await tasks.connect()
+                    running = [
+                        row
+                        for row in await tasks.tasks()
+                        if row.get("status") == RUNNING
+                    ]
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - the other half of the picker still works
+                    self._transcript.add_error(t("tasks_failed", err=exc))
+                finally:
+                    await tasks.close()
+
+            if not found and not running:
                 # Said rather than shown as an empty picker: a list with no
-                # rows is a key that looks broken, and the tool that would fix
-                # it is the thing to name.
-                self._transcript.add_note(t("no_subagents", agent=self._agent))
+                # rows is a key that looks broken, and the tools that would fix
+                # it are the things to name.
+                self._transcript.add_note(t("nothing_to_watch", agent=self._agent))
                 return
-            choices = [str(one["name"]) for one in found]
-            future: asyncio.Future[str | None] = asyncio.Future()
+            choices = [WatchChoice("subagent", str(one["name"])) for one in found] + [
+                WatchChoice("task", str(row["name"])) for row in running
+            ]
+            future: asyncio.Future[WatchChoice | None] = asyncio.Future()
             picker = self._transcript.add_conversation_picker(
                 ConversationPicker(choices, future)
             )
@@ -1398,8 +1451,22 @@ class SlifeApp(App[None]):
                 # current one.
                 self.call_after_refresh(self._rehome_approval)
 
+            if choice.kind == "task":
+                task_watch = self._task_watch_client_factory
+                if task_watch is None:
+                    self._transcript.add_error(
+                        t("tasks_failed", err="no task watch client is configured")
+                    )
+                    return
+                screen = WatchScreen(
+                    choice.name, lambda: task_watch(choice.name), task=True
+                )
+            else:
+                screen = WatchScreen(
+                    choice.name, lambda: self._watch_client_factory(choice.name)
+                )
             self.push_screen(
-                WatchScreen(choice, lambda: self._watch_client_factory(choice)),
+                screen,
                 # **A question the watch was covering comes back with the
                 # window.**  The row was mounted on the watch screen (it is the
                 # one in front), so dismissing that screen takes it; the turn is

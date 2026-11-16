@@ -28,11 +28,19 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server
-from slife2.libs.plugin.vocabulary import ATTACH, JOIN, TRANSCRIPT, Handover
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_LIST,
+    ATTACH,
+    JOIN,
+    TRANSCRIPT,
+    Handover,
+)
 from slife2.libs.plugin.vocabulary import decode as decode_handover
 from slife2.libs.turn import plan
 from slife2.libs.turn.events import TurnEvent, decode
@@ -41,19 +49,21 @@ from slife2.libs.turn.watch import decode as decode_watch
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
-def _unreadable(what: str, answer: Any) -> ConnectionError:
+def _unreadable(
+    what: str, answer: Any, *, server: str = "the agent server"
+) -> ConnectionError:
     """The loud failure a tool's answer that is not its shape raises, worded once.
 
-    Four answers here are contracts rather than data — a turn's `text`, the
-    transcript's `turns`, the subagent list, and the switch `model_switch`
-    reports — and each has an obvious empty that reads as a legitimate one: an
-    answer with no words, a conversation that never ran, an agent with no
-    subagents, a switch that worked.  So each quotes the payload rather than
-    summarising it, because a shape this build cannot read is the only evidence
-    there is that the far end is a different build (SDD Appendix C: a value that
-    cannot be read is not a value that is absent).
+    The answers here are contracts rather than data — a turn's `text`, the
+    transcript's `turns`, the subagent list, the task list, and the switch
+    `model_switch` reports — and each has an obvious empty that reads as a
+    legitimate one: an answer with no words, a conversation that never ran, an
+    agent with no subagents or tasks, a switch that worked.  So each quotes the
+    payload rather than summarising it, because a shape this build cannot read
+    is the only evidence there is that the far end is a different build (SDD
+    Appendix C: a value that cannot be read is not a value that is absent).
     """
-    return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
+    return ConnectionError(f"{server} did not {what} (it said {answer!r})")
 
 
 @dataclass(frozen=True)
@@ -250,6 +260,32 @@ class WatchClient(Protocol):
         events (`slife2.libs.turn.watch`).  It returns when the server closes the
         conversation — a removed subagent's last frame is `Closed` — and a
         cancelled call is the detach.
+        """
+        ...
+
+
+class AgentTaskClient(Protocol):
+    """The picker's view of the agent-task server.
+
+    A second connection rather than methods on :class:`AgentClient`, because
+    the tasks are another plugin's state: the agent server lists conversations
+    and the agent-task server lists the turns it is running, and a picker that
+    asked one of them about the other would be reading a table that does not
+    hold it.  It is separate from :class:`WatchClient` too: the list is one
+    call, and the watch screen opens its own client for the stream.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        """The tasks this agent has, as `agent_task_list` answers.
+
+        Each row has at least `name` and `status`; `running` is the only state a
+        watch can join.  A list this build cannot read raises rather than
+        answering empty: an agent with no tasks is a real, empty list, and the
+        two must not look alike (SDD Appendix C).
         """
         ...
 
@@ -610,6 +646,111 @@ class MCPAgentClient:
         # can tell it when there are none.
         injected = bool(payload.get("injected")) if isinstance(payload, dict) else False
         return TurnReply(text=text, injected=injected)
+
+
+class MCPAgentTaskClient:
+    """The agent-task server's list and one task's watch, over MCP.
+
+    **Two lifetimes in one class.**  The picker makes one with no `name`, calls
+    :meth:`tasks`, and closes it; the watch screen makes one with a name and
+    holds :meth:`watch` open for the screen's life.  Keeping the list here means
+    the tasks are read from the server that holds them, not from the agent
+    server's subagent directories — the two are different questions with
+    different answers.
+
+    The transport rule is :meth:`MCPAgentClient._call_tool`'s: a failure that is
+    not the server answering drops the connection, so a later call reconnects
+    instead of talking to a dead one.  The watch call is the one with no
+    deadline: it lasts as long as the view does.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        agent: str = DEFAULT_AGENT,
+        name: str = "",
+        timeout: float | None = None,
+    ) -> None:
+        self._url = url
+        self._agent = agent
+        #: Which task this client watches; empty for the picker's list-only
+        #: client.  The task's name is its handle in the registry.
+        self._name = name
+        self._timeout = _T.timeouts.work.management if timeout is None else timeout
+        self._client: Client | None = None
+
+    async def connect(self) -> None:
+        if self._client is not None:
+            return
+        self._client = await open_server(
+            self._url,
+            name=AGENT_TASK_SERVER_NAME,
+            fallback_tool=AGENT_TASK_LIST,
+            # No clock on the connection: a connection-level deadline is a
+            # deadline on every call that crosses it, and the watch is one.
+            timeout=None,
+        )
+
+    async def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await close_server(client)
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        """Read the task list.  See :class:`AgentTaskClient`."""
+        if self._client is None:
+            raise ConnectionError("not connected")
+        try:
+            result = await self._client.call_tool(
+                AGENT_TASK_LIST,
+                {},
+                meta=conversation_meta(self._agent),
+                timeout=self._timeout,
+            )
+        except ToolError:
+            raise
+        except Exception:
+            await self.close()
+            raise
+        payload = result.data
+        found = payload.get("tasks") if isinstance(payload, dict) else None
+        if not isinstance(found, list) or not all(
+            isinstance(one, dict) and isinstance(one.get("name"), str) for one in found
+        ):
+            raise _unreadable(
+                "return a task list", payload, server="the agent-task server"
+            )
+        return list(found)
+
+    async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
+        """Hold one task's watch open.  See :class:`WatchClient`."""
+        if self._client is None:
+            raise ConnectionError("not connected")
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            item = decode_watch(message or "")
+            if item is not None:
+                on_item(item)
+
+        try:
+            await self._client.call_tool(
+                "watch",
+                {"name": self._name},
+                meta=conversation_meta(self._agent),
+                # Passing a progress handler is what makes the SDK attach a
+                # progress token; without one the server's `report_progress`
+                # is a silent no-op and the screen is handed nothing.
+                progress_handler=on_progress,
+                timeout=None,
+            )
+        except ToolError:
+            raise
+        except Exception:
+            await self.close()
+            raise
 
 
 class WindowClient(Protocol):

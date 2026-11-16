@@ -23,9 +23,13 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.vocabulary import ATTACH, Handover, encode
-from slife2.libs.turn.watch import Snapshot, TurnStarted
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.libs.turn.watch import encode as encode_watch
-from slife2.tui.client import MCPAgentClient, MCPWindowClient
+from slife2.tui.client import (
+    MCPAgentClient,
+    MCPAgentTaskClient,
+    MCPWindowClient,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -50,6 +54,8 @@ class FakeTransport:
         self.subagents_data: Any = {"subagents": []}
         #: What `model_list` answers with, as the server would.
         self.models_data: Any = {"models": []}
+        #: What `agent_task_list` answers with, as the server would.
+        self.tasks_data: Any = {"tasks": []}
         #: Watch frames the fake's `watch` call reports, already encoded.
         self.watch_items: list[str] = []
 
@@ -81,6 +87,8 @@ class FakeTransport:
             return SimpleNamespace(data=copy.deepcopy(self.subagents_data))
         if name == "model_list":
             return SimpleNamespace(data=copy.deepcopy(self.models_data))
+        if name == "agent_task_list":
+            return SimpleNamespace(data=copy.deepcopy(self.tasks_data))
         if name == "watch":
             # What a held-open call's stream does: report, then return when the
             # server closes the conversation.
@@ -730,3 +738,73 @@ async def test_an_inbox_that_is_not_ours_is_refused(monkeypatch) -> None:
 
     with pytest.raises(ConnectionError, match="not slife2-tui"):
         await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_the_task_list_is_read_from_the_task_server(monkeypatch) -> None:
+    """The picker's list is the agent-task server's, with the caller's identity.
+
+    The server cannot guess whose tasks a shared process is being asked about,
+    so the conversation id rides in `_meta`; the list itself is the server's
+    rows, passed through to the picker.
+    """
+    transport = FakeTransport(tools=("agent_task_list",))
+    transport.tasks_data = {"tasks": [{"name": "research", "status": "running"}]}
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    rows = await client.tasks()
+
+    assert rows == [{"name": "research", "status": "running"}]
+    (arguments,) = sent(transport, "agent_task_list")
+    assert arguments == {}
+    assert transport.options[-1]["meta"]["slife2/client"]["agent"] == "jack"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_task_watch_streams_its_brief_and_has_no_deadline(monkeypatch) -> None:
+    """The watch call is the screen's lifetime, so it is the one with no clock.
+
+    The progress handler is what makes the SDK attach a token; without one the
+    server's `report_progress` is a silent no-op and the screen would be handed
+    nothing.
+    """
+    transport = FakeTransport(tools=("agent_task_list", "watch"))
+    transport.watch_items = [
+        encode_watch(Snapshot([])),
+        encode_watch(TaskBrief("research", "find it", "running")),
+        encode_watch(Closed("the task finished")),
+    ]
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack", name="research")
+    seen: list[Any] = []
+
+    await client.connect()
+    await client.watch(seen.append)
+
+    assert seen == [
+        Snapshot([]),
+        TaskBrief("research", "find it", "running"),
+        Closed("the task finished"),
+    ]
+    (arguments,) = sent(transport, "watch")
+    assert arguments == {"name": "research"}
+    options = transport.options[-1]
+    assert options["timeout"] is None
+    assert callable(options["progress_handler"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_task_list_this_build_cannot_read_raises(monkeypatch) -> None:
+    """A row with no name is damage, not an empty list."""
+    transport = FakeTransport(tools=("agent_task_list",))
+    transport.tasks_data = {"tasks": [{"status": "running"}]}
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    with pytest.raises(ConnectionError, match="agent-task server did not return"):
+        await client.tasks()

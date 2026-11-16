@@ -16,10 +16,11 @@ from typing import Any
 import pytest
 
 import slife2
-from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
+from slife2 import _parse_args, main, mesh_url, task_url, tui_model, tui_url
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
     REMOTE,
     A2ASettings,
     default_config,
@@ -573,6 +574,28 @@ def test_a_machine_with_no_mesh_section_has_no_mesh_url() -> None:
     every two seconds that this machine is not on the mesh."""
     assert mesh_url(default_config()) == ""
     assert not default_config().peer_agent.configured
+
+
+def test_the_task_url_is_the_agent_task_servers_row() -> None:
+    """`agent-task` is the `servers:` key; `slife2-agent-task` is the identity.
+
+    Two names a layer apart, the same pair `mesh_url` documents: the first is
+    where the config files the address, the second is what `open_server(name=…)`
+    proves it reached.
+    """
+    config = default_config()
+    assert task_url(config) == config.server("agent-task").url
+    assert task_url(config) != AGENT_TASK_SERVER_NAME
+
+
+def test_a_machine_with_no_agent_task_server_has_no_task_url() -> None:
+    """`""` is "do not ask": the picker then offers only the subagents."""
+    config = default_config()
+    servers = {
+        key: value for key, value in config.servers.items() if key != "agent-task"
+    }
+    object.__setattr__(config, "servers", servers)
+    assert task_url(config) == ""
 
 
 def test_the_broker_flag_is_parsed_and_reaches_the_environment(

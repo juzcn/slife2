@@ -51,6 +51,9 @@ from slife2.libs.harness.markers import strip as strip_marker
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
+from slife2.libs.turn.events import ContextChosen, TextDelta, TurnFinished
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief
+from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -344,22 +347,93 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
     raise AssertionError(f"task {name} never stopped")
 
 
+async def wait_for_call(built: Built) -> None:
+    """Wait until the turn has reached the model, so a watch joins mid-turn."""
+    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        if built.backend.calls:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the task never reached the model")
+
+
+async def wait_for_frame(
+    frames: list[Any], kind: type, *, timeout: float = 10.0
+) -> Any:
+    """The first frame of *kind*, polled — the watch stream is a callback."""
+    deadline = time.monotonic() + timeout  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        for item in frames:
+            if isinstance(item, kind):
+                return item
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{kind.__name__} never arrived; frames: {frames}")
+
+
+@contextlib.asynccontextmanager
+async def watching(
+    built: Built, name: str = "research"
+) -> AsyncIterator[tuple[list[Any], asyncio.Task[Any]]]:
+    """A watch call held open, and the frames it has been handed so far.
+
+    The call is started as a task and *probed* for its snapshot rather than
+    slept on: what proves a watcher is registered is that the server has
+    answered it at all.  The helper cancels the call on the way out, which is
+    the detach; a test that waits for `Closed` gets the normal return instead.
+    """
+    frames: list[Any] = []
+    snapshot = asyncio.Event()
+
+    async def on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        item = decode_watch(message or "")
+        if item is None:
+            return
+        frames.append(item)
+        if isinstance(item, Snapshot):
+            snapshot.set()
+
+    async with Client(built.mcp) as client:
+        call = asyncio.create_task(
+            client.call_tool(
+                "watch",
+                {"name": name},
+                meta=conversation_meta(AGENT),
+                progress_handler=on_progress,
+                timeout=None,
+            )
+        )
+        try:
+            await asyncio.wait_for(snapshot.wait(), timeout=10)
+            yield frames, call
+        finally:
+            call.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await call
+
+
 # ── the surface ──────────────────────────────────────────────────────────────
 
 
-async def test_the_four_tools_are_the_models_and_nothing_else_is(
+async def test_the_model_has_its_four_tools_and_the_watch_beside_them(
     hub: Client, store: Store
 ) -> None:
+    """The model's four, and the one management read beside them.
+
+    `watch` is the terminal's, not the model's: it is what `Ctrl+O` holds open,
+    and the gate (SDD §7.1) is what says so — a tool the model may call says
+    `for_the_model`, and an absent mark is the answer "no" rather than
+    "nobody has decided yet".
+    """
     tools = await build(hub=hub, context=store).mcp.list_tools()
-    assert sorted(t.name for t in tools) == [
+    assert sorted(t.name for t in tools if for_the_model(t.meta)) == [
         AGENT_TASK_CANCEL,
         AGENT_TASK_LIST,
         AGENT_TASK_START,
         AGENT_TASK_STATUS,
     ]
-    # The gate (SDD §7.1): a tool the model may call says so, and absence is the
-    # answer "no" rather than "nobody has decided yet".
-    assert all(for_the_model(t.meta) for t in tools)
+    assert sorted(t.name for t in tools if not for_the_model(t.meta)) == ["watch"]
 
 
 async def test_a_call_that_does_not_say_whose_task_it_is_is_refused(
@@ -1330,3 +1404,92 @@ async def test_a_hand_back_that_could_not_land_says_why(
         assert "could not be handed back" in caplog.text
     finally:
         async_tasks._tasks.pop(task_id, None)  # noqa: SLF001
+
+
+# ── watching a task ──────────────────────────────────────────────────────────
+
+
+async def test_a_watch_opens_with_the_brief_and_replays_a_turn_it_joined(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A task has no stored conversation, so the brief is its history.
+
+    The turn in flight is in the tap, and a watcher that joins after the model
+    has been called is handed the context decision and the deltas it already
+    produced — not just the tail.  The tap's start is the `TaskBrief`, which is
+    the one frame a task's own caller never needs and a watcher cannot infer.
+    """
+    built = build(
+        text_turn("abcdef", delay=0.05), hub=hub, context=store, window=window
+    )
+    await start(built)
+    await wait_for_call(built)
+
+    async with watching(built) as (frames, call):
+        first = await wait_for_frame(frames, Snapshot)
+        assert first.turns == [], "a task records nothing to open with"
+
+        brief = await wait_for_frame(frames, TaskBrief)
+        assert brief.name == "research"
+        assert brief.description == DESCRIPTION
+        assert brief.status == "running", "the status the task had when it began"
+
+        # The discriminator's decision is in the tap even though it was made
+        # before this watcher joined — the other half of the replay.
+        await wait_for_frame(frames, ContextChosen)
+        finished = await wait_for_frame(frames, TurnFinished)
+        assert finished.text == "abcdef"
+        closed = await wait_for_frame(frames, Closed)
+        assert "finished" in closed.reason
+        assert any(isinstance(item, TextDelta) for item in frames)
+
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    await wait_for_handover(window)
+
+
+async def test_a_watch_of_a_stopped_task_says_what_happened(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A late watch is answered rather than refused.
+
+    The task is still in the registry until the retired cap forgets it, so the
+    screen opens on the brief with the final status and the sentence its ending
+    carried.  There are no events to replay: a task's turn is gone with the
+    coroutine that ran it.
+    """
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
+    await start(built)
+    await wait_for_handover(window)
+    await settle(built)
+
+    async with watching(built) as (frames, call):
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    assert [type(item) for item in frames] == [Snapshot, TaskBrief, Closed]
+    brief = frames[1]
+    assert brief.status == "finished"
+    assert "delivered" in frames[2].reason
+
+
+async def test_cancelling_a_watched_task_closes_with_cancelled(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A cancelled task has no answer and no hand-over; the watcher is told."""
+    built = build(text_turn("abcdef", delay=0.1), hub=hub, context=store, window=window)
+    await start(built)
+    await wait_for_call(built)
+
+    async with watching(built) as (frames, call):
+        await wait_for_frame(frames, TaskBrief)
+        async with Client(built.mcp) as client:
+            stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "research"})
+        assert stopped["status"] == "cancelled"
+
+        closed = await wait_for_frame(frames, Closed)
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    assert closed.reason == "the task was cancelled"

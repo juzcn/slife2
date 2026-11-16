@@ -41,7 +41,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from rich.text import Text
 from textual import events
@@ -171,6 +171,16 @@ def _group_bubble(bubble: str, channel: str) -> str:
     return f"{bubble}({sender}@{group})> "
 
 
+def task_bubble(name: str) -> str:
+    """What an agent task's words wear: `AsyncTask(name)`.
+
+    **One spelling for two readers**: the window's channel prefix and the watch
+    screen's assistant signature both name the task that produced the words.
+    A second spelling here would make one task read as two.
+    """
+    return f"AsyncTask({name})"
+
+
 def channel_prefix(channel: str) -> str:
     """What a turn's channel is called on screen.
 
@@ -202,7 +212,7 @@ def channel_prefix(channel: str) -> str:
         # the words and nothing else (`slife2.plugins.agent_task.server`), and the bubble
         # is deliberately *not* the key spelled again: `agent-task:research` is
         # an address, and what a person is being told is who answered.
-        return f"AsyncTask({channel.split(':', 1)[1]})> "
+        return f"{task_bubble(channel.split(':', 1)[1])}> "
     if channel.startswith(f"{ASYNC_TOOL_CHANNEL}:"):
         # A background tool call of this conversation's own — the other half of
         # the pair above, and named the same way: the tool is what a person
@@ -1667,15 +1677,36 @@ class ModelPicker(Static):
         return content_text(self.content)
 
 
-class ConversationPicker(Static):
-    """The subagents this agent has made, inline in the transcript.
+#: The two kinds of thing the conversation picker can watch.  The kind is also
+#: the server the choice belongs to: a subagent is read from the agent server,
+#: a task from the agent-task server.
+WatchKind = Literal["subagent", "task"]
 
-    The model picker's shape, one decision smaller: a cursor, `Enter` picks,
-    `Esc` cancels, a blur cancels (a question abandoned is worse than a wasted
-    keystroke), and the row re-renders as the line the decision left.  The
-    bindings are `priority` for the picker's reason: the focused widget is the
-    prompt, whose `TextArea` would otherwise take `↑`/`↓` for its draft
-    history — the wrong list to move while a conversation is being chosen.
+
+@dataclass(frozen=True)
+class WatchChoice:
+    """One row of the conversation picker: a subagent or a running task.
+
+    **The pair is the choice, not the name.**  A subagent and a task may share a
+    name, and they are two different readers on two different servers; a picker
+    that carried only the name would have to guess which list it came from.
+    """
+
+    kind: WatchKind
+    name: str
+
+
+class ConversationPicker(Static):
+    """The conversations this window can watch, inline in the transcript.
+
+    Its rows are the agent's subagents and its running agent tasks — two
+    servers, one question, so one key.  The model picker's shape, one decision
+    smaller: a cursor, `Enter` picks, `Esc` cancels, a blur cancels (a question
+    abandoned is worse than a wasted keystroke), and the row re-renders as the
+    line the decision left.  The bindings are `priority` for the picker's
+    reason: the focused widget is the prompt, whose `TextArea` would otherwise
+    take `↑`/`↓` for its draft history — the wrong list to move while a
+    conversation is being chosen.
 
     **No active row and no missing-row case**, unlike the model picker: there is
     no setting this changes, so there is nothing the list could already be on.
@@ -1693,13 +1724,15 @@ class ConversationPicker(Static):
     ]
 
     def __init__(
-        self, choices: Sequence[str], future: asyncio.Future[str | None]
+        self,
+        choices: Sequence[WatchChoice],
+        future: asyncio.Future[WatchChoice | None],
     ) -> None:
         super().__init__("")
         self._choices = list(choices)
         self._future = future
         self._decided = False
-        self._chosen: str | None = None
+        self._chosen: WatchChoice | None = None
         self._cursor = 0 if self._choices else -1
         self.update(self._body())
 
@@ -1716,7 +1749,7 @@ class ConversationPicker(Static):
             self.update(self._body())
 
     def action_pick(self) -> None:
-        """Choose the name under the cursor, or nothing when none is under it."""
+        """Choose the row under the cursor, or nothing when none is under it."""
         if not self._decided and 0 <= self._cursor < len(self._choices):
             self._decide(self._choices[self._cursor])
 
@@ -1727,7 +1760,7 @@ class ConversationPicker(Static):
         """Focus went elsewhere: nothing was chosen.  See `ModelPicker`."""
         self._decide(None)
 
-    def _decide(self, choice: str | None) -> None:
+    def _decide(self, choice: WatchChoice | None) -> None:
         """Resolve the future once, and re-render as the decision.
 
         Once, because the blur that follows every decided picker would otherwise
@@ -1749,14 +1782,15 @@ class ConversationPicker(Static):
             return self._decided_line()
         line = Text()
         line.append(t("conversation_picker_title"), f"bold {PALETTE['text']}")
-        for index, name in enumerate(self._choices):
+        for index, choice in enumerate(self._choices):
             line.append("\n")
             line.append(
                 f"{GLYPHS['cursor']} " if index == self._cursor else "  ",
                 PALETTE["amber"],
             )
             line.append(f"{index + 1}. ", PALETTE["dim"])
-            line.append(name, f"bold {PALETTE['text']}")
+            line.append(t(f"picker_kind_{choice.kind}") + "  ", PALETTE["dim"])
+            line.append(choice.name, f"bold {PALETTE['text']}")
         line.append("\n")
         line.append(f"{GLYPHS['up']}/{GLYPHS['down']} ", PALETTE["dim"])
         line.append(t("picker_select"), f"bold {PALETTE['green']}")
@@ -1773,8 +1807,13 @@ class ConversationPicker(Static):
             line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
             return line
         line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
+        key = (
+            "conversation_watching_task"
+            if self._chosen.kind == "task"
+            else "conversation_watching"
+        )
         line.append(
-            t("conversation_watching", name=self._chosen),
+            t(key, name=self._chosen.name),
             f"bold {PALETTE['green']}",
         )
         return line

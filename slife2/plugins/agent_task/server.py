@@ -10,12 +10,12 @@ channel, wearing the marker that says which task it was (SDD §9.3).
 
 **It is a plugin because it holds loops**, which is what `slife2-agent` holds and
 why that one is a plugin.  What it does *not* do is reach for anything the agent
-*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` **called with nothing
-turned off** — `observer` already defaults to `NULL_OBSERVER` and `auto` to
-`None`, which are exactly a task's two answers, nobody is watching and there is
-no inbox to cut in from.  A behaviour this turn needs and the loop does not have
-belongs in `AgentLoop` behind a parameter that defaults off, never in a copy of
-the loop.
+*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` with
+`auto=None` — there is no inbox to cut in from — and an observer that publishes
+the turn to whoever is watching.  That observer is a reader, not a caller's
+progress stream: a task has no caller waiting on it.  A behaviour this turn needs
+and the loop does not have belongs in `AgentLoop` behind a parameter that
+defaults off, never in a copy of the loop.
 
 **A task runs on the agent's own context, under the agent's own key.**  Its
 single turn is set up exactly as a turn of the agent's is — `restore` when the
@@ -32,6 +32,14 @@ reaches the conversation as a message and *that* message is what the agent serve
 records, so writing the task's own round trip as well would file the same answer
 twice under a description that is a rendered template rather than anything the person
 said.  A task reads the agent's context and adds nothing to it.
+
+**A running task is watchable, and the watch is a read.**  The turn's observer
+publishes to the task's tap and watchers (`slife2.libs.turn.watchhub`, shared
+with the agent server); the stream opens with an empty snapshot and the agent's
+plan, a `TaskBrief` with the description, the turn's events from its start, and
+`Closed` with the ending.  Watching starts no turn, spends no model call, and
+does not change the `finished` rule: the answer still reaches the conversation
+by hand-over.
 
 Two things it deliberately does not have, each because nothing needs it rather
 than because it was left out:
@@ -106,11 +114,15 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.libs.turn import plan
 from slife2.libs.turn.context import turn_prompt_lead, with_lead
-from slife2.libs.turn.loop import TurnResult
+from slife2.libs.turn.events import TurnEvent, TurnObserver
+from slife2.libs.turn.loop import AgentLoop, TurnResult
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import render_instruction, render_system_prompt
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
 from slife2.libs.turn.tools import CatalogueAnswer, Tool, ToolRegistry
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, WatchItem
+from slife2.libs.turn.watch import encode as encode_watch
+from slife2.libs.turn.watchhub import WatchHub
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +156,27 @@ RETIRED = 32
 #: name is what the model addresses a task by, and the description is there so
 #: that a name it chose a while ago still means something.
 DESCRIPTION_CHARS = 120
+
+#: The registry's key: `(home, agent, name)` — and the watch hub's key too, so
+#: a watcher and the task it is reading cannot disagree about which task is
+#: meant.
+TaskKey = tuple[str, str, str]
+
+
+class WatchPublisher:
+    """The observer a task's turn publishes through, for whoever is watching.
+
+    A task has no caller progress stream: nobody asked for the turn and nobody
+    is waiting on it, so the one reader it can have is a watcher.  `publish` is
+    synchronous by the hub's contract; `on_event` is async because a turn's
+    observer is.
+    """
+
+    def __init__(self, publish: Callable[[TurnEvent], None]) -> None:
+        self._publish = publish
+
+    async def on_event(self, event: TurnEvent) -> None:
+        self._publish(event)
 
 
 @dataclass
@@ -184,12 +217,18 @@ class AgentTask:
     #: whether something arrived.  `finished` implies `True`; a `failed` task may
     #: have delivered its failure message or may have delivered nothing.
     delivered: bool = False
+    #: The sentence its last watch frame carried, kept while the task is still
+    #: answerable.  A watch that arrives after the end has no events to replay;
+    #: this is what lets the screen say what happened rather than open on a
+    #: status with no account of it.  Set when the task stops, never served to
+    #: the model (`report` is the model's shape).
+    ending: str = ""
     #: The running coroutine, kept so it is not collected mid-flight and so that
     #: `agent_task_cancel` has something to cancel.
     handle: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @property
-    def key(self) -> tuple[str, str, str]:
+    def key(self) -> TaskKey:
         """`(home, agent, name)` — what this process's registry is keyed by.
 
         Keyed by the agent and not by the name, because this server is shared:
@@ -304,6 +343,25 @@ def marker(task: AgentTask, *, status: str = "") -> str:
     return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}]"
 
 
+def closed_reason(task: AgentTask, outcome: str) -> str:
+    """What a task's last watch frame says happened.
+
+    `outcome` is what the *loop* did, which is not the same as the task's
+    status: a loop that answered and a hand-over that failed is `finished` work
+    and a `failed` task, and the frame has to say both rather than call the
+    answer a failure.  A cancelled task never reaches the other branches —
+    cancellation is not an outcome the answer can describe, and there is no
+    answer.
+    """
+    if task.status == CANCELLED:
+        return "the task was cancelled"
+    if outcome == FINISHED:
+        if task.status == FINISHED:
+            return "the task finished; its answer was delivered to the conversation"
+        return "the task finished, but its answer could not be delivered"
+    return task.text.strip() or "the task failed"
+
+
 def build_server(
     config: Config,
     *,
@@ -333,13 +391,20 @@ def build_server(
     #: reason the agent server's loop registry is not: the lifespan is not the
     #: process's lifetime over the in-memory transport, and clearing here would
     #: forget tasks every time a caller disconnected.
-    tasks: dict[tuple[str, str, str], AgentTask] = {}
+    tasks: dict[TaskKey, AgentTask] = {}
 
     #: The ended ones, oldest first, so that the cap has an order to forget in.
     #: Held as the objects rather than as keys: a name that has been started
     #: again is a *different* task under the same key, and evicting by key alone
     #: would throw away the new one.
     retired: list[AgentTask] = []
+
+    #: The turn in flight and every open `watch` call, keyed like the registry.
+    #: **The mechanism is `slife2.libs.turn.watchhub`'s**, shared with the agent
+    #: server: a task's tap carries its `TaskBrief` and the events its loop
+    #: produced, and a watcher that joins mid-turn is handed them from the start.
+    #: A task records nothing, so the tap's `recorded_turn` stays `None`.
+    watching: WatchHub[TaskKey] = WatchHub()
 
     #: **The middle of a task's turn**, shared with the agent server: the model
     #: clients, the context and hub connections, the restore, the rebuild and
@@ -421,7 +486,7 @@ def build_server(
 
     # ── the loop ─────────────────────────────────────────────────────────
 
-    async def run_loop(task: AgentTask) -> TurnResult:
+    async def run_loop(task: AgentTask, observer: TurnObserver) -> TurnResult:
         """One task's turn: the template as the user message, then the agent's
         own order around it — restore, rebuild, and the loop.
 
@@ -431,6 +496,12 @@ def build_server(
         what the turn runs on, and the loop advances it.  What is a task's own
         is the store — a local list — the absence of an inbox, and the absence
         of a record, which is argued below.
+
+        **The observer is the watcher's half**, and it is the same seam the
+        agent server uses: the loop reports every event through it, and the
+        rebuild's `ContextChosen` is reported here because the task's loop is
+        built after the rebuild.  A task has no caller progress stream; the
+        observer is the only reader its turn can have.
 
         `opening` travels **beside** the list rather than inside it, exactly as
         the agent server passes its own prompt: the rebuild replaces the list
@@ -479,6 +550,13 @@ def build_server(
                 model.reference,
             )
 
+        # **Reported before the turn**, as the agent server reports it: the
+        # discriminator is one model call nobody sees, so its two counts are the
+        # only sight of it, and they are a fact about what the turn runs on
+        # rather than about how it went.  Through `_emit`, so a watcher that
+        # cannot be served cannot cost the task its turn.
+        await AgentLoop._emit(observer, rebuilt.chosen)
+
         loop = await runtime.make_loop(
             task.identity,
             model,
@@ -520,7 +598,7 @@ def build_server(
                 plan.read(*task.identity),
             ),
         )
-        result = await loop.run_turn(rebuilt.messages, opening)
+        result = await loop.run_turn(rebuilt.messages, opening, observer)
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the
         # model had just loaded and was about to use.
@@ -606,6 +684,7 @@ def build_server(
         frames, and the answer beside them, for as long as the registry
         remembered it.  A task that has stopped holds nothing.
         """
+        outcome = FAILED
         try:
             outcome = FINISHED
             # **One token for one task turn.**  A task runs a turn of the
@@ -617,7 +696,10 @@ def build_server(
             # delivery starts.
             with logcontext.turning(logcontext.new_turn()):
                 try:
-                    result = await run_loop(task)
+                    result = await run_loop(
+                        task,
+                        WatchPublisher(partial(watching.publish, task.key)),
+                    )
                     task.text = (
                         result.text.strip()
                         or "(the task stopped without saying anything)"
@@ -651,6 +733,16 @@ def build_server(
             if outcome == FINISHED:
                 task.status = FINISHED if delivered else FAILED
         finally:
+            # **A watcher is told how it ended, and the tap goes with the task.**
+            # The sentence is kept on the object first: a watch that arrives
+            # after this frame has no events to replay, and the status alone
+            # cannot say whether a successful loop failed to deliver.  It is
+            # sent before `retire` and before the answer is let go — a failed
+            # loop's sentence is what the watcher has to show for the failure,
+            # and `task.text` is cleared below.
+            task.ending = closed_reason(task, outcome)
+            watching.close(task.key, task.ending)
+            watching.drop(task.key)
             # **A task is retired when its ending is final** — for a successful
             # loop, after the answer has been handed over.  The cap counts
             # `running`, so a task that is still delivering holds its slot: it is
@@ -870,6 +962,20 @@ def build_server(
             home=home_key(),
         )
         tasks[task.key] = task
+        # **The tap opens with the task, before the loop has produced an
+        # event.**  A watcher may join during the restore or the rebuild, and
+        # the brief is the one frame it could not otherwise see; a tap started
+        # inside `run` would leave that window with nothing to replay.  There is
+        # no await between the registry insert and this line, so a watch call
+        # cannot find the task without the tap.
+        watching.start_tap(
+            task.key,
+            TaskBrief(
+                name=task.name,
+                description=task.description,
+                status=task.status,
+            ),
+        )
         # Detached from the call that starts it, which is the whole of what
         # "background" means here: the request that asked returns, and the loop
         # keeps going.  SDD §5.6's rule for a write from a cancelled turn is the same
@@ -960,6 +1066,110 @@ def build_server(
             task.handle.cancel()
         logger.info("agent task %s cancelled for %s", task.name, agent)
         return task.report()
+
+    @mcp.tool
+    async def watch(name: str, ctx: Context) -> dict[str, Any]:
+        """Watch a running agent task's turn — read-only, until it stops.
+
+        **Hold this call open for as long as the view is up.**  The first
+        progress notification is a `Snapshot` of the task's opening read — an
+        empty turn list, because a task records nothing, and the agent's plan,
+        because that is what the task runs on.  `TaskBrief` follows with the
+        description the task was given, then the turn events from the task's
+        start (a watcher that joins mid-turn is handed the events already
+        produced), then live events.  The last frame is `Closed`, and the call
+        returns after it.  A cancelled call is the detach.
+
+        **A task that has already stopped is answered, not refused.**  It stays
+        in the registry until the retired cap forgets it, so a watch that
+        arrives a moment late gets the brief with the final status and the
+        sentence its ending carried — the screen says what happened rather than
+        failing to open on a task that ran.  A name this process does not hold
+        is a refusal.
+
+        **Watching is a read.**  It starts no turn, spends no model call, and
+        does not make the task finished: the answer still reaches the
+        conversation by hand-over, and a task whose answer reaches no window is
+        `failed` whether or not somebody watched.
+
+        Args:
+            name: The task's name, as `agent_task_start` was given it.
+
+        Returns:
+            `closed`: true, after `Closed` has been sent.  A cancellation
+                returns nothing — it is a detach.
+        """
+        agent = agent_of(ctx)
+        task = find(agent, name.strip())
+        if task is None:
+            raise ToolError(
+                f"no agent task named {name.strip()!r} is held here; it may have "
+                f"finished and been forgotten. Its answer, if it had one, is in "
+                f"the conversation."
+            )
+
+        count = 0
+
+        async def send(item: WatchItem) -> None:
+            nonlocal count
+            count += 1
+            # **Reported from this handler's own task**, which is what makes the
+            # progress token this call's (the hub's `Watcher` says why).
+            await ctx.report_progress(count, None, encode_watch(item))
+
+        plan_items = plan.read(*task.identity)
+        # **The status read and the registration are one synchronous step.**
+        # `run` sets a final status and closes the watchers without an await
+        # between, so a task seen running here cannot stop under this
+        # registration; a task seen stopped here has no future frames to wait
+        # for and is answered below without a watcher.
+        if task.status == RUNNING:
+            watcher = watching.watch(task.key)
+            replay = watching.replay(task.key)
+        else:
+            watcher = None
+            replay = None
+
+        try:
+            await send(Snapshot([], plan_items))
+            if watcher is None:
+                await send(
+                    TaskBrief(
+                        name=task.name,
+                        description=task.description,
+                        status=task.status,
+                    )
+                )
+                await send(Closed(task.ending or "the task is no longer running"))
+                return {"closed": True}
+            if replay is None:
+                # The task is running but has published nothing yet, or its
+                # build kept no tap; the brief is still the frame that says what
+                # is being watched, and the live queue follows.
+                await send(
+                    TaskBrief(
+                        name=task.name,
+                        description=task.description,
+                        status=task.status,
+                    )
+                )
+            else:
+                # The brief and every event the turn has produced, from its
+                # start.  A task's tap has no store id, so there is no snapshot
+                # that could already contain this turn and nothing to skip.
+                await send(replay.started)
+                for event in replay.events:
+                    await send(event)
+            while True:
+                item = await watcher.queue.get()
+                await send(item)
+                if isinstance(item, Closed):
+                    # The task stopped; the last frame has been written and
+                    # there is nothing after it to wait for.
+                    return {"closed": True}
+        finally:
+            if watcher is not None:
+                watching.unwatch(task.key, watcher)
 
     return mcp
 
