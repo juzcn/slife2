@@ -27,6 +27,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timedelta
 
 import pytest
 from a2a_over_mqtt import REPLY_ARTIFACT, REPLY_SUBMITTED, REPLY_TERMINAL, A2ARequest
@@ -288,13 +289,20 @@ async def test_a_scheduled_fire_runs_the_task_and_the_answer_reaches_the_window(
             ChatAnswer(text="{}"),
             ChatAnswer(text="Noted in the conversation."),
         ]
+        # **A fire in the next minute, and not again for an hour.**  `* * * * *`
+        # fires every minute; a slow CI can cross a second boundary while the
+        # test still waits for the first run to settle, and that starts a second
+        # task and a second window turn — four model calls the assertion below
+        # is not about.  Cron's granularity is a minute, so the next minute's
+        # value is the one that fires soonest.
+        next_minute = (datetime.now() + timedelta(minutes=1)).minute
         async with Client(config.server("schedule").url) as schedule:
             await schedule.call_tool(
                 "schedule_set",
                 {
                     "name": TASK,
                     "description": "Write the day's entry.",
-                    "cron": "* * * * *",
+                    "cron": f"{next_minute} * * * *",
                 },
                 meta=conversation_meta(agent),
             )
