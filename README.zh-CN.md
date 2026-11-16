@@ -344,8 +344,7 @@ subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_s
 `active`、`done` 或 `blocked`——模型用 `plan_write` 写入整份列表。列表随每一轮
 开头的 `[TURN-PROMPT:{…}]` 一起重放，因此上下文重建不会丢掉它；存在计划时，输入框
 上方的条带会显示它。状态是模型自己的声明，不是 harness 的观测：slife2 不会从工具
-调用推导状态。计划存为对话目录中的 `plan.yaml`；`reset` 会删除它，fork 则从创建者
-的副本开始。
+调用推导状态。计划存为对话目录中的 `plan.yaml`；`reset` 会删除它。
 
 ### 模型选择
 
@@ -945,7 +944,8 @@ peer_agent:
 subagent 是属于另一个 agent 的 agent。它有创建者的工具集、自己的角色化 system
 prompt 和自己的对话，但没有进程、没有窗口、不占用 agent 名字，也没有外部身份。它只在
 本地 subagent 网络上可达，在有消息发给它时运行。`subagent_create` 和 `subagent_remove`
-会拒绝 subagent 调用者。
+会拒绝 subagent 调用者。subagent 是常驻的，有自己的记忆；只是在对话旁临时做一件事，
+用 agent task——它跑在创建者自己的上下文上，用一条消息回答。
 
 subagent 用 `subagent_create` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
 与 peer agent 相同的操作、以 `subagent_*` 名字寻址：`subagent_send_message`、
@@ -964,14 +964,10 @@ subagent 用 `subagent_create` 创建，用 `subagent_remove` 删除。创建后
 | `name` | subagent 的名字和目录。 |
 | `model` | `provider/model`；为空则用创建者的模型。 |
 | `role` | 包含在 subagent prompt 里的一个词。 |
-| `fork` | 复制创建者当前的对话作为起点。fork 的轮次不存储，只活当前会话。 |
 
-非 fork 的 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db`、
-`subagent.yaml`、文件柜和媒体目录。fork 只有 `subagent.yaml` 记录：对话以创建者对话
-的副本保存在内存中，读取创建者的轮次日志作为上下文，共享创建者的文件柜和媒体。
-fork 是会话级的；下一次 server 启动时会删除所有 fork 记录。**fork 不能拉进群组**：
-`subagent_group_set` 会拒绝它，它的群消息会被丢弃。调度留在 agent 一侧。subagent
-不能再创建或删除 subagent。
+subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db`、
+`subagent.yaml`、文件柜和媒体目录。调度留在 agent 一侧。subagent 不能再创建或删除
+subagent。
 
 删除 subagent 时，先让本地网络释放它的位置，再停止它的循环，最后删除目录。网络通知
 无法完成时，subagent 保持不变。正在观看它的窗口会被告知对话已不存在。
@@ -1010,8 +1006,8 @@ subagent:
       media/                   生成的图片、视频和音频
       wechat.yaml              本 agent 的微信登录
       subagents/
-        <name>/                非 fork subagent 的 turns.db、subagent.yaml、
-                               cabinet/ 和 media/；fork 只有记录
+        <name>/                subagent 的 turns.db、subagent.yaml、
+                               cabinet/ 和 media/
 ```
 
 工具目录放在 agent 目录旁边，因为它属于整个 home，而不是某个 agent。

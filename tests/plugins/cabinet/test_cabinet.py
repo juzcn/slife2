@@ -38,7 +38,7 @@ from fastmcp.exceptions import ToolError
 from slife2.helpers.clock import at
 from slife2.libs.harness.dumps import text_size
 from slife2.libs.host.config import ToolResultSettings, load
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
+from slife2.libs.host.paths import agent_dir, data_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.store import index as store_index
 from slife2.libs.store.index import connect_to, table_exists
@@ -66,7 +66,7 @@ from slife2.plugins.cabinet.store import (
     store_of,
     vector_text,
 )
-from tests.fakes import FailingEmbedder, StubEmbedder, home_config
+from tests.fakes import FailingEmbedder, StubEmbedder
 
 pytestmark = pytest.mark.unit
 
@@ -120,50 +120,6 @@ def bag(agent: str = "jack") -> Path:
 
 def store(agent: str = "jack") -> CabinetStore:
     return store_of(index_path(agent))
-
-
-@pytest.mark.asyncio
-async def test_a_subagents_cabinet_follows_its_fork_flag(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its cabinet; a fork uses its maker's.
-
-    The cabinet is private work, so it follows the conversation.  A subagent
-    that is not a fork is a persistent agent of the maker's and gets its own
-    directory under `subagents/`; a fork is a temporary copy of its maker's
-    conversation, and what it writes lands in the maker's cabinet beside it.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    # A home of its own needs its configuration (SDD §4.1), exactly as a real
-    # one does: a provider, and nothing else.
-    home_config(tmp_path)
-    researcher = agent_dir("jack", "researcher")
-    record = subagent_file("jack", "researcher")
-
-    async with Client(cabinet()) as client:
-        record.write_text("fork: false\n", encoding="utf-8")
-        await payload(
-            client,
-            "note_write",
-            subagent="researcher",
-            subject="own",
-            content="the subagent's note",
-        )
-        own_mirror = Path("notes") / f"{cabinet_store.mirror_stem('own')}.md"
-        assert (researcher / "cabinet" / own_mirror).is_file()
-        assert not (agent_dir("jack") / "cabinet" / own_mirror).exists()
-
-        record.write_text("fork: true\n", encoding="utf-8")
-        await payload(
-            client,
-            "note_write",
-            subagent="researcher",
-            subject="shared",
-            content="the maker's note",
-        )
-        shared_mirror = Path("notes") / f"{cabinet_store.mirror_stem('shared')}.md"
-        assert (agent_dir("jack") / "cabinet" / shared_mirror).is_file()
-        assert not (researcher / "cabinet" / shared_mirror).exists()
 
 
 # --- the surface the model is given -------------------------------------------

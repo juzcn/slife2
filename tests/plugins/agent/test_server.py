@@ -852,35 +852,6 @@ class UnreadableStore:
         return SimpleNamespace(data=self.answers[name])
 
 
-class ParkedRestore:
-    """The real context store, with `restore` answering only when told to.
-
-    The window `adopt_maker` walks into is one store round trip wide, and a test
-    that hoped to land inside it would pass for the wrong reason whichever way it
-    went — so the round trip is held open instead, and *when* each of the two
-    restores lands is a fact.  `entered` counts them, `arrived` is set by the
-    first, and each waits on its own event of `release`.
-
-    Real underneath rather than a stub: what is under test is which loop's
-    `restore` gets to replace which list, and a store answering a made-up list
-    would say nothing about that.
-    """
-
-    def __init__(self, inner: Client) -> None:
-        self.inner = inner
-        self.entered = 0
-        self.arrived = asyncio.Event()
-        self.release = [asyncio.Event(), asyncio.Event()]
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        if name == "restore":
-            mine = self.entered
-            self.entered += 1
-            self.arrived.set()
-            await self.release[mine].wait()
-        return await self.inner.call_tool(name, arguments)
-
-
 @pytest.mark.asyncio
 async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     hub,
@@ -2143,36 +2114,6 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
     assert [m["role"] for m in stored] == ["user", "assistant"]
     assert stored[0]["content"] == "one"
     assert turn_failed_error(stored[1]["content"]) == f"RuntimeError: {DEAD_PLUGIN}"
-
-
-@pytest.mark.asyncio(loop_scope="function")
-async def test_a_forks_failed_turn_is_kept_and_written_nowhere(context, hub) -> None:
-    """**A fork has no store, and that is not the same as having no conversation.**
-
-    Its turns are not recorded — a fork writes nothing down — but the message it
-    was given stays in the list its next turn runs on, and the failure reaches
-    the caller exactly as it does for a conversation with a log.  The store is
-    what a fork does not have, not the conversation; the error path is the same
-    on both sides of that line.
-    """
-    backend = FakeBackend(text_turn("the fork's"))
-    server = build_server(
-        config(),
-        context_client=context,
-        hub_client=FlakyHub(hub, DEAD_PLUGIN, times=1),
-        backend=backend,
-    )
-
-    await create_subagent(server, "researcher", fork=True)
-    with pytest.raises(Exception, match="not answering"):
-        await send(server, "one", subagent="researcher")
-    await send(server, "two", subagent="researcher")
-
-    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
-    seen = [m for m in backend.calls[0][0] if m.role != "system"]
-    assert [m.role for m in seen] == ["user", "assistant", "user"]
-    assert without_footnote(seen[0].content) == "one"
-    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio
@@ -4097,13 +4038,12 @@ async def create_subagent(
     agent: str = DEFAULT_AGENT,
     model: str = "",
     role: str = "subagent",
-    fork: bool = False,
 ):
     """Name a subagent, with the caller's conversation id attached — as a turn does."""
     async with Client(server) as client:
         return await client.call_tool(
             SUBAGENT_CREATE,
-            {"name": name, "model": model, "role": role, "fork": fork},
+            {"name": name, "model": model, "role": role},
             meta=conversation_meta(agent),
         )
 
@@ -4132,11 +4072,11 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
 
     The record is what `subagent_remove` proves its blast radius with, and it
     holds the whole of what a subagent *is* — the model it runs on, the role it
-    was made for, whether it is a fork, and when it was made — which is the part
-    of an agent's identity that is neither its conversation nor its work, so it
-    is in the file rather than in a registry somewhere.  Which is also what makes
-    a subagent's settings as short-lived as the subagent: `subagent_remove`
-    deletes the directory, and there is nothing else holding them.
+    was made for, and when it was made — which is the part of an agent's
+    identity that is neither its conversation nor its work, so it is in the file
+    rather than in a registry somewhere.  Which is also what makes a subagent's
+    settings as short-lived as the subagent: `subagent_remove` deletes the
+    directory, and there is nothing else holding them.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
@@ -4147,14 +4087,12 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
         "researcher",
         model="deepseek/deepseek-flash",
         role="code reviewer",
-        fork=True,
     )
 
     assert made.data["created"] is True
     assert made.data["name"] == "researcher"
     assert made.data["model"] == "deepseek/deepseek-flash"
     assert made.data["role"] == "code reviewer"
-    assert made.data["fork"] is True
     assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
     record = subagent_file(DEFAULT_AGENT, "researcher")
     assert record.is_file(), "the file is what makes the directory a subagent's"
@@ -4166,7 +4104,6 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
         "name": "researcher",
         "model": "deepseek/deepseek-flash",
         "role": "code reviewer",
-        "fork": True,
     }
 
 
@@ -4176,22 +4113,20 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
 
     What a second call changes is what the subagent *runs on* and what it is
     *for* — its model and its role, which are its settings.  What it does not
-    change is when it was made and whether it was made as a fork, and those two
-    are one answer rather than two rules: a fork's conversation is a copy
-    already taken, so a later call cannot re-decide what it is made of — the
-    same reason `created_at` is kept.  Removing it and naming it again is how a
-    maker asks for a different one.
+    change is when it was made: that is not a question a later call is
+    answering.  Removing it and naming it again is how a maker asks for a
+    different one.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    first = await create_subagent(server, "researcher", model="one/one", fork=True)
+    first = await create_subagent(server, "researcher", model="one/one")
     before = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
     )
     again = await create_subagent(
-        server, "researcher", model="two/two", role="code reviewer", fork=False
+        server, "researcher", model="two/two", role="code reviewer"
     )
     after = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
@@ -4201,7 +4136,6 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
     assert again.data["created"] is False, "the same subagent, not a second one"
     assert again.data["model"] == "two/two"
     assert again.data["role"] == "code reviewer"
-    assert again.data["fork"] is True, "made as a fork, and that is what it is"
     assert after["created_at"] == before["created_at"], "when it was made is kept"
     assert len(subagent_dirs(DEFAULT_AGENT)) == 1
 
@@ -4378,65 +4312,6 @@ async def test_removing_a_subagent_mid_turn_stops_the_turn_and_removes_it(
         assert done.data["removed"] is True
         assert seen and seen[0] is True, (
             "the network was told after the turn ended, not as its stop"
-        )
-        await asyncio.gather(turn, return_exceptions=True)
-        assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
-
-
-@pytest.mark.asyncio
-async def test_removing_a_fork_mid_turn_is_the_same_stop_then_delete(
-    context, hub, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**A fork is removed by the same interrupt-then-delete.**
-
-    A fork has no log and shares its maker's cabinet and media, so the two
-    places a fork differs are both *outside* the removal: there is no record to
-    drain (`record` answers `None` by design), and the directory deleted is the
-    fork's own `subagent.yaml`, never the work directory it shares.  The turn,
-    the lock and the handle are the loop's, so nothing in the stop has a fork
-    branch.
-    """
-    monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
-    backend = FakeBackend(
-        text_turn("the maker's"),
-        text_turn(
-            "never finished",
-            delay=0.4,  # timeouts: the value this test is built around, not a budget
-        ),
-    )
-    seen: list[bool] = []
-    turn: asyncio.Task[Any] | None = None
-    mcp: FastMCP = FastMCP("mesh")
-
-    @mcp.tool
-    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
-        seen.append(turn is None or not turn.done())
-        return {"agent": agent, "subagent": subagent, "forgotten": True}
-
-    base = default_config()
-    async with Client(mcp) as mesh:
-        server = build_server(
-            replace(
-                base,
-                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
-            ),
-            context_client=context,
-            hub_client=hub,
-            backend=backend,
-            mesh_client=mesh,
-        )
-        await send(server, "one")  # the conversation the fork starts from
-        await create_subagent(server, "researcher", fork=True)
-        turn = asyncio.create_task(send(server, "two", subagent="researcher"))
-        for _ in range(200):
-            if len(backend.calls) >= 2:
-                break
-            await asyncio.sleep(0.01)
-
-        done = await remove_subagent(server, "researcher")
-        assert done.data["removed"] is True
-        assert seen and seen[0] is True, (
-            "the network was told after the fork's turn ended, not as its stop"
         )
         await asyncio.gather(turn, return_exceptions=True)
         assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
@@ -4646,437 +4521,6 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
         subagent_file(DEFAULT_AGENT, "helper").read_text(encoding="utf-8")
     )
     assert record["role"] == "subagent", "the role a subagent is made with unnamed"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
-    context, hub
-) -> None:
-    """`fork: true` is a subagent made of somebody else's conversation.
-
-    What it is handed is the maker's context as it stood when the fork's
-    first turn started — everything the maker had said and been told — and
-    `prompts_seen` is the request the fork's first turn actually sent, so the
-    claim is about the model call and not about a field somewhere.
-    """
-    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await create_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-
-    assert prompts_seen(backend, 1) == [
-        "user:one",
-        "assistant:the maker's answer",
-        "user:two",
-    ]
-    head = backend.calls[1][0][0].content
-    assert head.startswith(
-        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — your role is subagent."
-    )
-    # **A fork is not told that it is one** (the designer's call): the copy
-    # above is the whole of what makes it a fork, and explaining it earned less
-    # than it cost.
-    assert "fork" not in head.lower()
-    assert "copy" not in head.lower()
-
-
-@pytest.mark.asyncio
-async def test_a_fork_taken_from_a_maker_that_has_said_nothing(context, hub) -> None:
-    """The empty case, which is an ordinary one: a maker that is just starting.
-
-    Nothing is carried and nothing fails — the fork is handed an empty
-    conversation and runs on its own message, exactly as a subagent with no
-    history would.
-    """
-    backend = FakeBackend(text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await create_subagent(server, "researcher", fork=True)
-    await send(server, "one", subagent="researcher")
-
-    assert prompts_seen(backend, 0) == ["user:one"]
-
-
-@pytest.mark.asyncio
-async def test_a_fork_writes_nothing_down(context, hub) -> None:
-    """Its turns are not recorded — not under its own key, and not under its maker's.
-
-    The maker's conversation is what a fork is *made of*, so writing the fork's
-    turns there would file one agent's work as another's history; and writing
-    them under the fork's own key would put a copy of a conversation nobody had
-    into a store whose whole job is to be that conversation's memory — and then
-    hand it back, on the next start, as the context to continue from.
-    """
-    backend = FakeBackend(text_turn("the maker's"), text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await create_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-
-    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
-    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1, (
-        "the maker's own turn, and nothing the fork said"
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_fork_turn_is_not_rolled_back_by_the_next_message(
-    context, hub
-) -> None:
-    """A fork's `record` answers `None` because it has no log, not because it failed.
-
-    The turn's messages are the only copy a fork has, so treating that `None` as
-    a refused write and rolling the tail back deleted the user's message and the
-    completed tool batch — the work the cancellation path keeps on purpose.
-    """
-    backend = FakeBackend(
-        text_turn("the maker's"),
-        text_turn(
-            "never finished",
-            delay=0.4,  # timeouts: the value this test is built around, not a budget
-        ),  # timeouts: the value this test is built around, not a budget
-        text_turn("continued"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await create_subagent(server, "researcher", fork=True)
-    interrupted = asyncio.create_task(send(server, "two", subagent="researcher"))
-    await wait_for_streams(backend, 2)
-    interrupted.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await interrupted
-
-    await send(server, "three", subagent="researcher")
-    assert "user:two" in prompts_seen(backend, 2), (
-        "the cancelled fork turn is still in its conversation"
-    )
-    assert "user:three" in prompts_seen(backend, 2)
-
-
-@pytest.mark.asyncio
-async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
-    """The next start removes the record; a subagent with a store is kept.
-
-    A fork is its conversation, and its conversation is in memory — so the
-    `subagent.yaml` a restart finds describes something that no longer exists.
-    Left there, the name would answer as a *new* fork of wherever its maker
-    stands now: a different subagent wearing the old one's name.  So the start
-    of a session ends the last one's forks, and frees their names.
-
-    A non-fork subagent is the contrast, and the reason this is about the record
-    rather than about tidiness: it owns a store, so a restart must keep it.
-    """
-    backend = FakeBackend(text_turn("the maker's"))
-    first = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await create_subagent(first, "researcher", fork=True)
-    await create_subagent(first, "writer")
-
-    assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
-    assert subagent_of(DEFAULT_AGENT, "writer").is_dir()
-
-    # A second server on the same home is a restart: its first session is where
-    # the previous one's forks end.
-    second = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await send(second, "one")
-
-    assert not subagent_of(DEFAULT_AGENT, "researcher").exists(), (
-        "a fork's record outlived the conversation it described"
-    )
-    assert subagent_of(DEFAULT_AGENT, "writer").is_dir(), (
-        "a subagent with a stored conversation is not a fork's to lose"
-    )
-
-    # And the name is free again rather than being a half-subagent that `set`
-    # would silently take for the old one.
-    remade = await create_subagent(second, "researcher", fork=True)
-    assert remade.data["created"] is True
-
-
-@pytest.mark.asyncio
-async def test_the_idle_sweep_does_not_forget_a_fork(context, hub, monkeypatch) -> None:
-    """A fork's own turns are the only copy, so an idle fork is not idle state.
-
-    For every other conversation the sweep only reclaims memory: the turns are
-    in its store, and the next message restores them.  A fork has no store, so
-    reaping it would not reclaim anything — it would lose the conversation and
-    hand the next message a fresh copy of whatever the maker has said since.
-    """
-    monkeypatch.setattr(_T.timeouts.pacing, "loop_idle", 0.0)
-    backend = FakeBackend(
-        text_turn("the maker's"),
-        text_turn("the fork's"),
-        text_turn("again"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await create_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-    await send(server, "three", subagent="researcher")
-
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:the maker's",
-        "user:two",
-        "assistant:the fork's",
-        "user:three",
-    ], "the fork kept its own turn instead of starting again from its maker"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> None:
-    """The maker moves on without it, and that is true in both directions.
-
-    A copy rather than the same list, and both halves matter: what the maker says
-    after the fork was made is not something the fork has read, and the fork's
-    own turns are not in the maker's conversation either.  Reading "share
-    everything with the agent that made you" as *one* conversation with two
-    readers is the reading this rejects, and it is rejected on what a fork is
-    for: its job is to answer *about* a conversation, which it cannot do from
-    inside it.
-    """
-    backend = FakeBackend(
-        text_turn("one"),
-        text_turn("forked"),
-        text_turn("three"),
-        text_turn("again"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await create_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-    await send(server, "three")
-    await send(server, "four", subagent="researcher")
-
-    assert prompts_seen(backend, 3) == [
-        "user:one",
-        "assistant:one",
-        "user:two",
-        "assistant:forked",
-        "user:four",
-    ], "the fork's copy, then its own turns, and nothing the maker said since"
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:one",
-        "user:three",
-    ], "and the maker never saw what the fork said"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> None:
-    """The copy ends at the last exchange that finished, and it has to.
-
-    A maker calls `subagent_create` *as* a tool call, so the conversation it is in
-    the middle of ends with an assistant message whose call has no result yet —
-    the one history every provider refuses (`trim_tools` records the same thing
-    about the same pair).  A copy taken then is a conversation nobody can be
-    sent, so what a fork is handed is the conversation up to the point its maker
-    can still be read from: the message it is answering (`two`) is in the copy,
-    and the half-finished exchange is not.
-
-    **The maker is parked on `_approve` rather than merely slow**, so that *when*
-    the fork is made is a fact this test knows instead of a race it hopes goes
-    one way — a race would leave the assertion below passing for the wrong
-    reason, since a maker that had not appended its call yet produces the same
-    expected list.
-    """
-    from slife2.libs.turn.events import ToolApprovalRequested
-
-    backend = FakeBackend(
-        text_turn("one"),
-        ScriptedTurn(
-            result=StreamChatResult(
-                text="checking",
-                tool_calls=(
-                    ToolCall(id="c1", name="skill_list", arguments={"_approve": True}),
-                ),
-                stop_reason="tool_calls",
-            ),
-            chunks=[Chunk(text="checking")],
-        ),
-        text_turn("the fork's"),
-        text_turn("done"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await send(server, "one")
-
-    parked = asyncio.Event()
-
-    async def on_progress(_progress, _total, message):
-        if isinstance(decode(message or ""), ToolApprovalRequested):
-            parked.set()
-
-    async def maker():
-        async with Client(server) as client:
-            return await client.call_tool(
-                "send_message",
-                {"agent": DEFAULT_AGENT, "prompt": "two", "watched": True},
-                progress_handler=on_progress,
-            )
-
-    turn = asyncio.create_task(maker())
-    await asyncio.wait_for(parked.wait(), timeout=10)
-
-    await create_subagent(server, "researcher", fork=True)
-    # **Bounded, because the way this test fails is a deadlock.**  A fork that
-    # waits on the maker's lock waits out the maker's *whole turn*, and the
-    # maker here is parked on an approval this test cannot answer until after
-    # this line — so the regression is not a wrong value or an exception, it is
-    # a lane that never finishes.  A timeout is that deadlock saying so.
-    await asyncio.wait_for(
-        send(server, "three", subagent="researcher"),
-        timeout=10,  # timeouts: the value this test is built around, not a budget
-    )  # timeouts: the value this test is built around, not a budget
-
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:one",
-        "user:two",
-        "user:three",
-    ], "the maker's half-finished exchange is not a history a model can be sent"
-
-    # And the maker's own turn is untouched by any of it: it was waiting for an
-    # answer to a question, and it gets one.
-    async with Client(server) as client:
-        await client.call_tool(
-            "answer_approval",
-            {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
-        )
-    assert (await turn).data["text"] == "done"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_made_while_the_maker_is_live_keeps_its_message(
-    context, hub, monkeypatch
-) -> None:
-    """**The maker's conversation is read under the maker's lock.**
-
-    `adopt_maker` restores the maker's loop when the maker has not restored it
-    yet, and that is a state a live maker is in for one store round trip: the
-    loop is in `loops` from the moment `conversation` made it, and `send_message`
-    sets `restored` only once the store has answered.  A fork arriving in that
-    window ran the same `restore_into` as the maker — *not* under the maker's
-    lock, which the maker is holding — and two restores of one list are one
-    answer landing on top of the other: the fork's, arriving late, replaces a
-    list the maker has already appended its user message to.  The turn then
-    advances the orphaned list while `loop.messages` holds one that never saw it,
-    so `outcome.messages` comes out empty, nothing is recorded, and the fork is
-    handed a copy that never had the maker's message in it.
-
-    **Parked rather than raced.**  The maker's restore and the fork's are each
-    held open on an event, so *when* each lands is a fact this test knows instead
-    of a hope: the maker's is released first and its turn is proved running
-    before the fork's is let go.  With the lock the fork cannot be in its restore
-    at all until the maker's turn has ended, which is why the fork's copy is
-    taken from the live list — the maker's finished turn and all.
-    """
-    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
-    store = ParkedRestore(context)
-    server = build_server(
-        config(), context_client=store, hub_client=hub, backend=backend
-    )
-
-    maker = asyncio.create_task(send(server, "one"))
-    await asyncio.wait_for(store.arrived.wait(), timeout=_T.timeouts.work.hub)
-    await create_subagent(server, "researcher", fork=True)
-    fork = asyncio.create_task(send(server, "two", subagent="researcher"))
-    # **Where the two builds part company.**  Without the lock the fork is in
-    # its own restore by now — the maker's is parked and holds nothing — and this
-    # wait sees two; with it the fork is parked on the maker's lock and is not in
-    # a restore at all.  Nothing below depends on which of those happened.
-    for _ in range(100):
-        if store.entered == 2:
-            break
-        await asyncio.sleep(0.01)
-    store.release[0].set()
-    # The maker's turn is running — its user message is appended and the model
-    # has been asked — which is the moment the fork's restore used to land on
-    # top of it.
-    await wait_for_streams(backend, 1)
-    store.release[1].set()
-
-    assert (await maker).data["text"] == "the maker's answer"
-    assert (await fork).data["text"] == "the fork's"
-    # The copy the fork runs on: the maker's whole finished turn, then its own
-    # message.  An empty copy is the fork having read a list the maker's own
-    # restore had just replaced.
-    assert prompts_seen(backend, 1) == [
-        "user:one",
-        "assistant:the maker's answer",
-        "user:two",
-    ]
-    # ...and the maker's turn is in its own log, which is the other half of the
-    # same damage: a turn that advanced an orphaned list records nothing.
-    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1
-
-
-def test_an_unfinished_exchange_is_what_a_copy_leaves_off() -> None:
-    """`settled_messages` directly, because it is a rule about message lists.
-
-    A turn in flight ends wherever it has got to, and a copy of a conversation is
-    a *request* — so the rule is stated over the shapes a list can have and not
-    over one path through the server.  What it must not do is cut into a finished
-    exchange: a tool round the model has already been told about is context, and
-    losing it would be a copy that knows less than the agent it was made from.
-    """
-    from slife2.libs.turn.messages import Message
-    from slife2.plugins.agent.server import settled_messages
-
-    head = Message(role="system", content="you are")
-    asked = Message(role="user", content="one")
-    called = Message(
-        role="assistant", content=None, tool_calls=[ToolCall(id="c1", name="t")]
-    )
-    answered = Message(role="tool", content="result", tool_call_id="c1")
-    spoke = Message(role="assistant", content="two")
-    both = Message(
-        role="assistant",
-        content=None,
-        tool_calls=[ToolCall(id="c1", name="t"), ToolCall(id="c2", name="t")],
-    )
-
-    assert settled_messages([]) == []
-    assert settled_messages([head, asked]) == [head, asked]
-
-    # The two shapes a turn in flight leaves: a call nobody has answered, and a
-    # batch that answered only the first of two.
-    assert settled_messages([head, asked, called]) == [head, asked]
-    assert settled_messages([head, asked, both, answered]) == [head, asked]
-
-    # And the shapes that are histories, all of which stay whole: an answer, a
-    # finished exchange, and the same exchange with the model still to speak.
-    whole = [head, asked, called, answered, spoke]
-    assert settled_messages(whole) == whole
-    assert settled_messages([head, asked, called, answered]) == [
-        head,
-        asked,
-        called,
-        answered,
-    ]
-    assert settled_messages(whole + [called]) == whole
 
 
 def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
@@ -5298,13 +4742,11 @@ async def test_the_subagent_list_is_the_makers_directories(context, hub) -> None
                 "name": "researcher",
                 "model": "",
                 "role": "code reviewer",
-                "fork": False,
             },
             {
                 "name": "scout",
                 "model": "deepseek/deepseek-flash",
                 "role": "subagent",
-                "fork": False,
             },
         ]
     }, "sorted, with the record's own facts"

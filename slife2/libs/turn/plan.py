@@ -124,9 +124,7 @@ def plan_path(agent: str, subagent: str = "") -> Path:
     """Where one conversation's plan lives — **without making the directory**.
 
     The conversation's own directory, for `agent_path`'s reason: a read must not
-    create the thing it is asking about, and a fork has a directory of its own
-    (`work_path` would hand it its maker's, where a write would overwrite the
-    maker's plan).
+    create the thing it is asking about.
     """
     return agent_path(agent, subagent) / PLAN_FILE
 

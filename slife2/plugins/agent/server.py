@@ -136,8 +136,6 @@ from slife2.libs.host.model_config import (
 from slife2.libs.host.paths import (
     agent_dir,
     home,
-    in_home,
-    known_homes,
     subagent_dirs,
     subagent_file,
     subagent_path,
@@ -657,10 +655,9 @@ class Loop:
     #: that had already finished.  `settle_record` takes the id up on the next
     #: turn and the messages become addressable.  **A write that is refused is a
     #: hard failure**: the turn's messages are rolled back to this prefix, so a
-    #: silent unaddressable run cannot be left behind.  A fork has no id at all
-    #: and never rebuilds, so its carried run is never read.  A count is enough
-    #: here only because of that rule, and it is what lets a rebuild replace the
-    #: turns without destroying a message that has no turn to be replaced by.
+    #: silent unaddressable run cannot be left behind.  A count is enough here
+    #: because of that rule, and it is what lets a rebuild replace the turns
+    #: without destroying a message that has no turn to be replaced by.
     covered: int = 0
     #: The write of a turn whose caller could not wait for it, kept until the
     #: turn that follows can take up the id it answered with — see
@@ -734,23 +731,6 @@ class Loop:
     #: of a loop's state that is read and written while its lock is held, and
     #: that is why it is a dict of futures rather than a queue.
     approvals: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
-
-    #: **A `fork` is the one conversation that is not recorded**; every other
-    #: conversation this server holds is recorded, in the store its own key
-    #: names — a subagent owns its conversation (SDD §3.5), with a directory, a
-    #: cabinet and a memory of its own, and `subagent_remove` deletes them.  A
-    #: fork is made of its maker's conversation — copied out of it, and then its
-    #: own — so writing it down would file one agent's work under another's
-    #: history and put a second copy of that history in the store.  Nothing about
-    #: it is written: no restore, no rebuild, no turn record (`adopt_maker` is
-    #: all three).
-    #:
-    #: **And its session is its whole life.**  The files a fork leaves are its
-    #: `subagent.yaml` and its `plan.yaml`, and `forget_forks` removes the whole
-    #: directory when the server starts: a record with no conversation behind it
-    #: would name a new fork of the maker's current conversation, which is a
-    #: different subagent.
-    fork: bool = False
 
 
 @dataclass(frozen=True)
@@ -1376,10 +1356,8 @@ def build_server(
 
         **And it is told what it is, from its own file** (`subagent_spec`): the
         `role` the agent named it with is the one thing from that file the prompt
-        uses.  A fork is not told that it is one — the sentence was longer than
-        the fact was worth (the designer's call, 2026-10-17).  Its prompt is
-        `subagent.j2` and not the config's (`SUBAGENT_PROMPT`), because the two
-        say different things.
+        uses.  Its prompt is `subagent.j2` and not the config's
+        (`SUBAGENT_PROMPT`), because the two say different things.
 
         **And an agent's own prompt is rendered with whether anybody is
         watching**, read off the claim the client under that name wrote
@@ -1419,13 +1397,6 @@ def build_server(
         key is recreated on the next message that uses it and restores what it
         had — which is the whole reason the sweep is allowed to be this casual.
 
-        **A fork is the exception, and it is not idle state.**  What a restore
-        gives every other conversation back, a fork has nowhere else: its own
-        turns are the only copy, and letting them go would not reclaim a cache
-        but lose the conversation — the next message would start again from the
-        maker as it stood then.  So a fork is held for the session, which is the
-        whole of its life (`forget_forks` ends it at the next start).
-
         A conversation with a turn in flight is never idle, whatever its
         timestamp says: its own turn refreshes `last_used` when it finishes.
         """
@@ -1434,8 +1405,6 @@ def build_server(
         # that name a conversation come from the loop (`agent`, `subagent`),
         # which is also what keeps the home out of a log line.
         for key, loop in list(loops.items()):
-            if loop.fork:
-                continue
             if loop.lock.locked():
                 continue
             if loop.last_used < cutoff:
@@ -1487,11 +1456,11 @@ def build_server(
                     f"before messaging it."
                 )
             live = current()
-            # What this subagent's own file says it is — its model, its role,
-            # whether it is a fork — read *here*, when its conversation starts,
-            # which is what makes a `model_switch` in between reach it the way it
-            # reaches the maker's own next turn.  An agent's own conversation has
-            # no such file and is the defaults.
+            # What this subagent's own file says it is — its model and its role
+            # — read *here*, when its conversation starts, which is what makes a
+            # `model_switch` in between reach it the way it reaches the maker's
+            # own next turn.  An agent's own conversation has no such file and is
+            # the defaults.
             spec = subagent_spec(agent, subagent)
             name, provider, settings = live.resolve(model or spec.model)
             messages = opening_messages(agent, subagent, live, spec)
@@ -1511,7 +1480,6 @@ def build_server(
                 # The head is what an empty list covers, so a conversation that
                 # restores nothing carries nothing either.
                 covered=len(messages),
-                fork=spec.fork,
             )
             loops[client] = loop
             logger.debug(
@@ -1662,16 +1630,6 @@ def build_server(
             # A caller cancelled while queued, in which case its turn never
             # started and there is nothing to record.
             return None
-        if loop.fork:
-            # **A fork is not written down, and the answer it owes is not an
-            # id.**  Its turns are its own copy of its maker's conversation plus
-            # what it has done since, held in memory and gone with the loop — so
-            # there is no row to name and nothing for a caller to point at.
-            # `None` is what says so: the caller then leaves this turn's messages
-            # unbacked and unannotated, which is what a conversation with no log
-            # wants (`annotate_turn` would otherwise write a turn id into the one
-            # conversation that can never look one up).
-            return None
         messages = [message.to_record() for message in outcome.messages]
         await keep_images(loop.agent, loop.subagent, messages)
         return await remember_turn(
@@ -1776,13 +1734,6 @@ def build_server(
         # scope, so it still completes.
         loop.record_pending = None
         if turn_id is None:
-            # **`None` is a fork's ordinary answer, not a refused write.**  A
-            # fork has no log, so `record` returns `None` by design; rolling the
-            # turn back would delete the very messages the cancellation repair
-            # kept, and the next message to the fork would resume without them.
-            if loop.fork:
-                loop.covered = len(loop.messages)
-                return
             roll_back(loop, pending.outcome)
             return
         address_turn(loop, pending.outcome, pending.item, turn_id)
@@ -1816,107 +1767,6 @@ def build_server(
                 len(loop.turn_ids),
                 describe((loop.agent, loop.subagent)),
             )
-
-    async def adopt_maker(loop: Loop) -> None:
-        """A fork's context: a copy of its maker's conversation, taken now.
-
-        **This is what a fork starts from instead of a store**, and it is the
-        whole of what `fork: true` buys: *share everything with the agent that
-        made you*, answered with the one thing a conversation is — the context
-        it is made of.  Copied rather than shared, because the two part company
-        from here: what the fork does with it is a turn in the fork's
-        conversation, and nothing the maker says afterwards reaches it.
-
-        **The maker's conversation is read the way its own next turn would read
-        it** — out of memory when it is loaded, and out of the store when it is
-        not, which is the same step (`restore_into`) a turn of the maker's takes.
-        That is what makes a fork work from anywhere a maker can call from: a
-        turn of its own, an agent task working in its name, a scheduled fire.
-
-        **The copy ends at the last exchange that finished** (`settled_messages`),
-        and that is not tidiness.  A maker calls `subagent_create` *as* a tool call,
-        so the last thing in its list is an assistant message whose call has no
-        result yet — and a history that ends that way is the one state every
-        provider refuses.  So the fork is handed the conversation as it stood
-        when its maker asked for it, which is the reading a person would give
-        "what we had said so far" too.
-
-        **And the head is replaced rather than copied.**  The maker's system
-        prompt names the maker and says whether anybody is watching; a fork is
-        told what it is instead — its own name, its role, and whose subagent it
-        is.  `opening_messages` is where those words are, and this is why they
-        have to be *words*: a model reading somebody else's conversation under
-        its own name with nothing said is a model answering as somebody it is
-        not.
-
-        **The maker's list is read under the maker's lock when it still has to be
-        restored**, which is the rule `Loop.restored` states and not a precaution.
-        `restore_into` replaces the maker's messages wholesale, and the maker's
-        own `send_message` may be running that same restore under that same lock
-        at this moment — it is the state where the maker's loop is in `loops` and
-        not yet restored, which is every fresh conversation and every one the
-        idle sweep has just let go.  Two restores of one list is one answer
-        landing on top of the other: the fork's, arriving late, would replace a
-        list the maker has already appended its user message to — the turn then
-        advances the orphaned list while `loop.messages` holds one that never saw
-        it, and `covered`/`turn_ids` are computed against a conversation the turn
-        is not in.
-
-        **And only when it has to be restored, because the lock is held for a
-        whole turn.**  `send_message` takes this lock for the length of its turn —
-        not for its restore — so a fork that waited on it unconditionally waited
-        out the maker's *entire* turn, which is for ever when the maker is parked
-        on `_approve` with nobody answering yet.  That is not a hypothetical: it
-        is `test_a_fork_is_taken_from_a_maker_that_is_mid_turn`, which hangs.  A
-        maker that is already restored has had the only wholesale writer of its
-        list run, so what is there is a conversation and a turn in flight on it is
-        not the race this rule is about — the copy ends at the last exchange that
-        finished, which is what a fork is for.  The claim is re-read *inside* the
-        lock, so a maker that restores while this waits is not restored twice.
-        """
-        maker = conversation(loop.agent, "", "")
-        if maker.restored:
-            body = settled_messages(maker.messages)
-        else:
-            async with maker.lock:
-                if not maker.restored:
-                    await restore_into(maker)
-                    maker.restored = True
-                body = settled_messages(maker.messages)
-        # Copied on the way out either way, for the reason the copy is a copy at
-        # all (below): two loops must not share a message object, and a message
-        # the maker's turn rewrites while it is being read here would be copied
-        # from one state and stored in another.
-        body = [Message.from_wire(message.to_wire()) for message in body]
-        if body and body[0].role == "system":
-            body = body[1:]
-        # Copied, not aliased: the two loops must not share a message object.
-        # `repaired_error` drops an attachment by *rewriting* the messages that
-        # carry it (`attachments.drop`), so a fork sharing objects with its maker
-        # would have its own copy rewritten when the maker's turn failed.  The
-        # runtime's `restore` copies for the same reason, the same way — a
-        # message list handed to two conversations is a message list with two
-        # owners.
-        loop.messages = loop.messages + body
-        # Nothing in this list is backed by a turn this conversation can name —
-        # it has no log — so the carried tail is empty and this is the whole of
-        # it.  `rebuild`'s `carried` is the only reader, and a fork never runs a
-        # rebuild; the number is kept in step anyway rather than left to say
-        # something untrue.
-        loop.covered = len(loop.messages)
-        # The copy is the maker's conversation, so its size is the maker's
-        # figure too: a fork that started its first marker at `0 (0.0%)` would
-        # be reporting a fact about the wrong list.
-        loop.context_tokens = maker.context_tokens
-        # And the plan is part of what a conversation *is*: the messages alone
-        # would leave the fork working from a list its maker has moved on from.
-        _copy_plan(loop.agent, loop.subagent, loop.agent, "")
-        logger.info(
-            "forked %s from %s: %d message(s)",
-            describe((loop.agent, loop.subagent)),
-            describe((loop.agent, "")),
-            len(loop.messages) - 1,
-        )
 
     async def rebuild_into(loop: Loop, prompt: str) -> ContextChosen:
         """Ask what this turn runs on, take the answer, and report the counts.
@@ -2106,9 +1956,7 @@ def build_server(
 
         The message is `outcome.messages[0]`, which is the *same object* the
         loop is holding: the snapshot is a shallow copy, so there is no index to
-        carry and the live list is annotated by annotating this.  A fork's turn
-        never reaches here: it is written to no log, so no id is claimed for it
-        and there is nothing to annotate it with.
+        carry and the live list is annotated by annotating this.
         """
         opening = outcome.messages[0] if outcome.messages else None
         if opening is None or opening.role != "user":
@@ -2451,9 +2299,7 @@ def build_server(
             # cannot be read is the failure this was written for, and it is the
             # one failure that used to leave nothing to record at all.  A message
             # handed to a conversation is kept however its turn ended
-            # (`remember_turn`), and a fork's is kept the same way even though
-            # nothing is written for it: the store is what a fork does not have,
-            # not the conversation.  Put in before the snapshot below, so the
+            # (`remember_turn`).  Put in before the snapshot below, so the
             # record, the `[TURN:]` footnote and `roll_back` all see it as the
             # turn's own opening message.
             if len(loop.messages) == snapshot:
@@ -2579,10 +2425,7 @@ def build_server(
         Appendix A rule 10).
 
         **Put where `run_turn` would have put it**: the end of the live list, so
-        the record writes it as the turn's own opening message, and a fork —
-        which writes no record — holds it in memory all the same.  The store is
-        what a fork does not have, not the conversation; a failed turn is
-        handled identically on both sides of that line.
+        the record writes it as the turn's own opening message.
 
         **The pictures are named, not read.**  A turn that dies here never
         resolved its sources, and an image part whose URL is a path is one a
@@ -2671,29 +2514,9 @@ def build_server(
         )
         return ToolError(f"{exc}\n{attachments.DROPPED_IMAGES}")
 
-    #: Whether this process has already cleared the forks the previous session
-    #: left behind.  **Once per server, not once per lifespan**: over the
-    #: in-memory transport FastMCP runs the lifespan once per client session, and
-    #: the loops deliberately outlive those sessions — a sweep on every one
-    #: would delete a fork another client had just made.
-    session_started = False
-
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        nonlocal cabinet_conn, session_started
-        if not session_started:
-            session_started = True
-            # **The start of a session is the end of the last one's forks.**
-            # A fork's conversation lives in memory and nothing about it is
-            # written down, so the record a restart finds is the only part of it
-            # left — and a record with no conversation behind it is a name that
-            # would answer as a new fork of wherever its maker stands now.
-            # `forget_forks` says why that is a different subagent and not the
-            # same one resumed, and why the sweep is every home this process
-            # serves rather than its own.  It walks the filesystem and may wait
-            # out a held file, so it runs on a thread: start-up blocking the
-            # loop would hold every connection this server is about to serve.
-            await asyncio.to_thread(forget_forks)
+        nonlocal cabinet_conn
         try:
             yield {}
         finally:
@@ -3593,7 +3416,7 @@ def build_server(
         # failure is captured rather than left to `sys.exc_info()` there, because
         # a `finally` after an `except` that re-raises cannot be asked reliably
         # what it is unwinding; the id is initialised here because a turn that
-        # never records (a fork, a refused write) has none to bind.
+        # never records (a refused write) has none to bind.
         failure: BaseException | None = None
         turn_id: int | None = None
         #: This turn's token and the handle that puts it back when the turn is
@@ -3685,19 +3508,7 @@ def build_server(
                     # reassigning the list a running turn is reading.  The claim
                     # is on the loop, for the reason `Loop.restored` gives.
                     if not loop.restored:
-                        # **A fork is put back on its maker's conversation, not
-                        # on a stored one.**  It has no store — nothing about it
-                        # is written down — so this is its own step, and it is
-                        # taken here for the reason the restore is: this is where
-                        # a conversation begins.  Which includes beginning again:
-                        # a fork the idle sweep let go starts afresh from its
-                        # maker as it stands then, and that is the same rule and
-                        # not a fallback — a conversation nobody wrote down is a
-                        # conversation whose next start is a new copy.
-                        if loop.fork:
-                            await adopt_maker(loop)
-                        else:
-                            await restore_into(loop)
+                        await restore_into(loop)
                         loop.restored = True
                     tap = watching.start_tap(
                         key, TurnStarted(item.prompt, item.channel)
@@ -3719,32 +3530,23 @@ def build_server(
                     # very prompt, would be destroyed by it — and it reads the
                     # list the previous turn's write maintains, so it has to wait
                     # for that write the way the next turn does.
+                    chosen = await rebuild_into(loop, item.prompt)
+                    # **Reported before the turn**, because it is a fact about
+                    # what the turn runs on and not about how it went — and
+                    # because the answer that follows is the thing it is about.
+                    # The discriminator is one model call the caller never sees,
+                    # so this is the only place its decision is visible at all.
                     #
-                    # **And a fork is not rebuilt at all.**  There is no log to
-                    # go back to and no keep-list worth deciding, because what a
-                    # fork runs on is the copy it was handed plus its own turns.
-                    # Asked of the loop rather than of the store: a discriminator
-                    # call spent deciding what a fork already knows the answer to
-                    # would be a model call whose only outcome is "keep what you
-                    # have".
-                    if not loop.fork:
-                        chosen = await rebuild_into(loop, item.prompt)
-                        # **Reported before the turn**, because it is a fact about
-                        # what the turn runs on and not about how it went — and
-                        # because the answer that follows is the thing it is about.
-                        # The discriminator is one model call the caller never sees,
-                        # so this is the only place its decision is visible at all.
-                        #
-                        # **Through the loop's own fault tolerance**, like every
-                        # other event this conversation raises.  A broken progress
-                        # stream throws from `on_event` (`ctx.report_progress` on a
-                        # closed stream), and a throw from *here* lands before the
-                        # prompt has been appended or recorded at all — so the
-                        # caller's message is lost outright, where the same observer
-                        # failing on a `TextDelta` is swallowed one layer down
-                        # (`AgentLoop._emit`).  Asked for by class rather than instance
-                        # because the `AgentLoop` is not built until the turn below.
-                        await AgentLoop._emit(observer, chosen)
+                    # **Through the loop's own fault tolerance**, like every
+                    # other event this conversation raises.  A broken progress
+                    # stream throws from `on_event` (`ctx.report_progress` on a
+                    # closed stream), and a throw from *here* lands before the
+                    # prompt has been appended or recorded at all — so the
+                    # caller's message is lost outright, where the same observer
+                    # failing on a `TextDelta` is swallowed one layer down
+                    # (`AgentLoop._emit`).  Asked for by class rather than instance
+                    # because the `AgentLoop` is not built until the turn below.
+                    await AgentLoop._emit(observer, chosen)
                     # How long the list was when this turn began.  What the write
                     # below covers is what the turn *appends*, and the difference
                     # is the whole of it — see `covered` in the success branch.
@@ -3774,8 +3576,7 @@ def build_server(
                     # `run_turn` has appended it — the restore, the rebuild and
                     # the loop's opening are all steps that fail ahead of it —
                     # and `keep_opening` is what makes those failures a turn with
-                    # a record (and, for a fork, a conversation that still holds
-                    # the message) instead of a message nobody kept.
+                    # a record instead of a message nobody kept.
                     #
                     # **Before `repaired_error` as well**, so a picture the
                     # caller sent is dropped into its note by the same repair
@@ -3893,9 +3694,9 @@ def build_server(
                         roll_back(loop, outcome)
                         watching.drop_if(key, tap)
                         raise
-                    # The store has this turn now (or it never will: a fork has
-                    # no row).  Recorded on the tap so a watcher's snapshot can
-                    # decide whether replaying the tap would duplicate it.
+                    # The store has this turn now.  Recorded on the tap so a
+                    # watcher's snapshot can decide whether replaying the tap
+                    # would duplicate it.
                     tap.recorded_turn = turn_id
                     # **A turn joins `turn_ids` only when the list it follows is
                     # wholly accounted for**, and this is the second half of what
@@ -4078,7 +3879,7 @@ def build_server(
 
         Returns:
             `subagents`: one entry per directory, sorted by name, each with
-                `name`, `model` (empty for the maker's own), `role`, and `fork`.
+                `name`, `model` (empty for the maker's own) and `role`.
                 Empty is the honest answer for an agent that has made none.
         """
         found: list[dict[str, Any]] = []
@@ -4089,7 +3890,6 @@ def build_server(
                     "name": directory.name,
                     "model": spec.model,
                     "role": spec.role,
-                    "fork": spec.fork,
                 }
             )
         return {"subagents": found}
@@ -4294,7 +4094,6 @@ def build_server(
         name: str,
         model: str = "",
         role: str = DEFAULT_ROLE,
-        fork: bool = False,
     ) -> dict[str, Any]:
         """Make a subagent: an agent of your own, named, with its own memory.
 
@@ -4307,9 +4106,7 @@ def build_server(
 
         **A subagent you already have is the same subagent** — naming one twice
         makes no second one, so it is safe. What a second call changes is its
-        model and its role; whether it was made as a fork is what it was — a
-        fork's conversation is a copy already taken, and a later call cannot
-        re-decide what it is made of.
+        model and its role.
 
         Args:
             name: What to call it. A name is one subagent, so it is also the
@@ -4324,19 +4121,10 @@ def build_server(
                 one — `subagent` — and anything else is worth saying only when
                 it changes what the agent would do, the way "code reviewer"
                 does.
-            fork: Whether it starts from a **copy of your own conversation**
-                instead of from nothing — a temporary stand-in for you.  A fork
-                is handed everything you have said so far, as it stood at the
-                moment you made it, and nothing it does is written down: it
-                remembers its own turns for as long as this session runs, and a
-                restart forgets it — the name is free for a new one.  Ask one a
-                question *about* what you are in the middle of when you want the
-                answer to that question to be the only thing that enters your
-                history.
 
         Returns:
-            `name`, `model`, `role`, `fork`, and `created`: whether this call
-            was the one that made it.
+            `name`, `model`, `role`, and `created`: whether this call was the
+            one that made it.
         """
         maker, mine = conversation_reader("agent to make a subagent for", "a subagent")(
             ctx
@@ -4376,12 +4164,8 @@ def build_server(
         if created:
             agent_dir(maker, directory.name)
         record = read_subagent(maker, directory.name)
-        # What a second call does not get to rewrite, and both are the same
-        # reason: whether it is a fork is settled by the copy that was taken when
-        # it was made, and when it was made is not a question a later call is
-        # answering.  A second call says what this subagent runs on and what it
-        # is for.
-        made_fork = fork if created else record.get("fork") is True
+        # When it was made is not a question a later call is answering; a second
+        # call says what this subagent runs on and what it is for.
         _write_subagent(
             maker,
             directory.name,
@@ -4389,23 +4173,20 @@ def build_server(
                 "name": directory.name,
                 "model": model,
                 "role": role or DEFAULT_ROLE,
-                "fork": made_fork,
                 "created_at": record.get("created_at") or made_at,
             },
         )
         logger.info(
-            "subagent %s %s (model %s, role %s%s)",
+            "subagent %s %s (model %s, role %s)",
             describe((maker, directory.name)),
             "created" if created else "updated",
             model or "the maker's",
             role or DEFAULT_ROLE,
-            ", fork" if made_fork else "",
         )
         return {
             "name": directory.name,
             "model": model,
             "role": role or DEFAULT_ROLE,
-            "fork": made_fork,
             "created": created,
         }
 
@@ -4622,8 +4403,6 @@ class SubagentSpec:
     model: str = ""
     #: What it is for, in the words its prompt uses (`DEFAULT_ROLE`).
     role: str = DEFAULT_ROLE
-    #: Whether it was made as a copy of its maker's conversation (`Loop.fork`).
-    fork: bool = False
 
 
 def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
@@ -4642,11 +4421,6 @@ def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
     return SubagentSpec(
         model=str(record.get("model") or ""),
         role=str(record.get("role") or DEFAULT_ROLE),
-        # `is True` rather than `bool(…)`: this file is written by `subagent_create`
-        # and YAML spells a boolean as one, so a quoted "false" is a hand-edit
-        # that means nothing rather than a second spelling of False — and reading
-        # it as True would make a subagent a fork on the strength of a typo.
-        fork=record.get("fork") is True,
     )
 
 
@@ -4681,106 +4455,15 @@ def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
     return loaded
 
 
-def forget_forks() -> list[Path]:
-    """Remove every fork a previous session left behind — at the start of one.
-
-    **A fork is session-lived: its lifetime is the process that made it.**  Its
-    conversation is held in memory and nothing it says is written down, so the
-    only thing a restart could find is the `subagent.yaml` record — a record of
-    a conversation that no longer exists.  Left in place, the name would answer
-    as a *new* fork of wherever its maker stands now: a different subagent
-    wearing the old one's name, role and model.  So the record goes when the
-    conversation it described does, and this is where: the start of a session is
-    the end of the last one's forks.
-
-    **The walk is every home this process serves** (`known_homes`), because a
-    shared daemon answers for all of them.  It is `turn_dbs`' shape one level in
-    and for its reason: what belongs to an agent is found by looking under its
-    directory, and nothing keeps a list to be kept in step.
-
-    **A record that cannot be read leaves its directory alone.**  `read_subagent`
-    reads a damaged record as absent, so `subagent_spec` answers "not a fork"
-    for it, and a read failure does not widen a deletion — the same rule that
-    stops a torn record widening `subagent_remove`'s blast radius.
-
-    Raises:
-        ToolError: A fork directory that could not be removed, naming the path
-            and the reason.  **This is a refusal to start rather than a warning**
-            because the session would otherwise begin with a fork of the last
-            one still holding its name — the state this function exists to
-            prevent.  The caller is the lifespan, so the server does not serve.
-    """
-    removed: list[Path] = []
-    for root in known_homes():
-        agents = root / "agents"
-        if not agents.is_dir():
-            continue
-        with in_home(root):
-            for agent in sorted(agents.iterdir()):
-                if not agent.is_dir():
-                    continue
-                for directory in subagent_dirs(agent.name):
-                    if not subagent_spec(agent.name, directory.name).fork:
-                        continue
-                    try:
-                        _remove_tree(directory)
-                    except ToolError as e:
-                        raise ToolError(
-                            f"the fork {directory} left by the previous session "
-                            f"could not be removed: {e}"
-                        ) from e
-                    removed.append(directory)
-                    logger.info(
-                        "forgot the fork %s: a fork is session-lived",
-                        describe((agent.name, directory.name)),
-                    )
-    return removed
-
-
-def settled_messages(messages: list[Message]) -> list[Message]:
-    """A conversation cut back to the last exchange that finished.
-
-    **A history a provider will accept, which a live list is not always.**  A
-    turn is `[head, user, assistant(calls), results, assistant, …]`, and a list
-    caught mid-turn ends on one of two shapes that cannot be sent: an assistant
-    message whose calls have no results yet, or a batch of results that does not
-    answer every call above it — an iteration runs its calls in order, so a turn
-    parked on the second of two has answered the first.  Every other ending is a
-    history, and is left exactly as it is: a user message, an answer the model
-    gave, an exchange that finished.  Cutting those would be the copy losing
-    things its maker knows, which is the one thing a fork is for.
-
-    It is here for the fork (`adopt_maker`), which is taken while its maker is
-    *in* a turn — the maker calls `subagent_create` as a tool call, so its own list
-    necessarily ends mid-exchange — and a copy of that list is a conversation
-    nobody can be sent.  What it costs is the exchange the maker had not
-    finished: a tool round nobody has spoken about yet, which is the part of the
-    conversation that is still in motion.
-    """
-    if not messages:
-        return messages
-    results = 0
-    while results < len(messages) and messages[-1 - results].role == "tool":
-        results += 1
-    above = messages[-1 - results] if results < len(messages) else None
-    if above is None or above.role != "assistant" or not above.tool_calls:
-        # The results answer nothing, or there are none: the list ends on a
-        # message that stands on its own.
-        return messages
-    if len(above.tool_calls) == results:
-        return messages
-    return messages[: -1 - results]
-
-
 def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     """Write a subagent's record — the file that makes its directory one.
 
     It holds the whole of what a subagent *is*, and it is the whole of that: the
-    name it answers to, what it runs on, the role it was made for, whether it is a
-    fork, and when it was made (`SubagentSpec` reads three of those back).  A
-    second place holding any of it — a section in `slife2.yaml`, a table in a db —
-    would be a thing to keep in step with a directory that is deleted without
-    notice, and this file is deleted with it.
+    name it answers to, what it runs on, the role it was made for, and when it
+    was made (`SubagentSpec` reads those back).  A second place holding any of
+    it — a section in `slife2.yaml`, a table in a db — would be a thing to keep
+    in step with a directory that is deleted without notice, and this file is
+    deleted with it.
 
     Written whole every time, because it is one small mapping and a merge would
     be a second rule about which keys survive a `set`.  Block style, like
@@ -4788,28 +4471,9 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     to read a second format to see the next fact.
 
     **A write is a rename**, through `statefile.write`, so a process that dies
-    mid-write leaves the old record or the new one and never half of either.  A
-    truncated `subagent.yaml` loads as `None`, and `forked` would then read a
-    fork as an ordinary subagent — the damage this atomicity removes at the
-    source.
+    mid-write leaves the old record or the new one and never half of either.
     """
     statefile.write(subagent_file(agent, subagent), record)
-
-
-def _copy_plan(agent: str, subagent: str, maker: str, maker_subagent: str = "") -> None:
-    """Give a fork its maker's plan, as it stands now.
-
-    **The plan is part of what a fork copies.**  A fork is a copy of its maker's
-    conversation, and the plan is that conversation's current state — the
-    messages alone would leave it working from a list the maker no longer has.
-    A maker with no plan clears the fork's, because a fork re-adopted after an
-    idle sweep must not keep a plan the maker has since dropped.
-    """
-    items = plan.read(maker, maker_subagent)
-    if items:
-        plan.write(agent, subagent, items)
-    else:
-        plan.clear(agent, subagent)
 
 
 def _image_url(part: Any) -> str | None:
@@ -4830,10 +4494,10 @@ def _image_url(part: Any) -> str | None:
 def _recorded_into(tap: Tap, task: asyncio.Task[Any]) -> None:
     """Take up a detached record's id for the tap that turn left behind.
 
-    Only an `int` is a turn the store can be asked about; `None` is the store
-    having refused or a fork (which has no row), and leaving the tap's field
-    alone is the honest answer for both — a watcher then replays the tap rather
-    than trusting an id the snapshot cannot contain.
+    Only an `int` is a turn the store can be asked about; `None` is a turn with
+    nothing to record, and leaving the tap's field alone is the honest answer —
+    a watcher then replays the tap rather than trusting an id the snapshot
+    cannot contain.
 
     A cancelled or failed write leaves it alone too.  `detach` already says that
     failure in the log; this callback is not the place to say it a second time.

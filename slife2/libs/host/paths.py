@@ -121,15 +121,12 @@ import argparse
 import contextlib
 import hashlib
 import json
-import logging
 import os
 import tempfile
-from collections.abc import Generator, Mapping
+from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import NamedTuple
-
-logger = logging.getLogger(__name__)
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
@@ -762,17 +759,12 @@ def work_path(agent: str, subagent: str = "") -> Path:
     stale name would then come back as a directory with no record — blocked for
     `subagent_create` and untouchable for `subagent_remove`.
 
-    **A fork shares its maker's work directory; a subagent that is not a fork
-    owns its own.**  A fork is a temporary copy of its maker's conversation —
-    taken to answer one question and not recorded — so its cabinet and media are
-    the maker's.  A subagent that is not a fork is a persistent agent of the
+    **A subagent owns its work.**  A subagent is a persistent agent of the
     maker's, so its cabinet and media live under its own directory and are
-    removed with it.
-
-    ``subagent=""`` is the maker's own conversation, which uses the agent's
-    directory like a fork does.
+    removed with it.  ``subagent=""`` is the maker's own conversation, which
+    uses the agent's directory.
     """
-    if subagent and not forked(agent, subagent):
+    if subagent:
         return subagent_path(agent, subagent)
     return agents_dir() / _agent_segment(agent)
 
@@ -796,52 +788,6 @@ def _agent_segment(agent: str) -> str:
     return safe_agent_name(agent)
 
 
-def forked(agent: str, subagent: str) -> bool:
-    """Whether *subagent* was made as a fork, read from its own record.
-
-    A missing or unreadable record is not a fork: the directory is then the
-    subagent's own, which is the safe answer for a live subagent.  The record is
-    the same file `subagent_spec` reads; this helper is here rather than in the
-    agent server because every plugin that writes per-conversation work needs
-    the answer, and a plugin must not import another plugin.
-    """
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    path = subagent_path(agent, subagent) / _SUBAGENT_YAML
-    try:
-        record = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return False  # no record is the ordinary state, and is not damage
-    except (OSError, ValueError, YAMLError) as exc:
-        # **A record that cannot be read is not a record that says "not a
-        # fork".**  The directory is the subagent's own either way, which is
-        # the safe answer for a live subagent, but the damage is named: a fork
-        # whose record is lost would otherwise write into its own directory
-        # with nothing said (SDD Appendix C).
-        logger.warning(
-            "the record of %s/%s could not be read, so it is treated as not a fork: %s",
-            agent,
-            subagent,
-            exc,
-        )
-        return False
-    if not isinstance(record, Mapping):
-        # **A file that parsed to nothing is damage too.**  An empty or torn
-        # record loads as `None` (and a hand-written list as a list), which a
-        # plain `isinstance(record, dict)` test would quietly read as "not a
-        # fork".  The answer stays the safe one, but the warning is the trace a
-        # person needs.
-        logger.warning(
-            "the record of %s/%s is not a mapping (%r), so it is treated as not a fork",
-            agent,
-            subagent,
-            record,
-        )
-        return False
-    return record.get("fork") is True
-
-
 def subagent_file(agent: str, subagent: str) -> Path:
     """The record that makes `<agent>/subagents/<subagent>/` a subagent: a file
     inside it.
@@ -859,12 +805,12 @@ def subagent_file(agent: str, subagent: str) -> Path:
     inside `subagents/` (`agent_dir`).
 
     What it holds is the whole of what the subagent *is* — the model it runs on,
-    the role it was made for, whether it was made as a fork, and when it was made
-    — because that is the part of an agent's identity that is neither its
-    conversation (elsewhere: `turns.db` beside this) nor its work (elsewhere
-    again).  **The file is deleted with the directory**, which is what makes a
-    subagent's settings as short-lived as the subagent: nothing else records
-    them, so nothing has to be kept in step when one is removed.
+    the role it was made for, and when it was made — because that is the part of
+    an agent's identity that is neither its conversation (elsewhere: `turns.db`
+    beside this) nor its work (elsewhere again).  **The file is deleted with the
+    directory**, which is what makes a subagent's settings as short-lived as the
+    subagent: nothing else records them, so nothing has to be kept in step when
+    one is removed.
     """
     # **A read must not make the directory it is reading.**  `agent_dir` mkdirs,
     # and this path is asked for by `read_subagent` and by `conversation` for

@@ -205,16 +205,11 @@ def database_path(agent: str, subagent: str = "") -> Path:
     beats isolation as a `WHERE` clause somebody can forget to write — the same
     argument SDD §8.1 makes for agents, applied one level down.
 
-    **A non-fork subagent's store is its own directory**,
+    **A subagent's store is its own directory**,
     `agents/<agent>/subagents/<subagent>/`, because a subagent is an agent that
     belongs to whoever made it rather than a means to an end inside one of that
     agent's turns. Its conversation, its `subagent.yaml` record, its cabinet and
-    its media are its own.
-
-    **A fork has no store of its own.** It is a temporary copy of its maker's
-    conversation, held in memory and never written down, so its context reads
-    the maker's turn log and its cabinet and media are the maker's. Reads go
-    there; writes never do. `work_path` is what resolves the two cases; who lays
+    its media are its own. `work_path` is what resolves the two cases; who lays
     the directory out is
     `slife2.libs.host.paths.agent_dir`, and this function is one line because of
     it: the layout belongs in one place, and the file name in another.
@@ -837,7 +832,7 @@ class TurnStore:
         `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
         and leaves the connection *open*.  On Windows an open handle is a file
         nobody else can delete — `subagent_remove` met exactly that, with a
-        non-fork subagent's own `turns.db` undeletable
+        subagent's own `turns.db` undeletable
         (`slife2.plugins.agent.server.subagent_remove`).  `with connection:`
         here is the commit; the `finally` is the close.
         """

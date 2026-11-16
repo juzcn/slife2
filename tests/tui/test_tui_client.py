@@ -528,7 +528,7 @@ async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
     install(monkeypatch, transport)
     transport.subagents_data = {
         "subagents": [
-            {"name": "scout", "model": "", "role": "subagent", "fork": False},
+            {"name": "scout", "model": "", "role": "subagent"},
         ]
     }
     client = MCPAgentClient("http://test/mcp", agent="jack")
@@ -537,7 +537,7 @@ async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
     found = await client.subagents()
 
     assert sent(transport, "subagents") == [{"agent": "jack"}]
-    assert found == [{"name": "scout", "model": "", "role": "subagent", "fork": False}]
+    assert found == [{"name": "scout", "model": "", "role": "subagent"}]
 
 
 @pytest.mark.asyncio

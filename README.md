@@ -384,7 +384,7 @@ marker at the start of every turn, so a context rebuild cannot drop it, and the
 strip above the prompt shows it while there is one. The statuses are the model's
 own claims, not the harness's observations: nothing in slife2 derives one from a
 tool call. The plan is stored as `plan.yaml` in the conversation's own directory;
-`reset` removes it, and a fork starts from its maker's copy.
+`reset` removes it.
 
 ### Model selection
 
@@ -1118,7 +1118,10 @@ A subagent is an agent that belongs to another agent. It has the maker's tool
 set, its own role-specific system prompt, and its own conversation, but no
 process, no window, no claim on an agent name, and no external identity. It is
 reached only on the local subagent network and runs when something sends it a
-message. `subagent_create` and `subagent_remove` refuse a subagent caller.
+message. `subagent_create` and `subagent_remove` refuse a subagent caller. A
+subagent is a persistent agent with a memory of its own; for one piece of work
+beside the conversation, use an agent task — it runs on the maker's own context
+and answers with one message.
 
 A subagent is created with `subagent_create` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations as
@@ -1141,16 +1144,10 @@ the two networks' groups never overwrite each other.
 | `name` | The subagent's name and directory. |
 | `model` | `provider/model`; empty uses the maker's model. |
 | `role` | A word included in the subagent's prompt. |
-| `fork` | Copy the maker's current conversation as the starting point. A fork's turns are not stored, and it lives only for the session. |
 
-A non-fork subagent lives in `agents/<maker>/subagents/<name>/` with its own
-`turns.db`, `subagent.yaml`, cabinet, and media directory. A fork has only the
-`subagent.yaml` record: it keeps its conversation in memory as a copy of the
-maker's, reads the maker's turn log for context, and shares the maker's cabinet
-and media. A fork is session-lived; the next server start removes every fork
-record. **A fork cannot be pulled into a group**: `subagent_group_set` refuses
-one, and its group traffic is dropped. Scheduling stays with the agent. A
-subagent cannot create or remove a subagent.
+A subagent lives in `agents/<maker>/subagents/<name>/` with its own `turns.db`,
+`subagent.yaml`, cabinet, and media directory. Scheduling stays with the agent.
+A subagent cannot create or remove a subagent.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be
@@ -1192,8 +1189,8 @@ A data directory (a **home**) contains:
       media/                   generated images, video, and audio
       wechat.yaml              this agent's WeChat login
       subagents/
-        <name>/                a non-fork subagent's turns.db, subagent.yaml,
-                               cabinet/ and media/; a fork has only the record
+        <name>/                a subagent's turns.db, subagent.yaml,
+                               cabinet/ and media/
 ```
 
 The tool catalogue sits beside the agent directories because it belongs to the

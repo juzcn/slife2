@@ -27,14 +27,13 @@ from slife2.libs.host.config import (
     _media,
     load,
 )
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
+from slife2.libs.host.paths import agent_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.media import adapters
 from slife2.plugins.media.adapters import (
     DashScopeAIGCAdapter,
     MediaAdapterError,
     OpenAICompatAdapter,
-    media_dir,
     merge_params,
 )
 from slife2.plugins.media.server import (
@@ -1197,18 +1196,3 @@ async def test_saving_an_artifact_goes_off_the_event_loop(
 
     assert Path(answer).read_bytes() == b"RIFF"
     assert any(getattr(func, "__name__", "") == "write_bytes" for func in hopped)
-
-
-def test_a_subagents_media_follows_its_fork_flag(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its media; a fork writes to its maker's."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    agent_dir("jack", "researcher")  # the record's directory; a read does not make it
-    record = subagent_file("jack", "researcher")
-
-    record.write_text("fork: false\n", encoding="utf-8")
-    assert media_dir("jack", "researcher") == agent_dir("jack", "researcher") / "media"
-
-    record.write_text("fork: true\n", encoding="utf-8")
-    assert media_dir("jack", "researcher") == agent_dir("jack") / "media"

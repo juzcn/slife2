@@ -629,11 +629,9 @@ A subagent is an agent that belongs to another agent. A subagent:
 
 - has the maker's tool set, with one exception: `subagent_create` and
   `subagent_remove` refuse a subagent caller (§4.5.3);
-- has its own role-specific system prompt (`subagent.j2`) and its own
-  `subagent.yaml`; a non-fork subagent also has its own stored conversation,
-  cabinet, and media directory, while a fork stores no turns, reads the maker's
-  turn log for context without writing it, and shares the maker's cabinet and
-  media;
+- has its own role-specific system prompt (`subagent.j2`), its own
+  `subagent.yaml`, and its own stored conversation, cabinet, and media
+  directory;
 - has no process, no window, and no claim on an agent name; its conversation MAY
   be watched by a terminal (§4.5.6), and watching is a read rather than a
   window;
@@ -669,40 +667,24 @@ delivers; whether a member answers is the model's own `group_send_message` call.
 
 #### 4.5.1 Directory and record
 
-Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. A non-fork
-subagent has its conversation (`turns.db`), its record (`subagent.yaml`), and its
-own `cabinet/` and `media/` there. A fork has only the record: it is a copy of
-its maker's conversation held in memory, so it stores no turns, reads the
-maker's turn log for context without writing it, and shares the maker's cabinet
-and media. It has no restore or rebuild. That record is removed when the agent
-server next starts: a fork is session-lived, and the start of a session ends the
-forks of the last one.
-
-**A fork is never a group member**: it is temporary, so a roster naming one
-would keep addressing a name nobody answers; creation refuses it, placement does
-not wake it, and its group traffic is dropped. A subagent has no external
-identity of its own: WeChat and the peer-agent network belong to the agent, and
-scheduling stays with the agent.
+Every subagent of `jack` lives under `agents/jack/subagents/<name>/`, with its
+conversation (`turns.db`), its record (`subagent.yaml`), and its own `cabinet/`
+and `media/` there. A subagent has no external identity of its own: WeChat and
+the peer-agent network belong to the agent, and scheduling stays with the agent.
 
 The container level is deliberate: `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker, so a subagent named `cabinet`
 would otherwise collide with the maker's own directory. `subagent.yaml` records
-the model the subagent runs on, the role it was made for, whether it was made as
-a fork, and when it was made. The file is deleted with the directory — or, for a
-fork, when the next session starts. The configuration file holds only
+the model the subagent runs on, the role it was made for, and when it was made.
+The file is deleted with the directory. The configuration file holds only
 machine-wide facts: how many subagents a maker may have, and where the local
 network meets.
 
-#### 4.5.2 Role and fork
+#### 4.5.2 Role
 
 - **`role`** is a word included in the subagent's prompt. The prompt is the
   shipped `subagent.j2`, not the operator's `agent.system_prompt`, because a
   subagent must be told what it is, whose it is, and where its work comes from.
-- **`fork: true`** starts the subagent from a copy of its maker's conversation
-  as it stood when the subagent's conversation starts. Nothing about the fork is
-  stored: its turns are not recorded, it has no stored context to restore, and a
-  restart removes it. The copy is cut back to the last completed exchange,
-  because a provider rejects a conversation ending mid-exchange.
 
 #### 4.5.3 One level only
 
@@ -772,9 +754,9 @@ interrupt of a turn, not a withdrawal of a task, and the two do not line up.
 A terminal can watch a subagent's conversation without becoming its window. The
 agent server exposes two read-only management tools:
 
-- `subagents(agent)` lists the maker's subagent directories with the model, role,
-  and fork flag read from each `subagent.yaml`; it reads the filesystem, not the
-  roster, because the roster connects the mesh and wakes members.
+- `subagents(agent)` lists the maker's subagent directories with the model and
+  role read from each `subagent.yaml`; it reads the filesystem, not the roster,
+  because the roster connects the mesh and wakes members.
 - `watch(agent, subagent)` is a held-open call. Its first progress frame is a
   snapshot of the stored turns — `transcript`'s own read, so history ends at the
   same place for a watcher and a restarted window. A turn in flight is replayed
@@ -940,9 +922,8 @@ A conversation has one plan: a list the model writes whole through
 `plan_write`, each item one line of text and one of `pending`, `active`, `done`
 or `blocked`. The last successful write is the plan; an empty list clears it;
 there are no ids and no transition rules. The file is `plan.yaml` in the
-conversation's own directory, written atomically, removed by `reset` and copied
-by a fork at adoption. A missing file is no plan; an unreadable one fails the
-turn and names the path.
+conversation's own directory, written atomically and removed by `reset`. A
+missing file is no plan; an unreadable one fails the turn and names the path.
 
 The plan is not a turn and is not in the context store. Before every turn the
 agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
@@ -1098,8 +1079,7 @@ Rules:
   (`turn_prompt_note`) is added after the recall and removed before the turn is
   saved (`without_lead`), so it never reaches the row, the index or a rebuild. Its
   payload is a mapping — today `now` and `token-usage` — because a per-turn fact
-  can grow. The agent, its subagents and an agent task all carry it; a fork's
-  turns are never recorded, so its marker lives only in memory.
+  can grow. The agent, its subagents and an agent task all carry it.
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
 
@@ -1173,11 +1153,10 @@ hub whose tool list is not answering, a store that will not restore, a rebuild
 that fails: the message is put at the end of the live conversation as the turn's
 opening message and recorded, so the failure ends with a row rather than with the
 caller's words gone from both places. A picture the turn died before resolving is
-named in an `image_note`, never kept as a part a provider cannot fetch. A fork
-records nothing but keeps the message the same way — the store is what a fork
-does not have, not the conversation. An agent task records nothing at all and
-answers with its failure instead; its answer is a message like any other, and
-this rule is what keeps that message when the turn it arrives on fails too.
+named in an `image_note`, never kept as a part a provider cannot fetch. An agent
+task records nothing at all and answers with its failure instead; its answer is
+a message like any other, and this rule is what keeps that message when the turn
+it arrives on fails too.
 
 **A turn that cannot go on ends with the harness saying so.** A tool's failure
 is text in the result the model reads and the turn carries on; an exception is
@@ -1581,10 +1560,9 @@ the original.
 
 `libs/store/db.py` implements one SQLite file per conversation (conversation
 id): `agents/<agent>/turns.db` for the agent's own conversation, and
-`agents/<agent>/subagents/<name>/turns.db` for a non-fork subagent's. A fork has
-no file of its own; it reads the maker's turn log and never writes it, and its
-`subagent.yaml` is removed when the agent server starts. Isolation is by file: no
-query can reach another agent's turns because they are not in the file. The home
+`agents/<agent>/subagents/<name>/turns.db` for a subagent's. Isolation is by
+file: no query can reach another agent's turns because they are not in the file.
+The home
 a call came from selects which of the agent's directories is read or written. The
 store holds the turn log, the live-context list, and the indexes over the turns.
 
@@ -1713,8 +1691,8 @@ until a pass that chunks and embeds their contents exists (a RAG concern, not a
 cabinet one); until then a file is found by its words.
 
 The cabinet is per conversation: an agent's own conversation has
-`agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
-a fork uses the maker's. **The file is the document.** For every mirrored kind —
+`agents/<agent>/cabinet/`; a subagent has its own under its directory.
+**The file is the document.** For every mirrored kind —
 note, diary, report, dump — the text is written to its file and the file put in
 place before the row's transaction commits, so a filesystem that refuses the
 file takes the row, its keyword text and its vectors back with it, and **there
@@ -1951,9 +1929,7 @@ Rules specific to this system:
     receiver that already applied it unchanged; the repeat re-sends the notice,
     which is how a member that missed the first one catches up.
 13. **Leaving is autonomous, including for the owner.** An owner's departure
-    transfers the group to the first remaining member, or disbands it. A fork is
-    never a member: a roster naming one would keep addressing a name nobody
-    answers.
+    transfers the group to the first remaining member, or disbands it.
 14. **Group traffic is directed, fire-and-forget, and never returns to its
     sender.** One QoS 0 event per recipient on that recipient's own topic, carrying
     the roster and a generation id, so a member that missed a control learns the
@@ -2619,8 +2595,8 @@ model of the kind: a default is the operator's statement, and a typo must not
 spend a paid call on a model nobody named.
 
 Artifacts are written under the conversation's work directory by default: the
-agent's `media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork
-writes to its maker's. A caller that names an `output` path writes there instead
+agent's `media/`, or a subagent's `subagents/<name>/media/`. A caller that names
+an `output` path writes there instead
 — a relative path is relative to that directory, an absolute one is used as
 written. They never go to the process's working directory, which is the runtime
 directory and reconstructible. **An `output` file is replaced only by a complete
@@ -2816,7 +2792,7 @@ The order is a suggested priority.
 | Retrieval over files and dumps | Chunk and embed saved files and dumps so a search reaches their contents. | §8.3 leaves this out on purpose; documents are the largest corpus an agent saves and the one it cannot search by meaning. |
 | Sandboxed jobs | Run `jobs/` code in a child process with declared filesystem and network limits. | Jobs are arbitrary code with the caller's identity. Least privilege is the standard answer, and the plugin boundary already exists to carry it. |
 | Tool progress and cancellation | A long tool reports progress down its call; the window draws it and can cancel that call without ending the turn. | A long media or shell call is a spinner today, and the only lever is `Esc`, which ends the whole turn. |
-| Branch from a turn | Start a new conversation or fork from any stored turn id, leaving the original intact. | Checkpoints are the standard undo an agent user expects; exploration and retry become possible without resetting the conversation, and the fork machinery already knows how to copy one. |
+| Branch from a turn | Start a new conversation from any stored turn id, leaving the original intact. | Checkpoints are the standard undo an agent user expects; exploration and retry become possible without resetting the conversation. |
 | An eval lane | Recorded conversations, a provider fixture, and metrics for tool choice, recall and cost, run when a prompt, a tool schema or a model changes. | A stub model cannot catch a regression in what a real model chooses; eval-driven development is how the prompt and tool surfaces are changed safely. |
 
 ## Appendix A. Invariants
@@ -2911,7 +2887,7 @@ The four shapes an undeclared fallback takes:
 | A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start | A warning naming the path |
 | A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
-| A subagent record cannot be read | Treat it as not a fork | The shared work directory a fork uses | A record that parses | A warning naming the record |
+| A subagent record cannot be read | Read it as absent and use the defaults | The model and role the record held | A record that parses | A warning naming the record |
 | A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
 | No ancestor names this checkout | Use `~/.slife2` | The checkout's data directory | An override, which wins; a marker that cannot be read, which raises | A missing database or config |

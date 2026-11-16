@@ -4689,17 +4689,6 @@ async def test_a_local_group_message_wears_subagent_group_from_the_maker(
     )
 
 
-def test_a_fork_never_receives_group_traffic(tmp_path: Path) -> None:
-    session = local_member(tmp_path, subagent="forked")
-    session.fork = True
-    payload = group_event(sender=AGENT, owner=AGENT, members=(AGENT, "forked"))
-
-    session.mesh._handle_event(directed(payload, "forked"))
-
-    assert session.queue.empty()
-    assert session.groups.get(GROUP) is None
-
-
 @pytest.mark.asyncio
 async def test_a_learned_group_is_saved_and_a_restart_reads_it(
     tmp_path: Path, window: Window
@@ -4929,7 +4918,7 @@ async def test_a_send_to_an_empty_group_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_the_local_group_roster_refuses_unknown_and_forked_members(
+async def test_the_local_group_roster_refuses_unknown_members(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     async def connect(self: Any) -> None:
@@ -4943,9 +4932,6 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
 
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
-        fork = subagent_file(AGENT, "forked")
-        fork.parent.mkdir(parents=True, exist_ok=True)
-        fork.write_text("name: forked\nrole: test\nfork: true\n", encoding="utf-8")
         server = local_build(configured=True)
         async with Client(server) as client:
             with pytest.raises(ToolError, match="subagents"):
@@ -4953,18 +4939,6 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["nobody"]},
                     meta=conversation_meta(AGENT),
-                )
-            with pytest.raises(ToolError, match="forked"):
-                await client.call_tool(
-                    LOCAL.tool(GROUP_SET),
-                    {"group": GROUP, "members": ["forked"]},
-                    meta=conversation_meta(AGENT),
-                )
-            with pytest.raises(ToolError, match="forked subagent"):
-                await client.call_tool(
-                    LOCAL.tool(GROUP_SET),
-                    {"group": GROUP, "members": ["tester"]},
-                    meta=conversation_meta(AGENT, "forked"),
                 )
 
 

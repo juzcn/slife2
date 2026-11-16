@@ -1330,9 +1330,8 @@ class SubagentSettings:
     would be two agents wearing one name.
 
     **What is not here, and not in any config, is anything about *one*
-    subagent.**  The model it runs on, the role it was made for and whether it
-    was made as a fork are in the subagent's own file, inside its own directory,
-    and they are deleted with it
+    subagent.**  The model it runs on and the role it was made for are in the
+    subagent's own file, inside its own directory, and they are deleted with it
     (`slife2.plugins.agent.server.subagent_spec`): a subagent is made today and
     removed tomorrow, so its settings go where its directory goes rather than
     into a file an operator has to keep in step with it.  Its *prompt* is not

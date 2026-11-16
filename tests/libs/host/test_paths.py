@@ -34,7 +34,6 @@ from slife2.libs.host.paths import (
     subagent_file,
     subagent_path,
     turn_dbs,
-    work_dir,
 )
 
 pytestmark = pytest.mark.unit
@@ -320,72 +319,6 @@ def test_a_subagent_stays_inside_its_parent(
             agent_dir("jack", name)
 
     assert not (tmp_path / "agents" / "elsewhere").exists()
-
-
-def test_a_fork_shares_its_makers_work_directory(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its work; a fork is a copy and shares.
-
-    The cabinet and media are work products, so where they land follows the
-    conversation rather than the process: a persistent subagent has its own
-    directory, a fork has its maker's.  The record inside the subagent's
-    directory is what says which it is.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    jack = agent_dir("jack")
-    researcher = agent_dir("jack", "researcher")
-    record = subagent_file("jack", "researcher")
-
-    record.write_text("fork: false\n", encoding="utf-8")
-    assert work_dir("jack", "researcher") == researcher
-    assert work_dir("jack") == jack
-
-    record.write_text("fork: true\n", encoding="utf-8")
-    assert work_dir("jack", "researcher") == jack
-
-    record.unlink()
-    assert work_dir("jack", "researcher") == researcher, (
-        "a missing record is not a fork"
-    )
-
-
-def test_a_damaged_fork_record_is_named_not_silently_read(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """**A record that cannot be read is not a record that says "not a fork".**
-
-    The directory is the subagent's own either way, which is the safe answer
-    for a live subagent; what the warning adds is that a fork whose record was
-    lost would otherwise write into its own directory with nothing said.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    researcher = agent_dir("jack", "researcher")
-    subagent_file("jack", "researcher").write_text(
-        "fork: [unclosed\n", encoding="utf-8"
-    )
-
-    with caplog.at_level("WARNING"):
-        assert work_dir("jack", "researcher") == researcher
-
-    assert any("not a fork" in one.getMessage() for one in caplog.records)
-
-
-def test_an_empty_fork_record_is_named_too(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """**A file that parsed to nothing is damage, not absence.**  A zero-byte
-    record loads as `None` and the old mapping check read it as "not a fork"
-    without a word — the one arm of the read that did not name what it found.
-    The answer stays the safe one; the warning is the trace."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    researcher = agent_dir("jack", "researcher")
-    subagent_file("jack", "researcher").write_text("", encoding="utf-8")
-
-    with caplog.at_level("WARNING"):
-        assert work_dir("jack", "researcher") == researcher
-
-    assert any("not a mapping" in one.getMessage() for one in caplog.records)
 
 
 def test_reading_a_subagent_record_does_not_create_the_subagent(

@@ -58,9 +58,8 @@ MEDIA_DIR = "media"
 def media_dir(agent: str, subagent: str = "") -> Path:
     """Where an artifact goes by default: `work_dir(agent, subagent)/media/`.
 
-    **Per conversation, with forks sharing their maker's.**  A non-fork subagent
-    owns its media; a fork is a temporary copy of its maker's conversation and
-    writes to the maker's directory.
+    **Per conversation.**  A subagent owns its media; the agent's own
+    conversation writes to the agent's directory.
 
     **The default, not a boundary.**  A caller that names a file does so with a
     tool's `output` path; this directory is where an artifact lands when it

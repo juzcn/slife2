@@ -650,8 +650,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: Whose cabinet a call is about, **refused rather than guessed**.  One
     #: cabinet serves every agent, and which one a call is for is a fact only the
     #: caller has — so a call that says nothing is refused rather than answered
-    #: with somebody else's diary.  The pair is the conversation id: a non-fork
-    #: subagent resolves to its own cabinet, and a fork to its maker's.
+    #: with somebody else's diary.  The pair is the conversation id: a subagent
+    #: resolves to its own cabinet, and the maker to its own.
     conversation_of = conversation_reader("cabinet to act on", "the cabinet")
 
     async def cabinet(ctx: Context) -> CabinetStore:

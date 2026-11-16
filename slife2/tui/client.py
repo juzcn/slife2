@@ -161,8 +161,8 @@ class AgentClient(Protocol):
         `subagent_list` is a different question — it connects the mesh and wakes
         members to answer, neither of which a picker may do.
 
-        Each entry has `name`, `model` (empty for the maker's own), `role` and
-        `fork`.  A list this build cannot read raises rather than answering
+        Each entry has `name`, `model` (empty for the maker's own) and `role`.
+        A list this build cannot read raises rather than answering
         empty: an agent with no subagents is a real, empty list, and the two
         must not look alike (SDD Appendix C).
         """

@@ -103,7 +103,7 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import forked, home, home_key, in_home, subagent_dirs
+from slife2.libs.host.paths import home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -362,12 +362,6 @@ class Session:
     #: agent`), so it is also what a delivery that is not the window's has to
     #: address its turn with (`run_turn`).
     subagent: str = ""
-    #: Whether this member was made as a **fork** — a temporary copy of its
-    #: maker's conversation.  Read once when the session is built
-    #: (`paths.forked`), because the record does not change while a session
-    #: lives.  A fork is never a group member: it ends with the next start and
-    #: would leave a name behind that its maker's roster still addressed.
-    fork: bool = False
     #: The groups this member knows on this network, loaded from the member's
     #: own groups file — `groups.yaml` for the peer network and
     #: `subagent-groups.yaml` for the local one
@@ -914,22 +908,12 @@ def _wire(session: Session) -> None:
     def on_group_message(data: dict[str, Any]) -> None:
         """A group message: learn the roster, then hand the words to the turn.
 
-        **A fork is dropped here as well as refused at `group_set`.**  A fork is
-        a temporary copy of its maker's conversation; a stale roster that still
-        named it must not wake it for a group it can never belong to.
-
         The store is updated before delivery, so a member that missed the
         invitation has the group's name in `group_list` when it answers.  The
         marker and channel use the validated wire names verbatim — `safe_name`
         would collapse whitespace and silently rename an identity the store and
         the roster both key by.
         """
-        if session.fork:
-            logger.debug(
-                "a2a_group_message_fork agent=%s — dropped",
-                describe((session.agent, session.subagent)),
-            )
-            return
         event = group_store.parse_event(data)
         if event is None or event.kind != group_store.GROUP_MESSAGE:
             logger.warning(
@@ -958,8 +942,6 @@ def _wire(session: Session) -> None:
         spend a window line and a model's attention on bookkeeping.  The next
         group message carries the same roster anyway.
         """
-        if session.fork:
-            return
         event = group_store.parse_event(data)
         if event is None or event.kind not in group_store.GROUP_KINDS:
             logger.warning(
@@ -1462,9 +1444,6 @@ def build_server(
                     net=net,
                     mesh=mesh_for(agent, subagent),
                     subagent=subagent,
-                    # A fork's record is read once; it ends with the next start
-                    # and is never a group member.
-                    fork=forked(agent, subagent) if subagent else False,
                     # **Per network**: the peer server and the local one both
                     # serve this member's directory, and one shared file would
                     # be a store each process rewrites from its own stale copy.
@@ -1695,11 +1674,6 @@ def build_server(
         subscribed — the same silent loss `place_for` exists to prevent, one
         name over.  The maker's session is the empty-subagent one and is
         connected explicitly here.
-
-        **A fork is skipped.**  `group_set` refuses to put one in a roster; this
-        is the other half of that rule, for a stale roster that still names one:
-        a temporary conversation must not be woken for a group it can never
-        belong to.
         """
         if net is not LOCAL:
             return
@@ -1709,11 +1683,6 @@ def build_server(
             if peer == agent:
                 await connected(agent, USED, "")
             elif peer in membership(agent):
-                if forked(agent, peer):
-                    logger.debug(
-                        "a2a_group_fork_skipped agent=%s member=%s", agent, peer
-                    )
-                    continue
                 await connected(agent, MEMBER, peer)
 
     def start_broker(config_now: Config) -> None:
@@ -2383,13 +2352,6 @@ def build_server(
     # wire as a directed event.  The tools below are the only writers; the
     # receive path (`_wire`) is the other half.
 
-    def refuse_fork(agent: str, mine: str) -> None:
-        """A forked subagent is temporary, so it is never part of a group."""
-        if net is LOCAL and mine and forked(agent, mine):
-            raise ToolError(
-                "a forked subagent is temporary and cannot take part in groups."
-            )
-
     def unknown_group(group: str) -> ToolError:
         return ToolError(
             f"no group named {group!r} — {net.tool(GROUP_LIST)} shows the ones "
@@ -2404,7 +2366,7 @@ def build_server(
             raise ToolError(f"the group could not be saved: {exc}") from exc
 
     def group_roster_for_local(agent: str, roster: tuple[str, ...]) -> None:
-        """Refuse a local roster naming anything but real, non-fork members."""
+        """Refuse a local roster naming anything but real members."""
         known = membership(agent) | {agent}
         unknown = [name for name in roster if name not in known]
         if unknown:
@@ -2412,12 +2374,6 @@ def build_server(
                 f"{', '.join(repr(name) for name in unknown)} is not a member of "
                 f"this local network — a group may name the agent {agent!r} "
                 f"itself or one of its subagents."
-            )
-        forks = [name for name in roster if name != agent and forked(agent, name)]
-        if forks:
-            raise ToolError(
-                f"{', '.join(repr(name) for name in forks)} is a forked "
-                f"subagent; a fork is temporary and cannot join a group."
             )
 
     @mcp.tool(
@@ -2439,9 +2395,7 @@ def build_server(
         still learns the group.
 
         On the local network a member must be the maker itself or one of its
-        subagents, and a **forked** subagent is refused: a fork is a temporary
-        copy of its maker's conversation and ends with the next start, so a
-        roster naming one would keep addressing a name nobody answers.
+        subagents.
 
         Args:
             group: The group's name. Naming one you own replaces its roster.
@@ -2449,7 +2403,6 @@ def build_server(
                 omitted when replacing an existing roster is removed.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         try:
             if not group_store.valid_group_name(group):
@@ -2611,7 +2564,6 @@ def build_server(
             group: The group to disband, by name.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
         found = session.groups.get(group)
@@ -2660,7 +2612,6 @@ def build_server(
             group: The group to leave, by name.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
         found = session.groups.get(group)
@@ -2749,7 +2700,6 @@ def build_server(
             message: What to say; `@name`, `@all` and `@所有人` address people in it.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         if not isinstance(message, str) or not message.strip():
             raise ToolError("a group message cannot be empty.")
         me = member_name(sender, mine)
