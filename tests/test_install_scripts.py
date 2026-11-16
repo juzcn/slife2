@@ -2153,15 +2153,11 @@ def test_seed_never_overwrites_a_live_file(tmp_path: Path) -> None:
     assert "left untouched" in result.stdout
 
 
-def test_seed_places_the_guide_and_leaves_a_persons_copy_alone(
-    tmp_path: Path,
-) -> None:
-    """`AGENTS.md` is seeded like the config, not like `skills/`.
+def test_seed_overwrites_the_guide(tmp_path: Path) -> None:
+    """`AGENTS.md` is the system's delivery, overwritten like `skills/`.
 
-    It is a document a person edits — the model's guide to its tools, and the
-    thing an operator changes per home — so a reinstall never overwrites it: the
-    shipped copy lands beside it as a reference.  A missing one is created,
-    exactly as a missing `slife2.yaml` is.
+    The guide is the model's, not the operator's: a reinstall replaces the
+    home's copy with the shipped one and writes no reference beside it.
     """
     root = tmp_path / "repo"
     root.mkdir()
@@ -2171,15 +2167,14 @@ def test_seed_places_the_guide_and_leaves_a_persons_copy_alone(
     home = tmp_path / "home"
     home.mkdir()
     (home / "slife2.yaml").write_text("shipped: true\n", encoding="utf-8")
-    (home / "AGENTS.md").write_text("my guide\n", encoding="utf-8")
+    (home / "AGENTS.md").write_text("old guide\n", encoding="utf-8")
 
     result = _seed(source, home)
 
     assert result.returncode == 0, result.stderr
-    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "my guide\n"
-    assert (home / "AGENTS-default.md").read_text(encoding="utf-8") == (
-        "shipped guide\n"
-    )
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "shipped guide\n"
+    assert not (home / "AGENTS-default.md").exists()
+    assert "overwrote" in result.stdout
 
 
 def test_seed_creates_a_missing_guide(tmp_path: Path) -> None:
@@ -2195,6 +2190,23 @@ def test_seed_creates_a_missing_guide(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert (home / "AGENTS.md").read_text(encoding="utf-8") == "shipped guide\n"
+
+
+def test_seed_dry_run_says_the_guide_would_be_overwritten(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    source = root / "slife2.yaml"
+    source.write_text("shipped: true\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("shipped guide\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "AGENTS.md").write_text("old guide\n", encoding="utf-8")
+
+    result = _seed(source, home, "--dry-run")
+
+    assert result.returncode == 0, result.stderr
+    assert "would overwrite" in result.stdout
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "old guide\n"
 
 
 def test_seed_does_nothing_in_a_checkout(tmp_path: Path) -> None:

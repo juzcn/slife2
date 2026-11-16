@@ -99,7 +99,7 @@ providers, and the WeChat bridge.
 | OpenAI Responses API | Model wire protocol. |
 | Anthropic Messages API | Model wire protocol. |
 | `slife2.yaml` | Annotated configuration reference shipped with the project. |
-| `AGENTS.md` | The model's guide to its tools: a home document beside the configuration, shipped with the project and edited by an operator. |
+| `AGENTS.md` | The model's guide to its tools: a home file beside the configuration, shipped with the project and installed into every home; the system's deliverable, not a document to edit. |
 
 ### 1.6 Document conventions
 
@@ -532,11 +532,13 @@ least one embedding provider: there is no built-in provider or embedder.
 
 `AGENTS.md` is the second required document. It is the model's guide to its own
 tools, included in the system prompt every conversation opens with, and read
-from the home at that moment, so an edit reaches the next conversation. A home
-without one is refused where the prompt is rendered, naming the file. The
-installer seeds it under the configuration's rule: a live file is never
-overwritten, and a changed shipped copy is written beside it as
-`AGENTS-default.md`. The installer takes its requirements from the shipped
+from the home at that moment, so a replacement reaches the next conversation.
+**It is the system's deliverable, not the operator's document**: a person may
+read it, an edit is not supported, and a reinstall replaces it — as a reinstall
+replaces `skills/` and `jobs/` — with no `AGENTS-default.md` beside it. A home
+without one is refused where the prompt is rendered, naming the file. What a
+person wants to add to the prompt goes in a template of their own, named by
+`agent.system_prompt`. The installer takes its requirements from the shipped
 `slife2.yaml`, never the live one: the live file is the server's, may lag a
 release, and a merge is owed by hand — an upgrade must not wait on it.
 
@@ -2735,7 +2737,6 @@ The following are not implemented in this version:
 | A cap on total agent-task work | `max_running` bounds concurrency; a rate is the missing number. | Total work over time is unbounded. |
 | A cap on the number of conversations | The inbox is capped; the number of loops is not. | A client can create conversations without a machine-wide limit. |
 | A visible agent-task progress line | The four tools are the model's; the window has no line for a running task. | A person's only lever is to ask the model. |
-| A word to the model about the loaded set | The tool descriptions explain themselves. | A model may not use loading unless it reads them. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
 | A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
 | Background work inside an agent task | A task runs one turn and has no second turn to receive a result. | The opening template tells the model not to use `_async` or start another task. |

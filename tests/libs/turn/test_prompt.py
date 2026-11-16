@@ -1,11 +1,11 @@
-"""The guide is the home's, and only the system prompt reads it.
+"""The guide is the system's, and only the system prompt reads it.
 
-`AGENTS.md` — the model's guide to its own tools — is a document a person writes
-beside the configuration, not a template shipped inside the package.  These
-tests hold that boundary: the system prompt carries the home's text, a prompt of
-one's own can place it, an instruction template reads nothing from the home, and
-a home without the guide is refused by name rather than rendered with a blank
-section.
+`AGENTS.md` — the model's guide to its own tools — is a system-delivered file
+installed beside the configuration, not a template shipped inside the package.
+These tests hold that boundary: the system prompt carries the home's text, a
+prompt of one's own can place it, an instruction template reads nothing from the
+home, and a home without the guide is refused by name rather than rendered with
+a blank section.
 """
 
 from __future__ import annotations

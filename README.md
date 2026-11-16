@@ -119,11 +119,12 @@ lines print the `source` line to run, or open a new terminal.
 Python 3.13 is installed only when the machine has none; `uv python upgrade 3.13`
 moves it to a newer patch. The installer seeds the bundled `skills/` and `jobs/`
 into the data directory, **overwriting files of the same name**; a skill or job
-you added under another name stays untouched. `AGENTS.md` and `slife2.yaml` are
-**never overwritten**: a changed shipped copy is written beside them as
-`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge. What
-the installer installs is read from the **shipped** `slife2.yaml`, never your
-home's file: an upgrade does not wait for that merge.
+you added under another name stays untouched. `AGENTS.md` is overwritten too —
+it is the system's guide to the model's tools, not a file to edit. `slife2.yaml`
+is **never overwritten**: a changed shipped copy is written beside it as
+`slife2-default.yaml` for you to compare and merge. What the installer installs
+is read from the **shipped** `slife2.yaml`, never your home's file: an upgrade
+does not wait for that merge.
 
 From a source checkout, run the installer there:
 
@@ -176,7 +177,8 @@ export DEEPSEEK_API_KEY=...
 
 `slife2.yaml` is required — there is no built-in configuration. The installer
 seeds the shipped file into a new home; a checkout uses the `slife2.yaml` beside
-its code. `AGENTS.md` is required too, and follows the same rule.
+its code. `AGENTS.md` is required too; the installer writes it, and a reinstall
+replaces it.
 
 ### Docker
 
@@ -439,8 +441,9 @@ a reference. slife2 reads only `slife2.yaml`.
 
 `AGENTS.md` sits beside the configuration and is required as well. It is the
 model's guide to its tools, included in the system prompt every conversation
-opens with; an edit reaches the next conversation. The installer seeds it under
-the configuration's rule, writing `AGENTS-default.md` when your copy differs.
+opens with. It is the system's deliverable, not a file to edit: a reinstall
+replaces it, and there is no `AGENTS-default.md`. A prompt addition of your own
+belongs in a template named by `agent.system_prompt`.
 
 `slife2.yaml` is safe to check in. It should contain no secrets; every credential
 is a `${VAR}` reference resolved at runtime.

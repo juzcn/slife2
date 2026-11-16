@@ -1,12 +1,13 @@
 """The facts the installer needs from inside the project.
 
-`seed` puts the shipped configuration and the model's guide (`AGENTS.md`)
-where slife2 will read them, without ever overwriting a file the user already
-has, and copies the bundled `skills/` and
-`jobs/` into the home **overwriting files of the same name** — the content
-update, and deliberately not the versioned-backup dance the old installer did:
-the bundle is the authority, and a person who edits a seeded file edits their
-copy.  `require` reads the *shipped* configuration with the project's own loader
+`seed` puts the shipped configuration, the model's guide (`AGENTS.md`) and the
+bundled `skills/` and `jobs/` where slife2 will read them, with **two update
+rules**: `slife2.yaml` is the operator's document and is never overwritten — a
+changed shipped copy is written beside it as `slife2-default.yaml` — while
+`AGENTS.md`, `skills/` and `jobs/` are the system's delivery and a reinstall
+replaces them.  `AGENTS.md` is the model's guide: a person may read it in the
+home, but editing it is not supported and there is no reference copy to merge.
+`require` reads the *shipped* configuration with the project's own loader
 and prints every external program it names, with the place that names it — and,
 for a `cli:` entry, the line that installs it.  The home's `slife2.yaml` is the
 server's file and may lag a release; it is never the installer's source of
@@ -39,13 +40,14 @@ CONFIG_NAME = "slife2.yaml"
 #: name slife2 never reads: `find_config_path` looks for `slife2.yaml` only.
 REFERENCE_NAME = "slife2-default.yaml"
 
-#: The model's guide to its tools, seeded beside the configuration.  The name
-#: is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
+#: The model's guide to its tools, delivered beside the configuration.  The
+#: name is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
 #: stdlib-only and runs before the package is importable; the two spellings must
 #: stay one name, or the installer writes a file the prompt never finds.
+#:
+#: **The guide is the system's file, not the operator's**: a reinstall replaces
+#: it, as it replaces a bundled skill or job (`_seed_over`).
 AGENTS_NAME = "AGENTS.md"
-#: Its reference copy, for the configuration's reason.
-AGENTS_REFERENCE_NAME = "AGENTS-default.md"
 
 
 def _say(message: str) -> None:
@@ -73,9 +75,9 @@ def _seed_file(
     *reference_name* when it has one.  The second name is a reference for a
     person to compare and merge, not something slife2 reads.
 
-    Both files seeded this way — the configuration and the model's guide — are
-    documents a person edits, which is why neither is overwritten: the shipped
-    copy is advice, and the live file is theirs.
+    The configuration is the one document seeded this way: it is the operator's
+    file, so it is never overwritten — the shipped copy is advice, and the live
+    file is theirs.
     """
     if not source.is_file():
         _warn(
@@ -130,6 +132,71 @@ def _seed_file(
 #: Both are things a person or a model *uses*, not project source: `skills/`
 #: ships the playbooks and `jobs/` ships the code-defined tools.
 SEED_TREES = ("skills", "jobs")
+
+
+def _seed_over(
+    source: Path,
+    home: Path,
+    *,
+    name: str,
+    label: str,
+    dry_run: bool,
+) -> int:
+    """Copy the shipped *name* into *home*, replacing the home's copy.
+
+    **Overwrite is the whole update story**, the rule `seed_trees` follows: the
+    file is the system's delivery, not the operator's document.  `AGENTS.md` is
+    the model's guide, visible in the home so a person can read it, and a local
+    edit is unsupported — the next install replaces it.  There is no reference
+    copy, because there is nothing to merge.
+
+    A checkout's own file is already the live one, so seeding it beside itself
+    is a no-op.  A copy that fails is a warning, not a fatal install: the
+    configuration is in place, the home keeps whatever guide it had, and the
+    fix is to close whatever holds the file and run the installer again.
+    """
+    if not source.is_file():
+        _warn(
+            f"no shipped {name} at {source}; the home gets no {name}, and "
+            f"slife2 requires one.",
+            label,
+        )
+        return 0
+
+    try:
+        source = source.resolve()
+        home = home.resolve()
+        live = home / name
+        if source.parent == home:
+            _say(
+                f"{label}: checkout detected; {live} is the live file; nothing to seed."
+            )
+            return 0
+        shipped = source.read_bytes()
+        if live.is_file() and live.read_bytes() == shipped:
+            _say(f"{label}: {live} already matches the shipped {name}.")
+            return 0
+        existed = live.exists()
+        if dry_run:
+            verb = "overwrite" if existed else "create"
+            _say(f"{label}: would {verb} {live} from the shipped {name}.")
+            return 0
+        home.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, live)
+        if existed:
+            _say(f"{label}: overwrote {live} with the shipped {name}.")
+        else:
+            _say(f"{label}: created {live} from the shipped {name}.")
+        return 0
+    except OSError as exc:
+        print(
+            f"{label}: {exc}\n"
+            "  the configuration is in place and the install continues; only "
+            f"the shipped {name} could not be written. Close whatever holds the "
+            "file and run the installer again.",
+            file=sys.stderr,
+        )
+        return 0
 
 
 def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
@@ -189,15 +256,15 @@ def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
 
 
 def seed(source: Path, home: Path, dry_run: bool) -> int:
-    """Place the shipped configuration and guide, and the bundled skills and jobs.
+    """Place the shipped documents, and the bundled skills and jobs.
 
-    One step, the same source root, and **two update rules in it**: the
-    documents a person edits (`slife2.yaml`, `AGENTS.md`) keep their own rule —
-    the live file is never overwritten, and a changed shipped one is written
-    beside it as a reference — while `skills/` and `jobs/` are copied over the
-    home with files of the same name replaced.  A checkout whose home is the
-    checkout itself is a no-op for all of them; a home pointed elsewhere from a
-    checkout gets the same seeding as an installed one.
+    One step, the same source root, and **two update rules in it**: `slife2.yaml`
+    is the operator's document — the live file is never overwritten, and a
+    changed shipped one is written beside it as a reference — while `AGENTS.md`,
+    `skills/` and `jobs/` are the system's delivery and are copied over the home
+    with files of the same name replaced.  A checkout whose home is the checkout
+    itself is a no-op for all of them; a home pointed elsewhere from a checkout
+    gets the same seeding as an installed one.
     """
     code = _seed_file(
         source,
@@ -209,16 +276,13 @@ def seed(source: Path, home: Path, dry_run: bool) -> int:
     )
     if code:
         return code
-    code = _seed_file(
+    _seed_over(
         source.parent / AGENTS_NAME,
         home,
         name=AGENTS_NAME,
-        reference_name=AGENTS_REFERENCE_NAME,
         label=AGENTS_NAME,
         dry_run=dry_run,
     )
-    if code:
-        return code
     return seed_trees(source.parent, home, dry_run)
 
 

@@ -14,9 +14,9 @@ template and one f-string.
 
 **The two entry points are the difference between the prompt and an
 instruction.**  `render_system_prompt` puts the home's **`AGENTS.md`** — the
-guide to the model's tools, a document a person writes beside the config — into
-the context as `agents_md`, so the shipped `system.j2` opens with it and a
-prompt of one's own can put it where it likes.  `render_instruction` is for
+system-delivered guide to the model's tools, beside the config — into the
+context as `agents_md`, so the shipped `system.j2` opens with it and a prompt of
+one's own can put it where it likes.  `render_instruction` is for
 the instruction templates, which are one turn's text and the same in every
 home; it reads nothing from the home, and a template it renders may not ask
 for the guide.
@@ -31,7 +31,7 @@ because the server is shared, so two instances on one server are two names askin
 the same process.  Rendering once would make the first caller's name everybody's.
 Rendering it per *turn* would be the same mistake one size smaller: a
 conversation's agent cannot change, so there would be nothing to re-render for.
-`AGENTS.md` is read at that same moment, which is what makes an edit to it reach
+`AGENTS.md` is read at that same moment, which is what makes a replacement reach
 the next conversation rather than the next restart.
 
 Jinja2 caches compiled templates, so rendering per turn costs a dict lookup and
@@ -134,8 +134,9 @@ def render_system_prompt(template: str | Path | None, **context: object) -> str:
     required: a home has one beside `slife2.yaml`, exactly as it has the config,
     and a missing one is a `ConfigError` naming the file rather than a prompt
     that silently opens without the guide.  It is read here rather than once at
-    startup because it is a document a person edits — an edit reaches the next
-    conversation, as an edit to the config reaches the next turn.
+    startup because it is the installer's to replace — a reinstalled guide
+    reaches the next conversation, as an edit to the config reaches the next
+    turn.
 
     Raises:
         ConfigError: If the template or `AGENTS.md` is missing, unreadable, or
@@ -161,7 +162,7 @@ def _agents_md() -> str:
             f"no {AGENTS_DOC} in {path.parent}: a home has one beside "
             "slife2.yaml — the model's guide to its tools, which the system "
             "prompt opens with — and slife2 has none built in. The installer "
-            "seeds one; edit that, or write your own there."
+            "writes it; run the installer again to restore it."
         ) from None
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc

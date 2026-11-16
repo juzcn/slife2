@@ -112,8 +112,9 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 
 只有机器上没有 Python 3.13 时才会安装它；`uv python upgrade 3.13` 可升级到更新的
 补丁版本。安装器会把随附的 `skills/` 和 `jobs/` 放入数据目录，**同名文件会被覆盖**；
-用其他名字添加的 skill 或 job 不受影响。`AGENTS.md` 和 `slife2.yaml` **永不覆盖**：
-随附版本有变化时，会写回 `AGENTS-default.md` / `slife2-default.yaml` 供你比较合并。
+用其他名字添加的 skill 或 job 不受影响。`AGENTS.md` 同样会被覆盖——它是系统交付的
+模型工具指南，不是供你编辑的文件。`slife2.yaml` **永不覆盖**：随附版本有变化时，会
+写回 `slife2-default.yaml` 供你比较合并。
 
 从源码检出目录运行安装器：
 
@@ -163,7 +164,8 @@ export DEEPSEEK_API_KEY=...
 ```
 
 `slife2.yaml` 是必需的——没有内置配置。安装器会把随附文件放入新的 home；源码检出
-直接使用代码旁的 `slife2.yaml`。`AGENTS.md` 同样必需，规则相同。
+直接使用代码旁的 `slife2.yaml`。`AGENTS.md` 同样必需；它由安装器写入，重装时会被
+替换。
 
 ### Docker
 
@@ -391,8 +393,8 @@ embedding provider。文件缺失时启动停止，并用一行错误指出搜�
 `slife2.yaml`。
 
 `AGENTS.md` 与配置并列，同样必需。它是模型对自己工具的指南，包含在每个对话开头的
-system prompt 中；修改后下一个对话即可读到。安装器按配置的规则放置它：你的副本有
-差异时写 `AGENTS-default.md`。
+system prompt 中。它是系统交付物，不是供人编辑的文件：重装时会被覆盖，也不会生成
+`AGENTS-default.md`。想给提示词加内容，使用 `agent.system_prompt` 指定的自定义模板。
 
 `slife2.yaml` 可以安全地提交到版本库，它不应包含秘密；每个凭据都是运行时解析的
 `${VAR}` 引用。
