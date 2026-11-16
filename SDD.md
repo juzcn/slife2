@@ -2789,9 +2789,6 @@ the field arrives as a test that fails without the fix.
 Each is verified against the code and, where reachability allows, reproduced.
 None blocks the shipped flows; each is a state the design has not closed.
 
-- **`turn_summarize` without an id inside an agent task.** The tool answers
-  `captured` and writes nothing at the save point — and a task records no turn,
-  so the annotation has no row to land on. An explicit earlier `turn_id` works.
 - **A rebuild's non-writing exits do not compare with the store.** The
   `no_decision` and `context_sufficient` branches return the caller's snapshot
   without reading the live-context list, and the compare-and-set only runs on
