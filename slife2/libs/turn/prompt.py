@@ -52,6 +52,21 @@ TEMPLATE_DIR = Path(__file__).parent / "templates"
 #: The template used when the config names none.
 DEFAULT_TEMPLATE = "system.j2"
 
+#: The system prompt a subagent's conversation opens with.  **Not the template
+#: an agent's own conversation uses** (`agent.system_prompt`): the two have
+#: different things to say — this one says what a subagent is, whose it is, and
+#: where its work comes from — and an operator's prompt for their own agent
+#: cannot say any of that.  A bare name, so it is looked up among the templates
+#: shipped beside `system.j2`.
+#:
+#: **One template for every role, for now.**  `role` reaches it as a word ("You
+#: are scout, one of jill's subagents — your role is code reviewer") and not yet
+#: as a choice of *file*: a per-role template is the step this design leaves open,
+#: and it is left open on purpose rather than guessed at — a role that selects
+#: `prompts/<role>.j2` needs an answer for a role with no file, and that answer
+#: is a design decision.
+SUBAGENT_PROMPT = "subagent.j2"
+
 
 class _NoGuide:
     """What `render_instruction` puts where the guide would be: a mistake if printed.

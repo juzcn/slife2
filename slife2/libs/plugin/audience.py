@@ -140,9 +140,10 @@ DATA_DIR = "data_dir"
 #: the conversation's identity — `conversation_of`, `home_of` and the state key
 #: `conversation_key` read it — and a turn is not part of who a conversation is.
 #: A separate key also keeps the token out of `forwarded_conversation`, which
-#: the hub sends on to whichever server runs a tool: a model backend or a
-#: context store needs it to join its lines to the turn, a stranger's server
-#: does not.
+#: forwards the conversation's identity and nothing else; a proxy that has to
+#: make the token reach its far end adds it beside that (`slife2-toolhub`'s
+#: `call_tool` does, because a live-conversation tool needs it to tell its own
+#: turn from another one on the same id).
 #:
 #: An opaque value, not the store's rowid: the rowid does not exist until the
 #: turn is recorded, and the lines this must join are written before that

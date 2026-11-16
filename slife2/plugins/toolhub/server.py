@@ -213,6 +213,8 @@ from slife2.libs.plugin.audience import (
     for_the_model,
     forwarded_conversation,
     request_meta,
+    turn_of,
+    with_turn,
 )
 from slife2.libs.plugin.family import settle_attempts
 from slife2.libs.plugin.protocol import (
@@ -3435,6 +3437,13 @@ def build_server(
         nothing here *adds* to it: what the caller said it was is the whole of
         what the far end is told.
 
+        **The turn rides beside the conversation**, and for the same reason: the
+        conversation id alone cannot tell the agent server's live turn from an
+        agent task standing in for the same conversation, and a live-conversation
+        tool that resolved the loop by id alone would act on somebody else's
+        turn.  The token is the caller's, forwarded as it is; a call that named
+        none (a server API, a test) carries none.
+
         Args:
             name: The tool's advertised name — its own for ours, `server__tool`
                 for somebody else's (`model_name`).
@@ -3465,7 +3474,10 @@ def build_server(
                 return {"text": f"{name} failed: {exc}", "ok": False}
             return {"text": as_tool_text(answer), "ok": True}
 
-        forwarded = forwarded_conversation(request_meta(ctx))
+        forwarded = with_turn(
+            forwarded_conversation(request_meta(ctx)),
+            turn_of(request_meta(ctx)),
+        )
         row = await catalogue.route(name)
         if row is None:
             # Not routable *yet*, which is not the same as unknown: a server may

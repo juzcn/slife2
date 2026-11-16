@@ -208,6 +208,14 @@ CHECK_NEW_INPUT = "_check_new_input"
 #: two names that act on a live conversation are spelled in one place.
 ATTACH_IMAGE = "attach_image"
 
+#: **The tools that act on a live turn's own message list.**  They are the two
+#: the agent server serves against its loop: the cut-in takes a queued message
+#: and the attachment injects a part into the turn's last user message.  A
+#: server that runs a turn of its own on the same conversation id — an agent task
+#: — must serve them against *its* list instead, because the id alone cannot
+#: tell the two loops apart (`slife2.plugins.agent_task.server`).
+LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
+
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut
 #: short with it (`AgentLoop.run_turn`), and a rebuilt list repairs an orphaned

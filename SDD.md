@@ -909,11 +909,12 @@ The harness reaches the cabinet directly for `dump_save`, because that tool
 carries no audience mark; the model's routes back are `dump_read` and
 `dump_grep`.
 
-**An agent task has no cabinet client**, and its messages are not recorded. Its
-loop gets a `Compress` that cuts an over-budget result to the same byte bound
-with a marker that promises no file (`dumps.cut`); the bound holds, the tail is
-gone, and the model can call the tool again. The dump is the agent
-conversation's recovery convenience, not the bound itself.
+**An agent task writes no dumps**, and its messages are not recorded. Its loop
+gets a `Compress` that cuts an over-budget result to the same byte bound with a
+marker that promises no file (`dumps.cut`); the bound holds, the tail is gone,
+and the model can call the tool again. The dump is the agent conversation's
+recovery convenience, not the bound itself. A task opens the cabinet for one
+thing only: resolving an `[Image:…]` key its own `attach_image` was handed.
 
 #### 5.2.5 Fallbacks
 
@@ -935,7 +936,7 @@ The plan is not a turn and is not in the context store. Before every turn the
 agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
 removed before the turn is saved and re-derived from the file every turn: a
 rebuild chooses turns and never decides about the plan, and the prompt cache's
-prefix is untouched. A task runs on the agent's own conversation and sees the
+prefix is untouched. A task runs on the maker's own conversation and sees the
 same plan.
 
 The harness stores, validates, replays and draws; it never derives a status,
@@ -2026,17 +2027,19 @@ a profile message.
 
 ### 9.3 Agent tasks
 
-`plugins/agent_task/` runs one turn of the agent's own on a description, and the
-answer comes back as a message. It is a separate mechanism from a subagent: it
-runs on the agent's own context, has no address of its own, records nothing, and
-accepts no second message.
+`plugins/agent_task/` runs one turn of the caller's conversation on a
+description, and the answer comes back as a message. It is a separate mechanism
+from a subagent: it runs on the maker's own context, has no address of its own,
+records nothing, and accepts no second message.
 
 Properties:
 
 1. **A cap and a name.** `agent_task_start` refuses a duplicate name and refuses
-   past `agent-task.max_running`.
+   past `agent-task.max_running`. The name is the agent's handle — its own
+   conversation, its subagents and the window all address a task by it — so one
+   agent has one task namespace.
 2. **A task's turn is not written to the agent's database.** The task reads the
-   agent's context and adds nothing to it. What the conversation gains is the
+   maker's context and adds nothing to it. What the conversation gains is the
    answer, which the agent server records as a message.
 3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
@@ -2048,8 +2051,19 @@ Properties:
    kept (§9.3), so a task whose answer reached no window is `failed`; the status
    can be trusted to mean what it says.
 
+**The maker is a conversation, not an agent name.** `agent_task_start` reads the
+caller's whole `(agent, subagent)`, and that pair is the identity every hop the
+task makes carries: the prompt (`system.j2` for an agent, `subagent.j2` with the
+role for a subagent), the model (the agent default or the subagent's record), the
+context restored and rebuilt, the plan, and the tools' binding. A subagent that
+starts a task is asking for a turn of *its* conversation; one that ran on
+`(agent, "")` would be standing in for somebody else. A subagent's task whose
+record is gone fails instead of running: a directory without `subagent.yaml` is
+not a conversation, and restoring it would recreate the record-less directory
+that blocks the name for both subagent tools.
+
 A task runs one turn, so it makes one rebuild; zero would make it the one turn in
-the system whose context nobody decided. It runs with the agent's system prompt,
+the system whose context nobody decided. It runs with the maker's system prompt,
 model, tools, and context decision. Its opening message is the shipped
 `agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
 message sent when the task stops is the whole of what comes back, and it tells
@@ -2057,6 +2071,17 @@ the model not to use `_async` or start another task because there is no later
 turn to receive the result. It does not have the turn that started it, because
 `restore` reads the stored turn list and a turn is written only when it ends;
 the description must restate the last exchange.
+
+**The two live-conversation tools are the task's own.** `_check_new_input` and
+`attach_image` act on a live turn's message list — and a task is a live turn, but
+not the one in the agent server: the same conversation id, a different list, in a
+different process. So their declarations stay the hub's and their bodies are the
+task's: `_check_new_input` answers "nothing waiting" (a task has no inbox and no
+harness cut-in), and `attach_image` injects into the task's own single user
+message, the rendered description, so the picture is on the task's next model
+call. The agent server refuses either tool to a call that names a turn other than
+the loop's running one, and the hub forwards the caller's turn token so that is
+decidable.
 
 A task's prompt tells it not to start another task — the same one-turn rule
 that makes `_async` pointless. `agent-task.max_running` bounds concurrency, not
@@ -2066,7 +2091,9 @@ The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. **A task is `finished` only when its answer
 reached a window**: if no window is showing the conversation, it ends `failed`
 and the log records why — the answer is the product, and an answer nobody
-received is not a finished task.
+received is not a finished task. A subagent has no window of its own (§4.5), so
+a subagent's task answer is delivered to its agent's window; the channel and the
+marker name the task it came from.
 
 **A task can be watched while it runs.** The task server's management tool
 `watch(name)` is the same read a subagent's conversation has (§4.5.6): an empty
@@ -2762,12 +2789,6 @@ the field arrives as a test that fails without the fix.
 Each is verified against the code and, where reachability allows, reproduced.
 None blocks the shipped flows; each is a state the design has not closed.
 
-- **An agent task's conversation id aliases the maker's live loop.**
-  `agent_task` calls the hub as `(agent, "")`, and agent-server tools resolve a
-  conversation's loop by that id alone. A task that calls `attach_image`
-  attaches to the *maker's* next model call and tells the task it can see the
-  picture; `_check_new_input` called from a task can take a message queued for
-  the maker's turn. The task's own message list never receives either.
 - **`turn_summarize` without an id inside an agent task.** The tool answers
   `captured` and writes nothing at the save point — and a task records no turn,
   so the annotation has no row to land on. An explicit earlier `turn_id` works.

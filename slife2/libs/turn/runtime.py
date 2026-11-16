@@ -44,6 +44,7 @@ from slife2.libs.harness.async_tasks import Deliver
 from slife2.libs.harness.dumps import Compress
 from slife2.libs.host.config import (
     API_SERVER_NAMES,
+    CABINET_SERVER_NAME,
     CONTEXT_SERVER_NAME,
     TOOLHUB_SERVER_NAME,
     Config,
@@ -124,6 +125,7 @@ class TurnRuntime:
         backend: LLMBackend | None = None,
         context_client: Client | None = None,
         hub_client: Client | None = None,
+        cabinet_client: Client | None = None,
         source: Callable[[], Config] | None = None,
     ) -> None:
         self._config = config
@@ -137,6 +139,11 @@ class TurnRuntime:
         #: whoever handed it in.
         self._context_client = context_client
         self._hub_client = hub_client
+        #: The cabinet is the agent-task turn's: the agent server keeps its own
+        #: connection (it writes dumps and kept images through it as well), and a
+        #: task reaches it only to resolve an `[Image:…]` key its own
+        #: `attach_image` was handed.
+        self._cabinet_client = cabinet_client
         #: One connection per **endpoint**, not one per runtime.  The config is
         #: read per call (a shared server serves several homes, and each names
         #: its own `servers:` block), so two homes may point these peers at two
@@ -145,6 +152,7 @@ class TurnRuntime:
         #: reason `model()` keys its clients that way.
         self._contexts: dict[str, Client] = {}
         self._hubs: dict[str, Client] = {}
+        self._cabinets: dict[str, Client] = {}
         #: One client per model *server* — a server speaks one wire format for
         #: every provider that uses it — and one backend per model reference,
         #: because the reference is what the backend must match.
@@ -233,6 +241,36 @@ class TurnRuntime:
                     fallback_tool="list_tools",
                 )
                 self._hubs[url] = held
+            return held
+
+    async def cabinet(self) -> Client:
+        """The cabinet, opened on first use.
+
+        **Only a task opens one here.**  The agent server keeps its own
+        connection, because it writes through it as well (`dump_save`,
+        `image_save`); a task reaches it for exactly one thing — turning an
+        `[Image:…]` key its restored context carries back into a URL the task's
+        own `attach_image` can inject.  Opened lazily for that reason: a task
+        with no picture in it must not depend on the cabinet at all.
+
+        **The address is read per call** for `memory`'s reason, and the
+        connection is kept per address.
+        """
+        if self._cabinet_client is not None:
+            return self._cabinet_client
+        url = self.current().server("cabinet").url
+        held = self._cabinets.get(url)
+        if held is not None:
+            return held
+        async with self._opening:
+            held = self._cabinets.get(url)
+            if held is None:
+                held = await open_server(
+                    url,
+                    name=CABINET_SERVER_NAME,
+                    fallback_tool="dump_read",
+                )
+                self._cabinets[url] = held
             return held
 
     async def model(self, identity: ConversationId, model: ModelRef) -> LLMBackend:
@@ -516,3 +554,6 @@ class TurnRuntime:
         for client in self._hubs.values():
             await close_server(client)
         self._hubs.clear()
+        for client in self._cabinets.values():
+            await close_server(client)
+        self._cabinets.clear()

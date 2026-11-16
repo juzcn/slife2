@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp import MCPError
 
@@ -43,7 +43,14 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import catalogue_db, in_home
 from slife2.libs.host.paths import home as home_dir
-from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    conversation_meta,
+    conversation_of,
+    request_meta,
+    turn_of,
+    with_turn,
+)
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
 from slife2.libs.store.answer import MATCH_FLOOR, WEAK_FLOOR, confidence
@@ -1164,6 +1171,39 @@ async def test_a_plugins_tool_is_the_models_only_when_it_says_so() -> None:
     # and nothing to hide behind, so the name it would be reached by is its own.
     assert unreachable["ok"] is False
     assert "unknown tool" in unreachable["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_rides_beside_a_call_the_hub_routes() -> None:
+    """**The turn is forwarded with the conversation, and it is a separate key.**
+
+    A live-conversation tool resolves a loop by `(agent, subagent)`, and that id
+    alone cannot tell the agent server's own turn from an agent task standing in
+    for the same conversation.  The token the caller's broker minted is the
+    discriminator, and a proxy has to pass it on: the hub forwards it to the
+    plugin that runs the tool, beside — not inside — the conversation identity.
+    """
+    seen: dict[str, Any] = {}
+
+    server = FastMCP("plugin")
+
+    @server.tool(meta=FOR_THE_MODEL)
+    def digest(ctx: Context) -> str:
+        """What was said, newest first."""
+        seen.update(request_meta(ctx) or {})
+        return "ok"
+
+    async with Client(
+        hub_for(connected={"agent": lambda settings: server}, autoload=("digest",))
+    ) as hub:
+        await hub.call_tool(
+            "call_tool",
+            {"name": "digest", "arguments": {}},
+            meta=with_turn(conversation_meta("jack"), "t0k"),
+        )
+
+    assert turn_of(seen) == "t0k"
+    assert conversation_of(seen) == ("jack", "")
 
 
 @pytest.mark.asyncio

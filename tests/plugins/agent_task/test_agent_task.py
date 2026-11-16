@@ -38,20 +38,31 @@ import pytest
 import pytest_asyncio
 from fakes import (
     FakeBackend,
+    ScriptedTurn,
     StubEmbedder,
     a_home,
     plugin_transports,
     text_turn,
 )
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.markers import strip as strip_marker
+from slife2.libs.host import statefile
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
-from slife2.libs.plugin.audience import conversation_meta, for_the_model
+from slife2.libs.host.paths import subagent_file
+from slife2.libs.model.base import Chunk
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    conversation_meta,
+    for_the_model,
+)
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.events import ContextChosen, TextDelta, TurnFinished
+from slife2.libs.turn.messages import StreamChatResult, ToolCall
+from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief
 from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.agent_task.server import (
@@ -1493,3 +1504,217 @@ async def test_cancelling_a_watched_task_closes_with_cancelled(
 
     assert result.data == {"closed": True}
     assert closed.reason == "the task was cancelled"
+
+
+# ── the turn a task stands in for ────────────────────────────────────────────
+
+SUBAGENT = "scout"
+
+
+def a_subagent(*, role: str = "researcher") -> None:
+    """A subagent record in the test's home, which is what makes the name one.
+
+    A subagent with no model runs where its maker runs (`SubagentSpec`), so the
+    record changes the prompt and the role and leaves the model at the default —
+    which is what this test is about.
+    """
+    statefile.write(
+        subagent_file(AGENT, SUBAGENT),
+        {"name": SUBAGENT, "model": "", "role": role},
+    )
+
+
+def tool_turn(*calls: ToolCall) -> ScriptedTurn:
+    """One scripted model response that calls tools, then a text turn follows."""
+    return ScriptedTurn(
+        result=StreamChatResult(text="", tool_calls=calls, stop_reason="tool_calls"),
+        chunks=[Chunk(text="")],
+    )
+
+
+def declaring_agent(reached: list[str]) -> FastMCP:
+    """The agent server's *declarations* for the two live-conversation tools.
+
+    The hub must advertise the names — a task's registry replaces their bodies
+    and takes their declarations from the hub — and reaching one of these bodies
+    is the aliasing the task's own bodies exist to prevent.  So every body
+    records itself, and a test asserts the list stayed empty.
+    """
+    mcp = FastMCP("agent")
+
+    @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
+    async def check_new_input(ctx: Context) -> str:
+        reached.append(CHECK_NEW_INPUT)
+        return "the agent's queued message"
+
+    @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
+    async def attach_image(ctx: Context, sources: list[str]) -> dict[str, Any]:
+        reached.append(ATTACH_IMAGE)
+        return {"attached": [], "refused": []}
+
+    return mcp
+
+
+def hub_declaring_them(reached: list[str]) -> Client:
+    """A hub whose `agent` is `declaring_agent` and whose others are the usual."""
+    from slife2.plugins.toolhub.server import build_server as build_hub
+
+    base = default_config()
+    return Client(
+        build_hub(
+            base,
+            transports=plugin_transports(
+                base, {"agent": lambda _settings: declaring_agent(reached)}
+            ),
+            embedder=StubEmbedder(),
+        )
+    )
+
+
+async def test_a_subagents_task_runs_on_the_subagents_own_conversation(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """**The maker is a conversation, not an agent name.**
+
+    A subagent that starts a task is asking for a turn of *its* conversation:
+    `subagent.j2` with its role, the subagent's context, and the subagent's plan.
+    The answer still reaches the agent's window — a subagent has none of its own
+    — but the turn is the subagent's, which is what the prompt and the restored
+    history are here to prove.
+    """
+    a_subagent(role="researcher")
+    async with Client(store.client.transport) as writer:  # the same store
+        await writer.call_tool(
+            "remember",
+            {
+                "agent": AGENT,
+                "subagent": SUBAGENT,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "scout settled on three retries",
+                    }
+                ],
+                "who_helped": SUBAGENT,
+                "channel": "subagent:scout",
+                "created_at": "2026-10-12T09:00:00+08:00",
+                "completed_at": "2026-10-12T09:00:01+08:00",
+            },
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+
+    built = build(text_turn("three"), hub=hub, context=store, window=window)
+    async with Client(built.mcp) as client:
+        await client.call_tool(
+            AGENT_TASK_START,
+            {"name": "research", "description": DESCRIPTION},
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+    await settle(built)
+
+    messages = built.messages()
+    system = str(messages[0].content)
+    assert "one of jack's subagents" in system, system
+    assert "your role is researcher" in system, system
+    assert any(
+        "scout settled on three retries" in str(message.content) for message in messages
+    ), "the task ran on the subagent's context, not the agent's"
+    # The answer goes to the only window there is: the agent's.
+    assert window.handed[0]["agent"] == AGENT
+
+
+async def test_a_task_has_no_cut_in_and_takes_nothing_from_the_maker(
+    store: Store, window: Window
+) -> None:
+    """`_check_new_input` in a task answers "nothing waiting" — and reaches no
+    agent server.
+
+    A task is one user message and one turn: it has no inbox, and the message
+    queue the agent server holds is its maker's, not the task's.  The tool keeps
+    its declaration (the hub advertises it to every model), and its body is the
+    task's own — so the agent server's `_check_new_input`, which would take the
+    maker's queued message, is never called.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    async with hub:
+        built = build(
+            tool_turn(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={})),
+            text_turn("done"),
+            hub=hub,
+            context=store,
+            window=window,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's cut-in"
+    tool = [message for message in built.messages() if message.role == "tool"][0]
+    assert tool.content == NOTHING_WAITING
+
+
+async def test_a_tasks_attach_image_lands_on_its_own_next_call(
+    store: Store, window: Window
+) -> None:
+    """The picture goes on the task's *own* model call, which is the next one.
+
+    A task's single user message is the rendered description, so that is where
+    `attach_image` injects — the task's list is the only list its next request
+    carries.  The agent server's version, which would inject into the maker's
+    live loop, is never reached.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    source = "data:image/png;base64,AAAA"
+    async with hub:
+        built = build(
+            tool_turn(
+                ToolCall(id="c1", name=ATTACH_IMAGE, arguments={"sources": [source]})
+            ),
+            text_turn("I see it"),
+            hub=hub,
+            context=store,
+            window=window,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's attach_image"
+    messages = built.messages()
+    opening = [message for message in messages if message.role == "user"][0]
+    assert isinstance(opening.content, list), "the task's message carries the parts"
+    urls = [
+        part["image_url"]["url"]
+        for part in opening.content
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert urls == [source]
+    tool = [message for message in messages if message.role == "tool"][0]
+    assert json.loads(tool.content) == {"attached": [source], "refused": []}
+
+
+async def test_a_task_of_a_subagent_that_is_gone_does_not_recreate_the_name(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A name with no record is not a conversation, and a task does not make one.
+
+    The record's *existence* is what makes a directory a subagent's; a task that
+    ran on a removed name would restore a conversation whose store recreates the
+    directory without a record, and that blocks the name for `subagent_create`
+    and `subagent_remove` for ever.  So the task fails with a message — which is
+    the one thing it can still deliver.
+    """
+    built = build(text_turn("never reached"), hub=hub, context=store, window=window)
+    async with Client(built.mcp) as client:
+        await client.call_tool(
+            AGENT_TASK_START,
+            {"name": "research", "description": DESCRIPTION},
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+    stopped = await settle(built)
+
+    assert stopped["status"] == "failed"
+    assert not subagent_file(AGENT, SUBAGENT).parent.exists(), (
+        "the task recreated a record-less subagent directory"
+    )
+    assert "no subagent" in window.handed[0]["text"]

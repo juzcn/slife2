@@ -952,10 +952,10 @@ not, and the plugin is one shared process.
 
 ### Agent tasks
 
-An agent task is a separate turn of the same agent, started with a name and a
-description and answered later by a message in the same conversation. It is one
-turn: its prompt tells it not to use `_async` or start another task, because a
-result arriving later has nowhere to go.
+An agent task is a separate turn of the calling conversation — the agent's own or
+one of its subagents' — started with a name and a description and answered later
+by a message. It is one turn: its prompt tells it not to use `_async` or start
+another task, because a result arriving later has nowhere to go.
 
 | Tool | Purpose |
 |---|---|
@@ -964,13 +964,15 @@ result arriving later has nowhere to go.
 | `agent_task_list` | List this agent's tasks, running first. |
 | `agent_task_cancel` | Stop a task and report its state after the call. |
 
-A task runs as the agent, with the same system prompt, model, tools, and context
-decision. It does not have the turn that started it, so the description must
-restate the relevant context. Its answer arrives with an
+A task runs as the conversation that started it: an agent's task uses the agent's
+system prompt, model, tools, and context decision; a subagent's task uses the
+subagent's prompt, role, and model. It does not have the turn that started it, so
+the description must restate the relevant context. Its answer arrives with an
 `[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
-`AsyncTask(<name>)>`. If no window is showing the conversation when it stops, the
-task ends `failed` — the answer is the product and is not kept — and the log
-says why.
+`AsyncTask(<name>)>`. A subagent has no window, so a subagent's task answer is
+delivered to its agent's conversation. If no window is showing the agent when it
+stops, the task ends `failed` — the answer is the product and is not kept — and
+the log says why.
 
 ```yaml
 agent-task:

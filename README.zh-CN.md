@@ -808,9 +808,9 @@ note、diary、report 的文件全文；保存的文件只按词匹配；dump �
 
 ### Agent 任务
 
-agent task 是同一个 agent 的另一个 turn，用名字和描述启动，稍后以消息形式在同一对话中
-回答。它只有一个 turn：提示词告诉它不要使用 `_async` 或再启动任务，因为结果到达时
-已经没有下一轮可以接收。
+agent task 是发起对话——agent 自己的，或某个 subagent 的——的另一个 turn，用名字和
+描述启动，稍后以消息形式回答。它只有一个 turn：提示词告诉它不要使用 `_async` 或再
+启动任务，因为结果到达时已经没有下一轮可以接收。
 
 | 工具 | 用途 |
 |---|---|
@@ -819,10 +819,12 @@ agent task 是同一个 agent 的另一个 turn，用名字和描述启动，稍
 | `agent_task_list` | 列出本 agent 的任务，运行中的在前。 |
 | `agent_task_cancel` | 停止任务，并报告调用后的状态。 |
 
-任务以 agent 身份运行，使用相同的 system prompt、模型、工具和上下文决策。它没有启动
-它的那一轮，因此描述必须复述相关上下文。回答带 `[AgentTaskResult:{…}]` marker 从
-`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。任务停止时没有窗口
-显示该对话，任务以 `failed` 结束——回答就是产物，不会被保留——日志记录原因。
+任务以发起它的对话身份运行：agent 发起的任务使用 agent 的 system prompt、模型、工具
+和上下文决策；subagent 发起的任务使用 subagent 的提示词、角色和模型。它没有启动它的
+那一轮，因此描述必须复述相关上下文。回答带 `[AgentTaskResult:{…}]` marker 从
+`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。subagent 没有窗口，所以
+subagent 的任务回答投递到其 agent 的对话。任务停止时没有窗口显示该 agent，任务以
+`failed` 结束——回答就是产物，不会被保留——日志记录原因。
 
 ```yaml
 agent-task:

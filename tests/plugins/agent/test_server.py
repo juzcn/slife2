@@ -57,7 +57,8 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
-from slife2.libs.plugin.audience import conversation_meta
+from slife2.libs.plugin.audience import TURN, conversation_meta
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
@@ -79,7 +80,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.loop import DENIED
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import INTERRUPTED
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, INTERRUPTED
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -1387,6 +1388,49 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
     assert "user:two" not in prompts_seen(backend, 1)
     # ...and it never became a turn of its own: two model calls, one turn.
     assert len(backend.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_call_from_another_turn_cannot_use_this_turns_live_loop(
+    context,
+) -> None:
+    """**The conversation id does not name a turn; the token does.**
+
+    An agent task stands in for the same agent or subagent, so its calls carry
+    the same `(agent, subagent)` — but its list is its own, in its own process,
+    and the agent server's live loop is the *other* turn on that id.  A call
+    that names a different turn is answered by the tool's honest no: the cut-in
+    has nothing to hand over, and the image tool attaches nothing.  The message
+    queued for the running turn is still folded by the turn it belongs to, which
+    is what proves the foreign call did not take it.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.2  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn("It is 42, and yes to that too."),
+    )
+    hub_client, server = wired(backend, context)
+    foreign = {**conversation_meta(DEFAULT_AGENT), TURN: "a-task's-own-turn"}
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        async with Client(server) as other:
+            nothing = await other.call_tool(CHECK_NEW_INPUT, {}, meta=foreign)
+            with pytest.raises(ToolError, match="not this conversation's running one"):
+                await other.call_tool(
+                    ATTACH_IMAGE,
+                    {"sources": ["data:image/png;base64,AAAA"]},
+                    meta=foreign,
+                )
+        one, two = await asyncio.gather(first, second)
+
+    assert nothing.data == NOTHING_WAITING
+    assert two.data["injected"] is True, "the running turn still folded its own message"
+    assert one.data["text"] == two.data["text"]
 
 
 @pytest.mark.asyncio

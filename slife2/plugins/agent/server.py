@@ -94,8 +94,6 @@ from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
-from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
@@ -142,6 +140,12 @@ from slife2.libs.host.paths import (
     subagent_path,
 )
 from slife2.libs.host.runtime import read_claim
+from slife2.libs.host.subagents import (
+    DEFAULT_ROLE,
+    SubagentSpec,
+    read_subagent,
+    subagent_spec,
+)
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import (
     FOR_THE_MODEL,
@@ -150,6 +154,8 @@ from slife2.libs.plugin.audience import (
     conversation_key,
     conversation_meta,
     request_conversation,
+    request_meta,
+    turn_of,
 )
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -181,7 +187,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.prompt import render_system_prompt
+from slife2.libs.turn.prompt import SUBAGENT_PROMPT, render_system_prompt
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
@@ -246,29 +252,10 @@ Compressor = Callable[[ConversationId], Compress]
 SUBAGENT_CREATE = "subagent_create"
 SUBAGENT_REMOVE = "subagent_remove"
 
-#: What a subagent is when the call that made it named no role, and the word the
-#: shipped `subagent.j2` opens with.  A **role** is what a subagent is *for* —
-#: the one part of what it is that its maker decides and not the system — and it
-#: is kept in the subagent's own file, which is where everything about one
-#: subagent lives (`subagent_spec`).
-DEFAULT_ROLE = "subagent"
-
-#: The system prompt a subagent's conversation opens with, shipped and rendered
-#: per conversation (`slife2.libs.turn.prompt`).  **Not the template an agent's
-#: own conversation uses** (`agent.system_prompt`): the two have different things
-#: to say — this one says what a subagent is, whose it is, and where its work
-#: comes from — and an operator's prompt
-#: for their own agent cannot say any of that.  A bare name, so it is looked up
-#: among the templates shipped beside `system.j2`.
-#:
-#: **One template for every role, for now.**  `role` reaches it as a word ("You
-#: are scout, one of jill's subagents — your role is code reviewer") and not yet
-#: as a choice of *file*: a per-role
-#: template is the step this design leaves open, and it is left open on purpose
-#: rather than guessed at — a role that selects `prompts/<role>.j2` needs an
-#: answer for a role with no file, and that answer is a design decision.
-SUBAGENT_PROMPT = "subagent.j2"
-
+# `DEFAULT_ROLE` and `SUBAGENT_PROMPT` are imported: what a subagent is and what
+# its prompt says live in the libraries both turn-running servers share
+# (`slife2.libs.host.subagents`, `slife2.libs.turn.prompt`), because the
+# agent-task server runs a subagent's turn too.
 
 #: The harness tool a message that arrived mid-turn is delivered under — the
 #: *cut-in*, named for the pair it forms with the message it delivers.
@@ -698,6 +685,18 @@ class Loop:
     #: is the whole of it.  Set once the message is running its own turn,
     #: cleared on the way out by the task that set it.
     turn_task: asyncio.Task | None = None
+    #: **The token of the turn running on this loop**, or empty when it is idle.
+    #:
+    #: A loop is a *turn's* working state, not a property of the conversation's
+    #: id.  One id can have two live turns in two processes — the agent server's
+    #: own and an agent task standing in for the same conversation — and the
+    #: token is the discriminator every live-conversation tool needs: it is
+    #: minted where the turn starts, carried on every hop, and compared against
+    #: this field before a tool touches the list or the inbox.
+    #:
+    #: Set under the lock and cleared on the way out by the turn that set it (a
+    #: value guard, because a queued turn may have replaced it first).
+    turn_token: str = ""
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
     #: conversation whose model is later edited out of the config still runs: the
@@ -909,61 +908,45 @@ def build_server(
 
         This is the one place the two routes meet: a person's natural-language
         path goes through the encoder, and a marker's key goes through the
-        cabinet, and both end as the same `image_url` part.
+        cabinet, and both end as the same `image_url` part.  The policy is the
+        library's (`slife2.libs.turn.attachments.resolve_sources`); what is this
+        server's is the connection it asks through.
         """
-        pairs: list[tuple[str, str]] = []
-        refusals: list[str] = []
-        keys: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for source in wanted:
-            if source in seen:
-                continue
-            seen.add(source)
-            # A model's path is relative to its data directory — the working
-            # directory its own tools run in — so a path a tool printed is one
-            # `attach_image` can open.
-            encoded, refused = attachments.resolve([source], base=home())
-            if encoded:
-                pairs.extend(encoded)
-            else:
-                # **The encoder's sentence is kept** for the cabinet's failure:
-                # a path that is not there says "no such file", and only the
-                # cabinet can say whether the same string is one of its keys.
-                keys.append((source, refused[0]))
-        if not keys:
-            return pairs, refusals
-        try:
-            client = await cabinet()
-        except Exception as exc:  # noqa: BLE001 - an unreachable cabinet is each key's refusal
-            # **A missing path is not a cabinet failure.**  The lookup is only
-            # how a string that failed the encoder is checked against the
-            # cabinet's keys, so a cabinet that cannot be reached leaves each
-            # such source with the encoder's own sentence — plus why the second
-            # check could not be made, because a key that never got its turn is
-            # a different fact from a path that is genuinely absent.
-            refusals.extend(
-                f"{refusal} (the cabinet could not be reached: {exc})"
-                for _key, refusal in keys
-            )
-            return pairs, refusals
-        for key, refusal in keys:
+
+        async def lookup(
+            keys: list[tuple[str, str]],
+        ) -> tuple[list[tuple[str, str]], list[str]]:
             try:
+                client = await cabinet()
+            except Exception as exc:  # noqa: BLE001 - an unreachable cabinet is each key's refusal
+                # **A missing path is not a cabinet failure.**  The lookup is
+                # only how a string that failed the encoder is checked against
+                # the cabinet's keys, so a cabinet that cannot be reached leaves
+                # each such source with the encoder's own sentence — plus why
+                # the second check could not be made, because a key that never
+                # got its turn is a different fact from a path that is genuinely
+                # absent.
+                return [], [
+                    f"{refusal} (the cabinet could not be reached: {exc})"
+                    for _key, refusal in keys
+                ]
+
+            async def fetch(key: str) -> str | None:
                 answer = await client.call_tool(
                     "image_source",
                     {"key": key},
                     meta=conversation_meta(*conversation_id),
                     timeout=_T.timeouts.work.hub,
                 )
-                payload = tool_payload(answer)
-                url = payload.get("url")
-            except Exception:  # noqa: BLE001 - one source's refusal, not the batch's
-                refusals.append(refusal)
-                continue
-            if not isinstance(url, str) or not url:
-                refusals.append(refusal)
-                continue
-            pairs.append((key, url))
-        return pairs, refusals
+                url = tool_payload(answer).get("url")
+                return url if isinstance(url, str) and url else None
+
+            return await attachments.from_keys(keys, fetch)
+
+        # A model's path is relative to its data directory — the working
+        # directory its own tools run in — so a path a tool printed is one
+        # `attach_image` can open.
+        return await attachments.resolve_sources(wanted, base=home(), lookup=lookup)
 
     async def leave_the_mesh(
         agent: str, subagent: str, *, client: Client | None = None
@@ -1884,7 +1867,7 @@ def build_server(
             ", ".join(unloaded),
         )
 
-    def take_waiting(conversation_id: ConversationId) -> str:
+    def take_waiting(conversation_id: ConversationId, turn: str = "") -> str:
         """The first message waiting for one conversation, taken for delivery.
 
         **The delivery itself, and the reason `_check_new_input` is a real tool
@@ -1902,6 +1885,13 @@ def build_server(
         early rather than something new — the message would have arrived at the
         next iteration regardless.  A tool that could not say that could not be a
         harness tool at all (`slife2.libs.turn.tools`).
+
+        **`turn` is what keeps the two callers' turns apart.**  An agent task
+        addresses this conversation's id too — it stands in for the same agent
+        or subagent — so a call that names a turn other than the one running
+        here is answered "nothing waiting" and the queue is left for the turn it
+        belongs to (SDD §9.3).  A call that names no turn is the direct read
+        (`turn_of` says why that is the caller's to omit).
 
         **The entry is claimed before it is returned**, into `loop.injected`, so
         that the turn this arrives in is the turn that answers for it: the
@@ -1926,6 +1916,11 @@ def build_server(
         """
         loop = loops.get(conversation_key(*conversation_id))
         if loop is None or not loop.inbox:
+            return ""
+        if turn and turn != loop.turn_token:
+            # Another turn on the same id — an agent task of this conversation
+            # is the live case — is not this loop's, and its take would steal a
+            # message the running turn's own boundary is about to fold in.
             return ""
         waiting = loop.inbox[0]
         if waiting.images:
@@ -2610,6 +2605,19 @@ def build_server(
                 "this call is not inside a running turn, so there is no request "
                 "to attach an image to."
             )
+        # **The token is what tells this conversation's live turn from another
+        # one on the same id.**  An agent task stands in for the same agent or
+        # subagent, so its calls carry that id too — but its list is its own and
+        # this loop is not it.  Attaching to the maker's loop on the task's word
+        # would tell the task it can see a picture its next call never carries.
+        # A call that names no turn is the direct read (`turn_of` argues it).
+        caller_turn = turn_of(request_meta(ctx))
+        if caller_turn and caller_turn != loop.turn_token:
+            raise ToolError(
+                "this call belongs to a turn that is not this conversation's "
+                "running one, so there is no request here to attach an image "
+                "to; nothing was attached."
+            )
         wanted = [str(source) for source in sources if str(source).strip()]
         if not wanted:
             raise ToolError(
@@ -2702,7 +2710,9 @@ def build_server(
         # images, which cannot ride a tool result — and *this* is a tool result:
         # a blank one reads as a failure rather than as "nothing was handed
         # over", which is the whole reason `NOTHING_WAITING` is a sentence.
-        return take_waiting(conversation_id) or NOTHING_WAITING
+        return (
+            take_waiting(conversation_id, turn_of(request_meta(ctx))) or NOTHING_WAITING
+        )
 
     @mcp.tool(name=CHECK_ASYNC, meta=FOR_THE_MODEL)
     async def check_background_call(task_id: str) -> dict[str, Any]:
@@ -3518,6 +3528,7 @@ def build_server(
                 # writes — here, in the context store, in the model backend —
                 # and `turn_done` carries it beside the rowid.
                 turn_token, turn_handle = logcontext.begin_turn()
+                loop.turn_token = turn_token
                 # **The turn is opened for watchers here**, before its first
                 # observable step: `rebuild_into` can emit `ContextChosen`, and
                 # a watcher that joined while it ran must find that event in the
@@ -3799,6 +3810,13 @@ def build_server(
             try:
                 log_turn(loop, outcome, turn_id, failure, token=turn_token)
             finally:
+                # **The value guard, not a flag.**  A message queued behind this
+                # turn may have taken the lock and set its own token in the gap
+                # between the lock's release and this line; clearing
+                # unconditionally would erase the token of a turn that is
+                # running.  Only the token this turn put there is taken back.
+                if turn_token and loop.turn_token == turn_token:
+                    loop.turn_token = ""
                 if turn_handle is not None:
                     logcontext.end_turn(turn_handle)
 
@@ -4539,83 +4557,6 @@ def _remove_tree(directory: Path) -> None:
                     f"being written. Ask again in a moment."
                 ) from e
             time.sleep(_T.timeouts.pacing.file_release)
-
-
-@dataclass(frozen=True)
-class SubagentSpec:
-    """What a subagent's own file says it is: what to run it on, and what it is.
-
-    **A subagent's configuration is a file inside the subagent** — beside its
-    conversation and its work, the way a WeChat login is
-    (`slife2.plugins.wechat.server.SESSION_NAME`) — and it is *found* by looking
-    rather than listed anywhere (`slife2.libs.host.paths.subagent_dirs`).  That
-    is what makes the config as short-lived as the thing it configures: a
-    subagent made today and removed tomorrow takes its settings with it, and
-    nothing in `slife2.yaml` has to be kept in step with a directory that is no
-    longer there.
-
-    So this is read where it is used and never cached, which is the same rule the
-    config file itself gets: a subagent that has been named twice runs on what
-    the second call said, and a `model_switch` reaches one that has not started
-    yet.
-    """
-
-    #: `provider/model`, or empty for the maker's own — which is not a fallback
-    #: but the default the note asked for: a subagent is an agent the maker owns,
-    #: so it runs where the maker runs unless it was told otherwise.
-    model: str = ""
-    #: What it is for, in the words its prompt uses (`DEFAULT_ROLE`).
-    role: str = DEFAULT_ROLE
-
-
-def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
-    """One conversation's own settings, or the defaults for the maker's own.
-
-    The maker's own conversation has no such file and is not supposed to: what
-    makes a directory a subagent's is the record inside it, and an agent's own
-    conversation is not one (`slife2.libs.host.paths.subagent_file`).  So `""`
-    answers the defaults rather than being looked up, which keeps
-    `agent_dir(agent, "")` — the agent's own directory — out of a question about
-    a file that lives under the subagent's own directory.
-    """
-    if not subagent:
-        return SubagentSpec()
-    record = read_subagent(agent, subagent)
-    return SubagentSpec(
-        model=str(record.get("model") or ""),
-        role=str(record.get("role") or DEFAULT_ROLE),
-    )
-
-
-def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
-    """What a subagent was made with, or `{}` when there is none to read.
-
-    **A record that cannot be read is read as absent, and that is a decision
-    rather than a shrug.**  What makes a directory a subagent's is that this file
-    *exists* (`slife2.libs.host.paths.subagent_dirs`), so a torn write cannot
-    widen what `subagent_remove` deletes — the property that matters is carried by
-    the file's existence, not by its contents.  What the contents add is the model
-    and when it was made, and losing a `created_at` to a half-written file is a
-    smaller harm than a removal that refuses to happen; the log line is what says
-    a file wants looking at.
-
-    So the shape is the one `slife2.plugins.wechat.server` keeps for its login and
-    for its reason: a per-agent file whose absence is a normal state, whose
-    damage is reported where a person can read it, and which never turns into a
-    refusal of the thing the caller actually asked for.
-    """
-    path = subagent_file(agent, subagent)
-    if not path.is_file():
-        return {}
-    try:
-        loaded = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, YAMLError) as exc:
-        logger.warning("the record of %s could not be read: %s", path, exc)
-        return {}
-    if not isinstance(loaded, dict):
-        logger.warning("the record of %s is not a mapping", path)
-        return {}
-    return loaded
 
 
 def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:

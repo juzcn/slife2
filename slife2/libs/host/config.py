@@ -1288,8 +1288,8 @@ class AgentTaskSettings:
     """The `agent-task:` section, and the one number an agent task costs.
 
     **`agent:`, read by two plugins.**  Everything else a task's turn is made of
-    — the system prompt and `max_iterations` — is the agent's own and comes out
-    of that section, because a task *is* the agent working: a prompt or an
+    — the system prompt and `max_iterations` — is the conversation's own: the
+    agent's, or the subagent's when a subagent started the task.  A prompt or an
     iteration count that meant something different for a task would be two
     agents wearing one name.  So the rule that the section a key lives in is the
     plugin that reads it has exactly one exception, and this is where it is
@@ -1301,7 +1301,8 @@ class AgentTaskSettings:
     #: How many tasks one agent may have running at once.
     #:
     #: A cap rather than a preference, and the only bound this feature has: a
-    #: model can start tasks without limit, and each runs as the agent.  A
+    #: model can start tasks without limit, and each runs as the conversation
+    #: that started it — its own or one of its subagents'.  A
     #: task's prompt tells it not to start another — it is one turn — but
     #: nothing in the harness stops one that does, so the cap is about the
     #: concurrent work a conversation asks for.  What it does not bound is how
@@ -1332,7 +1333,7 @@ class SubagentSettings:
     **What is not here, and not in any config, is anything about *one*
     subagent.**  The model it runs on and the role it was made for are in the
     subagent's own file, inside its own directory, and they are deleted with it
-    (`slife2.plugins.agent.server.subagent_spec`): a subagent is made today and
+    (`slife2.libs.host.subagents.subagent_spec`): a subagent is made today and
     removed tomorrow, so its settings go where its directory goes rather than
     into a file an operator has to keep in step with it.  Its *prompt* is not
     `agent.system_prompt` either — it is the shipped `subagent.j2`, because what a
@@ -1691,7 +1692,7 @@ class ToolResultSettings:
     it and the whole of what was returned, and the two are answered separately —
     the whole is kept where there is a cabinet (a dump) and over the bound the
     model is handed a fixed head of it with the call id that reads the rest.  An
-    agent task has no cabinet and no recorded messages, so its over-size result
+    agent task writes no dumps and records no messages, so its over-size result
     is cut instead, with a marker that promises no file (§5.2.4).  The head is
     chosen by a rule, not by a model: the boundary is what this section sets,
     and the model's route back is `dump_read` and `dump_grep`.
