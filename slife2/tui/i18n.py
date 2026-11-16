@@ -455,6 +455,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "vision",
         "zh": "视觉",
     },
+    # ── the plan strip (`slife2.tui.widgets.PlanView`) ────────────────────
+    # How much of the model's own list it says is done.  The statuses themselves
+    # are glyphs, and the item text is the model's, so this is the only word the
+    # strip adds.
+    "plan_header": {
+        "en": "plan {done}/{total}",
+        "zh": "计划 {done}/{total}",
+    },
     # ── the status bar (`slife2.tui.widgets.StatusBar`) ───────────────────
     "status_working": {
         "en": "working",

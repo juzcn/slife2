@@ -35,6 +35,7 @@ a reader does belongs in the design document.
 | **Conversation id** | `(agent, subagent)`: the identity a call is for. |
 | **Conversation** | One agent's own history, or one of its subagents'. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made. |
+| **Plan** | The model's current list of steps for one conversation, each with a status. It lives beside the conversation, is replayed at the start of every turn, and is drawn above the prompt. |
 | **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | The machine-readable prefix a sender adds to a message, e.g. `[Wechat:{…}]`. Stored with the message, removed only for display. |
 | **Family** | A plugin that owns one configuration section or folder and declares its rows to the hub. |
@@ -374,6 +375,17 @@ interrupts the running turn but leaves the queue intact. A message that arrives
 while a turn is running — typed, handed over by another channel, or input to a
 headless window — is delivered to that turn at the next iteration boundary.
 
+### The plan
+
+The model can keep a plan for the work in front of it. Each item is one line of
+text with a status — `pending`, `active`, `done` or `blocked` — and the model
+writes the whole list with `plan_write`. The list rides the `[TURN-PROMPT:{…}]`
+marker at the start of every turn, so a context rebuild cannot drop it, and the
+strip above the prompt shows it while there is one. The statuses are the model's
+own claims, not the harness's observations: nothing in slife2 derives one from a
+tool call. The plan is stored as `plan.yaml` in the conversation's own directory;
+`reset` removes it, and a fork starts from its maker's copy.
+
 ### Model selection
 
 `Ctrl+S` lists every model under `providers:` and marks the one in use.
@@ -606,9 +618,10 @@ model reads its own history only.
 `browsed` and `limit` beside it. `confidence` is `sure`, `weak` or `none` on a
 ranked page and `null` on a browse.
 
-Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and
-`token-usage`; it is prompt text and is not stored. Each turn in a rebuilt
-context carries a `[TURN:{…}]` footnote naming its id, channel, and span.
+Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now`, `token-usage`
+and, when the conversation has one, `plan`; it is prompt text and is not stored.
+Each turn in a rebuilt context carries a `[TURN:{…}]` footnote naming its id,
+channel, and span.
 Capitalized markers are harness annotations; a marker that reads as a word, such
 as `[Wechat:{…}]`, was written by a sender and is stored with the message.
 

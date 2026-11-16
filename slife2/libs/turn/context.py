@@ -28,13 +28,13 @@ the explicit clear.
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
 a row every time a list is built and never stored.  `turn_prompt_note` is
-`[TURN-PROMPT:{…}]`, the clock and the context size at the start of the turn
-about to run: it is added to the user's message *after* the recall has chosen
-the conversation and removed before the turn is saved, so it never reaches the
-row, the index or a rebuild.  The second is the only place a per-turn fact can
-live without becoming a fact about the turn for ever — and its payload is a
-mapping for exactly that reason: what a turn needs to know can grow without
-giving the past a copy of it.
+`[TURN-PROMPT:{…}]`, the clock, the context size and the conversation's plan at
+the start of the turn about to run: it is added to the user's message *after*
+the recall has chosen the conversation and removed before the turn is saved, so
+it never reaches the row, the index or a rebuild.  The second is the only place
+a per-turn fact can live without becoming a fact about the turn for ever — and
+its payload is a mapping for exactly that reason: what a turn needs to know can
+grow without giving the past a copy of it.
 """
 
 from __future__ import annotations
@@ -583,15 +583,28 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
     )
 
 
-def turn_prompt_lead(context_tokens: int, context_window: int) -> str:
+def turn_prompt_lead(
+    context_tokens: int,
+    context_window: int,
+    plan: Sequence[Mapping[str, Any]] = (),
+) -> str:
     """The `[TURN-PROMPT:{…}]` lead a turn opens with.
 
-    **Two facts, one rule.**  The clock is sampled where the turn starts, and
+    **Three facts, one rule.**  The clock is sampled where the turn starts, and
     the context figure is `context_usage`'s — the same function the status bar
     calls — so the marker cannot round differently from the bar it mirrors.  A
     figure that is empty (no tokens and no declared window) is omitted rather
     than written as silence: a missing key is silence, not a zero
     (`turn_prompt_note`).
+
+    **The plan is replayed here because a rebuild cannot decide about it.**  It
+    is the model's current list (`slife2.libs.turn.plan`), read from the
+    conversation's own file before every turn; the rebuild chooses *turns*, and
+    a plan kept only as a turn could be dropped.  It rides the same marker for
+    the marker's own reason — it is a fact for the turn about to run, not a
+    record of it — and because it changes often enough that putting it in the
+    system prompt would invalidate the cached prefix on every update.  An empty
+    plan is omitted, like every fact the caller does not have.
 
     The two servers that run turns built this block each; it is here because
     what a turn is told at its start is prompt content, and this module already
@@ -601,6 +614,8 @@ def turn_prompt_lead(context_tokens: int, context_window: int) -> str:
     usage, _used = context_usage(context_tokens, context_window)
     if usage:
         facts["token-usage"] = usage
+    if plan:
+        facts["plan"] = [dict(item) for item in plan]
     return turn_prompt_note(facts)
 
 

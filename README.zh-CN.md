@@ -33,6 +33,7 @@ MCP server。
 | **conversation id** | `(agent, subagent)`：一次调用所面向的对话身份。 |
 | **conversation** | 一个 agent 自己的历史，或它的某个 subagent 的历史。 |
 | **turn** | 一次交换：输入、模型的回答以及它发起的工具调用。 |
+| **plan** | 模型为一个对话维护的当前步骤列表，每项带状态。它存放在对话目录旁，每轮开始时重放，并显示在输入框上方。 |
 | **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>` 或 `async-tool:<name>`。 |
 | **marker** | 发送者在消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。随消息存储，只在显示时移除。 |
 | **family** | 拥有一个配置节或文件夹，并向 hub 声明其所含行的 plugin。 |
@@ -337,6 +338,15 @@ subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_s
 `Esc` 打断当前轮，但保留队列。轮次运行期间到达的消息——窗口里输入的、其他 channel
 移交的、headless 窗口的输入——会在下一个迭代边界并入该轮。
 
+### 计划
+
+模型可以为手头的工作维护一个计划。每一项是一行文本加一个状态——`pending`、
+`active`、`done` 或 `blocked`——模型用 `plan_write` 写入整份列表。列表随每一轮
+开头的 `[TURN-PROMPT:{…}]` 一起重放，因此上下文重建不会丢掉它；存在计划时，输入框
+上方的条带会显示它。状态是模型自己的声明，不是 harness 的观测：slife2 不会从工具
+调用推导状态。计划存为对话目录中的 `plan.yaml`；`reset` 会删除它，fork 则从创建者
+的副本开始。
+
 ### 模型选择
 
 `Ctrl+S` 列出 `providers:` 下的所有模型并标出当前使用的。选择会调用模型自己也能
@@ -542,9 +552,9 @@ agent 参数：模型只能读取自己的历史。
 `limit`。`confidence` 在排序页上是 `sure`、`weak` 或 `none`，在浏览页上是
 `null`。
 
-每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now` 和 `token-usage`；它是提示文本，不会
-存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和
-跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
+每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now`、`token-usage`，以及存在时的
+`plan`；它是提示文本，不会存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，
+写明它的 id、channel 和跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
 是发送者写的，会随消息一起存储。
 
 ### 工具

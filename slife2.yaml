@@ -186,6 +186,8 @@ tool_load:
     - note_write
     - diary_write
     - report_write
+    # The plan: the model's current list, replayed at the start of every turn.
+    - plan_write
     # Images: the only way a picture reaches the model.
     - attach_image
     # Web search: Google via Serper, and Baidu for Chinese.

@@ -41,7 +41,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from rich.text import Text
 from textual import events
@@ -76,7 +76,9 @@ from slife2.libs.plugin.vocabulary import (
     WECHAT_MARKER,
     WINDOW_CHANNEL,
 )
+from slife2.libs.turn import plan
 from slife2.libs.turn.context import context_usage
+from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
 from slife2.tui import notes
 from slife2.tui.i18n import t
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -2050,3 +2052,101 @@ class StatusBar(Static):
             f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {t('status_keybinds')}[/]"
         )
         self.update("  ".join(parts))
+
+
+#: One mark and colour per plan status.  **The status is the model's claim, not
+#: the harness's measurement**, so `done` is muted rather than the green a tool
+#: panel's verified result wears — a reader must not mistake "the model says
+#: this is finished" for "this call returned".  `blocked` is the one that wants
+#: the eye, and it is the only red.
+PLAN_MARKS: dict[str, tuple[str, str]] = {
+    plan.PENDING: (GLYPHS["todo"], PALETTE["dim"]),
+    plan.ACTIVE: (GLYPHS["cursor"], PALETTE["amber"]),
+    plan.DONE: (GLYPHS["check"], PALETTE["muted"]),
+    plan.BLOCKED: (GLYPHS["failed"], PALETTE["red"]),
+}
+
+
+class PlanView(Static):
+    """The model's plan, as the model last wrote it: a strip above the prompt.
+
+    **A claim, not a measurement.**  The four statuses are the model's own
+    words; the harness stores and draws them and never derives one from a tool
+    call — there is no mapping from a call to an item, and a returned call is
+    not a finished step.  That is why `PLAN_MARKS` does not borrow the tool
+    panel's verified `done`.
+
+    **Two readers, one rule.**  `set_plan` is the opening read (a window's
+    transcript, a watcher's snapshot); `observe` is the live turn event.  Both
+    live here so the window and the watch screen cannot render one plan two
+    ways.  A write is committed only when the call that made it succeeded: a
+    refused write is a plan the server never stored, and drawing it would show
+    a list the next turn will not be given.
+
+    The strip is hidden when the plan is empty, and its text is model output —
+    `Text`, never markup.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._items: list[plan.PlanItem] = []
+        #: A plan write's arguments, by call id, until its outcome arrives.  A
+        #: start whose finish never comes leaves the old plan standing, which is
+        #: the same answer a cancelled turn gets.
+        self._started: dict[str, Any] = {}
+        self.display = False
+
+    def set_plan(self, items: Any) -> None:
+        """Draw this plan, or hide the strip when it is empty.
+
+        The validation is `slife2.libs.turn.plan`'s: a list this build would not
+        have written is a `PlanError`, and a caller that cannot place it keeps
+        the plan it has.
+        """
+        self._items = plan.from_wire(items, where="the plan")
+        self._refresh()
+
+    def observe(self, event: object) -> None:
+        """Take one turn event: a successful plan write becomes the strip."""
+        if isinstance(event, ToolCallStarted) and event.name == plan.PLAN_WRITE:
+            self._started[event.call_id] = event.arguments.get("items")
+            return
+        if isinstance(event, ToolCallFinished) and event.name == plan.PLAN_WRITE:
+            raw = self._started.pop(event.call_id, None)
+            if raw is None or not event.ok:
+                return
+            try:
+                self.set_plan(raw)
+            except plan.PlanError:
+                # A display drops a line it cannot read; the opening read is the
+                # recovery, and the last plan stands meanwhile.
+                return
+
+    def _refresh(self) -> None:
+        if not self._items:
+            self._items = []
+            self.update("")
+            self.display = False
+            return
+        self.display = True
+        done = sum(1 for item in self._items if item["status"] == plan.DONE)
+        line = Text()
+        line.append(
+            t("plan_header", done=done, total=len(self._items)),
+            style=f"bold {PALETTE['muted']}",
+        )
+        for item in self._items:
+            glyph, colour = PLAN_MARKS[item["status"]]
+            line.append("\n")
+            line.append(f"{glyph} ", colour)
+            line.append(
+                item["text"],
+                PALETTE["text"]
+                if item["status"] in (plan.ACTIVE, plan.BLOCKED)
+                else PALETTE["muted"],
+            )
+        self.update(line)
+
+    def plain_text(self) -> str:
+        """What the strip shows, for a test that reads the screen."""
+        return content_text(self.content)

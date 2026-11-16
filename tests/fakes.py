@@ -32,7 +32,7 @@ from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
 from slife2.libs.turn.watch import WatchItem
-from slife2.tui.client import TurnReply
+from slife2.tui.client import Conversation, TurnReply
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -186,6 +186,9 @@ class FakeAgentClient:
         #: window opened after a restart sees it.  Empty is the real answer for
         #: a name that has never run, and so is the default.
         self.turns: list[dict[str, Any]] = []
+        #: And the plan that came with it.  Empty is a real answer — a
+        #: conversation with no plan — so the strip is hidden by default.
+        self.plan: list[dict[str, str]] = []
         #: How many times the history was read, so a test can prove a window
         #: reads it once rather than once per connection.
         self.reads = 0
@@ -205,11 +208,11 @@ class FakeAgentClient:
             raise self._connect_error
         self.connected = True
 
-    async def transcript(self) -> list[dict[str, Any]]:
+    async def transcript(self) -> Conversation:
         if not self.connected:
             raise ConnectionError("not connected")
         self.reads += 1
-        return list(self.turns)
+        return Conversation(list(self.turns), [dict(item) for item in self.plan])
 
     async def close(self) -> None:
         self.connected = False

@@ -31,9 +31,10 @@ queue; it is the bytes and their meaning.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from slife2.libs.turn import plan
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.events import decode as decode_event
 from slife2.libs.turn.events import encode as encode_event
@@ -46,9 +47,17 @@ class Snapshot:
     `turns` is the shape `slife2.plugins.agent.server.transcript` returns — the
     same list a window draws when it opens — so a watcher and a restarted
     window cannot show different histories for one conversation.
+
+    `plan` is the conversation's current plan for the same reason: a plan is
+    read with the history (`slife2.libs.turn.plan`), and a watcher that opened
+    beside a window must start from the same list, or the two screens would
+    describe one conversation two ways.  Empty is a real answer — no plan — and
+    a plan this build cannot read is a frame this decoder drops, like every
+    other line it has no word for.
     """
 
     turns: list[dict[str, Any]]
+    plan: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -98,7 +107,7 @@ def encode(item: WatchItem) -> str:
     """
     if isinstance(item, Snapshot):
         return json.dumps(
-            {"t": SNAPSHOT, "turns": item.turns},
+            {"t": SNAPSHOT, "turns": item.turns, "plan": item.plan},
             ensure_ascii=True,
             separators=(",", ":"),
         )
@@ -138,8 +147,13 @@ def decode(message: str) -> WatchItem | None:
         kind = payload.get("t")
         if kind == SNAPSHOT:
             turns = payload.get("turns")
-            if isinstance(turns, list):
-                return Snapshot(turns)
+            raw_plan = payload.get("plan")
+            if isinstance(turns, list) and isinstance(raw_plan, list):
+                try:
+                    items = plan.from_wire(raw_plan, where="the snapshot's plan")
+                except plan.PlanError:
+                    return None
+                return Snapshot(turns, items)
             return None
         if kind == TURN_STARTED:
             text = payload.get("d")

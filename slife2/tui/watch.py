@@ -50,7 +50,7 @@ from slife2.tui.client import WatchClient
 from slife2.tui.draw import draw
 from slife2.tui.i18n import t
 from slife2.tui.restore import restore
-from slife2.tui.widgets import ChatView
+from slife2.tui.widgets import ChatView, PlanView
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,10 @@ class WatchScreen(Screen[None]):
         # message, which wears `Subagent(jill)>`.  The sender's kind is in the
         # channel, so this screen does not decide it (`channel_prefix`).
         yield Static(t("watch_header", subagent=self._subagent), id="watch-header")
+        # The strip the window has, under the header: the watched conversation's
+        # plan is part of what somebody looking over its shoulder can see, and
+        # the snapshot carries it for the same reason it carries the history.
+        yield PlanView()
         yield ChatView(self._subagent)
 
     def on_mount(self) -> None:
@@ -163,6 +167,10 @@ class WatchScreen(Screen[None]):
     def _apply(self, item: WatchItem) -> None:
         """Draw one watch item, in the order the server sent it."""
         chat = self.query_one(ChatView)
+        # The plan's live half.  The snapshot below sets the plan the watcher was
+        # not there to see; a `plan_write` in the watched turn reaches the strip
+        # through the same rule the window uses (`PlanView.observe`).
+        self.query_one(PlanView).observe(item)
         if not self._snapshot_seen:
             self._snapshot_seen = True
             if not isinstance(item, Snapshot):
@@ -172,8 +180,9 @@ class WatchScreen(Screen[None]):
                 chat.add_error(t("watch_snapshot_missing"))
 
         match item:
-            case Snapshot(turns=turns):
+            case Snapshot(turns=turns, plan=items):
                 restore(chat, turns)
+                self.query_one(PlanView).set_plan(items)
             case TurnStarted(text=text, channel=channel):
                 # **The message the turn is answering**, which its caller sent
                 # and a watcher never saw.  `add_user` also closes any turn left

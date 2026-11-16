@@ -184,6 +184,24 @@ WatchScreen {
     color: $slife-border-dim;
 }
 
+/* ── The plan strip ─────────────────────────────────────────────────────── */
+
+/* Current state, not history: it sits between the transcript and the prompt and
+   stays put while the conversation scrolls.  A cap plus internal scrolling
+   keeps a long plan from pushing the conversation off the screen; the tool
+   refuses a plan over the cap, so this is a display bound rather than a second
+   rule.  Hidden (`display: none`) when there is no plan. */
+PlanView {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    background: $slife-panel;
+    overflow-y: auto;
+    scrollbar-size: 1 2;
+    scrollbar-color: $slife-border-dim;
+    scrollbar-background: $slife-panel;
+}
+
 /* ── The status row ─────────────────────────────────────────────────────── */
 
 StatusBar {

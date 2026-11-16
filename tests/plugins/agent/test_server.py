@@ -59,7 +59,7 @@ from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import TurnStore
-from slife2.libs.turn import attachments
+from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
     TURN_PREFIX,
     TURN_PROMPT_PREFIX,
@@ -260,6 +260,28 @@ async def attach(
     return result.data
 
 
+async def write_plan(
+    server: FastMCP,
+    items: list[dict[str, str]],
+    *,
+    agent: str = DEFAULT_AGENT,
+    subagent: str = "",
+) -> dict[str, Any]:
+    """Call `plan_write` the way the model does, and answer its JSON.
+
+    The caller's identity rides in `_meta`, exactly as it does when the loop
+    makes the call on the model's behalf; a refusal raises out of `call_tool`,
+    which is what the tests about a refused plan read.
+    """
+    async with Client(server) as client:
+        result = await client.call_tool(
+            plan.PLAN_WRITE,
+            {"items": items},
+            meta=conversation_meta(agent, subagent),
+        )
+    return result.data
+
+
 async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     """Block until the backend has been asked for that many model streams.
 
@@ -396,6 +418,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "model_remove",
         "model_set",
         "model_switch",
+        "plan_write",
         "reset",
         "send_message",
         "subagent_create",
@@ -659,6 +682,115 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     assert footnote["channel"] == inbound
     assert footnote["begin"], "a turn that cannot say when it happened"
     assert as_sent[1][2] == "user:two", "and the newest turn has none yet"
+
+
+PLAN_ITEMS = [
+    {"text": "read the config", "status": plan.DONE},
+    {"text": "write the tool", "status": plan.ACTIVE},
+    {"text": "run the tests", "status": plan.PENDING},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_is_replayed_at_the_start_of_every_turn_and_never_stored(
+    context, hub
+) -> None:
+    """**The plan is the half of the prompt a rebuild cannot decide.**
+
+    It rides `[TURN-PROMPT:{…}]`, which is added after the recall and stripped
+    before the save — so the model reads it on every turn, the row keeps the
+    person's words only, and nothing about it depends on whether the turn that
+    wrote it is still in the context.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    # Snapshotted at call time, because the marker is removed before the save:
+    # a later read of `backend.calls` sees the cleaned message.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append([str(m.content) for m in messages if m.role == "user"])
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(
+        default_config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    written = await write_plan(server, PLAN_ITEMS)
+    assert written["done"] == 1
+    assert written["total"] == len(PLAN_ITEMS)
+
+    await send(server, "one")
+    await send(server, "two")
+
+    for call, words in ((as_sent[0], "one"), (as_sent[1], "two")):
+        current = call[-1]
+        end = current.index("] ")
+        facts = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
+        assert facts["plan"] == PLAN_ITEMS
+        assert current[end + 2 :] == words
+    assert TURN_PROMPT_PREFIX not in as_sent[1][0], "the first turn's lead is gone"
+
+    # The stored row is the person's words; the plan is the conversation's own
+    # file, answered beside the turns the window opens with.
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    assert answer.data["plan"] == PLAN_ITEMS
+    assert answer.data["turns"][0]["messages"][0]["content"] == "one"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_plan_leaves_the_previous_one_standing(context, hub) -> None:
+    """A tool that says no must not change the file it was asked to replace."""
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+    await write_plan(server, PLAN_ITEMS)
+
+    with pytest.raises(ToolError, match="status"):
+        await write_plan(server, [{"text": "one", "status": "doing"}])
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    assert answer.data["plan"] == PLAN_ITEMS
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_a_conversation_is_refused(context, hub) -> None:
+    """The shared process cannot guess whose plan a call means."""
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="did not say"):
+            await client.call_tool(plan.PLAN_WRITE, {"items": []})
+
+
+@pytest.mark.asyncio
+async def test_reset_forgets_the_plan_with_the_conversation(context, hub) -> None:
+    """The plan is conversation state, not part of the log a reset keeps."""
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+    await write_plan(server, PLAN_ITEMS)
+
+    await reset(server)
+
+    assert plan.read(DEFAULT_AGENT, "") == []
 
 
 @pytest.mark.asyncio
@@ -5211,6 +5343,28 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
         # turn.
         await asyncio.sleep(0.05)
         assert [type(item) for item in frames] == [Snapshot]
+
+
+@pytest.mark.asyncio
+async def test_a_watch_snapshot_carries_the_conversations_plan(context, hub) -> None:
+    """A plan is not a turn, so the snapshot's turns cannot supply it.
+
+    The watcher's first frame is the opening read a window gets, and a window
+    that opened beside it would draw this plan; a watcher without it would show
+    the same conversation without the strip.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=answering("hello"),
+    )
+    await write_plan(server, PLAN_ITEMS)
+
+    async with watching(server) as (frames, _):
+        first = frames[0]
+        assert isinstance(first, Snapshot)
+        assert first.plan == PLAN_ITEMS
 
 
 @pytest.mark.asyncio

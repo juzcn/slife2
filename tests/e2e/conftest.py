@@ -164,9 +164,11 @@ tool_result:
 # `note_write` is the tool the turn test asks the model for, so it is in the
 # list the model is offered.  Every other cabinet tool is on demand, which is
 # what a plugin's tools are now; the first eight are what the system works by.
-# The three after them are the unattended channels' own send tools: a channel
-# scenario is a model *answering* on that channel, and a model can only choose
-# a tool it was offered.
+# `plan_write` is the agent server's own model tool: listing it is what proves
+# the plan's audience and route across the hub.  The last three are the
+# unattended channels' own send tools: a channel scenario is a model
+# *answering* on that channel, and a model can only choose a tool it was
+# offered.
 tool_load:
   autoload:
     - tool_search
@@ -178,6 +180,9 @@ tool_load:
     - check_async
     - cancel_async
     - note_write
+    # The agent server's own model tool, so the plan's audience and route are
+    # proven across the hub rather than only by calling its handler directly.
+    - plan_write
     - wechat_send_message
     - peer_agent_task_response
     - subagent_send_message

@@ -14,11 +14,16 @@ import pytest
 from fakes import FakeWatchClient
 from textual.app import App
 
-from slife2.libs.turn.events import TextDelta, TurnFinished
+from slife2.libs.turn.events import (
+    TextDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnFinished,
+)
 from slife2.libs.turn.messages import Message, Usage
 from slife2.libs.turn.watch import Closed, Snapshot, TurnStarted
 from slife2.tui.watch import WatchScreen
-from slife2.tui.widgets import ChatView, HistoryInput
+from slife2.tui.widgets import ChatView, HistoryInput, PlanView
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -102,6 +107,55 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         await pilot.pause()
         assert len(app.screen_stack) == 1, "back to the window"
         assert watch.closed is True, "the watch call was cancelled"
+
+
+@pytest.mark.asyncio
+async def test_the_watched_plan_is_drawn_and_updated_by_a_write() -> None:
+    """The strip is the watcher's too: the snapshot carries the plan, and a
+    plan write in the watched turn reaches it through the same rule the window
+    uses (`PlanView.observe`)."""
+    watch = FakeWatchClient(
+        (
+            Snapshot(
+                [],
+                [{"text": "read the config", "status": "active"}],
+            ),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        view = app.screen.query_one(PlanView)
+        assert "plan 0/1" in view.plain_text()
+        assert "read the config" in view.plain_text()
+
+        watch.send(
+            ToolCallStarted(
+                call_id="p1",
+                name="plan_write",
+                arguments={"items": [{"text": "write the tests", "status": "done"}]},
+            )
+        )
+        watch.send(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=True,
+                result_preview='{"done": 1, "total": 1}',
+                result_chars=24,
+                elapsed_ms=1,
+            )
+        )
+        await pilot.pause()
+
+        assert "plan 1/1" in view.plain_text()
+        assert "write the tests" in view.plain_text()
+
+        await pilot.press("escape")
+        await pilot.pause()
 
 
 @pytest.mark.asyncio

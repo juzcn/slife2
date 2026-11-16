@@ -919,6 +919,28 @@ output, writing it, and building the head MUST succeed, and each fails the turn
 loudly if it does not: a conversation carrying a marker whose file is not there
 has given up the bound and broken the address while looking like success.
 
+#### 5.2.6 The plan
+
+A conversation has one plan: a list the model writes whole through
+`plan_write`, each item one line of text and one of `pending`, `active`, `done`
+or `blocked`. The last successful write is the plan; an empty list clears it;
+there are no ids and no transition rules. The file is `plan.yaml` in the
+conversation's own directory, written atomically, removed by `reset` and copied
+by a fork at adoption. A missing file is no plan; an unreadable one fails the
+turn and names the path.
+
+The plan is not a turn and is not in the context store. Before every turn the
+agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
+removed before the turn is saved and re-derived from the file every turn: a
+rebuild chooses turns and never decides about the plan, and the prompt cache's
+prefix is untouched. A task runs on the agent's own conversation and sees the
+same plan.
+
+The harness stores, validates, replays and draws; it never derives a status,
+maps a tool call to an item, or marks one stale. The status is the model's
+claim. The window's strip is §10.2's; a watcher receives the plan in its
+`Snapshot` and from the same turn events.
+
 ### 5.3 Harness tool pairs
 
 Some things the harness must say as the model, because a provider accepts them
@@ -2176,6 +2198,11 @@ to an agent with no window is refused by name (`NO_WINDOW`).
   `interrupted`. `interrupted` is about the turn rather than the call: the turn
   ended, was cancelled, or failed while the window was waiting, so no result
   exists and none is coming.
+- **The plan is a strip above the prompt**, hidden when empty. It is read once
+  with the opening history — a watcher reads it from its `Snapshot` — and
+  updated by a `plan_write` call that succeeded. Its four statuses are the
+  model's claims, not the harness's measurements, so `done` is not drawn in the
+  colour a tool panel's verified result wears.
 - **A connection has two states on screen**: online and offline. The reasons
   live in the status tool.
 - **The status bar's `tools` count is loaded/total**, both from the hub's answer
@@ -2758,7 +2785,6 @@ The order is a suggested priority.
 |---|---|---|
 | A question the person answers | An `ask_user` tool, and `_approve` routed to every channel that has a person: the window, WeChat, a peer. | Only the TUI can answer today; a WeChat or peer turn that asks is granted silently. Human-in-the-loop is the difference between an agent that checks a destructive step and one that performs it. |
 | WeChat media | Inbound image, voice note and file become an attachment, a transcription or a cabinet document; an outbound reply can carry an image or a file. | The bridge is text-only in both directions. The media server already transcribes and the cabinet already stores images, so the missing half is the bridge, not the capability. |
-| A plan the model maintains | A per-conversation plan/todo tool, drawn in the window, with per-item status. | Long-horizon work needs an explicit plan; a plan also survives a context rebuild better than the prose that described it. |
 | A spend budget | A `budget:` section (per turn, day or conversation), a usage ledger, and a hard stop. | Usage is measured per turn and logged, but nothing bounds it. On a paid model an unbounded loop is a bill. |
 | Scheduled catch-up | A per-task policy for fires missed while no instance ran, instead of a manual `schedule_run_now`. | Cron users expect anacron-like backfill; a laptop asleep at the due moment currently loses the run. |
 | Store-and-forward on the mesh | A durable per-member inbox and read cursor — MQTT persistent sessions with QoS-1 events, or an application-level store under the member's directory — so direct messages and group fan-out are held while a member is away, replayed when it returns, and acked so a replay is not answered twice. | An agent is absent whenever no window is showing it, which is ordinary rather than exceptional. Today a group message to an absent member is lost with no trace, and a `peer_agent_send_message` call ends as `unreachable` after the retry ladder, so the sender cannot tell "not heard" from "heard and not answered". WeChat holds messages for an absent recipient; the group's casual contract is the design question this raises, because a backlog needs a rule for what a returning member answers. |

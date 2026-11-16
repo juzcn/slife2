@@ -49,6 +49,7 @@ from slife2.tui.widgets import (
     ConversationPicker,
     HistoryInput,
     ModelPicker,
+    PlanView,
     StatusBar,
     ToolCallWidget,
 )
@@ -1249,6 +1250,96 @@ async def test_a_name_that_has_never_run_shows_nothing() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         assert shown(app) == ""
+        assert app.query_one(PlanView).plain_text() == "", "no plan, no strip"
+        assert not app.query_one(PlanView).display
+
+
+PLAN_ITEMS = [
+    {"text": "read the config", "status": "done"},
+    {"text": "run the tests", "status": "active"},
+]
+
+
+async def test_the_plan_comes_back_with_the_history() -> None:
+    """The plan is conversation state, and a window that opens must show it.
+
+    It is read with the history rather than scavenged from the restored turns:
+    a rebuild may have dropped the turn that wrote it, and the file is what the
+    model's next turn will be given regardless.
+    """
+    client = answering_with(*CONVERSATION)
+    client.plan = PLAN_ITEMS
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        view = app.query_one(PlanView)
+        text = view.plain_text()
+        showing = view.display
+
+    assert "plan 1/2" in text
+    assert "read the config" in text
+    assert "run the tests" in text
+    assert showing
+
+
+def plan_turn(items: list[dict[str, str]], *, ok: bool = True):
+    """A scripted turn that writes one plan and then answers."""
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallStarted(call_id="p1", name="plan_write", arguments={"items": items})
+        )
+        on_event(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=ok,
+                result_preview='{"done": 0, "total": 2}',
+                result_chars=24,
+                elapsed_ms=1,
+            )
+        )
+        on_event(
+            TurnFinished(
+                text="planned",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            )
+        )
+        return "planned"
+
+    return respond
+
+
+async def test_a_successful_plan_write_updates_the_strip_live() -> None:
+    """The tool's call is the event, and a successful one is the new plan."""
+    app = make_app(plan_turn(PLAN_ITEMS))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        text = app.query_one(PlanView).plain_text()
+
+    assert "plan 1/2" in text
+    assert "read the config" in text
+    assert "run the tests" in text
+
+
+async def test_a_refused_plan_write_is_not_drawn() -> None:
+    """A refused write is a plan the server never stored, so the strip keeps
+    the plan it had — the tool panel shows the refusal, not the strip."""
+    client = FakeAgentClient(
+        plan_turn([{"text": "a plan nobody wrote", "status": "pending"}], ok=False)
+    )
+    client.plan = PLAN_ITEMS
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        await submit(pilot, "plan it")
+        text = app.query_one(PlanView).plain_text()
+
+    assert "plan 1/2" in text, "the previous plan still stands"
+    assert "a plan nobody wrote" not in text
 
 
 def context_of(kept: int, recalled: int, rerank: str = ""):

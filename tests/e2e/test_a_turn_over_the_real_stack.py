@@ -101,6 +101,12 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     assert events[0] == "ContextChosen", events
     assert "TextDelta" in events and events[-1] == "TurnFinished"
     assert stack["provider"].chats == 2, stack["provider"].calls
+    # **The agent server's own model tool crossed the hub**, which is the one
+    # thing no in-memory test can show: the audience mark on `plan_write` and
+    # its autoload line are what put it in the request's tool list.
+    assert "plan_write" in stack["provider"].tool_names[1], stack[
+        "provider"
+    ].tool_names[1]
     # The model is the marker's only reader: the request carries it, across
     # every process between the agent and the stub.
     sent = stack["provider"].last_messages[-1]["content"]
@@ -112,9 +118,10 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     again = MCPAgentClient(config.agent.server.url, agent="e2e")
     await again.connect()
     try:
-        turns = await again.transcript()
+        conversation = await again.transcript()
     finally:
         await again.close()
+    turns = conversation.turns
     assert len(turns) == 1, turns
     # A turn is stored as the message list the model saw, so both halves are in
     # there and neither is a column of its own (`TurnRecord.to_wire`).

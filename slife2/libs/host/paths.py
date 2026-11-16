@@ -435,14 +435,28 @@ def agent_dir(agent: str, subagent: str = "") -> Path:
     first.  It is also what keeps a subagent *inside* its parent: the sanitiser
     refuses a name that reduces to `.` or `..`, so the last segment cannot climb
     out of the ones above it.
+
+    **`agent_path` is the same answer without the `mkdir`**, for a read that must
+    not create the directory it is asking about.
     """
-    path = (
+    path = agent_path(agent, subagent)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def agent_path(agent: str, subagent: str = "") -> Path:
+    """Where one conversation's directory is — **without making one**.
+
+    `agent_dir`'s non-creating half, for the readers that ask about a name
+    before using it: a transcript, a plan, a record.  `agents/` itself is still
+    made (`agents_dir`), because that is the home's own container rather than a
+    conversation, and the layout's one spelling lives there.
+    """
+    return (
         subagent_path(agent, subagent)
         if subagent
         else agents_dir() / _agent_segment(agent)
     )
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def subagent_path(agent: str, subagent: str) -> Path:

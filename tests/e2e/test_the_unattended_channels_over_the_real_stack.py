@@ -145,9 +145,10 @@ async def test_a_wechat_message_becomes_a_turn_and_the_reply_goes_back(stack) ->
     client = MCPAgentClient(config.agent.server.url, agent=agent)
     await client.connect()
     try:
-        turns = await client.transcript()
+        conversation = await client.transcript()
     finally:
         await client.close()
+    turns = conversation.turns
     assert len(turns) == 1, turns
     assert turns[0]["channel"] == "wechat", turns[0]
     assert "what is the number?" in json.dumps(turns[0]["messages"])
@@ -243,9 +244,10 @@ async def test_a_peer_task_runs_a_turn_and_the_answer_returns_over_the_mesh(
     client = MCPAgentClient(config.agent.server.url, agent=agent)
     await client.connect()
     try:
-        turns = await client.transcript()
+        conversation = await client.transcript()
     finally:
         await client.close()
+    turns = conversation.turns
     assert len(turns) == 1, turns
     assert turns[0]["channel"] == f"peer_agent:{REMOTE_PEER}", turns[0]
     assert answer in json.dumps(turns[0]["messages"])

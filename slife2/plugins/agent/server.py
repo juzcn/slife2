@@ -163,7 +163,7 @@ from slife2.libs.plugin.protocol import (
     unreadable,
 )
 from slife2.libs.plugin.vocabulary import FORGET, TRANSCRIPT
-from slife2.libs.turn import attachments
+from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
     turn_failed_note,
     turn_note,
@@ -798,11 +798,27 @@ class Loop:
     #: it is written: no restore, no rebuild, no turn record (`adopt_maker` is
     #: all three).
     #:
-    #: **And its session is its whole life.**  The only file a fork leaves is
-    #: its `subagent.yaml`, and `forget_forks` removes that when the server
-    #: starts: a record with no conversation behind it would name a new fork of
-    #: the maker's current conversation, which is a different subagent.
+    #: **And its session is its whole life.**  The files a fork leaves are its
+    #: `subagent.yaml` and its `plan.yaml`, and `forget_forks` removes the whole
+    #: directory when the server starts: a record with no conversation behind it
+    #: would name a new fork of the maker's current conversation, which is a
+    #: different subagent.
     fork: bool = False
+
+
+@dataclass(frozen=True)
+class StoredConversation:
+    """What a window or a watcher opens with: the turns, and the plan as it stands.
+
+    **Answered together because the two readers need one frame.**  The turns
+    are the context store's and the plan is the conversation's own file
+    (`slife2.libs.turn.plan`); `transcript` and `watch`'s snapshot must agree
+    about both, or a window and a watcher opened beside it would draw one
+    conversation two ways.
+    """
+
+    turns: list[dict[str, Any]]
+    plan: list[plan.PlanItem]
 
 
 def build_server(
@@ -2006,6 +2022,9 @@ def build_server(
         # figure too: a fork that started its first marker at `0 (0.0%)` would
         # be reporting a fact about the wrong list.
         loop.context_tokens = maker.context_tokens
+        # And the plan is part of what a conversation *is*: the messages alone
+        # would leave the fork working from a list its maker has moved on from.
+        _copy_plan(loop.agent, loop.subagent, loop.agent, "")
         logger.info(
             "forked %s from %s: %d message(s)",
             describe((loop.agent, loop.subagent)),
@@ -2357,7 +2376,16 @@ def build_server(
         # `finally` below so the row, the next turn's rebuild and the `[TURN:]`
         # footnote never see it either.  It is a prompt for this turn, not a
         # record of it.
-        lead = turn_prompt_lead(loop.context_tokens, loop.context_window)
+        #
+        # **The plan is read here, after the rebuild, because a rebuild cannot
+        # carry it.**  It is the conversation's own file, not a turn the
+        # discriminator chose between: this is the half of the prompt that
+        # survives whatever a rebuild decides.
+        lead = turn_prompt_lead(
+            loop.context_tokens,
+            loop.context_window,
+            plan.read(loop.agent, loop.subagent),
+        )
         user = with_lead(user, lead)
         for refusal in refusals:
             # **Reported, never dropped in silence**: to the caller in the reply
@@ -2887,6 +2915,41 @@ def build_server(
             "attached": [source for source, _url in pairs],
             "refused": refusals,
         }
+
+    plan_conversation = conversation_reader("plan to write", "the plan")
+
+    @mcp.tool(name=plan.PLAN_WRITE, meta=FOR_THE_MODEL)
+    async def write_plan(ctx: Context, items: list[dict[str, str]]) -> dict[str, Any]:
+        """Write the whole plan for this conversation, replacing the one before.
+
+        **Send every item every time.**  The list replaces the previous plan, so
+        an omitted item is a dropped item; an empty list clears the plan.  The
+        plan is replayed to you at the start of every turn and drawn for the
+        person watching, so keep it to the work in front of you: at most 24
+        items, each one line of at most 200 characters.
+
+        Args:
+            items: Every step, in order.  Each is `{text, status}`, where
+                `status` is `pending` (not started), `active` (being worked on
+                now), `done` (finished), or `blocked` (cannot proceed — put the
+                reason in the text).  No other fields.
+
+        Returns:
+            `items` as written, `done` (how many are `done`), and `total`.
+        """
+        agent, subagent = plan_conversation(ctx)
+        try:
+            written = plan.write(agent, subagent, items)
+        except plan.PlanError as exc:
+            raise ToolError(str(exc)) from exc
+        done = sum(1 for item in written if item["status"] == plan.DONE)
+        logger.info(
+            "plan %s: %d item(s), %d done",
+            describe((agent, subagent)),
+            len(written),
+            done,
+        )
+        return {"items": written, "done": done, "total": len(written)}
 
     @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
     async def check_new_input(ctx: Context) -> str:
@@ -4029,14 +4092,17 @@ def build_server(
             refused=outcome.refused,
         )
 
-    async def stored_turns(agent: str, subagent: str) -> list[dict[str, Any]]:
-        """The turns a conversation's store is made of, oldest first.
+    async def stored_conversation(agent: str, subagent: str) -> StoredConversation:
+        """The turns a conversation's store is made of, and its plan.
 
         **One read, two readers**: `transcript` gives it to a window that has
         just opened, and `watch` gives it to a watcher as its first frame.  They
         must agree about where history ends — a watcher that read a different
         list from the window would start its live stream at a different turn —
-        so the read lives here rather than being written out twice.
+        so the read lives here rather than being written out twice.  The plan
+        rides the same frame for the same reason: a window and a watcher opened
+        beside it must draw the same plan, and the plan is the conversation's
+        own file rather than the store's.
 
         The opening prompt is what a conversation that has never run would head
         with, so it is handed over rather than an empty list; the returned
@@ -4060,7 +4126,7 @@ def build_server(
         turns = payload.get("turns")
         if not isinstance(turns, list):
             raise unreadable("the context store", "return a turn list", payload)
-        return turns
+        return StoredConversation(turns, plan.read(agent, subagent))
 
     @mcp.tool(name=TRANSCRIPT)
     async def transcript(agent: str, subagent: str = "") -> dict[str, Any]:
@@ -4096,9 +4162,11 @@ def build_server(
             `turns`: the stored turns this conversation's context is made of, in
                 the list's own order, oldest first.  Empty for a conversation
                 that has never run — the honest answer for a genuinely new
-                name, and not an error.
+                name, and not an error.  `plan`: the conversation's current
+                plan, empty when it has none.
         """
-        return {"turns": await stored_turns(agent, subagent)}
+        stored = await stored_conversation(agent, subagent)
+        return {"turns": stored.turns, "plan": stored.plan}
 
     @mcp.tool
     async def subagents(agent: str) -> dict[str, Any]:
@@ -4196,7 +4264,7 @@ def build_server(
         # has it, which is the same check the replay makes.
         while True:
             before = taps.get(key)
-            turns = await stored_turns(agent, subagent)
+            stored = await stored_conversation(agent, subagent)
             if taps.get(key) is before:
                 break
         watcher = Watcher()
@@ -4207,7 +4275,7 @@ def build_server(
         )
         known = {
             turn["turn_id"]
-            for turn in turns
+            for turn in stored.turns
             if isinstance(turn, dict) and isinstance(turn.get("turn_id"), int)
         }
         count = 0
@@ -4220,7 +4288,7 @@ def build_server(
             await ctx.report_progress(count, None, encode_watch(item))
 
         try:
-            await send(Snapshot(turns))
+            await send(Snapshot(stored.turns, stored.plan))
             if replay is not None:
                 started, events, recorded = replay
                 # **The tap is the turn in flight, or the one that just ended.**
@@ -4266,6 +4334,11 @@ def build_server(
         request with a different blast radius: `turn_list` still finds every one
         of them, they are simply no longer what this conversation is made of.
 
+        **The plan goes with the conversation.**  It is the conversation's
+        current state rather than part of the log, and a reset that left it
+        would have the next turn resume a plan for a conversation the person
+        ended.
+
         **A turn in flight is waited for, and the loop is then retired.**  A
         reset that dropped the loop while a turn still held it would be undone
         by that turn's own record: the save appends its turn id to the live
@@ -4285,6 +4358,11 @@ def build_server(
         key = conversation_key(agent, subagent)
         loop = loops.get(key)
         if loop is None:
+            # **The plan is local and goes first.**  The context clear is the
+            # remote half; a failure there is a reset that did not happen, and
+            # a retry is the answer rather than a conversation left with one
+            # half of it gone and the other still there.
+            plan.clear(agent, subagent)
             await forget_context(agent, subagent)
             logger.debug("reset: %s was not running", describe((agent, subagent)))
             return {"reset": False}
@@ -4319,6 +4397,9 @@ def build_server(
                     ) from None
                 except Exception:  # noqa: BLE001 — a refused write writes nothing
                     pass
+            # The plan first, for the reason the branch above gives; this is the
+            # same two halves under the lock.
+            plan.clear(agent, subagent)
             await forget_context(agent, subagent)
             loop.removed = True
             loops.pop(key, None)
@@ -4833,6 +4914,22 @@ def _write_subagent(agent: str, subagent: str, record: dict[str, Any]) -> None:
     source.
     """
     statefile.write(subagent_file(agent, subagent), record)
+
+
+def _copy_plan(agent: str, subagent: str, maker: str, maker_subagent: str = "") -> None:
+    """Give a fork its maker's plan, as it stands now.
+
+    **The plan is part of what a fork copies.**  A fork is a copy of its maker's
+    conversation, and the plan is that conversation's current state — the
+    messages alone would leave it working from a list the maker no longer has.
+    A maker with no plan clears the fork's, because a fork re-adopted after an
+    idle sweep must not keep a plan the maker has since dropped.
+    """
+    items = plan.read(maker, maker_subagent)
+    if items:
+        plan.write(agent, subagent, items)
+    else:
+        plan.clear(agent, subagent)
 
 
 def _image_url(part: Any) -> str | None:

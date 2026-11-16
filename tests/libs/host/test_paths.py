@@ -17,6 +17,7 @@ from slife2.libs.host.paths import (
     DATA_ENV_VAR,
     RUNTIME_ENV_VAR,
     agent_dir,
+    agent_path,
     agents_dir,
     catalogue_db,
     data_dir,
@@ -237,6 +238,26 @@ def test_a_subagents_directory_is_inside_its_parents(
     assert agent_dir("jack") == jack, "and the agent's own does not move"
     # The one name that would have collided: an agent's own cabinet.
     assert agent_dir("jack", "cabinet") != jack / "cabinet"
+
+
+def test_agent_path_answers_without_making_the_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A read must not create the conversation it is asking about.**
+
+    The plan, a transcript and a record are all read before they may exist; a
+    path builder that made the directory would turn a typo or a removed
+    subagent's stale name into a directory with no record — which
+    `subagent_create` then refuses for ever as "half-removed".
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    assert agent_path("jack") == tmp_path / "agents" / "jack"
+    assert agent_path("jack", "researcher") == (
+        tmp_path / "agents" / "jack" / "subagents" / "researcher"
+    )
+    assert not (tmp_path / "agents" / "jack").exists()
+    assert not (tmp_path / "agents" / "jack" / "subagents" / "researcher").exists()
 
 
 @pytest.mark.skipif(

@@ -100,6 +100,7 @@ from slife2.tui.widgets import (
     HistoryInput,
     ModelChoice,
     ModelPicker,
+    PlanView,
     StatusBar,
 )
 
@@ -459,6 +460,10 @@ class SlifeApp(App[None]):
         # The transcript signs its messages with the agent name, so a
         # conversation reads `You> ...` / `jack> ...` on both sides.
         yield ChatView(self._agent)
+        # The plan sits between the conversation and the prompt: it is current
+        # state rather than history, so it stays put while the transcript
+        # scrolls.  Hidden until there is a plan (`PlanView`).
+        yield PlanView()
         yield HistoryInput(
             # The agent's name, not the program's: the prompt is addressed to
             # whoever this instance is, and it is the one place the name is
@@ -784,7 +789,7 @@ class SlifeApp(App[None]):
                 return
             assert self._client is not None
             try:
-                turns = await self._client.transcript()
+                conversation = await self._client.transcript()
             except Exception as exc:  # noqa: BLE001 - a window is not worth losing
                 # Given back (the flag stays unset) because this is the retry
                 # path: a read that failed because the servers were still coming
@@ -797,14 +802,20 @@ class SlifeApp(App[None]):
                 self._connection_text = t("connection_disconnected", err=exc)
                 self._refresh_status()
                 return
-            restore(self._transcript, turns)
+            restore(self._transcript, conversation.turns)
+            # **The plan comes with the history, once.**  A live write reaches
+            # the strip through the turn events (`_apply`); this is the other
+            # half, the state a window that has just opened was not there to
+            # see.  It is set from the same opening read for the watcher's
+            # reason: a window and a watcher opened together draw one plan.
+            self.query_one(PlanView).set_plan(conversation.plan)
             # Set only now, so it reports what has actually happened.  `restore`
             # cannot raise on its own data — it drops a row it cannot read — so
             # the only failure left outside the `try` is the transport's, above.
             self._restored = True
         # The bar is the one part of the window that would not otherwise know
         # the conversation had come back — see `context_of`.
-        self._context_tokens = context_of(turns)
+        self._context_tokens = context_of(conversation.turns)
         self._refresh_status()
 
     # --- the queue of turns --------------------------------------------------
@@ -1089,10 +1100,14 @@ class SlifeApp(App[None]):
         **The display half is `slife2.tui.draw.draw`'s**, shared with the screen
         that watches a conversation the window is not running, so a watched turn
         and a typed one cannot render differently.  The events that are the
-        *window's* — the approval prompt, the bill in the status bar, and the
-        catalogue's size — are handled here, because they are facts about this
-        view rather than about the conversation.
+        *window's* — the approval prompt, the bill in the status bar, the
+        catalogue's size and the plan strip — are handled here, because they are
+        facts about this view rather than about the conversation.
         """
+        # **The plan's live half.**  The opening read sets the plan the window
+        # was not there to see; every turn after it reaches the strip through
+        # this call, and a successful `plan_write` is what changes it.
+        self.query_one(PlanView).observe(event)
         if isinstance(event, ToolsCounted):
             # The hub's answer to the ask this model call was built from: the
             # pair the bar shows, both halves from the same ask

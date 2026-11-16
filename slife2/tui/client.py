@@ -34,6 +34,7 @@ from slife2.libs.host.config import (
 from slife2.libs.plugin.protocol import close_server, open_server
 from slife2.libs.plugin.vocabulary import ATTACH, JOIN, TRANSCRIPT, Handover
 from slife2.libs.plugin.vocabulary import decode as decode_handover
+from slife2.libs.turn import plan
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.libs.turn.watch import WatchItem
 from slife2.libs.turn.watch import decode as decode_watch
@@ -70,6 +71,22 @@ class TurnReply:
 
     text: str
     injected: bool = False
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """What a window opens with: the conversation's turns and its current plan.
+
+    **One read, because the plan is drawn beside the history.**  `turns` is the
+    context store's and `plan` is the conversation's own file
+    (`slife2.libs.turn.plan`), validated here as the shape this build accepts.
+    A window and a watcher that open at the same moment must start from the
+    same pair, which is why the server answers both together and `Snapshot`
+    carries the same two fields.
+    """
+
+    turns: list[dict[str, Any]]
+    plan: list[dict[str, str]]
 
 
 class AgentClient(Protocol):
@@ -141,21 +158,22 @@ class AgentClient(Protocol):
         """
         ...
 
-    async def transcript(self) -> list[dict[str, Any]]:
-        """The turns this conversation is made of, for a window to draw.
+    async def transcript(self) -> Conversation:
+        """The turns this conversation is made of, and its plan, for a window.
 
-        Empty for a conversation that has never run, which is the honest answer
-        for a new name and not a failure.  Read once, when the window opens: the
-        history is the server's, so a window that failed to read it has lost
-        nothing but the sight of it.
+        Empty turns are the honest answer for a new name and not a failure, and
+        so is an empty plan.  Read once, when the window opens: the history is
+        the server's, so a window that failed to read it has lost nothing but
+        the sight of it.
 
-        **A read that is missing `turns` is not that empty.**  A name with no
-        history is answered with a real turn list that happens to be empty
-        (`slife2.plugins.agent.server.transcript`, over `restore`'s own `{"turns": []}`);
-        a payload whose `turns` cannot be read is damage, and reading it as `[]`
-        is a window that shows a blank history and marks itself restored
-        (SDD Appendix C: a value that cannot be read is not a value that is
-        absent).
+        **A read that is missing `turns` or `plan` is not that empty.**  A name
+        with no history is answered with a real turn list that happens to be
+        empty (`slife2.plugins.agent.server.transcript`, over `restore`'s own
+        `{"turns": []}`), and a conversation with no plan with a real empty
+        list; a payload whose `turns` or `plan` cannot be read is damage, and
+        reading it as empty is a window that shows a blank history or no plan
+        and marks itself restored (SDD Appendix C: a value that cannot be read
+        is not a value that is absent).
         """
         ...
 
@@ -379,7 +397,7 @@ class MCPAgentClient:
         self._model = ref
         return answer
 
-    async def transcript(self) -> list[dict[str, Any]]:
+    async def transcript(self) -> Conversation:
         """Read the conversation back, for the window that has just opened.
 
         The transport rule is `_call_tool`'s, for `_call_tool`'s reason: a
@@ -390,7 +408,9 @@ class MCPAgentClient:
         A `turns` that is not a list raises rather than answering `[]`: an empty
         read is a name with no history, and a damaged one read as empty is a
         window that shows nothing and calls itself restored for the session.
-        The check is outside `_call_tool`, so the connection stays — the server
+        `plan` is read the same way — and through the plan's own validator, so a
+        plan this build would not have written is not drawn as one it did.  The
+        checks are outside `_call_tool`, so the connection stays — the server
         answered, and it is the answer this build cannot read.
         """
         result = await self._call_tool(
@@ -400,7 +420,14 @@ class MCPAgentClient:
         turns = payload.get("turns") if isinstance(payload, dict) else None
         if not isinstance(turns, list):
             raise _unreadable("return a turn list", payload)
-        return list(turns)
+        raw_plan = payload.get("plan") if isinstance(payload, dict) else None
+        if not isinstance(raw_plan, list):
+            raise _unreadable("return a plan", payload)
+        try:
+            items = plan.from_wire(raw_plan, where="the plan")
+        except plan.PlanError as exc:
+            raise _unreadable("return a plan", payload) from exc
+        return Conversation(list(turns), items)
 
     async def models(self) -> list[dict[str, Any]]:
         """Read the models the config defines.  See `AgentClient.models`.

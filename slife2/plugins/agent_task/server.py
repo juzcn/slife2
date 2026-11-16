@@ -104,6 +104,7 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_MARKER as MARKER_PREFIX,
 )
+from slife2.libs.turn import plan
 from slife2.libs.turn.context import turn_prompt_lead, with_lead
 from slife2.libs.turn.loop import TurnResult
 from slife2.libs.turn.messages import Message
@@ -509,7 +510,15 @@ def build_server(
         # the restored conversation's last turn, which is the number the agent's
         # status bar would have shown when the task started.
         opening = with_lead(
-            opening, turn_prompt_lead(restored.context_tokens, settings.context_window)
+            opening,
+            turn_prompt_lead(
+                restored.context_tokens,
+                settings.context_window,
+                # A task runs on the agent's own conversation, so it runs on the
+                # same plan: the halfway case — a task that did not see the plan
+                # it could write — would be two answers to one conversation.
+                plan.read(*task.identity),
+            ),
         )
         result = await loop.run_turn(rebuilt.messages, opening)
         # After the turn and not during it: the tool list goes out with every

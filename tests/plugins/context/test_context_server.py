@@ -2032,6 +2032,12 @@ def test_the_turn_prompt_lead_is_one_builder_for_the_clock_and_the_size() -> Non
     bare = json.loads(turn_prompt_lead(0, 0)[len(TURN_PROMPT_PREFIX) : -1])
     assert set(bare) == {"now"}
 
+    # The plan rides the same marker, and an empty one is omitted like every
+    # fact the caller does not have.
+    plan = [{"text": "read the config", "status": "active"}]
+    with_plan = json.loads(turn_prompt_lead(0, 0, plan)[len(TURN_PROMPT_PREFIX) : -1])
+    assert with_plan["plan"] == plan
+
 
 def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
     """**The lead's inverse is exact**, so the person's text arrives as written.

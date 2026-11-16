@@ -318,6 +318,83 @@ async def test_a_transcript_without_turns_is_not_an_empty_history(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_a_transcript_carries_the_plan_with_the_turns(monkeypatch) -> None:
+    """One opening read, two fields: the window draws the history and the plan.
+
+    The plan is validated through its own module, so a list this build would not
+    have written is refused rather than drawn as a plan it did.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def with_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(
+                data={
+                    "turns": [],
+                    "plan": [{"text": "read the config", "status": "active"}],
+                }
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", with_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    conversation = await client.transcript()
+
+    assert conversation.turns == []
+    assert conversation.plan == [{"text": "read the config", "status": "active"}]
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_without_a_plan_is_not_an_empty_plan(monkeypatch) -> None:
+    """A missing `plan` is damage: the server writes one even when it is empty."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def no_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(data={"turns": []})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", no_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError) as raised:
+        await client.transcript()
+
+    assert "plan" in str(raised.value)
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_the_build_would_not_have_written_is_refused(monkeypatch) -> None:
+    """A status outside the four is a plan this client will not draw."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def odd_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(
+                data={
+                    "turns": [],
+                    "plan": [{"text": "one", "status": "doing"}],
+                }
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", odd_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError, match="plan"):
+        await client.transcript()
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
     monkeypatch,
 ) -> None:

@@ -64,6 +64,10 @@ GLYPHS: dict[str, str] = {
     "interrupted": "⊘",  # circled division slash
     "failed": "✗",
     "check": "✓",  # the other half of `failed`
+    # A plan item nobody has started.  Distinct from every call state above:
+    # the plan's four statuses are the model's claims, and a panel's are the
+    # harness's observations, so the two vocabularies do not share a mark.
+    "todo": "○",
     "up": "↑",
     "down": "↓",
     "separator": "│",
