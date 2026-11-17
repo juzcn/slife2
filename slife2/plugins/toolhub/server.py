@@ -235,7 +235,7 @@ from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
 from slife2.libs.store.answer import search_answer
-from slife2.libs.store.catalogue import CATEGORIES, ToolStore
+from slife2.libs.store.catalogue import CATEGORIES, ToolStore, unknown_category
 from slife2.libs.store.index import Embedder
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
@@ -567,7 +567,8 @@ class Catalogue:
                 return found
             if found is not None:
                 if theirs is not None:
-                    found.reconfigure(
+                    await off_loop(
+                        found.reconfigure,
                         threshold=theirs.tool_load.threshold,
                         autoload=theirs.tool_load.autoload,
                         known=configured_sources(theirs),
@@ -1790,7 +1791,7 @@ TOOL_LIST_PARAMETERS: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Only one source, as a row's `source` field names it — "
-                "`arxiv`, `skills`, `jobs`. Omit for every source."
+                "`arxiv`, `skills`, `job`. Omit for every source."
             ),
         },
         "limit": {
@@ -1977,8 +1978,7 @@ def local_tools(
             # "nothing is installed" about a category that does not exist.  The
             # known words are in the refusal because they are the correction.
             raise ToolError(
-                f"{category!r} is not a tool category; known: "
-                + ", ".join(sorted(CATEGORIES))
+                unknown_category(category)
                 + " — leave `category` empty to list all of them"
             )
         # The declarations are refreshed for the reason a search refreshes

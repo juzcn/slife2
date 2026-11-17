@@ -178,7 +178,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     add_a2a_broker_argument(parser)
     parser.add_argument(
         "--agent",
-        default=DEFAULT_AGENT,
+        # None until the validation below has seen it: a flag that was written
+        # is a flag the command must honour, and the default would hide the
+        # writing of it (`--agent` on `status` does nothing there).
+        default=None,
         help=(
             "the name this instance runs under, or the agent a probe asks "
             f"(default: {DEFAULT_AGENT})"
@@ -276,6 +279,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--json only applies to `status`")
     if args.model and args.command != _RUN:
         parser.error("--model only applies to `run`")
+    if args.url is not None and args.command != _RUN:
+        parser.error("--url only applies to `run`")
+    if args.headless and args.command != _RUN:
+        parser.error("--headless only applies to `run`")
+    if args.keep_servers and args.command != _RUN:
+        parser.error("--keep-servers only applies to `run`")
+    if args.agent is not None and args.command not in (_RUN, "probe"):
+        parser.error("--agent only applies to `run` and `probe`")
     if args.force and args.command != "down":
         parser.error("--force only applies to `down`")
     if args.prompt is not None and args.command != "probe":
@@ -298,6 +309,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--lines must be 0 or more (0 shows the whole log)")
     if args.lines is None:
         args.lines = 50
+    if args.agent is None:
+        args.agent = DEFAULT_AGENT
     apply_data_dir(args)
     apply_a2a_broker(args)
     return args
@@ -644,16 +657,15 @@ def _broker_settings(config: Config) -> list[Any]:
     return found
 
 
-def _broker_status(config: Config) -> dict[str, Any] | None:
-    """The A2A broker's row, or `None` when the config is not on the mesh.
+def _broker_row(settings: Any) -> dict[str, Any]:
+    """One broker's row, read the way `down` reads it.
 
     The broker is the one daemon the launcher does not start, so `statuses`
-    cannot see it.  It is read the way `down` reads it: a record proves the
-    process is ours, and a port that answers proves there is a broker at all.
+    cannot see it: a record proves the process is ours, and a port that
+    answers proves there is a broker at all.  One row per address — both
+    networks may name one (`_broker_settings`), and a dead second broker is
+    a fact the report owes the reader, not a silence.
     """
-    brokers = _broker_settings(config)
-    if not brokers:
-        return None
     from slife2.libs.host.runtime import (
         log_path,
         read_record,
@@ -662,7 +674,6 @@ def _broker_status(config: Config) -> dict[str, Any] | None:
     )
     from slife2.plugins.a2a.broker import BROKER_NAME, log_url
 
-    settings = brokers[0]
     url = log_url(settings)
     listening = tcp_listening(settings.broker_host, settings.broker_port)
     record = read_record(url)
@@ -712,7 +723,7 @@ def _status_row(outcome: Any) -> dict[str, Any]:
 
 
 def _status(config: Config, *, as_json: bool = False) -> int:
-    """Report what every configured server and the broker are doing.
+    """Report what every configured server and broker is doing.
 
     The exit code is the answer a script needs: zero only when every row is
     usable.  A human-readable status and a machine-readable one are one read of
@@ -721,11 +732,10 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     from slife2.libs.host.launcher import Status, statuses
 
     outcomes = list(statuses(config))
-    broker = _broker_status(config)
+    brokers = [_broker_row(settings) for settings in _broker_settings(config)]
     failed = sum(1 for outcome in outcomes if not outcome.ok)
-    if broker is not None and not broker["ok"]:
-        failed += 1
-    total = len(outcomes) + (1 if broker is not None else 0)
+    failed += sum(1 for row in brokers if not row["ok"])
+    total = len(outcomes) + len(brokers)
 
     if as_json:
         print(
@@ -733,7 +743,12 @@ def _status(config: Config, *, as_json: bool = False) -> int:
                 {
                     "ok": failed == 0,
                     "servers": [_status_row(outcome) for outcome in outcomes],
-                    "broker": broker,
+                    # **One row, and that is the contract's shape**: `broker`
+                    # names the first address, the single row this field has
+                    # always carried.  The human report below reads every row;
+                    # a second broker's state reaches a script through the exit
+                    # code until the contract grows a list (SDD).
+                    "broker": brokers[0] if brokers else None,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -751,8 +766,8 @@ def _status(config: Config, *, as_json: bool = False) -> int:
         if outcome.detail:
             suffix += f" - {outcome.detail}"
         _report("", outcome.spec.name, outcome.spec.url, suffix)
-    if broker is not None:
-        _report("", broker["name"], broker["url"], broker["status"])
+    for row in brokers:
+        _report("", row["name"], row["url"], row["status"])
     if failed:
         print(
             f"\nslife2: {failed} of {total} server(s) are not usable",

@@ -133,8 +133,9 @@ async def test_reasoning_lands_on_the_message_the_way_text_does() -> None:
     channels is allowed to drop fragments.  Scripted contradictorily on purpose:
     the chunks spell one thing and the result another, so a loop that
     reassembled the reasoning from what it forwarded would be caught here.  That
-    the provider is never sent it back is `to_wire`'s, and
-    `tests/libs/model/test_wire.py` states it.
+    it rides the wire is `to_wire`'s, and `tests/libs/model/test_wire.py` states
+    it; whether a provider is sent it again is the adapter's decision
+    (`Message.thinking`).
     """
     turn = ScriptedTurn(
         result=StreamChatResult(text="42", thinking="six sevens are forty-two"),
@@ -581,7 +582,7 @@ async def test_max_iterations_cuts_off_a_runaway_loop() -> None:
         [], "go", observer
     )
 
-    assert result.hit_iteration_limit is True
+    assert result.stop_reason == "max_iterations"
     assert result.iterations == 3
     assert len(backend.calls) == 3
     final = observer.events[-1]
@@ -816,6 +817,105 @@ async def test_an_interruption_in_the_fit_keeps_the_result_it_had() -> None:
 
     assert [m.role for m in messages] == ["user", "assistant", "tool"]
     assert messages[-1].content == "the real answer"
+
+
+async def test_an_interrupted_cut_in_keeps_the_channel_of_the_message_it_took() -> None:
+    """A message folded just before the interruption is still a cut-in.
+
+    The batch's cancel path completes the pair with the answer the call had
+    returned — and when that answer is a message's own words, the channel has
+    to ride it exactly as the success path writes it: a rebuilt transcript
+    draws the line from this field, and without it the line wears the window's
+    bubble (`slife2.tui.restore`), as though the person had typed it there.
+    """
+    taken: list[str] = []
+    committed: list[bool] = []
+    started = asyncio.Event()
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        taken.append("one")
+        return "the message that arrived mid-turn"
+
+    async def fit(_call, _text) -> str:
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never chosen"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="_check_new_input", arguments={}))
+    )
+    loop = AgentLoop(
+        backend,
+        ToolRegistry([*tools(), a_tool("_check_new_input", check_new_input)]),
+        compress=fit,
+    )
+    messages: list[Message] = []
+
+    task = asyncio.create_task(
+        loop.run_turn(
+            messages,
+            "go",
+            folded=lambda: ("wechat", "submission-9"),
+            folded_commit=lambda: committed.append(True),
+            injected=lambda: len(taken),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == "the message that arrived mid-turn"
+    assert messages[-1].channel == "wechat", "the rebuilt line needs the bubble"
+    assert committed == [True], "the completed pair is a delivery"
+
+
+async def test_an_interrupted_cut_in_that_never_answered_wears_its_channel() -> None:
+    """The channel is the take's, not the answer's — the success path's rule.
+
+    A call that took the message and was cut before it answered writes
+    `INTERRUPTED`, and the take is still credited as a delivery; the line a
+    rebuild draws for it wears the channel the message came in on, exactly as
+    a completed call's would.
+    """
+    taken: list[str] = []
+    committed: list[bool] = []
+    started = asyncio.Event()
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        taken.append("one")
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never arrives"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="_check_new_input", arguments={}))
+    )
+    loop = AgentLoop(
+        backend,
+        ToolRegistry([*tools(), a_tool("_check_new_input", check_new_input)]),
+    )
+    messages: list[Message] = []
+
+    task = asyncio.create_task(
+        loop.run_turn(
+            messages,
+            "go",
+            folded=lambda: ("wechat", "submission-9"),
+            folded_commit=lambda: committed.append(True),
+            injected=lambda: len(taken),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == INTERRUPTED
+    assert messages[-1].channel == "wechat"
+    assert committed == [True]
 
 
 async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:

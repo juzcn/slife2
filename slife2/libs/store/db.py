@@ -99,7 +99,7 @@ from slife2.libs.store.index import (
     _rowid,
     as_similarity,
     checked_vectors,
-    connect_to,
+    connection_to,
     embed_chunks,
     embed_rows,
     filter_clause,
@@ -818,7 +818,7 @@ class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
     A connection per call rather than one held open, **and closed when the call
-    ends** — see `_connect`, which is the one place that is decided.
+    ends** — `connection_to` is the one place that is decided.
     """
 
     def __init__(self, path: Path) -> None:
@@ -827,21 +827,9 @@ class TurnStore:
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, and **it is closed on the way out**.
-
-        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
-        and leaves the connection *open*.  On Windows an open handle is a file
-        nobody else can delete — `subagent_remove` met exactly that, with a
-        subagent's own `turns.db` undeletable
-        (`slife2.plugins.agent.server.subagent_remove`).  `with connection:`
-        here is the commit; the `finally` is the close.
-        """
-        connection = connect_to(self.path)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        """One connection for this call — `connection_to`'s lifetime."""
+        with connection_to(self.path) as connection:
+            yield connection
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -976,7 +964,9 @@ class TurnStore:
         # **Every text column goes through `storable`, not only the document.**
         # A summary or a tag arrives from a model answer as readily as the
         # messages do, and a lone surrogate in one must not lose the turn the
-        # way `storable` exists to prevent.
+        # way `storable` exists to prevent.  The name and stamp columns are no
+        # exception: `who_helped` is an agent name, which arrives from a command
+        # line with anything in it, and a caller-supplied stamp is text too.
         summary = storable(summary)
         tags = storable(tags)
         record = _Stored(
@@ -984,11 +974,11 @@ class TurnStore:
             search=searchable_text(stored, summary, tags),
             summary=summary,
             tags=tags,
-            created_at=created_at or now(),
-            completed_at=completed_at or now(),
-            channel=channel,
-            who_helped=who_helped,
-            what_model=what_model,
+            created_at=storable(created_at or now()),
+            completed_at=storable(completed_at or now()),
+            channel=storable(channel),
+            who_helped=storable(who_helped),
+            what_model=storable(what_model),
             token_count=int(token_count),
             context_tokens=int(context_tokens),
             usage=json.dumps(usage.to_wire()) if usage is not None else None,

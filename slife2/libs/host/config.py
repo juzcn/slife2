@@ -127,7 +127,13 @@ from slife2.libs.host.model_config import (
     load_provider,
 )
 from slife2.libs.host.paths import home
-from slife2.libs.host.tool_config import load_cli, load_mcp, load_rest_api
+from slife2.libs.host.tool_config import (
+    load_cli,
+    load_mcp,
+    load_rest_api,
+    read_enabled,
+    string_field,
+)
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -337,15 +343,15 @@ class Net:
         the remote one's segments are a room name — `default`, usually — so a
         word of its own is what keeps the two meshes from being one.
 
-        Neither segment is configured on that side.  There is nothing for a file
-        to get right: the unit cannot be anything but the agent's name without
-        merging two agents' subagents, and the org is the network's, so
-        `SubagentSettings.network` refuses a `unit:` and takes an `org:` only to
-        override the default.
+        The unit is not configured on that side: it cannot be anything but the
+        agent's name without merging two agents' subagents, so
+        `SubagentSettings.network` refuses a `unit:`.  The org is the network's
+        own word — `SUBAGENT_ORG` by default — and an `org:` the file writes
+        overrides it, which is how an operator groups meshes (SDD §4.5.5).
         """
         if self.shared_namespace:
             return settings.org, settings.unit
-        return SUBAGENT_ORG, agent
+        return settings.org, agent
 
 
 #: The remote network: an agent's peers, which may be on another machine and on
@@ -2996,6 +3002,7 @@ def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
     if raw is None:
         return base
     section = _mapping(raw, "tool_load")
+    _refuse_unknown(section, {"threshold", "autoload"}, "tool_load")
     threshold = _int_or(section.get("threshold"), base.threshold, "tool_load.threshold")
     if threshold < 1:
         raise ConfigError(
@@ -3036,6 +3043,9 @@ def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
             "tool_result.tokens is now `tool_result.bytes` — the bound is a "
             "size, not a token budget; 32 KiB is 32768, or leave the section out"
         )
+    # After the migration refusal, so a `tokens:` key gets the sentence that
+    # says what it became rather than a generic unknown-key one.
+    _refuse_unknown(section, {"bytes"}, "tool_result")
     size = _int_or(section.get("bytes"), base.bytes, "tool_result.bytes")
     if size < MIN_TOOL_RESULT_BYTES:
         raise ConfigError(
@@ -3061,6 +3071,7 @@ def _media(raw: Any, base: MediaSettings) -> MediaSettings:
     if raw is None:
         return base
     section = _mapping(raw, "media")
+    _refuse_unknown(section, {"providers", "defaults"}, "media")
     providers = {
         str(name): _media_provider(spec, str(name))
         for name, spec in _mapping(section.get("providers"), "media.providers").items()
@@ -3103,6 +3114,7 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     if raw is None:
         return base
     section = _mapping(raw, "file-tunnel")
+    _refuse_unknown(section, {"providers", "active"}, "file-tunnel")
     known = ", ".join(sorted(KNOWN_TUNNEL_PROVIDERS))
     providers: dict[str, dict] = {}
     for name, spec in _mapping(
@@ -3170,6 +3182,9 @@ def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
     """
     if not isinstance(raw, dict):
         raise ConfigError(f"media.providers.{name}: expected a mapping")
+    _refuse_unknown(
+        raw, {"api", "base_url", "models", "api_key"}, f"media.providers.{name}"
+    )
     api = str(raw.get("api") or "")
     base_url = str(raw.get("base_url") or "").rstrip("/")
     if not api:
@@ -3207,6 +3222,7 @@ def _media_model(raw: Any, where: str) -> MediaModelSettings:
     """
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping")
+    _refuse_unknown(raw, {"model", "kind", "params", "voice"}, where)
     model = str(raw.get("model") or "")
     kind = str(raw.get("kind") or "")
     if not model:
@@ -3323,6 +3339,7 @@ def _embeddings(raw: Any) -> EmbeddingsSettings:
         )
 
     section = _mapping(raw, "embeddings")
+    _refuse_unknown(section, {"providers", "active_model"}, "embeddings")
     providers_raw = _mapping(section.get("providers"), "embeddings.providers")
     if not providers_raw:
         raise ConfigError(
@@ -3465,8 +3482,8 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     if not isinstance(raw, dict):
         raise ConfigError(f"rest-api.{name}: expected a mapping")
 
-    command = str(raw.get("command") or "")
-    spec = str(raw.get("spec") or "")
+    command = string_field(raw.get("command"), f"rest-api.{name}.command")
+    spec = string_field(raw.get("spec"), f"rest-api.{name}.spec")
     if not command and not spec:
         raise ConfigError(
             f"rest-api.{name}: needs `spec` (the OpenAPI document's URL or "
@@ -3616,44 +3633,34 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
 
 
 def _string_list(raw: Any, where: str) -> tuple[str, ...]:
+    """A list of strings — a scalar number is text, a container is a mistake.
+
+    `args: [8080]` is a port written the way YAML writes numbers, and the
+    command line it becomes is text either way; `args: [{port: 8080}]` is a
+    mapping `str()` would render as a program argument nobody meant.  The
+    canonical objects' `list[str]` draws the same line.
+    """
     if raw is None:
         return ()
     if not isinstance(raw, list):
         raise ConfigError(f"{where}: expected a list")
-    return tuple(str(item) for item in raw)
+    items: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            items.append(item)
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            items.append(str(item))
+        else:
+            raise ConfigError(
+                f"{where}: expected a list of strings, got {type(item).__name__}"
+            )
+    return tuple(items)
 
 
 def _enabled(raw: Mapping[str, Any], where: str) -> bool:
-    """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
-
-    **`bool(raw.get("enabled", True))` read a string as a switch.**  ruamel's
-    loader is YAML 1.2, so `enabled: no` and `enabled: off` are the *strings*
-    `no` and `off` — not the booleans PyYAML would have made of them — and every
-    non-empty string is true to `bool`.  So an entry the operator had switched
-    off came back on, and `family.py` dialled it at every start, because
-    `settings.enabled` is the whole of what decides whether a link is made.  The
-    reading is wrong in the one direction that costs something: the server is
-    started and asked, rather than not.
-
-    **The value is refused rather than guessed at.**  Coercing a string to a
-    boolean is the other half of the same mistake, one spelling over — it
-    replaces "the switch this says is on" with "the switch it did not say"; a
-    quoted `"false"` is a hand-edit that means nothing at all, and a *value that
-    cannot be read is not an absent one*.  Every other field in this module is
-    refused at load with a sentence naming it, and a switch decides whether a
-    process is dialled, so it is refused the same way.  A key that is not there
-    is the one other answer, and it is the documented default: `enabled: true`
-    is what the file never writes and absent is what it means
-    (`slife2.libs.host.configfile.upsert`).
-    """
-    value = raw.get("enabled", True)
-    if not isinstance(value, bool):
-        raise ConfigError(
-            f"{where}.enabled: expected `true` or `false`, got {value!r} — YAML "
-            f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
-            f"strings; leave the key out for true"
-        )
-    return value
+    """An entry's `enabled:` switch — `read_enabled`'s rule, refused as a
+    `ConfigError` because a load failure is this layer's kind."""
+    return read_enabled(raw, where, error=ConfigError)
 
 
 def _secrets(raw: Any, where: str) -> dict[str, str]:
@@ -3711,6 +3718,7 @@ def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}: expected a mapping with host/port/path")
+    _refuse_unknown(raw, {"host", "port", "path"}, where)
     # **The padding is not part of the host.**  A quoted `" localhost "` — an
     # easy paste — passed `is_loopback_host`, which strips before judging, and
     # then built `http:// localhost :24000/mcp`, which is not an URL anything

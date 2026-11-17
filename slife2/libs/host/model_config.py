@@ -170,6 +170,16 @@ PROVIDER_DEFAULTS: dict[str, Any] = {"api_key": ""}
 #: same courtesy `rest_api_set` already extends.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+#: A whole value that is one well-formed reference — the only shape the secret
+#: chain resolves (`slife2.libs.host.config._ENV_PATTERN`).  A malformed
+#: `${...}` is not a reference: passed through, it resolves to nothing, is read
+#: as a literal, and travels to the far end as the key itself.
+_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+#: The refusal both credential-writing tools answer with — `model_set` and
+#: `rest_api_set` — because one rule about one field is one sentence.
+API_KEY_REFUSAL = "api_key must be a `${VAR}` reference — not the secret itself"
+
 #: Model fields whose `null` in YAML means "the field was not written", which
 #: the loader turns into the canonical default.  `reasoning`, `max_tokens`,
 #: `temperature` and `top_p` are absent here deliberately: a written `null`
@@ -268,13 +278,16 @@ def model_entry(model: ModelConfig) -> dict[str, Any]:
 def show_api_key(value: str) -> str:
     """The key as a model may see it: the reference, or nothing.
 
-    A `${VAR}` reference is not the secret and is what a full-set has to
-    restate.  A literal written into the file is the operator's secret, so it
-    is shown as `""`; `model_set` treats `""` as "leave the provider's key
-    alone", which is the one field where that is the safe answer.
+    A well-formed `${VAR}` reference is not the secret and is what a full-set
+    has to restate.  Anything else — a literal, or a malformed `${…}` the chain
+    could never resolve — is shown as `""`; `model_set` treats `""` as "leave
+    the provider's key alone", which is the one field where that is the safe
+    answer.  The test is `to_reference`'s (`_REFERENCE`), so `set(get())` is
+    true: a value get hands back is one set accepts, and a value get hides is
+    one set keeps rather than accuses the model of writing.
     """
     value = (value or "").strip()
-    if value.startswith("${"):
+    if _REFERENCE.match(value):
         return value
     return ""
 
@@ -283,14 +296,17 @@ def to_reference(value: str) -> str:
     """A model-written credential reference, normalized; the secret itself is refused.
 
     `OPENAI_API_KEY` means `${OPENAI_API_KEY}` — the same courtesy
-    `rest_api_set` extends.  Anything else that is not already a reference is
-    a literal key, and a model-facing tool must not write one into the file.
+    `rest_api_set` extends, and the same rule: this is the one normalizer both
+    tools write by, so they cannot come to different conclusions about one
+    value.  A reference is the well-formed shape the chain resolves
+    (`_REFERENCE`); anything else that is not a bare variable name is a literal
+    key, and a model-facing tool must not write one into the file.
     """
     value = (value or "").strip()
     if not value:
         return ""
-    if value.startswith("${"):
+    if _REFERENCE.match(value):
         return value
     if _ENV_NAME.match(value):
         return f"${{{value}}}"
-    raise ValueError("api_key must be a `${VAR}` reference — not the secret itself")
+    raise ValueError(API_KEY_REFUSAL)

@@ -167,6 +167,45 @@ def test_a_cut_holds_the_bound_and_promises_no_file() -> None:
     assert answer.startswith("x")
 
 
+def test_a_cut_that_cannot_show_anything_raises_like_a_window() -> None:
+    """**One failure policy for the two fitters.**  An empty tool result with no
+    truncation marker is a confident negative — the model reads a tool that
+    produced nothing — so a budget too small for the marker, or for even one
+    character beside it, fails the turn the way `window`'s too-small address
+    does, rather than answering `""`.
+    """
+    # The marker's size is read off a real cut rather than respelled here.
+    answer = dumps.cut("x" * 100_000, BUDGET)
+    _head, _, tail = answer.partition("\n[...")
+    marker_bytes = dumps.text_size("\n[..." + tail)
+
+    for budget in (1, marker_bytes - 1):
+        with pytest.raises(ValueError, match="marker"):
+            dumps.cut("x" * 100, budget)
+
+    # The marker fits, but the output's first character (three UTF-8 bytes)
+    # does not: the same failure, not an empty head beside the marker.
+    with pytest.raises(ValueError, match="one character"):
+        dumps.cut("你好世界", marker_bytes + 1)
+
+    assert dumps.cut("", BUDGET) == "", "nothing was cut, so nothing is claimed"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_for_too_small_to_show_anything_fails_the_turn() -> None:
+    """The task path's `Compress` raises rather than answering an empty result:
+    a failed turn is visible, where an empty tool result reads as the tool's
+    own answer."""
+    answer = dumps.cut("x" * 100_000, BUDGET)
+    _head, _, tail = answer.partition("\n[...")
+    budget = dumps.text_size("\n[..." + tail) - 1
+    fit = dumps.cut_for(budget)
+    call = ToolCall(id="c1", name="fake__echo", arguments={})
+
+    with pytest.raises(ValueError, match="marker"):
+        await fit(call, "x" * 100_000)
+
+
 @pytest.mark.asyncio
 async def test_cut_for_is_the_loops_bound() -> None:
     """The `Compress` an agent task gets: a fitting result passes through, a

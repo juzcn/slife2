@@ -247,6 +247,39 @@ def test_a_flag_for_another_command_is_a_usage_error() -> None:
     assert exit_info.value.code == 2
 
 
+def test_the_run_only_flags_are_refused_on_other_commands() -> None:
+    """`--url`, `--headless` and `--keep-servers` are the window's.
+
+    Carried by another command they would do nothing, and a flag that does
+    nothing reads as an instruction the command carried out — `slife2 probe
+    --url X` silently ignoring X is the case that was live.
+    """
+    for command in ("status", "down", "logs", "probe"):
+        for flag in (
+            ("--url", "http://elsewhere/mcp"),
+            ("--headless",),
+            ("--keep-servers",),
+        ):
+            with pytest.raises(SystemExit) as exit_info:
+                _parse_args([command, *flag])
+            assert exit_info.value.code == 2
+
+
+def test_agent_is_the_runs_and_the_probes() -> None:
+    """`--agent` names the instance a run claims or a probe asks.
+
+    `status`, `down` and `logs` are the machine's and carry no name; the
+    default still resolves for the commands that do.
+    """
+    assert _parse_args(["--agent", "jack"]).agent == "jack"
+    assert _parse_args(["probe", "--prompt", "hi", "--agent", "jack"]).agent == "jack"
+    assert _parse_args(["status"]).agent == "slife2"
+    for command in ("status", "down", "logs"):
+        with pytest.raises(SystemExit) as exit_info:
+            _parse_args([command, "--agent", "jack"])
+        assert exit_info.value.code == 2
+
+
 def test_status_exits_nonzero_when_a_server_is_not_usable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -533,6 +566,47 @@ def test_status_exits_nonzero_when_the_broker_is_down(
     out = capsys.readouterr().out
     assert "a2a-broker" in out
     assert "not running" in out
+
+
+def test_status_reports_every_broker_the_config_names(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both networks may name a broker, and a dead second one is a fact.
+
+    `_broker_settings` returns one row per address, and `down` and `logs`
+    iterate all of them; the report that read only the first left the second
+    broker's death invisible.  The human report loops the rows.  The JSON
+    `broker` field keeps its single-row contract, and the exit code tells a
+    script the whole truth either way.
+    """
+    from slife2.libs.host import launcher, runtime
+    from slife2.libs.host.config import SubagentSettings
+
+    config = default_config()
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
+    object.__setattr__(
+        config,
+        "subagent",
+        SubagentSettings(network=A2ASettings(configured=True, broker_port=2883)),
+    )
+    monkeypatch.setattr(launcher, "statuses", lambda _config: iter(()))
+    monkeypatch.setattr(runtime, "tcp_listening", lambda _host, port: port == 1883)
+    monkeypatch.setattr(runtime, "read_record", lambda _url: None)
+
+    assert slife2._status(config) == 2
+    out, err = capsys.readouterr()
+    assert "mqtt://localhost:1883" in out
+    assert "mqtt://localhost:2883" in out, "the second broker was invisible"
+    assert "not running" in out
+    assert "1 of 2 server(s) are not usable" in err
+
+    assert slife2._status(config, as_json=True) == 2
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is False, "the exit code's truth is the JSON's too"
+    assert answer["broker"]["url"] == "mqtt://localhost:1883", (
+        "the single-row contract names the first address"
+    )
+    assert answer["broker"]["ok"] is True
 
 
 def test_the_tui_connects_to_the_agent_server() -> None:

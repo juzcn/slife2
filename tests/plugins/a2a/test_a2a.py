@@ -371,6 +371,31 @@ def test_the_instance_id_is_read_out_of_the_nested_card() -> None:
     assert _card_instance({"capabilities": {"extensions": ["nonsense"]}}) == ""
 
 
+def test_the_shared_wire_readers_are_the_packages_one_copy() -> None:
+    """**One rule, one place**: the control-character pattern and the
+    user-property reader are `states`' — the mesh scrubs and the group gates
+    refuse with the same pattern, and the mesh's presence and the responder's
+    context check read properties through one function.  A copy in either
+    module is the drift coming back.
+    """
+    from types import SimpleNamespace
+
+    from slife2.plugins.a2a import groups, mesh, responder, states
+
+    assert mesh.CONTROL_RE is states.CONTROL_RE
+    assert groups.CONTROL_RE is states.CONTROL_RE
+    assert mesh.user_property is states.user_property
+    assert responder.user_property is states.user_property
+
+    props = SimpleNamespace(
+        UserProperty=[("a2a-status", "offline"), ("a2a-status", "online")]
+    )
+    assert states.user_property(props, "a2a-status") == "offline", "the first pair wins"
+    assert states.user_property(props, "absent") == ""
+    assert states.user_property(None, "a2a-status") == ""
+    assert states.user_property(SimpleNamespace(), "a2a-status") == ""
+
+
 def test_a_reply_says_which_ending_it_was() -> None:
     def wire(state: str) -> dict:
         return {"result": {"statusUpdate": {"status": {"state": state}}}}
@@ -576,7 +601,7 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     mesh._sends["message-1"] = _OutboundSend(
         "message-1", PEER, "session", "{}", record=False
     )
-    mesh._note_inbound("owed-1", PEER)
+    mesh._inbound.add("owed-1", PEER)
 
     rows = mesh.open_tasks()
 
@@ -1751,6 +1776,95 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
         "a2a_outbound_loop_error" in record.getMessage() and record.exc_info is not None
         for record in caplog.records
     ), "the handler bug left no trace anywhere"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_the_classifier_cannot_read_is_the_tasks_ending() -> None:
+    """**A shape the SDK's classifier raises on is the unclassified path.**
+
+    `classify_reply` reads `.get` off whatever `result`, `statusUpdate` or
+    `error` holds, so a list, a number or a string there raises
+    `AttributeError` — which used to escape to the outbound loop and cost a
+    live connection, the roster and a resubscribe for one malformed reply.
+    The raise is caught beside the call and routed where an unclassifiable
+    reply already goes: the task ends `failed` with the sentence that says
+    this build cannot read it, and the send is forgotten (SDD Appendix C).
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+
+    shapes = (
+        {"result": []},
+        {"result": {"statusUpdate": 42}},
+        {"error": "boom"},
+    )
+    for index, shape in enumerate(shapes):
+        task_id = f"task-unreadable-{index}"
+        corr = f"corr-unreadable-{index}"
+        send = _OutboundSend(task_id, PEER, "session", "{}")
+        mesh._sends[task_id] = send
+        mesh._corr_to_task[corr] = _Route(task_id, send.round, send.agent, "task")
+        get_store().record_send(task_id, PEER)
+
+        mesh._handle_reply(
+            FakeMessage(
+                "a2a/v1/reply/org/unit/jack/s1",
+                json.dumps(shape).encode(),
+                corr=corr,
+            )
+        )
+
+        assert get_store().get(task_id).status == "failed"
+        assert task_id not in mesh._sends, "the unreadable answer is still an ending"
+        assert done[-1][0] == task_id
+        assert done[-1][2] == FAILED
+        assert "cannot read" in done[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_reply_does_not_reconnect_the_outbound_client(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**One malformed reply is one task's ending, not one reconnect.**
+
+    The classifier's raise used to reach `_run_outbound`'s handler clause,
+    which logs it and then leaves the client — so the loop dialled again,
+    cleared the roster and resubscribed over a reply it could have settled.
+    The reply is settled here instead, and the client the loop opened is the
+    only one it needed.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    task_id = "task-malformed-on-the-loop"
+    corr = "corr-malformed-on-the-loop"
+    send = _OutboundSend(task_id, PEER, "session", "{}")
+    mesh._sends[task_id] = send
+    mesh._corr_to_task[corr] = _Route(task_id, send.round, send.agent, "task")
+    get_store().record_send(task_id, PEER)
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+
+    broker = _OneMessageBroker(
+        FakeMessage(
+            "a2a/v1/reply/org/unit/jack/s1",
+            json.dumps({"result": {"statusUpdate": 42}}).encode(),
+            corr=corr,
+        ),
+        mesh,
+    )
+    monkeypatch.setattr(
+        "slife2.plugins.a2a.mesh.aiomqtt.Client", lambda **kwargs: broker
+    )
+
+    with caplog.at_level(logging.ERROR, logger="slife2.plugins.a2a.mesh"):
+        await mesh._run_outbound()
+
+    assert broker.entries == 1, "the malformed reply cost a reconnect"
+    assert not any(
+        "a2a_outbound_loop_error" in record.getMessage() for record in caplog.records
+    ), "the reply was read as a handler bug rather than settled"
+    assert done and done[0][2] == FAILED
+    assert get_store().get(task_id).status == "failed"
 
 
 @pytest.mark.parametrize("subagent", ["", "child"])
@@ -3184,6 +3298,46 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     assert get_store().get(TASK).status == "cancelled"
     get_store().record_error(TASK)
     assert get_store().get(TASK).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_reads_the_owner_off_the_row_when_the_send_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The row outlives the send, and still names the peer.**
+
+    The ownership guard fired only while the send was in `_sends` — but the
+    store is process-wide: a non-reviving teardown clears the sends, the FIFO
+    cap evicts the oldest, and another agent's mesh never held the send at
+    all.  With the send gone, a cancel naming the wrong peer published the
+    withdrawal to that peer and recorded the row cancelled while the real
+    peer kept working.  The record's agent is the owner when the send is
+    gone, and the refusal is the same sentence.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    task_id = "task-row-without-a-send"
+    get_store().record_send(task_id, PEER)
+    assert mesh._sends.get(task_id) is None, "the state this test is about"
+
+    refused = await mesh.cancel_task("someone-else", task_id)
+    assert refused == (
+        f"Error: task_id {task_id!r} is with {PEER!r}, not 'someone-else'."
+    )
+    assert published == [], "the withdrawal went to the caller-named peer"
+    assert get_store().get(task_id).status == "pending"
+
+    # The peer the row names can still withdraw it, and the withdrawal is
+    # published to that peer's topic.
+    assert await mesh.cancel_task(PEER, task_id) == "cancelled"
+    assert get_store().get(task_id).status == "cancelled"
+    assert len(published) == 1
+    assert published[0][0] == mesh._topics.request(PEER)
 
 
 # ── the local network: a member takes its place ─────────────────────────────

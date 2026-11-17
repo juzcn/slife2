@@ -356,14 +356,15 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
     and a new `response.*` event is not a reason to fail a turn.
 
     `streamed` is the caller's memory of which **output indexes this stream has
-    already delivered content for** — the function-call arguments and the answer
-    text, whether it arrived as deltas or whole.  It is written here and not at
-    the call site, because this is the only place that knows an event's
-    `output_index`: a `Chunk` carries the index of a *tool call* and nothing at
-    all about which text item it belongs to.  The terminal event reads it to
-    back-fill only what never streamed (`_arguments_that_never_streamed`,
-    `_text_that_never_streamed`), and `response.output_text.done` reads it to
-    avoid repeating text its deltas already delivered.
+    already delivered content for** — the function-call arguments, the answer
+    text and the reasoning, whether it arrived as deltas or whole.  It is
+    written here and not at the call site, because this is the only place that
+    knows an event's `output_index`: a `Chunk` carries the index of a *tool
+    call* and nothing at all about which text item it belongs to.  The terminal
+    event reads it to back-fill only what never streamed
+    (`_arguments_that_never_streamed`, `_text_that_never_streamed`,
+    `_thinking_that_never_streamed`), and the `.done` events read it to avoid
+    repeating content their deltas already delivered.
 
     Two events here are errors rather than results, and both **raise**:
     `response.failed` and a bare `error`.  The alternative — returning an empty
@@ -405,6 +406,24 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         # unreadable in a way that is hard to notice and impossible to undo.
         thinking = getattr(event, "delta", "") or ""
         if thinking:
+            _note_streamed(streamed, event)
+            events.append(Chunk(thinking=thinking))
+
+    elif kind in (
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.done",
+    ):
+        # **The reasoning half of the text back-fill below, per part.**  An
+        # endpoint that assembles the summary and sends it whole has only this
+        # event to send it in: the deltas never came, so `thinking_parts` stays
+        # empty while the `Finish` arrives from `response.completed` anyway,
+        # and the model's working is lost with nothing anywhere saying so — the
+        # answer is right and the thinking line is simply absent.  An index
+        # that never streamed is filled in from it, on
+        # `_text_that_never_streamed`'s rule and for its reason.
+        thinking = getattr(event, "text", "") or ""
+        if thinking and read_int(event, "output_index") not in (streamed or set()):
+            _note_streamed(streamed, event)
             events.append(Chunk(thinking=thinking))
 
     elif kind == "response.output_item.added":
@@ -451,6 +470,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
+        events.extend(_thinking_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_stop_reason(response)))
 
@@ -462,6 +482,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
+        events.extend(_thinking_that_never_streamed(response, streamed))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_incomplete_reason(response)))
 
@@ -481,12 +502,13 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
 def _note_streamed(streamed: set[int] | None, event: Any) -> None:
     """Remember that this event's output index has delivered its content now.
 
-    One line, and it is a function because it is written in three places for one
-    rule: an *output index* is the position of an item in `response.output`, and
-    both kinds of item — a function call and a message — own exactly one index
-    (see `translate`'s `streamed`).  A stream that never had a memory handed to
-    it is not an error: `translate` is callable without one, and a caller that
-    passes none is a caller with one event and no terminal to back-fill.
+    One line, and it is a function because it is written wherever an event
+    delivers content, for one rule: an *output index* is the position of an
+    item in `response.output`, and each kind of item — a function call, a
+    message, a reasoning item — owns exactly one index (see `translate`'s
+    `streamed`).  A stream that never had a memory handed to it is not an
+    error: `translate` is callable without one, and a caller that passes none
+    is a caller with one event and no terminal to back-fill.
     """
     if streamed is not None:
         streamed.add(read_int(event, "output_index"))
@@ -525,6 +547,42 @@ def _text_that_never_streamed(
         )
         if text:
             events.append(Chunk(text=text))
+    return events
+
+
+def _thinking_that_never_streamed(
+    response: Any, streamed: set[int] | None
+) -> list[ProviderEvent]:
+    """The reasoning of a response whose deltas never came.
+
+    **The reasoning half of the same back-fill**: the thinking parts are
+    assembled from `response.reasoning_summary_text.delta` and
+    `response.reasoning_text.delta` — or, for an endpoint that sends the
+    summary whole, from their `.done` events, which `translate` treats as the
+    same content — so a response that sends neither leaves `thinking_parts`
+    empty while the `Finish` arrives anyway, and the model's working is lost
+    with nothing anywhere saying so.
+
+    The reasoning items in the completed response carry the text, so every
+    output index whose reasoning never streamed is read from here: the
+    `summary` parts and any `content` parts, the same two kinds the deltas
+    arrive as.  One `Chunk` per item rather than one per part, on
+    `_text_that_never_streamed`'s rule — a string the accumulator appends to
+    the same thinking, in order.
+    """
+    seen = streamed or set()
+    events: list[ProviderEvent] = []
+    for index, item in enumerate(getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "reasoning" or index in seen:
+            continue
+        text = "".join(
+            str(getattr(part, "text", "") or "")
+            for part in (getattr(item, "summary", None) or [])
+            + (getattr(item, "content", None) or [])
+            if getattr(part, "type", "") in ("summary_text", "reasoning_text")
+        )
+        if text:
+            events.append(Chunk(thinking=text))
     return events
 
 
@@ -658,7 +716,8 @@ def _make_streamer() -> Streamer:
         `streamed` is what a *later* event needs to know about an earlier one —
         which is why it lives across the stream rather than inside `translate`,
         whose only input beyond the event itself is this set
-        (`_arguments_that_never_streamed`, `_text_that_never_streamed`).
+        (`_arguments_that_never_streamed`, `_text_that_never_streamed`,
+        `_thinking_that_never_streamed`).
         """
         streamed: set[int] = set()
 

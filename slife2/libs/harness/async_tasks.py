@@ -75,13 +75,13 @@ catalogue.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from slife2.libs.harness.markers import wrap
 from slife2.libs.turn.tools import ToolFailed
 
 logger = logging.getLogger(__name__)
@@ -208,12 +208,11 @@ MAX_ASYNC_TASKS = 100
 def marker(status: str, *, call_id: str = "", tool: str = "", task_id: str = "") -> str:
     """One line of machine-readable state, as every marker in this system is written.
 
-    `ensure_ascii` off, unlike the turn-event codec: this is content in a
-    conversation rather than a payload on a progress channel, and a tool name
-    that is not ASCII should read as itself in a transcript.
+    The envelope and its `ensure_ascii` decision are `markers.wrap`'s; the name
+    and the fields are this module's, the way every writer owns its own.
     """
     fields = {"call_id": call_id, "tool": tool, "task_id": task_id, "status": status}
-    return f"{MARKER_PREFIX}{json.dumps(fields, ensure_ascii=False)}]"
+    return wrap(MARKER_PREFIX, fields)
 
 
 def channel_for(tool: str) -> str:
@@ -287,7 +286,9 @@ def _prune_finished() -> None:
     delivered ones, whose text is already cleared.  So the first pass drops only
     finished tasks that were delivered; only if the cap is still exceeded with
     nothing else left does the second pass drop an undelivered one, because the
-    memory bound has to win eventually.
+    memory bound has to win eventually.  The refusal both tools then answer
+    with names that third cause (`_not_found`), so a result nobody read is not
+    reported as one somebody read.
     """
     if len(_tasks) <= MAX_ASYNC_TASKS:
         return
@@ -451,11 +452,17 @@ def _not_found(task_id: str) -> str:
     as a call that succeeded — an `ok` with "Error:" in its text — and a
     transcript that reads a failure as a success is the one thing this system's
     tool contract exists to prevent.
+
+    **Three causes, and the sentence names all three.**  An id that was never
+    started, a finished task somebody read, and a finished task the cap dropped:
+    `_prune_finished`'s second pass takes even an unread result once the memory
+    bound has to win, so "read already" alone would be false about a result
+    nobody read.
     """
     return (
-        f"no async task {task_id!r} here: either it was never started, or it "
-        f"finished and has been read already — the task_id comes from the call "
-        f"that started it."
+        f"no async task {task_id!r} here: it was never started, it finished "
+        f"and has been read already, or it was dropped to bound memory — the "
+        f"task_id comes from the call that started it."
     )
 
 

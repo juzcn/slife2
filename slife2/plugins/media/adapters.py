@@ -390,6 +390,36 @@ TTS_PATH = "/services/audio/tts/SpeechSynthesizer"
 IMAGE_FIELD_KEY = "image_field"
 DEFAULT_IMAGE_FIELD = "image_url"
 
+#: Smallest and largest total pixels DashScope's image models accept (about
+#: 768²..4096²).  **The vendor's numbers, beside the adapter that speaks to it**:
+#: another provider's models have bounds of their own, so a refusal must name
+#: the bounds of the provider actually called — which only this adapter knows.
+MIN_PIXELS = 589_824
+MAX_PIXELS = 16_777_216
+
+
+def _check_pixels(size: str) -> None:
+    """Refuse a size outside DashScope's range, before the call is paid for.
+
+    The size is the effective one — the call's argument or the config's
+    `params.size`, whichever is being sent — so a configured size gets the same
+    answer as a written one.  A spelling this does not recognise is left alone:
+    the grammar is `check_size`'s question at the tool, and the vendor is the
+    last word on anything that passes it.
+    """
+    found = _SIZE_PARTS.match(size)
+    if found is None:
+        return
+    pixels = int(found.group(1)) * int(found.group(2))
+    if not MIN_PIXELS <= pixels <= MAX_PIXELS:
+        direction = "small" if pixels < MIN_PIXELS else "large"
+        raise MediaAdapterError(
+            f"{size!r} is too {direction}: {pixels} pixels, and DashScope's "
+            f"image models take {MIN_PIXELS}..{MAX_PIXELS} (about 768x768 to "
+            f"4096x4096)."
+        )
+
+
 #: Audio suffixes as media types, pinned here rather than asked of `mimetypes`:
 #: the data URI's header decides how the far end decodes the bytes, and a
 #: platform that does not know `.m4a` would send `application/octet-stream` and
@@ -631,6 +661,11 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             # call's own argument was normalised — the same field, two
             # spellings, and the vendor 400 that `_size_for` exists to prevent.
             params["size"] = _size_for(params["size"], "*")
+        # The range is this vendor's fact, checked here rather than at the tool:
+        # the tool serves every adapter, and DashScope's floor is not another
+        # provider's (`_check_pixels`).
+        if isinstance(params.get("size"), str):
+            _check_pixels(params["size"])
         output = await self._generate(model, content, params)
         for item in self._content(output):
             if url := item.get("image"):
@@ -783,10 +818,15 @@ class OpenAICompatAdapter(_HttpClientMixin):
             raise NotImplementedError(
                 "an image to work from (this adapter draws from text alone)"
             )
-        body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
-        body.update(extra_params or {})
+        # **The call outranks the config**, the rule `merge_params` keeps for
+        # every adapter.  `body.update(extra_params)` put the configured
+        # `params:` last: a config saying `n: 4` billed four images while only
+        # the first was saved, and a configured `model` or `prompt` replaced
+        # the caller's own.
+        given: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
         if size:
-            body["size"] = size
+            given["size"] = size
+        body = merge_params(extra_params, given)
         # The vendor's spelling is the last word on size, whichever side
         # supplied it: extra_params carries the caller's raw WIDTH*HEIGHT
         # (the server merges it in) and a config params.size may use it too.

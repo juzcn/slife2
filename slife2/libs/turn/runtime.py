@@ -176,6 +176,45 @@ class TurnRuntime:
 
     # ── the peers ────────────────────────────────────────────────────────
 
+    async def _open_peer(
+        self,
+        injected: Client | None,
+        cache: dict[str, Client],
+        server: str,
+        *,
+        name: str,
+        fallback_tool: str,
+        timeout: float | None = None,
+    ) -> Client:
+        """One lazily-opened peer: injected, cached by address, or opened once.
+
+        **The three peers are one mechanism**, and this is it.  An injected
+        client belongs to whoever handed it in and is returned as it is.  The
+        address is read per call, from the config the call is served from
+        (`current`), because this process may serve several homes and each may
+        name a different daemon.  The connection is kept per address, so the
+        common one-home case still opens once.  And the lock makes two turns
+        starting together build one client for one server rather than two and
+        leak the loser.
+
+        `timeout` is the connection's request deadline where the peer wants
+        one; None leaves every request's patience to the call that makes it.
+        """
+        if injected is not None:
+            return injected
+        url = self.current().server(server).url
+        held = cache.get(url)
+        if held is not None:
+            return held
+        async with self._opening:
+            held = cache.get(url)
+            if held is None:
+                held = await open_server(
+                    url, name=name, fallback_tool=fallback_tool, timeout=timeout
+                )
+                cache[url] = held
+            return held
+
     async def memory(self) -> Client:
         """The context plugin, opened on first use.
 
@@ -185,28 +224,17 @@ class TurnRuntime:
         restored is a turn that should not run — and this is the peer whose
         absence is felt soonest.
 
-        **The address is read per call**, from the config the call is served
-        from (`current`), because this process may serve several homes and
-        each may name a different context daemon.  The connection is kept per
-        address, so the common one-home case still opens once.
+        The address is read per call and the connection kept per address
+        (`_open_peer`).
         """
-        if self._context_client is not None:
-            return self._context_client
-        url = self.current().server("context").url
-        held = self._contexts.get(url)
-        if held is not None:
-            return held
-        async with self._opening:
-            held = self._contexts.get(url)
-            if held is None:
-                held = await open_server(
-                    url,
-                    name=CONTEXT_SERVER_NAME,
-                    fallback_tool="remember",
-                    timeout=_T.timeouts.work.context,
-                )
-                self._contexts[url] = held
-            return held
+        return await self._open_peer(
+            self._context_client,
+            self._contexts,
+            "context",
+            name=CONTEXT_SERVER_NAME,
+            fallback_tool="remember",
+            timeout=_T.timeouts.work.context,
+        )
 
     async def hub(self) -> Client:
         """The toolhub, opened on first use.
@@ -218,30 +246,21 @@ class TurnRuntime:
         whose *upstreams* are not is the operator's configuration and is not an
         error at all.
 
-        **The address is read per call** for `memory`'s reason, and the
-        connection is kept per address.
+        The address is read per call and the connection kept per address
+        (`_open_peer`).
 
         **No request deadline on the connection**: `timeout=` on the
         connection is a clock on every request that crosses it, so a listing's
         patience would become the deadline for a tool call.  The asks made of
         the hub state their own patience where they are made.
         """
-        if self._hub_client is not None:
-            return self._hub_client
-        url = self.current().server("toolhub").url
-        held = self._hubs.get(url)
-        if held is not None:
-            return held
-        async with self._opening:
-            held = self._hubs.get(url)
-            if held is None:
-                held = await open_server(
-                    url,
-                    name=TOOLHUB_SERVER_NAME,
-                    fallback_tool="list_tools",
-                )
-                self._hubs[url] = held
-            return held
+        return await self._open_peer(
+            self._hub_client,
+            self._hubs,
+            "toolhub",
+            name=TOOLHUB_SERVER_NAME,
+            fallback_tool="list_tools",
+        )
 
     async def cabinet(self) -> Client:
         """The cabinet, opened on first use.
@@ -253,25 +272,16 @@ class TurnRuntime:
         own `attach_image` can inject.  Opened lazily for that reason: a task
         with no picture in it must not depend on the cabinet at all.
 
-        **The address is read per call** for `memory`'s reason, and the
-        connection is kept per address.
+        The address is read per call and the connection kept per address
+        (`_open_peer`).
         """
-        if self._cabinet_client is not None:
-            return self._cabinet_client
-        url = self.current().server("cabinet").url
-        held = self._cabinets.get(url)
-        if held is not None:
-            return held
-        async with self._opening:
-            held = self._cabinets.get(url)
-            if held is None:
-                held = await open_server(
-                    url,
-                    name=CABINET_SERVER_NAME,
-                    fallback_tool="dump_read",
-                )
-                self._cabinets[url] = held
-            return held
+        return await self._open_peer(
+            self._cabinet_client,
+            self._cabinets,
+            "cabinet",
+            name=CABINET_SERVER_NAME,
+            fallback_tool="dump_read",
+        )
 
     async def model(self, identity: ConversationId, model: ModelRef) -> LLMBackend:
         """A backend bound to one conversation, opened on first use.

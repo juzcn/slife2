@@ -139,13 +139,33 @@ def cut(text: str, budget: int) -> str:
     file that exists; this marker does not claim one, so a loop with no cabinet
     (an agent task) can still hold the bound and end the turn honestly.  The
     tail is gone; a model that needs it calls the tool again.
+
+    **A budget that cannot show anything is a failure, as it is for `window`.**
+    An empty answer with no truncation marker is a confident negative — the
+    model reads a tool that produced nothing — so the two fitters share one
+    policy: raise, and the turn fails visibly rather than recording an empty
+    result as the tool's own.
     """
     marker = "\n[... the rest of this output was not shown]"
     room = budget - text_size(marker)
     if room < 1:
-        return ""
+        raise ValueError(
+            f"a `tool_result.bytes` window of {budget} cannot hold the cut's "
+            f"own marker ({text_size(marker)} bytes) — raise it"
+        )
     body = text.encode("utf-8", "backslashreplace")[:room].decode("utf-8", "ignore")
-    return f"{body}{marker}" if body else ""
+    if not body:
+        if text:
+            # The marker fits but the output's first character does not: a
+            # multi-byte character cut mid-sequence decodes to nothing, and an
+            # empty head beside the marker is the same confident negative.
+            raise ValueError(
+                f"a `tool_result.bytes` window of {budget} leaves no room for "
+                f"even one character of the output beside the cut's marker — "
+                f"raise it"
+            )
+        return ""
+    return f"{body}{marker}"
 
 
 def cut_for(budget: int) -> Compress:

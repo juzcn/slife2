@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -80,6 +81,13 @@ def _send(
             },
         },
     }
+
+
+def _without_id(data: dict) -> dict:
+    """The same SendMessage with no messageId — the peer the register's
+    last-text fallback is for (SDD Appendix C)."""
+    del data["params"]["message"]["messageId"]
+    return data
 
 
 def _cancel(task_id: str, corr: str = "cancel-1") -> SimpleNamespace:
@@ -417,6 +425,120 @@ async def test_a_new_message_while_working_is_refused(
     )
     await _until(lambda: _states(client)[-1].startswith("error:"), "the refusal")
 
+    assert _states(client)[-1] == "error:-32602"
+    assert len(handed) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_no_id_retry_of_the_last_text_replays_the_pause(
+    mesh: A2AMesh, client: RecordingClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**No messageId: the task's LAST text is the retry's fingerprint**
+    (SDD Appendix C).  A peer that sends no id and repeats the request that
+    produced the question is a retry — the pause is replayed and no new round
+    runs — and the fallback says it fired: a debug line naming the peer and
+    the task, the trace of the distinction it cannot make.
+    """
+    task_id = _new_task()
+    handed: list[tuple[str, str, str, str]] = []
+    mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
+        (source, content, tid, kind)
+    )
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "翻译")))
+    await _settle(mesh, task_id, "input_required", "简体还是繁体?")
+
+    with caplog.at_level(logging.DEBUG, logger="slife2.plugins.a2a.responder"):
+        await mesh._responder.dispatch(
+            client,
+            _message(_without_id(_send(task_id, "m-unused", "翻译")), corr="corr-2"),
+        )
+
+    assert _states(client)[-1] == "TASK_STATE_INPUT_REQUIRED"
+    assert _status_message(client) == "简体还是繁体?"
+    assert len(handed) == 1, "a retry is not a second round"
+    assert mesh._inbound.get(task_id).round == 1
+    assert any(
+        "a2a_retry_by_text" in record.getMessage()
+        and task_id in record.getMessage()
+        and "alice" in record.getMessage()
+        for record in caplog.records
+    ), "the fallback left no trace naming the peer and the task"
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_repeating_an_older_rounds_text_is_a_new_round(
+    mesh: A2AMesh, client: RecordingClient
+) -> None:
+    """**The last text, not any remembered one.**  Round one asked 翻译, round
+    two asked 简体; a no-id message repeating round one's words is a
+    continuation of the paused task, not a retry of a round two rememberings
+    ago.  Matching any of the last 32 texts swallowed it as a retry and
+    replayed the pause — the peer's new input never reached the model.
+    """
+    task_id = _new_task()
+    handed: list[tuple[str, str, str, str]] = []
+    mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
+        (source, content, tid, kind)
+    )
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "翻译")))
+    await _settle(mesh, task_id, "input_required", "简体还是繁体?")
+    await mesh._responder.dispatch(
+        client,
+        _message(
+            _send(task_id, "m2", "简体", message_type="task_input"), corr="corr-2"
+        ),
+    )
+    await _settle(mesh, task_id, "input_required", "用哪个术语?")
+
+    await mesh._responder.dispatch(
+        client,
+        _message(
+            _without_id(_send(task_id, "m3", "翻译", message_type="task_input")),
+            corr="corr-3",
+        ),
+    )
+    await _until(lambda: len(handed) == 3, "the continuation's hand-over")
+
+    assert handed[-1][1] == "翻译"
+    assert handed[-1][3] == "task_input"
+    assert mesh._inbound.get(task_id).round == 3
+
+    await _settle(mesh, task_id, "completed", "译文")
+    assert _states(client)[-2:] == ["artifact:译文", "TASK_STATE_COMPLETED"]
+
+
+@pytest.mark.asyncio
+async def test_a_working_task_replays_a_retry_and_refuses_a_repeated_new_message(
+    mesh: A2AMesh, client: RecordingClient
+) -> None:
+    """**The text fallback is the no-id case** (SDD Appendix C).  A peer that
+    sends no id and repeats the working request is a retry and gets `working`
+    replayed; a new messageId with the same text is a new message, and the
+    answer is the refusal any other new message gets — this build's requester
+    always stamps an id and its ladder republishes the identical payload, so
+    a retry never needs the text to be recognised.
+    """
+    task_id = _new_task()
+    handed: list[tuple[str, str, str, str]] = []
+    mesh.on_inbound_task = lambda source, content, tid, kind="task": handed.append(
+        (source, content, tid, kind)
+    )
+    await mesh._responder.dispatch(client, _message(_send(task_id, "m1", "do it")))
+    await _until(lambda: handed, "the first hand-over")
+
+    # No id, same text: the register's retry, replayed as working.
+    await mesh._responder.dispatch(
+        client,
+        _message(_without_id(_send(task_id, "m-unused", "do it")), corr="corr-2"),
+    )
+    await _until(lambda: _states(client)[-1] == "TASK_STATE_WORKING", "the replay")
+    assert len(handed) == 1
+
+    # A new id with the same text is a new message, not a retry.
+    await mesh._responder.dispatch(
+        client, _message(_send(task_id, "m2", "do it"), corr="corr-3")
+    )
+    await _until(lambda: _states(client)[-1].startswith("error:"), "the refusal")
     assert _states(client)[-1] == "error:-32602"
     assert len(handed) == 1
 

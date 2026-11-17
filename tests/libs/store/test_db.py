@@ -19,7 +19,7 @@ import pytest
 from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
-from slife2.libs.store import db
+from slife2.libs.store import index
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     _TURN_COLUMNS,
@@ -297,14 +297,14 @@ async def test_a_summary_update_takes_the_write_lock_before_it_reads(
     )
 
     statements: list[str] = []
-    original = db.connect_to
+    original = index.connect_to
 
     def traced(target):
         connection = original(target)
         connection.set_trace_callback(statements.append)
         return connection
 
-    monkeypatch.setattr(db, "connect_to", traced)
+    monkeypatch.setattr(index, "connect_to", traced)
     assert store.update_summary(1, tags="planning") is True
 
     assert statements[0].strip().upper() == "BEGIN IMMEDIATE", statements
@@ -357,7 +357,11 @@ async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
 
     A summary and tags come from the same model answer the messages do, so a
     lone surrogate in one must take the same U+FFFD the body does rather than
-    failing the insert and losing the whole turn.
+    failing the insert and losing the whole turn.  The name and stamp columns
+    are no exception: `who_helped` is an agent name, which arrives from a
+    command line with anything in it, and `channel`/`what_model` are text the
+    same way — a surrogate in one used to raise `UnicodeEncodeError` at the
+    INSERT and lose the turn the comment promised it never would.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
 
@@ -366,12 +370,18 @@ async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
         messages=[{"role": "user", "content": "hi"}],
         summary="half a character: \ud83d",
         tags="tag\ud83d",
+        channel="chan\ud83d",
+        who_helped="ja\ud83dck",
+        what_model="local/b\ud83dig",
     )
 
     assert turn_id == 1
     (record,), _ = store.turns()
     assert record.summary == "half a character: �"
     assert record.tags == "tag�"
+    assert record.channel == "chan�"
+    assert record.who_helped == "ja�ck"
+    assert record.what_model == "local/b�ig"
     assert store.update_summary(1, summary="again \ud83d") is True
     (record,), _ = store.turns()
     assert record.summary == "again �"
@@ -1072,7 +1082,7 @@ def test_a_store_closes_its_connection_when_the_call_ends(tmp_path, monkeypatch)
         def close(self):
             closed.append("closed")
 
-    monkeypatch.setattr("slife2.libs.store.db.connect_to", lambda path: Connection())
+    monkeypatch.setattr("slife2.libs.store.index.connect_to", lambda path: Connection())
     TurnStore(tmp_path / "turns.db")
 
     assert closed == ["closed"], "the connection outlived the call"

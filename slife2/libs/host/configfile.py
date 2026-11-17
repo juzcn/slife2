@@ -466,12 +466,43 @@ def _take_intro(container: CommentedMap, name: str) -> Any:
 
 
 def _put_intro(container: CommentedMap, name: str, block: Any) -> None:
-    """Hang *block* off `name`, where the entry that follows it will read it."""
+    """Hang *block* off `name`, where the entry that follows it will read it.
+
+    **The entry's own inline comment is kept.**  ruamel merges the comment on
+    an entry's last line (`command: a  # keep me`) and the block introducing
+    the *next* entry into one token, so overwriting the slot wholesale deleted
+    a survivor's inline comment along with the doomed entry's introduction —
+    even when there was no block to move at all.  The head is the token's first
+    line when it does not begin with a newline; the block remainder is what
+    this write replaces.
+    """
     holder, key, at = _tail_of(container, name)
     slot = holder.ca.items.setdefault(key, [None, None, None, None])
     while len(slot) <= at:
         slot.append(None)
-    slot[at] = block
+    existing = slot[at]
+    head = ""
+    if existing is not None:
+        value = str(existing.value)
+        if not value.startswith("\n"):
+            head = value.split("\n", 1)[0] + "\n"
+    if block is None:
+        slot[at] = (
+            CommentToken(head, existing.start_mark, existing.end_mark, existing.column)
+            if head and existing is not None
+            else None
+        )
+        return
+    if head and existing is not None:
+        # The block's leading newline separates it from the value above; after
+        # an inline head, the head's own newline is that separator.
+        value = str(block.value)
+        merged = head + (value[1:] if value.startswith("\n") else value)
+        slot[at] = CommentToken(
+            merged, existing.start_mark, existing.end_mark, existing.column
+        )
+    else:
+        slot[at] = block
 
 
 def _as_pending(block: Any) -> Any:

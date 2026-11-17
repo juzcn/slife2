@@ -18,9 +18,10 @@ scripted streamer makes no network call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
@@ -40,6 +41,8 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
+    ResponseReasoningTextDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -80,7 +83,13 @@ from slife2.plugins.llm.openai_server import (
 from slife2.plugins.llm.openai_server import (
     translate as openai_translate,
 )
-from slife2.plugins.llm.server_common import ToolCallAccumulator, build_llm_server
+from slife2.plugins.llm.server_common import (
+    ToolCallAccumulator,
+    build_llm_server,
+    sdk_client_factory,
+    sdk_streamer,
+    stream_chat_impl,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -911,6 +920,115 @@ def test_responses_a_stream_that_delivered_its_text_is_not_answered_twice() -> N
     ) == [Finish(stop_reason="stop")]
 
 
+def _reasoning_summary_done(text: str) -> ResponseReasoningSummaryTextDoneEvent:
+    return ResponseReasoningSummaryTextDoneEvent.model_validate(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "r1",
+            "output_index": 0,
+            "summary_index": 0,
+            "sequence_number": 2,
+            "text": text,
+        }
+    )
+
+
+def _reasoning_item(summary: str) -> dict[str, Any]:
+    """The assembled reasoning, as `response.output` carries it."""
+    return {
+        "type": "reasoning",
+        "id": "r1",
+        "summary": [{"type": "summary_text", "text": summary}],
+    }
+
+
+def test_responses_reads_the_reasoning_a_gateway_sends_whole() -> None:
+    """**The reasoning half of the text back-fill, and it was missing.**
+
+    The thinking parts were assembled from the reasoning *deltas* and from
+    nothing else, so an endpoint that assembles the summary and sends it whole
+    — the same partial gateway the text back-fill exists for — left them empty
+    while the `Finish` arrived anyway: the answer was right and the model's
+    working was simply absent, with nothing anywhere saying a thing was lost.
+    """
+    assert responses_translate(_reasoning_summary_done("six sevens")) == [
+        Chunk(thinking="six sevens")
+    ]
+    # An index that *did* stream is left alone: the whole summary appended
+    # after its own deltas would be the same thinking twice.
+    assert (
+        responses_translate(_reasoning_summary_done("six sevens"), streamed={0}) == []
+    )
+
+
+def test_responses_fills_in_the_reasoning_that_never_streamed() -> None:
+    """The terminal response carries the reasoning item, so an index whose
+    reasoning never streamed — delta or `.done` — is read from there, beside
+    the text back-fill it mirrors."""
+    event = _completed(output=[_reasoning_item("six sevens"), _message_item("42")])
+
+    assert responses_translate(event) == [
+        Chunk(text="42"),
+        Chunk(thinking="six sevens"),
+        Finish(stop_reason="stop"),
+    ]
+    assert responses_translate(event, streamed={0}) == [
+        Chunk(text="42"),
+        Finish(stop_reason="stop"),
+    ]
+
+
+def test_responses_reasoning_that_streamed_is_not_answered_twice() -> None:
+    """The memory is per stream, on the text's rule: a gateway that sends the
+    deltas *and* the assembled summary must reach the transcript once."""
+    streamed: set[int] = set()
+    delta = ResponseReasoningSummaryTextDeltaEvent.model_validate(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "six sevens",
+            "item_id": "r1",
+            "output_index": 0,
+            "summary_index": 0,
+            "sequence_number": 1,
+        }
+    )
+
+    assert responses_translate(delta, streamed=streamed) == [
+        Chunk(thinking="six sevens")
+    ]
+    assert (
+        responses_translate(_reasoning_summary_done("six sevens"), streamed=streamed)
+        == []
+    )
+    assert responses_translate(
+        _completed(output=[_reasoning_item("six sevens")]), streamed=streamed
+    ) == [Finish(stop_reason="stop")]
+
+
+def test_responses_the_full_reasoning_text_is_read_on_the_same_terms() -> None:
+    """`reasoning_text` is the other kind the deltas arrive as, so its whole
+    form is read the same way — the `.done` event, and the item's `content`
+    parts in the terminal response."""
+    done = ResponseReasoningTextDoneEvent.model_validate(
+        {
+            "type": "response.reasoning_text.done",
+            "item_id": "r1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 2,
+            "text": "the working",
+        }
+    )
+    assert responses_translate(done) == [Chunk(thinking="the working")]
+
+    item = _reasoning_item("")
+    item["content"] = [{"type": "reasoning_text", "text": "the working"}]
+    assert responses_translate(_completed(output=[item])) == [
+        Chunk(thinking="the working"),
+        Finish(stop_reason="stop"),
+    ]
+
+
 def test_responses_a_truncated_response_says_length() -> None:
     """Cut off at the output cap is an ordinary outcome, not an error.
 
@@ -1428,7 +1546,7 @@ def scripted(*events) -> Streamer:
 
     async def stream(
         provider: str, messages: list[Message], tools: list[ToolSpec], model: str
-    ) -> AsyncIterator[Chunk | Finish]:
+    ) -> AsyncGenerator[Chunk | Finish]:
         for event in events:
             yield event
 
@@ -1700,38 +1818,27 @@ def test_openai_stream_usage_is_asked_for_unless_a_gateway_refuses_it() -> None:
     own default in place and that is the right one.  `omit` is the escape hatch
     for a gateway that rejects the extension with a 400, which is the whole
     reason the knob exists: without it such a gateway is unusable with no
-    workaround at all.
+    workaround at all.  The knob is per model — whether the field is accepted
+    is a fact about the endpoint — and it is the only switch there is.
     """
     plain = ModelSettings(model="m")
-    request = openai_build_request([], [], plain, stream_usage=True)
+    request = openai_build_request([], [], plain)
     assert request["stream_options"] == {"include_usage": True}
 
     omitted = ModelSettings(model="m", stream_usage="omit")
-    assert "stream_options" not in openai_build_request(
-        [], [], omitted, stream_usage=True
-    )
-
-    # The knob is per model, and the parameter is the server's own switch: a
-    # call that asked for nothing is not given a field back by a model setting.
-    assert "stream_options" not in openai_build_request(
-        [], [], plain, stream_usage=False
-    )
+    assert "stream_options" not in openai_build_request([], [], omitted)
 
 
 def test_openai_sends_only_what_was_configured() -> None:
     bare = ModelSettings(model="m")
-    request = openai_build_request(
-        [Message(role="user", content="hi")], [], bare, stream_usage=False
-    )
+    request = openai_build_request([Message(role="user", content="hi")], [], bare)
     assert "temperature" not in request
     assert "top_p" not in request
     assert "max_tokens" not in request
     assert "thinking" not in request
 
     tuned = ModelSettings(model="m", temperature=0.3, top_p=0.9, max_tokens=100)
-    request = openai_build_request(
-        [Message(role="user", content="hi")], [], tuned, stream_usage=True
-    )
+    request = openai_build_request([Message(role="user", content="hi")], [], tuned)
     assert request["temperature"] == 0.3
     assert request["top_p"] == 0.9
     assert request["max_tokens"] == 100
@@ -1747,22 +1854,22 @@ def test_openai_thinking_is_opt_in() -> None:
     `thinking` parameter to pass it as — the guard test below is what holds that.
     """
     native = ModelSettings(model="m", reasoning=True)
-    assert "thinking" not in openai_build_request([], [], native, stream_usage=True)
+    assert "thinking" not in openai_build_request([], [], native)
 
     asked = ModelSettings(
         model="m", reasoning=True, thinking="enabled", max_tokens=1000
     )
-    request = openai_build_request([], [], asked, stream_usage=True)
+    request = openai_build_request([], [], asked)
     assert request["extra_body"]["thinking"]["type"] == "enabled"
     # Half the budget, because the other half is what the answer is made of.
     assert request["extra_body"]["thinking"]["budget_tokens"] == 500
 
     refused = ModelSettings(model="m", reasoning=True, thinking="disabled")
-    refused_request = openai_build_request([], [], refused, stream_usage=True)
+    refused_request = openai_build_request([], [], refused)
     assert refused_request["extra_body"]["thinking"]["type"] == "disabled"
 
     omitted = ModelSettings(model="m", thinking="omit")
-    omitted_request = openai_build_request([], [], omitted, stream_usage=True)
+    omitted_request = openai_build_request([], [], omitted)
     assert "thinking" not in omitted_request
     assert "extra_body" not in omitted_request, "nothing to carry, no hatch opened"
 
@@ -1779,7 +1886,7 @@ def test_thinking_enabled_without_a_cap_is_refused() -> None:
     asked = ModelSettings(model="m", reasoning=True, thinking="enabled")
 
     with pytest.raises(ValueError) as raised:
-        openai_build_request([], [], asked, stream_usage=True)
+        openai_build_request([], [], asked)
 
     assert "max_tokens" in str(raised.value)
 
@@ -1795,7 +1902,7 @@ def test_an_unrecognised_thinking_value_is_refused_not_ignored() -> None:
     """
     settings = ModelSettings(model="m", reasoning=True, thinking="enabledd")
     with pytest.raises(ValueError) as raised:
-        openai_build_request([], [], settings, stream_usage=True)
+        openai_build_request([], [], settings)
 
     message = str(raised.value)
     assert "enabledd" in message, "the value is named"
@@ -1834,7 +1941,6 @@ def test_the_openai_request_only_names_arguments_the_sdk_has() -> None:
         ],
         [ToolSpec(name="t", description="d", parameters={"type": "object"})],
         settings,
-        stream_usage=True,
     )
 
     assert set(request) - accepted == set(), "a key the SDK would refuse"
@@ -2515,6 +2621,127 @@ async def test_a_client_is_not_closed_under_a_stream_that_is_reading_it(
         assert built[0].closed is False, "the answer being read is left alone"
 
     assert built[0].closed is True, "and the client is let go the moment it ends"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_closes_the_stream_it_was_reading() -> None:
+    """**An abandoned stream must not keep the provider generating.**
+
+    A turn interrupted while the consumer is suspended at `report_progress`
+    raises out of `stream_chat_impl` with the adapter still suspended at its
+    `yield`, holding the SDK's open response and the pool's lease.  An
+    `async for` left that way closes nothing: the cleanup would run only when
+    the collector happened to reach the generator, and until then the
+    provider keeps generating — and billing — on a connection nobody reads.
+    The adapter's own cleanup runs on the way out instead, deterministically.
+    """
+    closed: list[bool] = []
+
+    async def streamer(provider, messages, tools, model):
+        try:
+            yield Chunk(text="one")
+            yield Chunk(text="two")
+            yield Finish("stop")
+        finally:
+            closed.append(True)
+
+    class _Ctx:
+        async def report_progress(self, progress, total, message):
+            if progress == 2:
+                raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stream_chat_impl(streamer, "p", [], [], "m", _Ctx())
+
+    assert closed == [True], "the cleanup ran on the way out, not at collection"
+
+
+class _FakeStreamResponse:
+    """Enough of an SDK stream: async iteration, and a close that is recorded."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = iter(events)
+        self.closed = False
+
+    def __aiter__(self) -> _FakeStreamResponse:
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._events)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_closing_a_stream_closes_the_sdk_response_and_releases_the_pool(
+    monkeypatch,
+) -> None:
+    """The frame's half of the same rule: `aclose` on the streamer — what an
+    interrupted turn triggers — must close the SDK response the loop was
+    reading and release the pool's lease.  An `async for` left by a thrown
+    GeneratorExit does not close its iterator, so the response is closed in a
+    `finally`; and a lease still held would keep a retired pool from closing
+    its clients for ever.
+    """
+    from slife2.plugins.llm import server_common
+
+    built: list[_FakeSDKClient] = []
+    current = [_config("https://first.test/v1")]
+    responses: list[_FakeStreamResponse] = []
+
+    def make_client(_provider: Any, _key: str) -> Any:
+        built.append(_FakeSDKClient())
+        return built[-1]
+
+    async def start(_client: Any, _request: dict[str, Any]) -> Any:
+        responses.append(_FakeStreamResponse([Chunk(text="hi"), Finish("stop")]))
+        return responses[-1]
+
+    monkeypatch.setattr(server_common, "load_cached", lambda: current[0])
+    streamer = sdk_streamer(
+        api="openai-completions",
+        server_name="t",
+        sdk_client=make_client,
+        build_request=lambda messages, tools, settings: {},
+        start=start,
+        translator=lambda: lambda event: [event],
+    )
+
+    events = streamer("p", [], [], "m")
+    assert await events.__anext__() == Chunk(text="hi")
+    await events.aclose()  # the turn is interrupted mid-answer
+    assert responses[0].closed is True, "the provider's connection is let go"
+
+    # The lease went with it: a config edit now closes the replaced client at
+    # once, which a pool still held by the abandoned stream could never do.
+    current[0] = _config("https://second.test/v1")
+    fresh = streamer("p", [], [], "m")
+    assert [event async for event in fresh] == [Chunk(text="hi"), Finish("stop")]
+    assert responses[1].closed is True, "a stream read to the end closes it too"
+    assert built[0].closed is True
+    assert built[1].closed is False
+
+
+def test_the_sdk_clients_never_retry_a_call_behind_the_callers_back() -> None:
+    """Both SDKs default to two retries, and a retried request may already
+    have reached the provider — a second generation billed for one answer.
+    The factory states the policy once for every chat backend: a failed call
+    fails the turn, and the caller retries deliberately (SDD §2.7)."""
+    provider = ProviderSettings(
+        api="openai-completions",
+        base_url="https://example.test/v1",
+        api_key_ref="k",
+    )
+    openai_client = sdk_client_factory("openai", "AsyncOpenAI")(provider, "sk-test")
+    anthropic_client = sdk_client_factory("anthropic", "AsyncAnthropic")(
+        provider, "sk-test"
+    )
+    assert openai_client.max_retries == 0
+    assert anthropic_client.max_retries == 0
 
 
 # --- the `main` every model server shares ------------------------------------

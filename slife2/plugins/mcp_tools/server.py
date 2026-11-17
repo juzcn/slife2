@@ -47,7 +47,6 @@ from slife2.libs.plugin.family import (
     prepare_entry,
     remove_entry,
     report_entry,
-    state_word,
     switch_entry,
 )
 from slife2.libs.plugin.protocol import serve_plugin
@@ -110,7 +109,9 @@ WORDS = FamilyWords(
 # written once and held once.
 
 
-def _prepare(config: Config, name: str, entry: dict[str, Any]) -> ToolServerSettings:
+async def _prepare(
+    config: Config, name: str, entry: dict[str, Any]
+) -> ToolServerSettings:
     """Write one `mcp:` entry, or raise `ToolError` saying why it cannot be.
 
     Two refusals, and both happen *before* anything is written — a name the hub
@@ -123,29 +124,9 @@ def _prepare(config: Config, name: str, entry: dict[str, Any]) -> ToolServerSett
     words the loader would have used — a restart later, and in a process that
     never saw this call.
     """
-    return prepare_entry(
+    return await prepare_entry(
         config, name, lambda: (_tool_server(entry, name), entry), section=SECTION
     )
-
-
-def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One row of `mcp_list` — what the server is, and whether it is usable.
-
-    **A listing is for choosing, not for reading the entry.**  The key, the
-    operator's sentence about what it offers, the link's state, and a count or
-    the failure's reason are what a model chooses between servers with; the
-    command, URL, args, cwd and credentials are `mcp_get`'s, and putting them
-    here would make the browse pay for a configuration it is not editing.
-    """
-    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
-    if one is not None and one.settings.enabled:
-        if one.usable:
-            row["tools"] = len(one.rows or [])
-        elif one.error:
-            row["error"] = one.error
-    if description := str(raw.get("description") or ""):
-        row["description"] = description
-    return row
 
 
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
@@ -184,9 +165,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             one — and `total`, `limit` and `offset`, so
             `offset + len(servers) < total` says whether more remain.
         """
-        return await list_entries(
-            homes.current(), limit, offset, words=WORDS, describe=_describe
-        )
+        return await list_entries(homes.current(), limit, offset, words=WORDS)
 
     @mcp.tool(name="mcp_get", meta=FOR_THE_MODEL)
     async def mcp_get(name: str) -> dict[str, Any]:
@@ -224,7 +203,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
                 prefix every tool of it reaches you as (`{name}__{tool}`).
             config: The whole entry — the `config` object `mcp_get` returned.
         """
-        settings = _prepare(load(), name, mcp_entry(config))
+        settings = await _prepare(load(), name, mcp_entry(config))
         report = await apply_and_report(homes.current(), settings, words=WORDS)
         report.pop("enabled", None)  # the writable field is in `config`
         _, written = entry_of(name)

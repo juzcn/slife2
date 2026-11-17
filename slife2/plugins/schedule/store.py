@@ -34,7 +34,9 @@ after somebody tidies up.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +45,7 @@ from typing import Any
 from slife2.helpers.clock import now
 from slife2.libs.host.paths import schedule_db
 from slife2.libs.store.db import StaleSchema
-from slife2.libs.store.index import connect_to
+from slife2.libs.store.index import connection_to, instant_bound
 
 #: Every state a run can be in, in the order they can be reached.
 #:
@@ -310,10 +312,11 @@ class ScheduleStore:
             ).fetchone()
         return str(row["value"]) if row else ""
 
-    def _connect(self) -> sqlite3.Connection:
-        """A connection to this ledger, opened the way every store opens one.
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection for this call, opened the way every store opens one.
 
-        **`index.connect_to` and not the four lines it is made of**, which is
+        **`index.connection_to` and not the four lines it is made of**, which is
         what this was.  A ledger is opened per call and written by one process,
         so the pragmas are the same four the turns' store and the cabinet's
         want — and `slife2.libs.store.index` says in as many words that a second
@@ -322,8 +325,15 @@ class ScheduleStore:
         not go through the shared one, so a pragma tuned for the writers that
         contend (the `busy_timeout`, which matters most for a file two processes
         touch) would have had to be tuned twice.
+
+        **And the lifetime is `connection_to`'s, not the raw connection's.**
+        `with sqlite3.connect(...)` commits and leaves the handle *open*; a
+        ledger opened per call with none closed is a descriptor leak, and on
+        Windows an open handle is a file nobody else can delete.  The caller's
+        `with` gets the commit; the close happens on the way out.
         """
-        return connect_to(self.path)
+        with connection_to(self.path) as connection:
+            yield connection
 
     def _ensure_schema(self) -> None:
         """Make this file one this build can serve, refusing one it cannot.
@@ -543,6 +553,34 @@ class ScheduleStore:
                 (task.id, due_at),
             ).fetchone()
         return _run(row, name) if row else None
+
+    def key_at(self, name: str, stamp: str) -> str | None:
+        """The stored key of the run due at this instant, whatever its spelling.
+
+        **The instant is the run's identity; the string is only its key.**  A
+        run written before a daylight-saving fall-back carries the old offset,
+        and a model handing the same instant back in another spelling has it
+        normalized to *today's* local offset (`normalize_bound`) — a string
+        that equals no stored key, so the string lookups answer "no such run"
+        about a run that is there.  `julianday` reads the offset and compares
+        the moments, the same question `_by_instant` asks for ordering.
+
+        `stamp` is a normalized bound; a date-only one is given its local
+        midnight (`instant_bound`), the reckoning every instant comparison here
+        uses.  Stored keys always carry an offset (`slife2.helpers.clock.at`),
+        so the comparison is between two readings of one instant.
+        """
+        task = self.task(name)
+        if task is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT due_at FROM scheduled_runs"
+                " WHERE task_id = ? AND julianday(due_at) = julianday(?)"
+                " LIMIT 1",
+                (task.id, instant_bound(stamp)),
+            ).fetchone()
+        return str(row["due_at"]) if row else None
 
     def runs(
         self,

@@ -159,21 +159,66 @@ CLI_DEFAULTS: dict[str, Any] = {
 }
 
 
-def _check_enabled(data: Mapping[str, Any], where: str) -> None:
-    """The switch is a real YAML boolean, and absence means on.
+def read_enabled(
+    data: Mapping[str, Any], where: str, *, error: type[Exception] = ValueError
+) -> bool:
+    """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
 
-    The same rule and the same sentence as `slife2.libs.host.config._enabled`:
-    a YAML 1.2 `no`/`off` is a string, every non-empty string is true, and a
-    switch that decides whether a process is dialled is refused rather than
-    guessed at.
+    The one rule for every section that carries the switch, and the one
+    sentence it is refused with; `error` is the exception the calling layer
+    refuses with (`ConfigError` at load, `ValueError` here).
+
+    **`bool(raw.get("enabled", True))` read a string as a switch.**  ruamel's
+    loader is YAML 1.2, so `enabled: no` and `enabled: off` are the *strings*
+    `no` and `off` — not the booleans PyYAML would have made of them — and every
+    non-empty string is true to `bool`.  So an entry the operator had switched
+    off came back on, and `family.py` dialled it at every start, because
+    `settings.enabled` is the whole of what decides whether a link is made.  The
+    reading is wrong in the one direction that costs something: the server is
+    started and asked, rather than not.
+
+    **The value is refused rather than guessed at.**  Coercing a string to a
+    boolean is the other half of the same mistake, one spelling over — it
+    replaces "the switch this says is on" with "the switch it did not say"; a
+    quoted `"false"` is a hand-edit that means nothing at all, and a *value that
+    cannot be read is not an absent one*.  Every other field of an entry is
+    refused at load with a sentence naming it, and a switch decides whether a
+    process is dialled, so it is refused the same way.  A key that is not there
+    is the one other answer, and it is the documented default: `enabled: true`
+    is what the file never writes and absent is what it means
+    (`slife2.libs.host.configfile.upsert`).
     """
     value = data.get("enabled", True)
     if not isinstance(value, bool):
-        raise ValueError(
-            f"{where}.enabled: expected `true` or `false`, got {value!r} — YAML "
+        # A scalar is echoed; a mapping given to a switch can carry a literal
+        # credential, so it is named by its type (`validation_refusal`'s rule).
+        shown = (
+            repr(value)
+            if isinstance(value, (str, int, float))
+            else type(value).__name__
+        )
+        raise error(
+            f"{where}.enabled: expected `true` or `false`, got {shown} — YAML "
             f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
             f"strings; leave the key out for true"
         )
+    return value
+
+
+def string_field(value: Any, where: str, *, strip: bool = True) -> str:
+    """A `command:`/`url:`/`spec:` as written — a string or absent, never coerced.
+
+    `str(["npx", "foo"])` is the program name `"['npx', 'foo']"`: a row that
+    loads cleanly and fails at spawn in another process, which is the failure
+    the canonical objects exist to prevent — and their `str` fields refuse a
+    non-string, so the hand-written readers refuse it the same way.  A
+    non-scalar is named by its type, not echoed (`validation_refusal`'s rule).
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    return value.strip() if strip else value
 
 
 def load_mcp(raw: Any, *, where: str) -> McpConfig:
@@ -185,8 +230,8 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
         raise ValueError(
             f"{where}: `transport` is derived from `command`/`url`; do not write it"
         )
-    command = str(data.get("command") or "").strip()
-    url = str(data.get("url") or "").strip()
+    command = string_field(data.get("command"), f"{where}.command")
+    url = string_field(data.get("url"), f"{where}.url")
     if command and url:
         raise ValueError(
             f"{where}: has both `command` and `url`; one entry is one "
@@ -200,7 +245,7 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
     data["command"] = command or None
     data["url"] = url or None
     data["transport"] = "http" if url else "stdio"
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("args", "env", "headers", "cwd", "description"):
         if data.get(key) is None:
             data.pop(key, None)
@@ -230,7 +275,7 @@ def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
         )
     if not data.get("spec"):
         raise ValueError(f"{where}: needs `spec` — the OpenAPI document's URL or path")
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("base_url", "api_key", "args", "env", "cwd", "description"):
         if data.get(key) is None:
             data.pop(key, None)
@@ -246,14 +291,14 @@ def load_cli(raw: Any, *, where: str) -> CliConfig:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: expected a mapping")
     data = {str(key): value for key, value in raw.items()}
-    command = str(data.get("command") or "")
+    command = string_field(data.get("command"), f"{where}.command", strip=False)
     if not command:
         raise ValueError(
             f"{where}: needs `command` — the program the model may run "
             f"(e.g. `gh`, or `python -m mytool`)"
         )
     data["command"] = command
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("description", "install"):
         if data.get(key) is None:
             data.pop(key, None)

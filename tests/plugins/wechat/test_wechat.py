@@ -383,6 +383,61 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_login_whose_save_failed_still_polls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The loop is the login; the file is its record for the next start.**
+
+    `save_session` ran before `watch`, so a full disk at the confirmation left
+    a valid token with nothing polling it: `ready` short-circuits on the token,
+    no later call starts the loop, and `wechat_check_status` answered
+    `connected` with `polling` false and an empty error — a zombie with no
+    visible cause and no recovery.  The loop now starts first, the failed save
+    is a warning naming the file, and the next cursor write saves it again.
+    """
+    bridge = Bridge()
+    bridge.scan = {
+        "status": "confirmed",
+        "bot_token": "bot-token-9",
+        "ilink_user_id": "bot-user-9",
+        "ilink_bot_id": "bot-9",
+    }
+    made = rig(monkeypatch, bridge=bridge)
+    session = made.plugin.session("jack")
+    real_save = wechat.save_session
+    failed = False
+
+    def refuse_once(agent: str, saved: Mapping[str, Any]) -> Path:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("the disk is full")
+        return real_save(agent, saved)
+
+    monkeypatch.setattr(wechat, "save_session", refuse_once)
+    with caplog.at_level(logging.WARNING, logger="slife2.plugins.wechat.server"):
+        await made.plugin.login(session)
+        try:
+            await until(lambda: session.qr_state == "confirmed")
+            assert session.polling, "a valid token with nothing polling it"
+            facts = await made.plugin.status(session)
+            # The next cursor write repairs the file (`_persist`), so the
+            # login survives the restart the failed save put at risk.
+            bridge.cursor = "cursor-1"
+            await until(lambda: load_session("jack").get("bot_token") == "bot-token-9")
+        finally:
+            await made.close()
+
+    assert facts["connected"] is True
+    assert facts["polling"] is True, "the status reads the loop, not the token alone"
+    assert facts["error"] == ""
+    assert any(
+        str(session_path("jack")) in record.getMessage() for record in caplog.records
+    ), "the failed save left nothing to find"
+    assert load_session("jack").get("get_updates_buf") == "cursor-1"
+
+
+@pytest.mark.asyncio
 async def test_a_watch_that_cannot_poll_ends_the_login_rather_than_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

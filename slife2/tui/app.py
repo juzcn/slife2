@@ -971,9 +971,6 @@ class SlifeApp(App[None]):
                     # queue is a question nobody can answer (`_turn_over`).
                     self._turn_over = True
                     await self._flush_events()
-                    if not entry.drawn:
-                        self._transcript.add_user(entry.prompt, channel=entry.channel)
-                        entry.drawn = True
                     # `append_text` is guarded by `_turn_open`, which the
                     # `ends_turn` below clears, but `add_tool_start` is guarded
                     # by neither: a late `ToolCallStarted` would mount a panel
@@ -991,11 +988,6 @@ class SlifeApp(App[None]):
                     self._turn_over = True
                     await self._flush_events()
                     self._finish_entry(ticket)
-                    # A turn that died before its first event still had a
-                    # message; draw it now so the error has a subject.
-                    if not entry.drawn:
-                        self._transcript.add_user(entry.prompt, channel=entry.channel)
-                        entry.drawn = True
                     self._transcript.add_error(str(exc))
                 else:
                     # **The reply is the authority on whether this message ran a
@@ -1022,8 +1014,11 @@ class SlifeApp(App[None]):
                     # and a transport that died mid-call — all leave the panel
                     # that opened for it claiming to be running.  Done here rather
                     # than in the two branches because it is a fact about *every*
-                    # ending, including the next one somebody adds.
+                    # ending, including the next one somebody adds.  The plan
+                    # strip parks writes the same way and settles at the same
+                    # seam (`PlanView.settle`).
                     self._transcript.settle_tools()
+                    self.query_one(PlanView).settle()
                     if ticket in self._submissions:
                         self._finish_entry(ticket)
                     self._refresh_status()
@@ -1209,6 +1204,15 @@ class SlifeApp(App[None]):
         The flag is set before the cancel so the drain can tell this
         interruption from the one an exit or a reset causes; see
         `_interrupting`.
+
+        **A turn is in flight even where the drain holds no live task.**
+        `_turn` is None while the drain connects and restores before it mounts
+        the first block, and done while a reply's tail events are flushed after
+        the answer arrived — windows where the submission's call is still the
+        work in flight and `_order` still holds it.  The head of the display
+        order is that submission, so the interrupt lands on its task; reporting
+        "no turn" here would quit the app over work that is still running,
+        which is the one thing the module docstring's ctrl+c promise refuses.
         """
         # **The prompt is refused first.**  The loop is parked on that future,
         # and a row left undecided on a turn that is going away is an answer
@@ -1218,10 +1222,19 @@ class SlifeApp(App[None]):
         # is still answered rather than left hanging.
         if self._approval is not None:
             self._approval.action_deny()
-        if self._turn is None or self._turn.done():
-            return False
+        turn = self._turn
+        if turn is None or turn.done():
+            if not self._order:
+                return False
+            # The drain is between holds — connecting, restoring, or flushing
+            # a reply's tail.  The head submission's task is the work still in
+            # flight; where the reply already arrived the cancel is a no-op,
+            # and the report is the point: there is something to stop, so the
+            # interrupt does not quit.
+            turn = self._submissions[self._order[0]].task
+            assert turn is not None
         self._interrupting = True
-        self._turn.cancel()
+        turn.cancel()
         return True
 
     def action_cancel(self) -> None:

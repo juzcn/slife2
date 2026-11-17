@@ -67,6 +67,22 @@ from slife2.libs.plugin.vocabulary import ATTACHED, NOTE, SUBMIT, refused
 logger = logging.getLogger(__name__)
 
 
+def _classify(exc: Exception) -> bool | None:
+    """The answer a failed call leaves: provably unwritten, or unknown.
+
+    **The split between the three answers' last two, in one place.**  A refusal
+    proves nothing was written — the terminal looks its session up before it
+    posts anything — so it is `False`, the one result a caller may safely act
+    on by trying again or somewhere else.  Every other exception means the
+    words may already be down the stream: `None`, which no caller may repeat.
+    The exception's *type* cannot tell the two apart (everything a handler
+    raises arrives as a `ToolError`), so `refused` is asked — the module
+    docstring carries the whole argument.  Each call site keeps its own log
+    level and words.
+    """
+    return False if refused(exc) else None
+
+
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
     """One `submit`, classified: written, refused, or unknown.
 
@@ -81,11 +97,12 @@ async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool
             timeout=_T.timeouts.transport.window,
         )
     except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-        if refused(exc):
+        answer = _classify(exc)
+        if answer is False:
             logger.info("no window is showing %s: %s", agent, exc)
-            return False
-        logger.warning("the hand-over to %s did not come back: %s", agent, exc)
-        return None
+        else:
+            logger.warning("the hand-over to %s did not come back: %s", agent, exc)
+        return answer
     return True
 
 
@@ -195,11 +212,12 @@ async def note_to_window(
                     timeout=_T.timeouts.transport.window,
                 )
             except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-                if refused(exc):
+                answer = _classify(exc)
+                if answer is False:
                     logger.debug("no window is showing %s: %s", agent, exc)
-                    return False
-                logger.debug("the note to %s did not come back: %s", agent, exc)
-                return None
+                else:
+                    logger.debug("the note to %s did not come back: %s", agent, exc)
+                return answer
             return True
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.debug("no window for %s could be reached: %s", agent, exc)
@@ -244,7 +262,7 @@ async def window_attached(
                     )
                 except Exception as exc:  # noqa: BLE001 - the third answer
                     logger.debug("the window for %s could not be asked: %s", agent, exc)
-                    return None
+                    return _classify(exc)
                 value = tool_payload(answer).get("attached")
                 if value is True:
                     return True

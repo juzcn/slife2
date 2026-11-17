@@ -50,7 +50,7 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
-from slife2.libs.host.paths import work_dir
+from slife2.libs.host.paths import local_path, work_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
 from slife2.plugins.media.adapters import (
@@ -85,11 +85,11 @@ INSTRUCTIONS = (
 # ── The one bound a caller can be wrong about ────────────────────────────────
 # An image size is the argument a model gets *plausibly* wrong — "2048x2048" for
 # a model whose floor is 768 — and the vendor's own refusal arrives after the
-# call has been paid for.  So it is checked here, against the vendor's numbers.
-
-#: Smallest and largest total pixels the vendor accepts (about 768²..4096²).
-MIN_PIXELS = 589_824
-MAX_PIXELS = 16_777_216
+# call has been paid for.  The *spelling* is checked here, because `WIDTH*HEIGHT`
+# is what every tool documents and every adapter takes.  The pixel *range* is a
+# vendor's own fact, so it is checked in the adapter that knows it
+# (`DashScopeAIGCAdapter.generate_image`): one provider's numbers refused in
+# another's name is a sentence that lies about the provider actually called.
 
 #: `1024*1024`, `1024x1024`, `1024 X 1024` — the three ways this gets written.
 _SIZE = re.compile(r"^(\d+)\s*[xX*]\s*(\d+)$")
@@ -99,7 +99,9 @@ def check_size(size: str) -> str:
     """A size the caller wrote, or a sentence saying why it is not one.
 
     Empty passes: "whatever the model defaults to" is a valid thing to want, and
-    the config's own `params` may already say it.
+    the config's own `params` may already say it.  The grammar is the whole of
+    this check — whether the pixels are a range the provider takes is the
+    adapter's question, asked where the provider is known.
     """
     if not size.strip():
         return ""
@@ -108,14 +110,6 @@ def check_size(size: str) -> str:
         raise ToolError(
             f"{size!r} is not a size. Write it as `WIDTH*HEIGHT`, "
             f"two whole numbers — `1024*1024`."
-        )
-    pixels = int(matched.group(1)) * int(matched.group(2))
-    if not MIN_PIXELS <= pixels <= MAX_PIXELS:
-        direction = "small" if pixels < MIN_PIXELS else "large"
-        raise ToolError(
-            f"{size!r} is too {direction}: {pixels} pixels, and this "
-            f"provider takes {MIN_PIXELS}..{MAX_PIXELS} (about 768x768 to "
-            f"4096x4096)."
         )
     return size.strip()
 
@@ -182,24 +176,16 @@ def _input_path(ctx: Context, value: str) -> Path:
     A relative path is resolved against that directory — the one its own tools
     run in — because this process serves every agent and has no cwd of its own
     to mean.  An absolute path is used as written.
+
+    The rule is `slife2.libs.host.paths.local_path`'s, with this conversation's
+    work directory as its base — the drive-relative refusal included, which
+    arrives as a `ValueError` and is a tool's to answer as a `ToolError`.
     """
     agent, subagent = conversation_of(ctx)
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return path
-    base = work_dir(agent, subagent)
-    # **A drive-relative path is not a relative path.**  `D:voice.mp3` means
-    # "voice.mp3 under the current directory on D:", and `Path` joining discards
-    # the base when the drives differ — so the file opened is one the caller did
-    # not name.  The same drive resolves under the base, which is the anchor this
-    # tool promises; another drive is refused with the fix.
-    if path.drive and path.drive.casefold() != base.drive.casefold():
-        raise ToolError(
-            f"{value!r} is relative to drive {path.drive}, and this conversation's "
-            f"work directory is on {base.drive or 'another drive'} — write an "
-            f"absolute path, or a path relative to the media directory"
-        )
-    return base / path
+    try:
+        return local_path(value, base=work_dir(agent, subagent))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _reference_path(ctx: Context, value: str) -> str:

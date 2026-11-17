@@ -32,6 +32,7 @@ from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
+    THINKING_BUDGET_SHARE,
     Translate,
     build_backend_server,
     read_int,
@@ -52,10 +53,6 @@ SERVER_NAME = plugin(API).name
 #: Output cap when a model entry does not set one.  Anthropic requires the
 #: field, so "absent" cannot mean "omit" here the way it does for sampling.
 DEFAULT_MAX_TOKENS = 4096
-
-#: How much of the output budget a thinking model may spend reasoning.  Half,
-#: because the other half is what the answer is made of.
-THINKING_BUDGET_SHARE = 0.5
 
 #: The smallest `budget_tokens` the Messages API accepts.  A floor of the
 #: protocol rather than a preference: a request below it is a 400, so a

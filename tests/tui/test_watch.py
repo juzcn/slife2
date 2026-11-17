@@ -206,6 +206,61 @@ async def test_the_watched_plan_is_drawn_and_updated_by_a_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_closed_turn_leaves_no_parked_plan_write() -> None:
+    """The watcher's settle: a write whose finish never came is parked no
+    longer than the turn that started it.
+
+    `Closed` is the watched turn's ending (cancelled, failed, link dropped),
+    and it settles the strip's parked writes as the window's endings do — a
+    later frame reusing the id finds nothing parked, and the stale items are
+    not drawn as a committed plan.
+    """
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TurnStarted("plan it", "agent:jack"),
+            ToolCallStarted(
+                call_id="p1",
+                name="plan_write",
+                arguments={
+                    "items": [{"text": "a plan never committed", "status": "active"}]
+                },
+            ),
+            Closed("the turn was cancelled"),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        view = app.screen.query_one(PlanView)
+        assert not view._started, "the closed turn's write leaked"
+        assert not view.display, "a write never committed draws no plan"
+
+        # A later turn reuses the id and finishes it without a start of its
+        # own: nothing is parked for it, so the stale items are not drawn.
+        watch.send(TurnStarted("again", "agent:jack"))
+        watch.send(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=True,
+                result_preview="{}",
+                result_chars=2,
+                elapsed_ms=1,
+            )
+        )
+        await pilot.pause()
+        text = view.plain_text()
+
+    assert "a plan never committed" not in text, (
+        "a reused call id popped the closed turn's stale write"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_closed_conversation_says_why_and_keeps_the_screen() -> None:
     """`Closed` is the last frame, not the end of the view.
 

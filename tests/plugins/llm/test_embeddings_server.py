@@ -44,8 +44,13 @@ class _FakeOpenAI:
         self.requests.append((model, list(input)))
         return SimpleNamespace(
             data=[
-                SimpleNamespace(embedding=[float(index)] + [0.0] * (self.dimension - 1))
-                for index, _ in enumerate(input, start=1)
+                # `index` is the protocol's own statement of which input the
+                # vector answers, and the server orders by it.
+                SimpleNamespace(
+                    index=index,
+                    embedding=[float(index + 1)] + [0.0] * (self.dimension - 1),
+                )
+                for index, _ in enumerate(input)
             ]
         )
 
@@ -220,6 +225,27 @@ async def test_an_empty_list_asks_nothing() -> None:
     fake = _FakeOpenAI()
     assert await _client("mystery", fake).embed([]) == []
     assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_vectors_come_back_in_input_order_however_the_list_is_ordered() -> None:
+    """`data[].index` identifies the input a vector answers; list position is
+    not a promise.  An endpoint that returns the list in any other order would
+    otherwise attribute one text's vector to another — silently, because every
+    vector still looks right."""
+
+    class _Shuffled(_FakeOpenAI):
+        async def _create(self, *, model: str, input: list[str]) -> Any:
+            self.requests.append((model, list(input)))
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=1, embedding=[2.0]),
+                    SimpleNamespace(index=0, embedding=[1.0]),
+                ]
+            )
+
+    vectors = await _client("mystery", _Shuffled()).embed(["one", "two"])
+    assert vectors == [[1.0], [2.0]]
 
 
 @pytest.mark.asyncio

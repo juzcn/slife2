@@ -72,6 +72,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import agents_dir, turn_dbs
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -82,6 +83,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     unreadable,
 )
+from slife2.libs.plugin.vocabulary import TURN_SUMMARIZE
 from slife2.libs.store.answer import search_answer
 from slife2.libs.store.db import (
     StaleSchema,
@@ -91,7 +93,7 @@ from slife2.libs.store.db import (
     store_for,
     user_message,
 )
-from slife2.libs.store.index import Embedder, page_limit, time_window
+from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit, time_window
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
@@ -105,6 +107,11 @@ SERVER_NAME = CONTEXT_SERVER_NAME
 #: This server's key in the config's `servers:` table, and the name the agent
 #: server connects to it by.
 CONFIG_KEY = "context"
+
+#: The page a `turn_list` that names no size gets — the same convention every
+#: listing in this system uses (`slife2.libs.paging.page_window`): a caller
+#: that names no size must not get the smallest legal page.
+DEFAULT_TURN_PAGE = 20
 
 #: How much of a candidate a cross-encoder reads.  The turn's own exchange is
 #: what relevance is judged on; a tool result would swamp it (results are
@@ -307,6 +314,15 @@ def build_server(
     #: is re-embedding turns that do not exist yet.
     synced: set[Path] = set()
 
+    #: **The check and the sync are one step per file.**  Two callers reaching
+    #: a file created after the startup pass together would both run `indexed`
+    #: — the membership check sits before a network-length await — and both
+    #: place vectors for the same turns: `turn_chunk` has no uniqueness on
+    #: `(turn_id, chunk_index)`, so the duplicates persist, consume KNN places
+    #: and inflate the index's vector count.  A lock per path makes the second
+    #: caller wait and then see the mark.
+    syncing: dict[Path, asyncio.Lock] = {}
+
     async def indexed(store: TurnStore, model: Embedder) -> None:
         """Bring one file up to date with `model`, or say why it cannot be."""
         await store.sync_indexes(model)
@@ -319,11 +335,19 @@ def build_server(
         synced.add(store.path)
         logger.info("indexed %s (%s)", store.path, status)
 
+    async def sync_once(store: TurnStore) -> None:
+        """Bring one file up to date once, whoever asks first (`syncing`)."""
+        if store.path in synced:
+            return
+        lock = syncing.setdefault(store.path, asyncio.Lock())
+        async with lock:
+            if store.path not in synced:
+                await indexed(store, await embedding.get())
+
     async def store_of(agent: str, subagent: str) -> TurnStore:
         """One conversation's store, with its indexes brought up to date."""
         store = await off_loop(store_for, agent, subagent)
-        if store.path not in synced:
-            await indexed(store, await embedding.get())
+        await sync_once(store)
         return store
 
     async def read_store_of(agent: str, subagent: str) -> TurnStore | None:
@@ -334,8 +358,8 @@ def build_server(
         otherwise come back as a directory with no record.
         """
         store = await off_loop(read_store_for, agent, subagent)
-        if store is not None and store.path not in synced:
-            await indexed(store, await embedding.get())
+        if store is not None:
+            await sync_once(store)
         return store
 
     @asynccontextmanager
@@ -513,7 +537,7 @@ def build_server(
         ctx: Context,
         since: str | None = None,
         until: str | None = None,
-        limit: int = 20,
+        limit: int = DEFAULT_TURN_PAGE,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Browse what was said before, newest first, one line per turn.
@@ -529,7 +553,8 @@ def build_server(
                 Omit for no lower bound.
             until: Upper bound on the same grammar. A date means the whole day.
                 Omit for no upper bound.
-            limit: How many turns this page may hold.
+            limit: How many turns this page may hold. Omit for the default
+                page; zero or less means the same.
             offset: How many turns to skip — that is how you page back.
 
         Returns:
@@ -551,22 +576,20 @@ def build_server(
         # conversation has never run and the page is empty — the refusal is
         # about what was asked, not about what was found.
         time_window(since, until)
+        # The applied numbers are the answer's, so a caller pages by the size
+        # this call actually used (`page_window`'s convention).
+        size, start = page_window(limit, offset, unset=DEFAULT_TURN_PAGE, cap=MAX_PAGE)
         store = await off_loop(read_store_for, agent, subagent)
         if store is None:
-            return {
-                "entries": [],
-                "total": 0,
-                "limit": page_limit(limit),
-                "offset": max(0, offset),
-            }
+            return {"entries": [], "total": 0, "limit": size, "offset": start}
         records, total = await off_loop(
-            store.turns, since=since, until=until, limit=limit, offset=offset
+            store.turns, since=since, until=until, limit=size, offset=start
         )
         return {
             "entries": [record.to_listing() for record in records],
             "total": total,
-            "limit": page_limit(limit),
-            "offset": max(0, offset),
+            "limit": size,
+            "offset": start,
         }
 
     @mcp.tool(meta=FOR_THE_MODEL)
@@ -732,7 +755,7 @@ def build_server(
             limit=page_limit(limit),
         )
 
-    @mcp.tool(meta=FOR_THE_MODEL)
+    @mcp.tool(name=TURN_SUMMARIZE, meta=FOR_THE_MODEL)
     async def turn_summarize(
         ctx: Context,
         turn_id: int | None = None,
@@ -762,7 +785,7 @@ def build_server(
         summary = (summary or "").strip()
         tags = (tags or "").strip()
         if not summary and not tags:
-            raise ToolError("turn_summarize needs a summary and/or tags")
+            raise ToolError(f"{TURN_SUMMARIZE} needs a summary and/or tags")
         if turn_id is None:
             return {
                 "status": "captured",
@@ -1516,6 +1539,10 @@ def build_server(
         # against it, and a second home would be graded by the first home's
         # ceiling.
         policy = current().context
+        if not model:
+            # The promise `rebuild`'s `model` argument makes: an empty reference
+            # is sized against the config's default, and says so.
+            logger.info("recall_window_default_model")
         window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
         # the headroom *below*.  Summed here and not by the store: the store

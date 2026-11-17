@@ -63,7 +63,7 @@ from slife2.tui.client import WatchClient
 from slife2.tui.draw import draw
 from slife2.tui.i18n import t
 from slife2.tui.restore import restore
-from slife2.tui.widgets import ChatView, PlanView, task_bubble
+from slife2.tui.widgets import ApprovalPrompt, ChatView, PlanView, task_bubble
 
 logger = logging.getLogger(__name__)
 
@@ -240,14 +240,18 @@ class WatchScreen(Screen[None]):
                 # open by a previous one that failed without a `TurnFinished`;
                 # `begin_assistant` opens this one for the deltas below.  Settle
                 # first: a new turn proves the prior one ended, and `add_user`
-                # clears the tool map without closing the panels it held.
+                # clears the tool map without closing the panels it held.  The
+                # plan strip's parked writes settle at the same seam.
                 chat.settle_tools()
+                self.query_one(PlanView).settle()
                 chat.add_user(text, channel=channel)
                 chat.begin_assistant()
             case Closed(reason=reason):
                 # The watched turn is gone (cancelled, failed, link dropped);
-                # whatever it left running has no ending coming.
+                # whatever it left running has no ending coming — panels and
+                # parked plan writes alike.
                 chat.settle_tools()
+                self.query_one(PlanView).settle()
                 chat.add_note(
                     t("watch_closed", reason=reason)
                     if reason
@@ -258,8 +262,11 @@ class WatchScreen(Screen[None]):
                 # The answer is authoritative and replaces what the deltas
                 # built — the reconciliation `finish_assistant` documents.
                 # Every ending settles, as the main window does; on a success
-                # the panels are already complete and this is a no-op.
+                # the panels are already complete and this is a no-op.  A
+                # successful plan write was popped by its own finish; what is
+                # left parked is a write this turn never finished.
                 chat.settle_tools()
+                self.query_one(PlanView).settle()
                 chat.finish_assistant(text)
             case ToolApprovalRequested():
                 # A watched turn runs unattended (`watched=False`), so the loop
@@ -299,5 +306,20 @@ class WatchScreen(Screen[None]):
         brief.add_class("visible")
 
     def action_close_watch(self) -> None:
-        """Leave the screen.  The conversation keeps running without us."""
+        """Leave the screen — or refuse the question on it, which is what Esc
+        means beside one.  The conversation keeps running without us either way.
+
+        **A pending approval owns escape here, as it does in the window.**  The
+        row's own escape binding is priority, but so is this screen's, and the
+        priority pass runs app → screen → focused widget, so the key arrives
+        here first.  Denying is the smaller answer and the one the row
+        advertises (`n/Esc`); closing over a parked question would leave the
+        turn waiting on a row that went away with the screen — the re-home
+        (`slife2.tui.app._rehome_approval`) keeps the question, but the key
+        meant to answer it, not to move it.
+        """
+        for prompt in self.query(ApprovalPrompt):
+            if prompt.pending:
+                prompt.action_deny()
+                return
         self.dismiss(None)

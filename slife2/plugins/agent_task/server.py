@@ -139,8 +139,8 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import turn_prompt_lead, with_lead
-from slife2.libs.turn.events import TurnEvent, TurnObserver
-from slife2.libs.turn.loop import AgentLoop, TurnResult
+from slife2.libs.turn.events import TurnEvent, TurnObserver, emit
+from slife2.libs.turn.loop import TurnResult
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import (
     SUBAGENT_PROMPT,
@@ -160,7 +160,7 @@ from slife2.libs.turn.tools import (
 )
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, WatchItem
 from slife2.libs.turn.watch import encode as encode_watch
-from slife2.libs.turn.watchhub import WatchHub
+from slife2.libs.turn.watchhub import Tap, WatchHub
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,13 @@ class AgentTask:
     #: The running coroutine, kept so it is not collected mid-flight and so that
     #: `agent_task_cancel` has something to cancel.
     handle: asyncio.Task[None] | None = field(default=None, repr=False)
+    #: The tap `start_tap` opened for this task, kept so its `finally` can tell
+    #: its own from a replacement's.  A cancelled task's `finally` runs after
+    #: `agent_task_cancel` has returned, and the name may already have been
+    #: started again: the new task's tap and watchers are under the same key,
+    #: and closing or dropping by key alone would end the new task's watch and
+    #: take its replay from later joiners (`WatchHub.drop_if`'s reason).
+    tap: Tap | None = field(default=None, repr=False)
 
     @property
     def key(self) -> TaskKey:
@@ -328,7 +335,7 @@ class AgentTask:
         """
         return (self.agent, self.subagent)
 
-    def report(self) -> dict[str, Any]:
+    def report(self, *, status: str = "") -> dict[str, Any]:
         """The five fields, in one shape for three readers.
 
         The marker on the answer, every tool's reply and a row of
@@ -336,13 +343,22 @@ class AgentTask:
         between two spellings of one fact — which is the same reason the marker
         keys are named after the arguments and fields the tools use
         (SDD §5.5).
+
+        `status` is the marker's alone: what the answer *will be* if it lands,
+        while the object is still `running` through the hand-over.  The finish
+        time follows the status reported rather than the object's —
+        `finished_at` is empty until the task stops, so a reader asking
+        mid-delivery is not told a finish time beside a `running` status, two
+        contradictory facts.  The stamp itself is written when the loop returns
+        (`run`), and a terminal status reports it unchanged.
         """
+        shown = status or self.status
         return {
             "task_id": self.task_id,
             "name": self.name,
-            "status": self.status,
+            "status": shown,
             "started_at": self.started_at,
-            "finished_at": self.finished_at,
+            "finished_at": self.finished_at if shown != RUNNING else "",
         }
 
 
@@ -411,11 +427,12 @@ def marker(task: AgentTask, *, status: str = "") -> str:
     `status` is what the answer *is*, which is not always the object's status at
     the moment it is built: a successful loop is still `running` while its answer
     is being handed over (a task is `finished` only when it lands), and the
-    marker has to say what the answer will be if it lands.
+    marker has to say what the answer will be if it lands.  It goes through
+    `report`, so the finish time follows the status the marker claims — the
+    answer says `finished` with the moment the work ended, not with an empty
+    field beside it.
     """
-    payload = task.report()
-    if status:
-        payload["status"] = status
+    payload = task.report(status=status)
     return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}]"
 
 
@@ -638,17 +655,9 @@ def build_server(
                 else []
             )
             if not wanted:
-                raise ToolFailed(
-                    "this call named no source; pass the paths, URLs or `data:` "
-                    "URIs of the images to attach."
-                )
+                raise ToolFailed(attachments.NO_SOURCE)
             if not turn.accepts_images:
-                # The agent server's sentence, for the same reason: the refusal
-                # is what the model reads, so it can act on it.
-                raise ToolFailed(
-                    f"{turn.model} cannot read images, so nothing was attached — "
-                    f"move to a model whose config lists `image` under `input`."
-                )
+                raise ToolFailed(attachments.cannot_read_images(turn.model))
 
             async def lookup(
                 keys: list[tuple[str, str]],
@@ -657,7 +666,7 @@ def build_server(
                     client = await runtime.cabinet()
                 except Exception as exc:  # noqa: BLE001 - an unreachable cabinet is each key's refusal
                     return [], [
-                        f"{refusal} (the cabinet could not be reached: {exc})"
+                        attachments.cabinet_unreachable(refusal, exc)
                         for _key, refusal in keys
                     ]
 
@@ -687,7 +696,7 @@ def build_server(
             if pairs and not attachments.inject(
                 turn.messages, [url for _source, url in pairs]
             ):
-                raise ToolFailed("there is no message here to attach an image to.")
+                raise ToolFailed(attachments.NO_MESSAGE)
             logger.info(
                 "attach_image in agent task %s: %d attached, %d refused",
                 task.name,
@@ -801,9 +810,9 @@ def build_server(
         # **Reported before the turn**, as the agent server reports it: the
         # discriminator is one model call nobody sees, so its two counts are the
         # only sight of it, and they are a fact about what the turn runs on
-        # rather than about how it went.  Through `_emit`, so a watcher that
+        # rather than about how it went.  Through `emit`, so a watcher that
         # cannot be served cannot cost the task its turn.
-        await AgentLoop._emit(observer, rebuilt.chosen)
+        await emit(observer, rebuilt.chosen)
 
         # **The live half of the turn**, made after the rebuild because the list
         # a tool mutates is the one the rebuild decided on.  The registry closes
@@ -980,7 +989,9 @@ def build_server(
             # **The answer is the product, so a task is not `finished` until it
             # has reached a window.**  The loop's status stays `running` while
             # the hand-over runs, so a reader that asks in that moment is not
-            # told a completion that may still fail; the marker carries the
+            # told a completion that may still fail — and `report` withholds the
+            # finish time for the same reason: a `running` status beside a
+            # finish time is two contradictory facts.  The marker carries the
             # outcome the answer will have if it lands.
             try:
                 delivered = await deliver(task, status=outcome)
@@ -999,8 +1010,18 @@ def build_server(
             # loop's sentence is what the watcher has to show for the failure,
             # and `task.text` is cleared below.
             task.ending = closed_reason(task, outcome)
-            watching.close(task.key, task.ending)
-            watching.drop(task.key)
+            # **Close and drop only while the tap is still this task's.**  A
+            # cancelled task's `finally` runs after the cancel call returned,
+            # and the name may already have been started again: the new task's
+            # tap and watchers are under the same key, and ending them by key
+            # alone would tell the new task's watchers the old task's ending
+            # and take the new tap's replay from later joiners
+            # (`WatchHub.drop_if`'s reason).  The check and the two calls are
+            # one synchronous block, so no start can slip between them; a
+            # normal ending reaches here with its own tap still in place.
+            if watching.tap(task.key) is task.tap:
+                watching.close(task.key, task.ending)
+                watching.drop(task.key)
             # **A task is retired when its ending is final** — for a successful
             # loop, after the answer has been handed over.  The cap counts
             # `running`, so a task that is still delivering holds its slot: it is
@@ -1257,7 +1278,7 @@ def build_server(
         # inside `run` would leave that window with nothing to replay.  There is
         # no await between the registry insert and this line, so a watch call
         # cannot find the task without the tap.
-        watching.start_tap(
+        task.tap = watching.start_tap(
             task.key,
             TaskBrief(
                 name=task.name,

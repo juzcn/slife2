@@ -1819,3 +1819,19 @@ def test_a_job_that_did_not_load_keeps_its_row_and_cannot_be_injected(
 
     assert rows_in(store) == [("job__broken", STATUS_ERROR, UNLOADED)]
     assert store.injectable(["job"])["tools"] == []
+
+
+def test_a_page_with_no_size_is_the_default_page_not_one_row(tmp_path) -> None:
+    """`limit <= 0` is "nobody said", and the answer is the default page.
+
+    The browse used to hand-roll the window; `page_window` is the one rule
+    every listing uses, and a caller that names no size must not get the
+    smallest legal page (one row) — `DEFAULT_TOOL_PAGE` is the convention.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool(f"arxiv__t{i}") for i in range(25)])
+    for asked in (0, -1):
+        page = store.page(limit=asked)
+        assert page["limit"] == DEFAULT_TOOL_PAGE
+        assert len(page["tools"]) == DEFAULT_TOOL_PAGE
+        assert page["total"] == 25

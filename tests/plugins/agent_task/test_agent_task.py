@@ -643,6 +643,58 @@ async def test_the_marker_says_which_task_it_was_and_when(
     assert payload["finished_at"]
 
 
+async def test_a_running_task_is_not_reported_with_a_finish_time(
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**`finished_at` is empty until the task stops** — the field's contract,
+    and the loop's stamp does not bend it: the moment is written when the loop
+    returns, but the status stays `running` through the hand-over, so a status
+    read in that window carried a finish time beside `running`, two
+    contradictory facts.  The report withholds the stamp while the status is
+    `running`; the marker, which claims the outcome the answer will have,
+    carries it — and the settled report and the marker agree on the moment.
+
+    The hand-over is gated to hold the task in that window: the delivery is
+    where a successful loop is still `running`, and the gate is what makes the
+    read land inside it rather than race it.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_hand_over = module.hand_over
+
+    async def gated_hand_over(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await release.wait()
+        await real_hand_over(*args, **kwargs)
+
+    monkeypatch.setattr(module, "hand_over", gated_hand_over)
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
+    await start(built)
+    await asyncio.wait_for(entered.wait(), timeout=10)
+
+    async with Client(built.mcp) as client:
+        running = await ask(client, AGENT_TASK_STATUS, {"name": "research"})
+        listed = await ask(client, AGENT_TASK_LIST)
+    assert running["status"] == "running"
+    assert running["finished_at"] == "", "a running task reported a finish time"
+    assert listed["tasks"][0]["finished_at"] == ""
+
+    release.set()
+    answer = await settle(built)
+    assert answer["status"] == "finished"
+    assert answer["finished_at"]
+    await wait_for_handover(window)
+
+    text = window.handed[0]["text"]
+    payload = json.loads(text[len(MARKER_PREFIX) : text.index("]")])
+    assert payload["status"] == "finished"
+    assert payload["finished_at"] == answer["finished_at"], (
+        "the marker and the settled report disagree about when the work ended"
+    )
+
+
 async def test_a_task_that_fails_still_answers(
     hub: Client, store: Store, window: Window
 ) -> None:
@@ -1504,6 +1556,119 @@ async def test_cancelling_a_watched_task_closes_with_cancelled(
 
     assert result.data == {"closed": True}
     assert closed.reason == "the task was cancelled"
+
+
+async def test_a_cancelled_runs_finally_leaves_the_replacements_watch_alone(
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old turn's ending must not end the new task's watch.**
+
+    `agent_task_cancel` writes `cancelled` synchronously, but the cancelled
+    coroutine's `finally` runs later — and the name is startable again the
+    moment the status is not `running`.  When the new task's `start_tap` has
+    replaced the tap, the old `finally` closing and dropping by key alone sent
+    the new task's watchers the old task's `Closed` and took the new tap's
+    replay from later joiners (`WatchHub.drop_if`'s reason).
+
+    The two hand-overs are gated to make the window deterministic: the first
+    holds the old run *after* its cancellation and *before* its `finally`,
+    the second holds the new task mid-delivery so a late watcher joins while
+    its tap is still the live one.  The old `finally` then runs against the
+    replacement's tap, and the assertions are what it must leave alone.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    made: list[Any] = []
+    real_task = module.AgentTask
+
+    def recording(**fields: Any) -> Any:
+        task = real_task(**fields)
+        made.append(task)
+        return task
+
+    monkeypatch.setattr(module, "AgentTask", recording)
+
+    first_entered = asyncio.Event()
+    first_held = asyncio.Event()
+    first_release = asyncio.Event()
+    second_entered = asyncio.Event()
+    second_release = asyncio.Event()
+    real_hand_over = module.hand_over
+    deliveries = 0
+
+    async def gated_hand_over(*args: Any, **kwargs: Any) -> None:
+        nonlocal deliveries
+        deliveries += 1
+        if deliveries == 1:
+            first_entered.set()
+            try:
+                # Never set: the cancellation is what ends this wait, and the
+                # except below holds the run before its `finally` runs.
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                first_held.set()
+                await first_release.wait()
+                raise
+        if deliveries == 2:
+            second_entered.set()
+            await second_release.wait()
+        await real_hand_over(*args, **kwargs)
+
+    monkeypatch.setattr(module, "hand_over", gated_hand_over)
+    built = build(
+        text_turn("old answer"),
+        text_turn("new answer"),
+        hub=hub,
+        context=store,
+        window=window,
+    )
+    await start(built)
+    await asyncio.wait_for(first_entered.wait(), timeout=10)
+
+    async with Client(built.mcp) as client:
+        stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "research"})
+    assert stopped["status"] == "cancelled"
+    await asyncio.wait_for(first_held.wait(), timeout=10)
+    old_handle = made[0].handle
+    assert old_handle is not None
+
+    # The name is free again: a second task under it, with its own tap.  It
+    # runs its turn and parks in its hand-over, still `running`.
+    await start(built)
+    assert made[1].tap is not made[0].tap
+    await asyncio.wait_for(second_entered.wait(), timeout=10)
+
+    async with watching(built) as (frames1, call1):
+        await wait_for_frame(frames1, TaskBrief)
+        # The old run's finally runs now, against the replacement's tap.
+        first_release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await old_handle
+
+        # A watcher joining after the old finally still replays the new
+        # task's turn from its start — the tap the old drop would have taken.
+        async with watching(built) as (frames2, call2):
+            await wait_for_frame(frames2, ContextChosen)
+            second_release.set()
+            closed2 = await wait_for_frame(frames2, Closed)
+            assert "finished" in closed2.reason
+            assert "cancelled" not in closed2.reason
+            result2 = await asyncio.wait_for(call2, timeout=10)
+        assert result2.data == {"closed": True}
+
+        # The watcher that was there when the old finally ran was not closed
+        # by the old task's ending; it ends with the new task's own.
+        closed1 = await wait_for_frame(frames1, Closed)
+        assert "cancelled" not in closed1.reason, (
+            "the cancelled task's finally closed the replacement's watcher"
+        )
+        assert "finished" in closed1.reason
+        result1 = await asyncio.wait_for(call1, timeout=10)
+
+    assert result1.data == {"closed": True}
+    await wait_for_handover(window)
+    assert len(window.handed) == 1, "the cancelled task delivered an answer"
+    assert window.handed[0]["text"].endswith("new answer")
 
 
 # ── the turn a task stands in for ────────────────────────────────────────────

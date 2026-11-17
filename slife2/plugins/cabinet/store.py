@@ -149,7 +149,7 @@ from slife2.libs.store.index import (
     as_similarity,
     checked_vectors,
     clear_vectors,
-    connect_to,
+    connection_to,
     embed_chunks,
     filter_clause,
     fuse_shortlist,
@@ -204,6 +204,14 @@ INDEX_NAME = ".index.db"
 #: what the cabinet *contains* (the saved attachments): two of those in one path
 #: — `agents/jack/files/files/images/a.png` — read as nothing at all.
 CABINET_DIR = "cabinet"
+
+#: Where a stored image's bytes live, inside the cabinet.  **The `image` kind's
+#: directory, and not a `Spec.mirror`**: an image's bytes *are* the document, so
+#: it has no markdown mirror (`SPECS[IMAGE].mirror` is empty) — but the directory
+#: is still the cabinet's own, and a saved file filed under it would be
+#: indistinguishable from a picture a turn's `[Image:…]` reference points at.
+#: Spelled once here so the collision guard and `image_save` agree about it.
+PICTURES_DIR = "pictures"
 
 #: Bump when the **vectorized kinds** or what their vectors are built from
 #: change.  It rides in the vector identity, so an index built under the old
@@ -748,23 +756,10 @@ class CabinetStore:
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, and **it is closed on the way out**.
-
-        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
-        and leaves the connection open.  On Windows an open handle is a file
-        nobody else can delete, and a connection per call with none closed is a
-        descriptor leak on every other platform.  The turn store and the
-        catalogue state the same rule; this is the third store.
-
-        What the caller's `with` gets is the commit (`with connection:`); the
-        `finally` is the close.
-        """
-        connection = connect_to(self.path)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        """One connection for this call — `connection_to`'s lifetime, the same
+        rule the turn store and the catalogue keep."""
+        with connection_to(self.path) as connection:
+            yield connection
 
     # ── Bringing the index up to date ────────────────────────────────────
 
@@ -1411,16 +1406,15 @@ class CabinetStore:
             connection.execute(
                 "DELETE FROM cabinet_doc WHERE id = ?", (int(row["id"]),)
             )
-        if mirror := str(row.get("mirror") or ""):
-            # **The row is already gone by this line**, so a file that cannot be
-            # removed must not turn a successful delete into a failed one.  The
-            # bytes branch below already says this with `discard_file`; a mirror
-            # held open by an editor is the same accident (Windows refuses the
-            # unlink), and raising here would report failure for a document that
-            # no longer exists — then every retry answers "there is no note".
-            discard_file(self.root / mirror)
-        if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
-            discard_file(self.root / saved)
+            # **The file goes inside the transaction, before the commit.**  The
+            # stem is a function of the key, so a concurrent re-create of the same
+            # key lands on the same file — unlinking after the commit deleted the
+            # live successor's file, the worse evil.  Here a refused unlink rolls
+            # the whole remove back and the document stays whole (`_unlink_document`).
+            if mirror := str(row.get("mirror") or ""):
+                _unlink_document(self.root / mirror)
+            if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
+                _unlink_document(self.root / saved)
         return row
 
     async def annotate(
@@ -1450,21 +1444,31 @@ class CabinetStore:
             raise ValueError(CORPUS_KIND_HINT)
         key = storable(key)
         with self._connect() as connection:
+            # **The read is inside the write lock, and the write uses what it
+            # read.**  The row and its file were read on one connection and the
+            # summary written on another, so a `note_update` committing a new
+            # body and keyword text in between was overwritten by the older
+            # body's text, and a `remove` left the UPDATE hitting no row while
+            # `_index` inserted an orphan entry the tool then called success.
+            # `BEGIN IMMEDIATE` takes the lock before the read — a deferred
+            # transaction would open at the UPDATE and leave the same window —
+            # so the row and its body are read as they will be written, and a
+            # document that is gone answers `None` rather than a phantom.
+            connection.execute("BEGIN IMMEDIATE")
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
-        if found is None:
-            return None
-        row = self._with_body(dict(found))
-        row["summary"] = summary or row.get("summary") or ""
-        row["tags"] = tags or row.get("tags") or ""
-        # **`updated_at` is the document's own time, not the annotation's.**
-        # Notes report and sort by it ("when it was last written"), so
-        # describing one re-dated it — a `cabinet_summarize` moved an old note
-        # above a newer one in `note_list` and changed the `time` the model
-        # reads.  The summary and tags are found by the keyword index, which is
-        # rewritten below; the time axis is not theirs.
-        with self._connect() as connection:
+            if found is None:
+                return None
+            row = self._with_body(dict(found))
+            row["summary"] = summary or row.get("summary") or ""
+            row["tags"] = tags or row.get("tags") or ""
+            # **`updated_at` is the document's own time, not the annotation's.**
+            # Notes report and sort by it ("when it was last written"), so
+            # describing one re-dated it — a `cabinet_summarize` moved an old note
+            # above a newer one in `note_list` and changed the `time` the model
+            # reads.  The summary and tags are found by the keyword index, which
+            # is rewritten below; the time axis is not theirs.
             connection.execute(
                 "UPDATE cabinet_doc SET summary = ?, tags = ? WHERE id = ?",
                 (
@@ -2206,6 +2210,24 @@ def discard_file(path: Path) -> None:
         path.unlink()
     except OSError as exc:
         logger.debug("cabinet: %s not removed: %s", path, exc)
+
+
+def _unlink_document(path: Path) -> None:
+    """Unlink a document's file inside its row's transaction, or refuse the remove.
+
+    **The file goes before the row's delete commits, and a refused unlink takes
+    the whole remove back.**  A mirror's stem is a function of the key, so a
+    concurrent re-create of the same key lands on the same file: unlinking after
+    the commit deleted the live successor's file, the worse evil.  Inside the
+    transaction, a filesystem that refuses the unlink (an editor holding the file
+    open on Windows) rolls the remove back and the document stays whole.  A file
+    already gone is not a refusal — a document whose text is missing is damaged,
+    and its remove still succeeds.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def parse_tags(value: Any) -> str:

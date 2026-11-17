@@ -40,7 +40,10 @@ which cancels the handler behind it, which is the detach.
 
 **Four tools, and none of them is the model's.**  `submit` is a channel's,
 `note` is the harness's, `attach` is a window's, and `attached` answers whether
-one is there; all four are addressed by an agent name.  Nothing here carries
+one is there; all four are addressed by an agent name, **taken stripped at the
+wire**: a name with stray whitespace is the same session as the clean one, so
+the window `attach` registers and the `attached` that asks about it cannot come
+to two keys (`conversation_key` does not normalise).  Nothing here carries
 `slife2.libs.plugin.audience.FOR_THE_MODEL`, so the hub leaves all of it out of
 the tool set, and the plugin serves no `list_sources` — it declares no rows, and
 is therefore asked for none (`slife2.libs.plugin.protocol`).
@@ -349,6 +352,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
                 one agent replaces the first, which is how a stale session from a
                 killed window is cleared.
         """
+        agent = agent.strip()
         session = windows.attach(agent)
         try:
             await _push(ctx, session)
@@ -400,7 +404,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
                 thing this system says for any missing peer, arriving here as
                 "nobody is looking at that conversation".
         """
-        await _hand_over(agent, text, channel, TURN)
+        await _hand_over(agent.strip(), text, channel, TURN)
 
     @mcp.tool(name=NOTE)
     async def note(agent: str, text: str) -> None:
@@ -428,7 +432,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         Raises:
             ToolError: If no window is showing that agent.
         """
-        await _hand_over(agent, text, "", NOTE)
+        await _hand_over(agent.strip(), text, "", NOTE)
 
     return mcp
 

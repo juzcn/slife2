@@ -27,7 +27,14 @@ import importlib
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,6 +75,12 @@ INSTRUCTIONS = (
     "authoritative — a caller that ignores the progress stream still gets the "
     "whole answer. This server keeps no state between calls."
 )
+
+#: How much of the output budget a thinking model may spend reasoning.  Half,
+#: because the other half is what the answer is made of and a model that spends
+#: everything thinking returns nothing.  Both adapters that send a thinking
+#: budget read it here.
+THINKING_BUDGET_SHARE = 0.5
 
 
 @dataclass
@@ -247,24 +260,36 @@ async def stream_chat_impl(
     (`slife2.libs.model.base`).  A stream with no `Finish` is therefore one that
     was cut, and the turn fails rather than handing half an answer to a loop
     that would record it as a whole one.
+
+    **And the stream is closed on every way out, not only the normal one.**
+    An interrupted turn raises out of `ctx.report_progress` while the adapter
+    is suspended at its `yield`, and an `async for` abandoned there leaves it
+    suspended — holding the SDK's open response and the pool's lease — until
+    the collector happens to reach it, with the provider still generating on
+    a connection nobody reads.  `aclosing` runs the adapter's own cleanup
+    deterministically instead: the SDK stream is closed and the lease released
+    on the way out, whichever way out it is.
     """
     builder = _TurnBuilder()
     reported = 0
 
-    async for event in streamer(
-        provider,
-        [Message.from_wire(m) for m in messages],
-        [ToolSpec.from_wire(t) for t in tools],
-        model,
-    ):
-        chunk = builder.absorb(event)
-        if chunk is None:
-            continue
-        reported += 1
-        # A no-op when the client sent no progress token, which is the intended
-        # behaviour: a caller that does not want a stream should not pay for
-        # one, and gets the same result at the end.  See `slife2.libs.turn.events`.
-        await ctx.report_progress(reported, None, encode_chunk(chunk))
+    async with contextlib.aclosing(
+        streamer(
+            provider,
+            [Message.from_wire(m) for m in messages],
+            [ToolSpec.from_wire(t) for t in tools],
+            model,
+        )
+    ) as events:
+        async for event in events:
+            chunk = builder.absorb(event)
+            if chunk is None:
+                continue
+            reported += 1
+            # A no-op when the client sent no progress token, which is the intended
+            # behaviour: a caller that does not want a stream should not pay for
+            # one, and gets the same result at the end.  See `slife2.libs.turn.events`.
+            await ctx.report_progress(reported, None, encode_chunk(chunk))
 
     if not builder.finished:
         raise RuntimeError(
@@ -546,11 +571,18 @@ def sdk_client_factory(
     stays importable, and a process that serves nothing from it never loads the
     SDK.  It also leaves the class named once, in the `sdk_streamer` call that
     uses it.
+
+    **No call is ever repeated behind the caller's back.**  Both SDKs default
+    to two retries, and a retried request may already have reached the
+    provider — a second generation billed for one answer.  `max_retries=0`
+    makes a failed call fail the turn, and the caller retries deliberately
+    (SDD §2.7); the embeddings server states the same policy for the one
+    client it builds itself.
     """
 
     def make_client(provider: ProviderSettings, key: str) -> Any:
         client_class = getattr(importlib.import_module(module), attribute)
-        return client_class(api_key=key, base_url=provider.base_url)
+        return client_class(api_key=key, base_url=provider.base_url, max_retries=0)
 
     return make_client
 
@@ -577,9 +609,9 @@ def sdk_streamer(
     how many output tokens have already been counted.  Made per stream, so two
     concurrent calls cannot share a counter.
 
-    `build_request` is passed in rather than called here because one wire has a
-    flag that has to be closed over before the request exists (`stream_usage`),
-    and closing over it is the caller's business.
+    `build_request` is passed in rather than called here because the body is
+    the wire's own: each adapter builds the fields its protocol takes from the
+    same neutral messages, tools and resolved settings.
     """
     pool = LiveProviders(api, server_name, sdk_client)
 
@@ -588,7 +620,7 @@ def sdk_streamer(
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
-    ) -> AsyncIterator[ProviderEvent]:
+    ) -> AsyncGenerator[ProviderEvent]:
         # Held for the whole stream, not just to look the provider up: the
         # client is what carries the response being read below, and a config
         # edit landing mid-answer must not close it out from under the stream
@@ -598,9 +630,18 @@ def sdk_streamer(
             request = build_request(messages, tools, settings)
             response = await start(clients.client(provider), request)
             translate = translator()
-            async for event in response:
-                for out in translate(event):
-                    yield out
+            # **The response is closed on every way out of the loop.**  An
+            # `async for` left by a thrown exception — the GeneratorExit of an
+            # interrupted turn reaching the yield below — does not close its
+            # iterator, and an open stream keeps the provider generating on a
+            # connection nobody reads.  `close()` is the spelling both SDKs
+            # have; `aclose` is OpenAI's alias for it.
+            try:
+                async for event in response:
+                    for out in translate(event):
+                        yield out
+            finally:
+                await response.close()
 
     return stream
 

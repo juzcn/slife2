@@ -27,13 +27,18 @@ continuation, terminal-task rejection and `GetTask` have no counterpart in SDK
 two stores are ours.  The split is deliberate: interop follows the published
 profile, and a self-built binding would be a second protocol wearing the name.
 
-**Two things are deliberately absent.**  `broker.py` — a TCP probe that decides
-whether to start the plugin at all — has no counterpart, because
-`slife2.libs.host.runtime.tcp_listening` already is that and there is no spawn to gate: a
-plugin the config names is always started (SDD §4.2), and what the section decides is
-whether the plugin opens a mesh.  And `identity.py`, the *inbox* vocabulary
-(`AgentName`, `Channel`, `AgentMessage`), is not here at all: this build
+**`broker.py` probes, owns, and stops the broker with the stack** (SDD §9.2).
+A config that names the mesh has said it wants a broker, so a local one that
+is absent is started — mosquitto, on the concrete loopback address the section
+names — and recorded, so the take-down stops exactly what this machine started
+and leaves somebody else's alone.  A broker that still will not serve fails the
+start loudly rather than attaching a tool surface to nothing; a wildcard
+address is refused by name, and a broker on another machine is the operator's
+to run.
+
+**`identity.py`, the *inbox* vocabulary, is deliberately absent.**  This build
 carries a channel as the string a turn records (`peer_agent:<peer>` on this
 network, `agent:`/`subagent:` on the local one), drawn by
-`slife2.tui.widgets.channel_prefix`.
+`slife2.tui.widgets.channel_prefix`, so there is no `AgentName`/`Channel`/
+`AgentMessage` module for a message to wear.
 """

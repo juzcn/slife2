@@ -104,6 +104,7 @@ from slife2.clients.toolclient import (
     tool_lookup,
 )
 from slife2.helpers.clock import now
+from slife2.helpers.threads import off_loop
 from slife2.libs.harness import dumps
 from slife2.libs.harness.async_tasks import (
     CANCEL_ASYNC,
@@ -167,7 +168,12 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
-from slife2.libs.plugin.vocabulary import FORGET, NOTHING_WAITING, TRANSCRIPT
+from slife2.libs.plugin.vocabulary import (
+    FORGET,
+    NOTHING_WAITING,
+    TRANSCRIPT,
+    TURN_SUMMARIZE,
+)
 from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
     turn_failed_note,
@@ -183,6 +189,7 @@ from slife2.libs.turn.events import (
     ToolsCounted,
     TurnEvent,
     TurnObserver,
+    emit,
     encode,
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
@@ -919,15 +926,8 @@ def build_server(
             try:
                 client = await cabinet()
             except Exception as exc:  # noqa: BLE001 - an unreachable cabinet is each key's refusal
-                # **A missing path is not a cabinet failure.**  The lookup is
-                # only how a string that failed the encoder is checked against
-                # the cabinet's keys, so a cabinet that cannot be reached leaves
-                # each such source with the encoder's own sentence — plus why
-                # the second check could not be made, because a key that never
-                # got its turn is a different fact from a path that is genuinely
-                # absent.
                 return [], [
-                    f"{refusal} (the cabinet could not be reached: {exc})"
+                    attachments.cabinet_unreachable(refusal, exc)
                     for _key, refusal in keys
                 ]
 
@@ -1151,7 +1151,7 @@ def build_server(
 
         found = await turn_tools(conversation_id)
         if observer is not None:
-            await AgentLoop._emit(
+            await emit(
                 observer,
                 ToolsCounted(total=found.total, loaded=len(found.tools)),
             )
@@ -1179,7 +1179,7 @@ def build_server(
                     continue
                 function = call.get("function")
                 function = function if isinstance(function, dict) else {}
-                if str(function.get("name") or "").split("__")[-1] != "turn_summarize":
+                if str(function.get("name") or "").split("__")[-1] != TURN_SUMMARIZE:
                     continue
                 try:
                     arguments = json.loads(function.get("arguments") or "{}")
@@ -1189,8 +1189,9 @@ def build_server(
                     # over a damaged argument would lose the turn the
                     # annotation belongs to.  The damage is named instead.
                     logger.warning(
-                        "a turn_summarize call's arguments could not be read; "
+                        "a %s call's arguments could not be read; "
                         "the annotation is dropped: %s",
+                        TURN_SUMMARIZE,
                         exc,
                     )
                     continue
@@ -1274,7 +1275,10 @@ def build_server(
             )
         )
         turn_id = payload.get("turn_id")
-        if not isinstance(turn_id, int):
+        # A bool is an int to `isinstance`, and `True == 1` — a store answering
+        # `turn_id: true` would name turn 1 in the keep-list.  The file's other
+        # strict readers exclude it for the same reason.
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool):
             raise unreadable("the context store", "return a turn id", payload)
         return turn_id
 
@@ -2126,7 +2130,9 @@ def build_server(
         # route uses.  Left to `Path`'s default, a relative path resolved
         # against the daemon's working directory (the runtime directory), so a
         # path that works in `file_save` named a different file here.
-        pairs, refusals = attachments.resolve(item.images, base=home())
+        # The encode reads and base64s up to `MAX_BYTES` per source — blocking
+        # work in a process that serves every agent on the machine, so it hops.
+        pairs, refusals = await off_loop(attachments.resolve, item.images, base=home())
         if pairs and not loop.accepts_images:
             # **Extended, not replaced**: a caller who passed one unreadable
             # source and one the model cannot see is owed both reasons, and a
@@ -2193,8 +2199,8 @@ def build_server(
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             loop.approvals[call.id] = future
             try:
-                # **Emitted through the loop's own fault tolerance, not straight
-                # to the observer.**  `AgentLoop._emit` exists so that a UI which
+                # **Emitted through the shared fault tolerance, not straight
+                # to the observer.**  `emit` exists so that a UI which
                 # throws cannot end a turn, and this event is raised from inside
                 # a turn: a client whose progress stream is broken throws from
                 # `on_event` (`ctx.report_progress` on a closed stream), and
@@ -2202,12 +2208,12 @@ def build_server(
                 # this answer — a tool call the model is entitled to make, refused
                 # because a *display* failed, where the same observer failing on a
                 # `TextDelta` would have been swallowed one layer down.  It is a
-                # staticmethod, so the class is asked rather than an instance: this
-                # closure is built before `agent_loop` and must not depend on it.
+                # module function, so this closure — built before `agent_loop` —
+                # asks it without depending on the instance.
                 # **The answer, unlike every other event's, is read.**  Nobody
                 # can answer a request that was not written, so that failure
                 # refuses the call instead of parking the turn on it.
-                if not await AgentLoop._emit(
+                if not await emit(
                     observer,
                     ToolApprovalRequested(call.id, call.name, call.arguments),
                 ):
@@ -2644,26 +2650,16 @@ def build_server(
             )
         wanted = [str(source) for source in sources if str(source).strip()]
         if not wanted:
-            raise ToolError(
-                "this call named no source; pass the paths, URLs or `data:` "
-                "URIs of the images to attach."
-            )
+            raise ToolError(attachments.NO_SOURCE)
 
         if not loop.accepts_images:
-            # Encoding is refused rather than letting a provider drop the
-            # images: the refusal is the tool result the model reads, so it can
-            # tell the person — rather than the harness writing an assistant
-            # message on the model's behalf.
-            raise ToolError(
-                f"{loop.model} cannot read images, so nothing was attached — "
-                f"move to a model whose config lists `image` under `input`."
-            )
+            raise ToolError(attachments.cannot_read_images(loop.model))
 
         pairs, refusals = await attach_sources(conversation_id, wanted)
         if pairs and not attachments.inject(
             loop.messages, [url for _source, url in pairs]
         ):
-            raise ToolError("there is no message here to attach an image to.")
+            raise ToolError(attachments.NO_MESSAGE)
         logger.info(
             "attach_image %s: %d attached, %d refused",
             conversation_id,
@@ -2880,12 +2876,19 @@ def build_server(
         return ""
 
     def _model_ref(ref: str) -> tuple[str, str]:
-        """`provider/model`, split — the one reference check the two tools share."""
+        """`provider/model`, split and stripped — the one reference check every
+        model tool shares, so `deepseek / x` is the same reference to all of
+        them, and the same refusal when it is not one."""
         provider, slash, model = ref.strip().partition("/")
         provider, model = provider.strip(), model.strip()
         if not slash or not provider or not model:
             raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
         return provider, model
+
+    def _no_such_model(ref: str) -> ToolError:
+        """The refusal for a reference the config does not define — one sentence
+        for every tool that can discover it."""
+        return ToolError(f"`{ref}` is not a model this config defines.")
 
     def _model_config(ref: str, providers: dict[str, dict[str, Any]]) -> dict[str, Any]:
         """One model's whole entry, validated by the canonical config object.
@@ -2899,7 +2902,7 @@ def build_server(
         provider_name, model_id = _model_ref(ref)
         entry = providers.get(provider_name)
         if not isinstance(entry, dict):
-            raise ToolError(f"`{ref}` is not a model this config defines.")
+            raise _no_such_model(ref)
         try:
             provider = load_provider(entry, where=f"providers.{provider_name}")
         except ValueError as exc:
@@ -2918,7 +2921,7 @@ def build_server(
             else None
         )
         if spec is None:
-            raise ToolError(f"`{ref}` is not a model this config defines.")
+            raise _no_such_model(ref)
         try:
             model = load_model(spec, where=f"providers.{provider_name}")
         except ValueError as exc:
@@ -3181,10 +3184,8 @@ def build_server(
             `ref`, and `provider_removed`: whether the provider's whole entry
             went with it, which happens when this was its last model.
         """
-        ref = ref.strip()
-        if "/" not in ref:
-            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
-        provider, model = ref.split("/", 1)
+        provider, model = _model_ref(ref)
+        ref = f"{provider}/{model}"
         try:
             providers = _providers()
             active = _active_default(providers)
@@ -3196,7 +3197,7 @@ def build_server(
         if not any(
             isinstance(one, dict) and one.get("model") == model for one in specs
         ):
-            raise ToolError(f"`{ref}` is not a model this config defines.")
+            raise _no_such_model(ref)
         # **The config-wide guard comes first, deliberately.**  With one model
         # the fallback makes it the default too, so both refusals are true — and
         # "it is the last model" is the deeper reason, the one that says what
@@ -3271,22 +3272,20 @@ def build_server(
             `default:` said before, and `moved`, how many conversations that were
             already running this server moved onto it from their next turn.
         """
-        ref = ref.strip()
-        if "/" not in ref:
-            raise ToolError(f"`{ref}` is not a model reference; use `provider/model`.")
+        provider, model = _model_ref(ref)
+        ref = f"{provider}/{model}"
         try:
             providers = _providers()
             old = _active_default(providers)
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
-        provider, model = ref.split("/", 1)
         entry = providers.get(provider)
         specs = (entry or {}).get("models")
         specs = specs if isinstance(specs, list) else []
         if not any(
             isinstance(one, dict) and one.get("model") == model for one in specs
         ):
-            raise ToolError(f"`{ref}` is not a model this config defines.")
+            raise _no_such_model(ref)
 
         # What the conversations below are moved *onto*, and it is not the same
         # question as the judge inside the writer.  `default:` is a scalar the
@@ -3615,9 +3614,9 @@ def build_server(
                     # prompt has been appended or recorded at all — so the
                     # caller's message is lost outright, where the same observer
                     # failing on a `TextDelta` is swallowed one layer down
-                    # (`AgentLoop._emit`).  Asked for by class rather than instance
-                    # because the `AgentLoop` is not built until the turn below.
-                    await AgentLoop._emit(observer, chosen)
+                    # (`emit`).  A module function, so it is asked before the
+                    # `AgentLoop` is built for the turn below.
+                    await emit(observer, chosen)
                     # How long the list was when this turn began.  What the write
                     # below covers is what the turn *appends*, and the difference
                     # is the whole of it — see `covered` in the success branch.
@@ -4156,6 +4155,16 @@ def build_server(
             # answer rather than a file.
             return {"reset": False}
         key = conversation_key(agent, subagent)
+        if key in removing:
+            # **A name being removed is not a conversation that can be reset.**
+            # The record check above passes for most of a removal (the record
+            # goes last), and `forget_context` *creates* the store it clears —
+            # landing after the delete, it would leave the record-less directory
+            # both subagent tools refuse.  The same claim `conversation()` checks.
+            raise ToolError(
+                f"{describe((agent, subagent))} is being removed; wait for the "
+                f"removal to finish."
+            )
         loop = loops.get(key)
         if loop is None:
             # **The remote half goes first.**  The plan is local and the context
@@ -4165,6 +4174,9 @@ def build_server(
             # not happen, and a retry is the answer.
             await forget_context(agent, subagent)
             plan.clear(agent, subagent)
+            # The tap keeps the last turn for a joining watcher's replay; a
+            # conversation that has just been forgotten has no turn to replay.
+            watching.drop(key)
             logger.debug("reset: %s was not running", describe((agent, subagent)))
             return {"reset": False}
         try:
@@ -4204,6 +4216,7 @@ def build_server(
             plan.clear(agent, subagent)
             loop.removed = True
             loops.pop(key, None)
+            watching.drop(key)
         finally:
             loop.lock.release()
         logger.debug("reset: %s forgotten", describe((agent, subagent)))
@@ -4415,6 +4428,15 @@ def build_server(
         # already queued behind the lock cannot run and save a turn into the
         # directory after the delete, recreating it without a record.
         key = conversation_key(maker, directory.name)
+        if key in removing:
+            # **One removal at a time per name.**  The claim is a set, so a
+            # second concurrent removal would walk a tree the first is deleting
+            # and report its vanished files as held open; and the first's
+            # `finally` would release the claim while the second still deletes.
+            raise ToolError(
+                f"{directory.name!r} is already being removed; wait for that "
+                f"removal to finish."
+            )
         # **The claim is synchronous and comes before the first await.**  A
         # message that arrives during the network notification or the delete
         # checks this set on the loop-creating path, so it cannot start a turn
@@ -4566,13 +4588,16 @@ def _remove_tree(directory: Path) -> None:
     # `subagent_create` and `subagent_remove` until somebody cleans the tree by
     # hand.  Removing the record at the end makes a failed delete leave a
     # *subagent* (one still removable), not a locked name.
-    if not directory.exists():
-        # Another process finished the removal between the caller's check and
-        # this hop; the directory being gone is the outcome asked for.
-        return
     record = directory / SUBAGENT_RECORD
     deadline = time.monotonic() + _T.timeouts.storage.sqlite_busy
     while True:
+        if not directory.exists():
+            # Another removal finished the tree between the caller's check and
+            # this hop, or between two attempts; gone is the outcome asked for.
+            # Checked every attempt: a walk that meets a directory another
+            # removal just deleted raises `FileNotFoundError`, and retrying that
+            # to the deadline would report a vanished file as held open.
+            return
         try:
             for root, dirs, files in os.walk(directory, topdown=False):
                 base = Path(root)

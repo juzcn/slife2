@@ -158,6 +158,75 @@ async def test_a_broken_write_restores_the_previous_job(
 
 
 @pytest.mark.asyncio
+async def test_a_restore_that_cannot_write_says_the_file_is_broken(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A restore that failed is said, not raised raw.**
+
+    The rollback wrote the previous bytes through the staging file with no
+    `except`: a disk that filled between the swap and the restore let a raw
+    `OSError` out, left the broken new file live, and lost the previous bytes
+    with the call.  The refusal now says the restore failed and the file on
+    disk is the broken code — `job_set` again is the repair.
+    """
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        await ask(client, "job_set", name="slugify", code=SLUGIFY)
+        real_write_bytes = Path.write_bytes
+
+        def refuse_staging(self: Path, data: bytes) -> int:
+            if self.name == ".slugify.installing":
+                raise OSError("the disk is full")
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", refuse_staging)
+        with pytest.raises(ToolError, match="could not be restored") as raised:
+            await client.call_tool(
+                "job_set", {"name": "slugify", "code": "def slugify(:\n"}
+            )
+        ran = await ask(
+            client, "job_run", name="slugify", arguments={"title": "Still works"}
+        )
+
+    assert "the disk is full" in str(raised.value), "the cause is in the sentence"
+    assert "broken code" in str(raised.value)
+    assert "slugify.py" in str(raised.value), "and the file it names is on disk"
+    assert "job_set" in str(raised.value)
+    assert (isolated_runtime / "jobs" / "slugify.py").read_text(
+        encoding="utf-8"
+    ) == "def slugify(:\n", "the broken file is what is on disk"
+    assert ran["text"] == "still-works", "the loaded tool is the previous one"
+    assert not (isolated_runtime / "jobs" / ".slugify.installing").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_new_jobs_broken_file_that_cannot_be_removed_is_said(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal on the other branch: a new job that does not load is
+    removed, and a removal that fails says the broken file is still there."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        real_unlink = Path.unlink
+
+        def refuse_final(self: Path, missing_ok: bool = False) -> None:
+            if self.name == "broken.py":
+                raise OSError("the file is held by another program")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", refuse_final)
+        with pytest.raises(ToolError, match="could not be removed") as raised:
+            await client.call_tool(
+                "job_set", {"name": "broken", "code": "def broken(:\n"}
+            )
+
+    assert "broken code" in str(raised.value)
+    assert (isolated_runtime / "jobs" / "broken.py").read_text(
+        encoding="utf-8"
+    ) == "def broken(:\n"
+
+
+@pytest.mark.asyncio
 async def test_a_new_job_that_does_not_load_writes_nothing(
     isolated_runtime: Path,
 ) -> None:

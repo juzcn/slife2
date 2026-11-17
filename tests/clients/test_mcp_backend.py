@@ -8,7 +8,7 @@ MCP messages, real progress notifications, no port and no provider.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import pytest
 from fakes import evaluate
@@ -27,7 +27,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 def scripted(*events) -> Streamer:
     async def stream(
         provider: str, messages: list[Message], tools: list[ToolSpec], model: str
-    ) -> AsyncIterator[Chunk | Finish]:
+    ) -> AsyncGenerator[Chunk | Finish]:
         for event in events:
             yield event
 

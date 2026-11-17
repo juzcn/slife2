@@ -2301,7 +2301,12 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
     `recall` beside the keep-list was ignored in silence.  What an id is, is
     `normalise_ids`'s to decide, and the two now read as one rule.
     """
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import Decision, parse_with_reason
+
+    def parse(reply: str) -> Decision | None:
+        """The decision half of the one reader — `parse` was superseded by
+        `parse_with_reason`, and these assertions are about the decision."""
+        return parse_with_reason(reply)[0]
 
     assert parse('{"context": ["2", 1]}') == Decision(keep=[2, 1])
     # The whole reply survives, which is what "both halves" means.
@@ -2336,7 +2341,12 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
     six-word sentence asked for exactly matches nothing.  Blank sentences are
     nothing asked, and a value that is not a list of strings is a reply the
     build does not obey."""
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import Decision, parse_with_reason
+
+    def parse(reply: str) -> Decision | None:
+        """The decision half of the one reader — `parse` was superseded by
+        `parse_with_reason`, and these assertions are about the decision."""
+        return parse_with_reason(reply)[0]
 
     assert parse(
         '{"recall": {"sentences": ["the dean", "the anniversary"]}}'
@@ -2368,7 +2378,12 @@ def test_a_recall_can_say_the_input_is_not_a_question() -> None:
     a question, and a value that is not a boolean is a reply this build does
     not obey.
     """
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import Decision, parse_with_reason
+
+    def parse(reply: str) -> Decision | None:
+        """The decision half of the one reader — `parse` was superseded by
+        `parse_with_reason`, and these assertions are about the decision."""
+        return parse_with_reason(reply)[0]
 
     assert parse(
         '{"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}'

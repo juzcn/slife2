@@ -82,6 +82,7 @@ from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
 from fastmcp.client.transports import StdioTransport
 from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import SEPARATOR
@@ -91,9 +92,8 @@ from slife2.libs.plugin.audience import with_home
 
 logger = logging.getLogger(__name__)
 
-#: The SDK's JSON-RPC `CONNECTION_CLOSED` code, spelled rather than imported:
-#: `mcp_types` has the constant and `mcp` does not re-export it, and this build
-#: does not depend on `mcp_types` by name.
+#: The SDK's JSON-RPC code for a link that is gone, read from `mcp.types`
+#: where the SDK states it rather than spelled again here.
 #:
 #: **It says the link is gone.  It says nothing about how far a request got**,
 #: and reading it as "nothing was asked" is what would run a model's tool twice.
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 #: and never a reason to run the call again.  `REQUEST_TIMEOUT` is outside the
 #: class for the same reason: a call that timed out went out, and may still be
 #: running.
-LINK_DOWN_CODE = -32000
+LINK_DOWN_CODE = CONNECTION_CLOSED
 
 
 def _link_is_down(exc: BaseException) -> bool:

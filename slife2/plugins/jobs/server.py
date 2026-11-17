@@ -26,6 +26,7 @@ the credentials — the same isolation every other plugin keeps.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -423,9 +424,10 @@ def build_server(
         or an agent.
 
         A write that does not load is refused and the previous version is put
-        back, so the installed job is never a broken file. Replacing a job is
-        the same call — keep the function name stable if you want the tool name
-        and its arguments to stay the same.
+        back, so the installed job is never a broken file — a put-back that
+        itself fails says so, naming the broken file left on disk for `job_set`
+        to replace. Replacing a job is the same call — keep the function name
+        stable if you want the tool name and its arguments to stay the same.
 
         Args:
             name: The job's name and the file's stem; a Python identifier, not
@@ -482,8 +484,27 @@ def build_server(
                     os.replace(staging, final)
                 else:
                     final.unlink(missing_ok=True)
+            except OSError as exc:
+                # **A restore that failed is said, not raised raw.**  The broken
+                # new file is what is on disk now, and the previous bytes live
+                # only in this call — so the model is told exactly that, and
+                # that `job_set` again is the repair.
+                undo = (
+                    "the previous version could not be restored"
+                    if exists
+                    else "the broken file could not be removed"
+                )
+                raise ToolError(
+                    f"{name!r} was not installed — {loaded.error} — and {undo} "
+                    f"({exc}): the file at {final} is the broken code. Fix the "
+                    f"code and call `job_set` again"
+                ) from exc
             finally:
-                staging.unlink(missing_ok=True)
+                # A staging file left behind is harmless — the next `job_set`
+                # reuses the name — and a cleanup that raised would mask the
+                # refusal it follows.
+                with contextlib.suppress(OSError):
+                    staging.unlink(missing_ok=True)
             raise ToolError(
                 f"{name!r} was not installed — {loaded.error}"
                 + ("; the previous version was restored" if exists else "")

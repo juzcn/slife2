@@ -3808,7 +3808,7 @@ async def test_a_broken_observer_does_not_lose_the_message(
     observer there lands before the prompt has been appended or recorded: it
     propagates out of `send_message`, the caller is told the turn failed, and the
     message is gone — nowhere in the conversation and nowhere in the log.  The
-    same observer failing on a `TextDelta` is swallowed by `AgentLoop._emit`,
+    same observer failing on a `TextDelta` is swallowed by `emit`,
     which is the whole reason that seam exists; the two events the *server* raises
     were the ones not routed through it.
     """

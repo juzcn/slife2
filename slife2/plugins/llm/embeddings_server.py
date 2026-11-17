@@ -292,6 +292,12 @@ class EmbeddingClient:
         a remote provider otherwise fails the catalogue build and takes the
         whole stack down (`RemoteEmbedder.embed` makes the same case for the
         hop it owns).
+
+        **The order is the protocol's own `index`, not the list's.**
+        `data[].index` says which input each vector answers, and an endpoint
+        that returns the list in any other order would otherwise attribute one
+        text's vector to another — silently, because every vector still looks
+        right.
         """
         if not texts:
             return []
@@ -313,7 +319,10 @@ class EmbeddingClient:
                 exc,
             )
             response = await self._embed_request(texts)
-        return [list(item.embedding) for item in response.data]
+        return [
+            list(item.embedding)
+            for item in sorted(response.data, key=lambda item: item.index)
+        ]
 
     async def _embed_request(self, texts: list[str]) -> Any:
         """The one request, split out so the retry repeats exactly that call."""

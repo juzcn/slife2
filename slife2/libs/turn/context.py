@@ -49,6 +49,7 @@ from typing import Any
 
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import BOUND_GRAMMAR, can_place
+from slife2.libs.harness.markers import wrap
 from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import INTERRUPTED
 
@@ -262,8 +263,8 @@ def _keep(raw: Any) -> list[int] | _Refused | None:
     **The filter asks `_is_id` rather than `isinstance(item, int)`**, and that
     was a bug of the silent kind: a model that wrote `["7", "9"]` — JSON of
     whatever the encoder wrote, which is the source `normalise_ids`'s docstring
-    names — made *every* id resolve to a refusal, so `parse` answered `None` and
-    dropped the other half of the decision with it.  A valid `recall` beside the
+    names — made *every* id resolve to a refusal, so the parse answered no
+    decision and dropped the other half of the reply with it.  A valid `recall` beside the
     keep-list was thrown away and the model's instruction was ignored, with only
     `recall_discriminator_unparsed` in the log to say so.
     """
@@ -404,19 +405,6 @@ def parse_with_reason(text: str) -> tuple[Decision | None, str]:
     if isinstance(recall, _Refused):
         return None, recall.reason
     return Decision(keep=keep, recall=recall), ""
-
-
-def parse(text: str) -> Decision | None:
-    """The decision in a discriminator's reply, or `None` if there is not one.
-
-    **Degrading is the whole point.**  A timeout, a provider failure and a reply
-    that is not the requested object all arrive here as "nothing usable", and the
-    caller's fallback — keep the context — is perfectly good.  Nothing here
-    raises and nothing here retries; `parse_with_reason` is the same answer for
-    the caller that can say *why*, which is what makes one correction round
-    possible.
-    """
-    return parse_with_reason(text)[0]
 
 
 def repair_note(reason: str) -> str:
@@ -628,11 +616,7 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
     should remember.  The caller omits what it does not know; a missing key is
     silence, not a zero.
     """
-    return (
-        f"{TURN_PROMPT_PREFIX}"
-        f"{json.dumps(dict(facts), ensure_ascii=False)}"
-        f"{TURN_SUFFIX}"
-    )
+    return wrap(TURN_PROMPT_PREFIX, facts)
 
 
 def turn_prompt_lead(
@@ -686,11 +670,7 @@ def turn_note(
     or drift from the row it describes.  `turn_footnote` is the same footnote
     without the marker, for the reader that is a screen.
     """
-    return (
-        f"{TURN_PREFIX}"
-        f"{turn_footnote(turn_id, created_at, completed_at, channel)}"
-        f"{TURN_SUFFIX}"
-    )
+    return wrap(TURN_PREFIX, turn_footnote(turn_id, created_at, completed_at, channel))
 
 
 def turn_failed_note(error: str) -> str:
@@ -708,11 +688,7 @@ def turn_failed_note(error: str) -> str:
     not a column — so it rides its own message, which is stored, rebuilt, and
     still there after a restart.  `turn_failed_error` is the screen's reader.
     """
-    return (
-        f"{TURN_FAILED_PREFIX}"
-        f"{json.dumps({'by': 'harness', 'error': error}, ensure_ascii=False)}"
-        f"{TURN_SUFFIX}"
-    )
+    return wrap(TURN_FAILED_PREFIX, {"by": "harness", "error": error})
 
 
 def turn_failed_error(content: Any) -> str | None:

@@ -381,10 +381,14 @@ class ChatView(VerticalScroll):
         self._agent = agent
         self._streaming: AssistantMessage | None = None
         self._streaming_text = ""
-        #: The part of this turn's answer already drawn in blocks a note closed
-        #: mid-turn.  A note lands between two pieces of a streaming answer, so
-        #: the authoritative `finish_assistant` text is written as its suffix —
-        #: writing it whole drew the prefix a second time.
+        #: The part of the answer already drawn in blocks a note closed
+        #: mid-stream.  A note lands between two pieces of a streaming answer,
+        #: so the authoritative `finish_assistant` text is written as its suffix
+        #: — writing it whole drew the prefix a second time.  **Bounded to the
+        #: model call in flight**: the answer is the *last* call's text
+        #: (`slife2.libs.turn.loop.TurnResult`), so what an earlier iteration
+        #: streamed is not a prefix of it — `add_tool_start` and `add_cut_in`
+        #: close an iteration and start this account over.
         self._turn_drawn = ""
         #: What this turn's bill turned out to be, held until there is a block to
         #: print it under.  `set_usage` is called by `TurnFinished`, which arrives
@@ -589,8 +593,15 @@ class ChatView(VerticalScroll):
         only a tool panel (which it is not) or nothing (SDD §14.2).  The words
         are already in the record; this is the line that says so while they
         arrive.
+
+        **And it closes an iteration, so the drawn-prefix account starts over.**
+        The message is taken at a tool boundary and the answer still coming is
+        the next model call's text; what streamed before this line belongs to
+        the call that took the message, and is not a prefix of the answer
+        (`_turn_drawn`).
         """
         self._close_block()
+        self._turn_drawn = ""
         self._user_line(text, moment, "", channel)
 
     def _user_line(
@@ -846,6 +857,12 @@ class ChatView(VerticalScroll):
         if self._streaming is not None:
             self._streaming.collapse_thinking()
         self._close_block()
+        # The same distinction for the drawn-prefix account: what a note
+        # recorded before this panel belongs to the call that just ended, and
+        # the authoritative answer is the *last* call's text — carrying the
+        # earlier words forward would trim a final answer that happens to
+        # begin with them (`finish_assistant`).
+        self._turn_drawn = ""
         widget = ToolCallWidget(
             call_id=call_id,
             name=name,
@@ -2181,7 +2198,9 @@ class PlanView(Static):
         self._items: list[plan.PlanItem] = []
         #: A plan write's arguments, by call id, until its outcome arrives.  A
         #: start whose finish never comes leaves the old plan standing, which is
-        #: the same answer a cancelled turn gets.
+        #: the same answer a cancelled turn gets.  **Bounded to the turn in
+        #: flight**: :meth:`settle` clears it wherever a turn ends, so a write
+        #: the turn never finished cannot leak into the next one.
         self._started: dict[str, Any] = {}
         self.display = False
 
@@ -2210,6 +2229,20 @@ class PlanView(Static):
                 # A display drops a line it cannot read; the opening read is the
                 # recovery, and the last plan stands meanwhile.
                 return
+
+    def settle(self) -> None:
+        """Drop the parked writes of a turn that ended without their outcomes.
+
+        A parked write is a claim that an outcome is still coming, and a
+        cancelled or failed turn stops sending them — the same stale claim a
+        tool panel's "running" is, settled at the same seams
+        (`ChatView.settle_tools`).  Left parked, the entry leaks for the
+        session's life, and a later turn's reused call id pops it and draws a
+        stale plan as a committed one.  The plan on screen is untouched: a
+        write whose outcome never came leaves the old plan standing, which is
+        the rule `observe` already keeps.
+        """
+        self._started.clear()
 
     def _refresh(self) -> None:
         if not self._items:

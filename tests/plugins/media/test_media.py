@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -283,6 +284,45 @@ async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
     assert target.read_bytes() == b"png"
 
 
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
+@pytest.mark.asyncio
+async def test_a_drive_relative_input_is_the_work_directorys_or_refused() -> None:
+    """The rule is `local_path`'s with the work directory as its base: the same
+    drive resolves under it, another drive is refused with the fix — and the
+    refusal names the working directory the media tools resolve against, not
+    the home `local_path` defaults to."""
+    base = agent_dir("jack")
+    other = "D:" if base.drive.casefold() != "d:" else "C:"
+    adapter = FakeAdapter()
+    async with Client(server_for(adapter)) as client:
+        await ask(client, "transcribe_audio", input=f"{base.drive}a.wav")
+        assert adapter.calls["asr"]["audio_path"] == base / "a.wav"
+        answer = await refused(client, "transcribe_audio", input=f"{other}a.wav")
+
+    assert "relative to drive" in answer
+    assert "working directory" in answer
+    assert str(base) in answer, "the anchor the refusal names is the base itself"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_input_resolves_in_its_own_work_directory() -> None:
+    """The base is the conversation's `work_dir`, subagent half included: a
+    worker's relative path is its own directory, not its maker's."""
+    adapter = FakeAdapter()
+    async with Client(server_for(adapter)) as client:
+        await client.call_tool(
+            "transcribe_audio",
+            {"input": "a.wav"},
+            meta=conversation_meta("jack", "researcher"),
+        )
+
+    assert (
+        adapter.calls["asr"]["audio_path"] == agent_dir("jack", "researcher") / "a.wav"
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_failed_move_keeps_the_file_that_was_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -434,14 +474,15 @@ async def test_a_transcript_can_be_written_to_an_absolute_path(tmp_path) -> None
 @pytest.mark.asyncio
 async def test_a_size_is_checked_before_the_call_is_paid_for() -> None:
     """The one argument a model gets plausibly wrong, refused here rather than
-    at the provider, where the refusal arrives after the call has been billed."""
+    at the provider, where the refusal arrives after the call has been billed.
+    The *grammar* is the tool's half, shared by every adapter; the pixel range
+    is a vendor's fact and is refused in the adapter that knows it
+    (`test_dashscope_refuses_a_size_outside_its_range`)."""
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
         bad = await refused(client, "generate_image", prompt="x", size="1024")
-        small = await refused(client, "generate_image", prompt="x", size="10x10")
 
     assert "is not a size" in bad
-    assert "too small" in small
     # `close` is recorded by the lifespan's teardown, so the question is which
     # *capabilities* were reached — and none were.
     assert not {"image", "video", "tts", "asr"} & set(adapter.calls)
@@ -512,8 +553,10 @@ def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
     assert check_size("1024*1024") == "1024*1024"
     assert check_size("1024x1024") == "1024x1024"
     assert check_size("") == "", "empty means the model's own default"
-    with pytest.raises(ToolError, match="too large"):
-        check_size("8192*8192")
+    # The grammar is the whole of this check: a pixel range is a vendor's fact,
+    # and one provider's numbers may not refuse another provider's size.
+    assert check_size("8192*8192") == "8192*8192"
+    assert check_size("10x10") == "10x10"
 
 
 # --- the config's four steps --------------------------------------------------
@@ -670,6 +713,112 @@ def _saver_returning(path: Path):
         return path
 
     return save
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "extra", "direction"),
+    [
+        ("10x10", None, "too small"),
+        ("8192*8192", None, "too large"),
+        ("", {"size": "512*512"}, "too small"),
+    ],
+)
+async def test_dashscope_refuses_a_size_outside_its_range(
+    monkeypatch, tmp_path, size: str, extra: dict[str, Any] | None, direction: str
+) -> None:
+    """**The vendor's numbers, refused in the vendor's name.**
+
+    The range used to be checked at the tool, before the provider was resolved,
+    so `generate_image(model="…/dall-e-2", size="512*512")` was refused with
+    DashScope's floor attributed to the selected provider.  The check now lives
+    in the adapter that knows the bounds, and it is the *effective* size that is
+    checked — a configured `params.size` gets the same answer as a written one.
+    Either way the refusal arrives before the request, not after the call is
+    billed.
+    """
+    adapter = dashscope()
+    asked: list[str] = []
+
+    async def fake_request(method, url, *, extra_headers=None, json_body=None):
+        asked.append(url)
+        return {
+            "output": {
+                "choices": [{"message": {"content": [{"image": "https://cdn/x.png"}]}}]
+            }
+        }
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    with pytest.raises(MediaAdapterError, match=direction) as caught:
+        await adapter.generate_image(
+            model="img",
+            prompt="x",
+            size=size,
+            outputs_dir=tmp_path,
+            extra_params=extra,
+        )
+
+    assert "DashScope" in str(caught.value), "the bounds name their vendor"
+    assert "589824..16777216" in str(caught.value)
+    assert asked == [], "the refusal arrived before the call was paid for"
+
+
+@pytest.mark.asyncio
+async def test_a_range_refusal_names_the_provider_actually_called(
+    monkeypatch, tmp_path
+) -> None:
+    """The sentence the model reads is the adapter's, wrapped by `_run` — and
+    it names DashScope rather than a "this provider" the tool never resolved."""
+    adapter = dashscope()
+
+    async def fake_request(method, url, *, extra_headers=None, json_body=None):
+        raise AssertionError("the request was made before the size was refused")
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    config = replace(load(), media=settings())
+    async with Client(build_server(config, adapters={"test": adapter})) as client:
+        answer = await refused(client, "generate_image", prompt="x", size="512*512")
+
+    assert answer.startswith("the image call failed:")
+    assert "too small" in answer
+    assert "DashScope" in answer
+
+
+@pytest.mark.asyncio
+async def test_an_openai_image_below_dashscopes_floor_reaches_the_wire(
+    monkeypatch, tmp_path
+) -> None:
+    """`512*512` is a size dall-e-2 takes; DashScope's floor is not OpenAI's.
+
+    The tool used to refuse it locally with DashScope's numbers attributed to
+    the selected provider.  The grammar passes, and the vendor is the judge of
+    its own range.
+    """
+    adapter = OpenAICompatAdapter(
+        MediaProviderSettings(name="o", api="openai-images", base_url="https://x/v1")
+    )
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="dall-e-2", prompt="x", size="512*512", outputs_dir=tmp_path
+    )
+
+    assert seen["size"] == "512x512"
 
 
 @pytest.mark.asyncio
@@ -1090,6 +1239,64 @@ async def test_an_openai_image_size_survives_the_servers_extra_params(
     )
 
     assert seen["size"] == "1024x1024"
+
+
+@pytest.mark.asyncio
+async def test_the_openai_call_outranks_the_config(monkeypatch, tmp_path) -> None:
+    """**The call wins, as it does for every adapter.**
+
+    `body.update(extra_params)` put the configured `params:` last: a config
+    saying `n: 4` billed four images while only the first was saved, and a
+    configured `model` or `prompt` replaced the caller's own.  `merge_params`
+    is the one place that rule is written, and this is the adapter that had
+    not read it.
+    """
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client:
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        size="1024*1024",
+        outputs_dir=tmp_path,
+        extra_params={
+            "model": "other",
+            "prompt": "hijack",
+            "n": 4,
+            "size": "512*512",
+            "quality": "hd",
+        },
+    )
+
+    assert seen["model"] == "img"
+    assert seen["prompt"] == "x"
+    assert seen["n"] == 1, "four billed images, one saved"
+    assert seen["size"] == "1024x1024"
+    assert seen["quality"] == "hd", "the config supplies what the call leaves open"
+
+    # A size the call leaves open is the config's, in the vendor's spelling.
+    seen.clear()
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        outputs_dir=tmp_path,
+        extra_params={"size": "512*512"},
+    )
+    assert seen["size"] == "512x512"
 
 
 @pytest.mark.asyncio

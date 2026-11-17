@@ -31,6 +31,7 @@ from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
+    THINKING_BUDGET_SHARE,
     build_backend_server,
     sdk_client_factory,
     sdk_streamer,
@@ -44,12 +45,6 @@ logger = logging.getLogger(__name__)
 API = "openai-completions"
 
 SERVER_NAME = plugin(API).name
-
-#: How much of the output budget a thinking model may spend reasoning, when
-#: `compat.thinking: enabled` asks for it.  Half, because the other half is what
-#: the answer is made of and a model that spends everything thinking returns
-#: nothing.
-THINKING_BUDGET_SHARE = 0.5
 
 
 def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
@@ -143,8 +138,6 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
-    *,
-    stream_usage: bool,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
@@ -159,7 +152,7 @@ def build_request(
     }
     if tools:
         request["tools"] = [t.to_wire() for t in tools]
-    if stream_usage and settings.stream_usage != "omit":
+    if settings.stream_usage != "omit":
         # An OpenAI extension.  Some compatible servers reject it with a 400,
         # and `compat.stream_usage: omit` is the switch for those — per model,
         # because whether the field is accepted is a fact about the endpoint and
@@ -354,7 +347,7 @@ def _usage(raw: Any) -> Usage | None:
     )
 
 
-def _make_streamer(*, stream_usage: bool = True) -> Streamer:
+def _make_streamer() -> Streamer:
     """The adapter for one process — every provider that speaks this wire.
 
     **It reads the config on every call**, through `LiveProviders`, so a
@@ -364,18 +357,11 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     keyring, and constructing a client outside a running event loop is not
     always safe.
     """
-
-    def build(
-        messages: list[Message], tools: list[ToolSpec], settings: ModelSettings
-    ) -> dict[str, Any]:
-        """The body, with the one flag this wire has to close over."""
-        return build_request(messages, tools, settings, stream_usage=stream_usage)
-
     return sdk_streamer(
         api=API,
         server_name=SERVER_NAME,
         sdk_client=sdk_client_factory("openai", "AsyncOpenAI"),
-        build_request=build,
+        build_request=build_request,
         start=lambda client, request: client.chat.completions.create(**request),
         # `translate` is a pure function of one event on this wire, so the
         # factory hands back the same callable every time.
@@ -383,12 +369,10 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     )
 
 
-def build_server(*, streamer: Streamer | None = None, stream_usage: bool = True):
+def build_server(*, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_backend_server(
-        name=SERVER_NAME,
-        streamer=streamer,
-        make=lambda: _make_streamer(stream_usage=stream_usage),
+        name=SERVER_NAME, streamer=streamer, make=_make_streamer
     )
 
 

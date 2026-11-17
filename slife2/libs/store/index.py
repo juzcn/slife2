@@ -55,6 +55,7 @@ hide the one part the tests pin.
 from __future__ import annotations
 
 import array
+import contextlib
 import math
 import re
 import sqlite3
@@ -256,6 +257,31 @@ def connect_to(path: Path) -> sqlite3.Connection:
     )
     _load_vector_index(connection)
     return connection
+
+
+@contextlib.contextmanager
+def connection_to(path: Path) -> Iterator[sqlite3.Connection]:
+    """One connection for one call, committed and **closed on the way out**.
+
+    `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
+    and leaves the connection *open*.  On Windows an open handle is a file
+    nobody else can delete — `subagent_remove` met exactly that, with a
+    subagent's own `turns.db` undeletable
+    (`slife2.plugins.agent.server.subagent_remove`) — and a connection per call
+    with none closed is a descriptor leak on every other platform.  The
+    caller's `with` gets the commit (`with connection:`); the `finally` is the
+    close.
+
+    The lifetime is stated once for the three stores that open a connection
+    per call — the turns', the catalogue's and the cabinet's — so "a
+    connection per call" means the same thing in all three.
+    """
+    connection = connect_to(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def begin_rebuild(connection: sqlite3.Connection) -> None:

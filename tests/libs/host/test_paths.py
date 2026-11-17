@@ -23,10 +23,10 @@ from slife2.libs.host.paths import (
     agent_path,
     agents_dir,
     catalogue_db,
+    checkout_root,
     data_dir,
     home,
     homes_dir,
-    in_checkout,
     in_home,
     known_homes,
     local_path,
@@ -53,7 +53,7 @@ def test_a_checkout_keeps_its_data_beside_itself(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
 
-    assert in_checkout() is True
+    assert checkout_root() is not None
     assert data_dir() == tmp_path
 
 
@@ -76,7 +76,7 @@ def test_a_subdirectory_of_a_checkout_finds_the_checkout_root(
     monkeypatch.chdir(nested)
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
 
-    assert in_checkout() is True
+    assert checkout_root() is not None
     assert data_dir() == tmp_path
 
 
@@ -88,7 +88,7 @@ def test_an_installation_keeps_its_data_under_home(
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
     monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path / "home"))
 
-    assert in_checkout() is False
+    assert checkout_root() is None
     assert data_dir() == tmp_path / "home" / ".slife2"
 
 
@@ -103,7 +103,7 @@ def test_another_projects_pyproject_is_not_a_checkout(
         '[project]\nname = "something-else"\n', encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
-    assert in_checkout() is False
+    assert checkout_root() is None
 
 
 def test_a_config_alone_does_not_make_a_checkout(
@@ -112,7 +112,7 @@ def test_a_config_alone_does_not_make_a_checkout(
     """A production folder somebody put a `slife2.yaml` in is still production."""
     (tmp_path / "slife2.yaml").write_text("default: ''\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    assert in_checkout() is False
+    assert checkout_root() is None
 
 
 def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
@@ -120,10 +120,10 @@ def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
 ) -> None:
     """**A path that cannot be read is not a path that is not a checkout.**
 
-    `in_checkout` swallowed every `OSError` into False, so a `pyproject.toml`
-    that was there but unreadable — permissions, a racing delete — read as "not
-    a checkout" and sent the whole data directory to `~/.slife2` with nothing
-    said.  Only "no such file" now answers False.
+    The reader swallowed every `OSError` into "not a checkout", so a
+    `pyproject.toml` that was there but unreadable — permissions, a racing
+    delete — read as absent and sent the whole data directory to `~/.slife2`
+    with nothing said.  Only "no such file" now answers `None`.
     """
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "slife2"\n', encoding="utf-8"
@@ -139,7 +139,7 @@ def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
 
     monkeypatch.setattr(Path, "read_text", denied)
     with pytest.raises(PermissionError):
-        in_checkout()
+        checkout_root()
 
 
 def test_the_environment_overrides_both(

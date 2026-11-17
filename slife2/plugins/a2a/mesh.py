@@ -109,11 +109,13 @@ from slife2.plugins.a2a.responder import (
 from slife2.plugins.a2a.states import (
     CANCELLED,
     COMPLETED,
+    CONTROL_RE,
     FAILED,
     INTERRUPTED,
     PENDING,
     REJECTED,
     TERMINAL_STATUSES,
+    user_property,
 )
 from slife2.plugins.a2a.task_store import get_store
 from slife2.tui import notes
@@ -206,10 +208,6 @@ class FIFOCache(dict):
 AgentName = NewType("AgentName", str)
 """Identifies an agent by its name — the mesh identity, and the MQTT client id."""
 
-# Control characters a remote peer could use to break out of a single display
-# line in a handed-over message, the TUI, or logs (newlines, tabs, ESC, …).
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-
 
 def safe_name(value: object) -> str:
     """Display-safe form of a remote, untrusted peer value.
@@ -219,7 +217,7 @@ def safe_name(value: object) -> str:
     inject instructions into the message handed to the model — and cap the length
     so a name cannot bloat a context.
     """
-    s = _CONTROL_RE.sub(" ", str(value))
+    s = CONTROL_RE.sub(" ", str(value))
     return " ".join(s.split())[:128]
 
 
@@ -601,19 +599,6 @@ class _PresencePeer:
         self.status = status  # "online" | "offline"
 
 
-def _user_property(props, key: str) -> str:
-    """Read an MQTT v5 user property (list of (k, v) tuples)."""
-    if props is None:
-        return ""
-    user_props = getattr(props, "UserProperty", None)
-    if not user_props:
-        return ""
-    for k, v in user_props:
-        if k == key:
-            return str(v)
-    return ""
-
-
 def _presence_status(props) -> str:
     """Map the standard ``a2a-status`` presence property to online/offline.
 
@@ -625,7 +610,7 @@ def _presence_status(props) -> str:
     that can be handed one therefore refuses the empty payload *before* asking
     this, and that ordering is load-bearing rather than tidy.
     """
-    status = _user_property(props, "a2a-status")
+    status = user_property(props, "a2a-status")
     if not status:
         return "online"
     return "offline" if status == "offline" else "online"
@@ -1407,7 +1392,19 @@ class A2AMesh:
         data = _decode_payload(msg)
         if data is None:
             return
-        kind, content = classify_reply(data)
+        try:
+            kind, content = classify_reply(data)
+        except (AttributeError, TypeError, ValueError):
+            # **The SDK's classifier reads shapes, not JSON types.**  A
+            # `result` that is a list, a `statusUpdate` that is a number, an
+            # `error` that is a string — each is `.get` on a non-dict, and the
+            # raise would escape to `_run_outbound`, whose loop leaves the
+            # client on any handler exception: one malformed reply would cost
+            # a live connection, the roster and a resubscribe.  A reply this
+            # build cannot read is the unclassified path below — the task's
+            # ending, not the transport's (SDD Appendix C: a value that cannot
+            # be read is not read as success).
+            kind, content = "", ""
         if send is not None:
             # **A reply arrived, but "arrived" is not "classified".**  Setting
             # `delivered` before `classify_reply` made an unreadable answer
@@ -2138,12 +2135,18 @@ class A2AMesh:
         if record.status in _ENDED:
             return record.status
         send = self._sends.get(task_id)
-        if send is not None and send.agent != agent:
+        owner = send.agent if send is not None else record.agent_name
+        if owner != agent:
             # **The task belongs to the peer it was sent to.**  Publishing a
             # withdrawal to a caller-supplied name without this check told the
             # wrong peer, recorded the row cancelled, and let the real peer run
             # on — the sibling `continue_task` refuses the same mistake.
-            return f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
+            # **The record is the owner when the send is gone.**  The store is
+            # process-wide and its rows outlive `_sends`: a non-reviving
+            # teardown clears the sends, the FIFO cap evicts the oldest, and
+            # another agent's mesh never held this send at all.  The row still
+            # names the peer the task went to, so the guard reads it there.
+            return f"Error: task_id {task_id!r} is with {owner!r}, not {agent!r}."
         # **The ladder stops before the withdrawal is published.**  A rung is
         # asleep between attempts; waking after the cancel, it would publish the
         # request again and start work on a peer that may just have been revived
@@ -2161,7 +2164,7 @@ class A2AMesh:
         self._corr_to_task[correlation] = _Route(
             task_id,
             send.round if send is not None else 0,
-            send.agent if send is not None else record.agent_name,
+            owner,
             # `cancel_task` only reaches a recorded task (`record` was read
             # above), and the recorded kind is a task.
             "task",
@@ -2252,9 +2255,7 @@ class A2AMesh:
             if not raw or raw == self.agent_name or raw in seen:
                 continue
             if not groups.valid_member_name(raw):
-                raise groups.GroupError(
-                    f"{raw!r} is not a member name this network can address."
-                )
+                raise groups.unaddressable(raw)
             seen.add(raw)
             targets.append(raw)
         body = json.dumps(
@@ -2406,10 +2407,6 @@ class A2AMesh:
         return self._responder.resolve(task_id, RoundOutcome(outcome, text))
 
     # ── Inbound task bookkeeping ────────────────────────────────────────
-
-    def _note_inbound(self, task_id: str, peer: str) -> None:
-        """An inbound task is now in flight in this process."""
-        self._inbound.add(task_id, peer)
 
     def _note_withdrawn(self, task_id: str, peer: str) -> None:
         """The peer withdrew this task — remember who, for the late attempt.

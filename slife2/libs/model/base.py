@@ -19,7 +19,7 @@ noticing, because the loop builds its message from the result.  See
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -84,8 +84,13 @@ class Streamer(Protocol):
 
     Implemented once per wire protocol — in `openai_server`,
     `openai_responses_server` and `anthropic_server`.  It is a plain callable
-    returning an async iterator, so a test can substitute a scripted one
+    returning an async generator, so a test can substitute a scripted one
     without any of the SDK being involved.
+
+    **The generator's `aclose` is part of the contract.**  `stream_chat_impl`
+    closes the stream on every way out of the call, so an interrupted turn
+    releases the SDK response and the provider pool's lease deterministically
+    instead of leaving the provider generating on an abandoned connection.
     """
 
     def __call__(
@@ -94,7 +99,7 @@ class Streamer(Protocol):
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
-    ) -> AsyncIterator[ProviderEvent]: ...
+    ) -> AsyncGenerator[ProviderEvent]: ...
 
 
 @dataclass

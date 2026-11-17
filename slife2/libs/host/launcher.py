@@ -70,7 +70,7 @@ from slife2.libs.host.runtime import (
     unregister_client,
     write_claim,
 )
-from slife2.libs.plugin.protocol import close_server, open_server
+from slife2.libs.plugin.protocol import DOWN_HINT, close_server, open_server
 
 logger = logging.getLogger(__name__)
 
@@ -451,6 +451,15 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
         delay = min(delay * 2, 0.5)
 
 
+#: The daemons this process spawned, kept so a later pass can reap them.
+#: **On POSIX a child that exits stays a zombie until its parent waits on it**,
+#: and a client spawns nothing else mid-session to trigger `subprocess`'s own
+#: cleanup — a server another instance's `down` stopped, or one that crashed,
+#: would otherwise sit in the process table for the life of this one.  `poll()`
+#: is the wait; on Windows it is a harmless status read.
+_spawned: list[subprocess.Popen] = []
+
+
 def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     """Make sure a server is up, reusing one that already is — and time it.
 
@@ -460,6 +469,9 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     almost every launch finds everything already running, and a warm start that
     says `12ms` per server is the honest report of a start that did nothing.
     """
+    for proc in list(_spawned):
+        if proc.poll() is not None:
+            _spawned.remove(proc)
     started = time.monotonic()
     outcome = _bring_up(spec, config_path=config_path)
     return replace(outcome, seconds=time.monotonic() - started)
@@ -504,6 +516,7 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
             proc = spawn(_argv(spec), url=spec.url)
+            _spawned.append(proc)
             _wait_ready(spec, proc)
             # The record is written by the server itself, not here: it is the
             # only party that knows which config it read, and that is what
@@ -570,7 +583,7 @@ def _conflict_detail(spec: ServerSpec) -> str:
     if stale:
         return (
             f"port {spec.port} is held by {spec.name} from build {stale}, not "
-            f"this build {__version__}; stop it with `slife2 down` and start again"
+            f"this build {__version__}; {DOWN_HINT}"
         )
     return (
         f"port {spec.port} is held by something that is not this build's "

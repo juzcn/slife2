@@ -50,6 +50,7 @@ from slife2.clients.gateway import (
     proxied_name,
     transport_for,
 )
+from slife2.helpers.threads import off_loop
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     Config,
@@ -724,12 +725,13 @@ class Family:
     def connecting(self) -> None:
         """Start a connect attempt for every entry that is switched on.
 
-        Called at startup and on every ask: a source that is not answering is one
-        this has to ask about again, and the only moment there is to ask is a
-        `list_sources`.
+        Called on every ask: a source that is not answering is one this has to
+        ask about again, and the only moment there is to ask is a `list_sources`.
+        The connect is asked for directly — building a whole declaration for its
+        side effect would construct every row twice per ask.
         """
         for one in self._held.values():
-            one.declaration()
+            one.connecting()
 
     async def settle(self) -> None:
         """Let attempts already in flight finish, briefly.
@@ -957,6 +959,12 @@ def refusal(config: Config, name: str) -> str | None:
     written across every row it owns, so sharing one would mark somebody else's
     playbooks broken.
 
+    A name the *other connection section* owns is refused too, but by the loader
+    (`slife2.libs.host.config`, the one place both sections are known): the
+    writer judges every entry through `load`, so the collision is caught before
+    the write counts and a second check here would be a second sentence for one
+    refusal.
+
     Three names and not every reserved word: the rest of what a source may not be
     called — the plugin's own name, a category the hub owns — the hub refuses
     loudly at declaration time (`Upstream._record`), and duplicating that list
@@ -1074,7 +1082,30 @@ def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
     return one.state
 
 
-def prepare_entry(
+def describe_entry(
+    one: Held | None, name: str, raw: Mapping[str, Any], *, words: FamilyWords
+) -> dict[str, Any]:
+    """One row of a `*_list` — what the entry is, and whether it is usable.
+
+    **A listing is for choosing, not for reading the entry.**  The operator's
+    sentence about it, the link's state, and a count or the failure's reason are
+    what a model chooses between entries with; the command, URL, spec and
+    credential are `*_get`'s.  One builder for both connection families: the row
+    differs only by the count's name, which is `FamilyWords.unit`'s plural —
+    the same key `entry_report` writes.
+    """
+    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
+    if one is not None and one.settings.enabled:
+        if one.usable:
+            row[f"{words.unit}s"] = len(one.rows or [])
+        elif one.error:
+            row["error"] = one.error
+    if description := str(raw.get("description") or ""):
+        row["description"] = description
+    return row
+
+
+async def prepare_entry(
     config: Config,
     name: str,
     build: Callable[[], tuple[ToolServerSettings, Mapping[str, Any]]],
@@ -1107,7 +1138,10 @@ def prepare_entry(
         raise ToolError(why)
     try:
         settings, entry = build()
-        configfile.upsert(section, name, entry)
+        # The write takes the cross-process config lock (up to `storage.filelock`)
+        # and round-trips the YAML — blocking work on a loop that serves every
+        # conversation this plugin holds, so it hops.
+        await off_loop(configfile.upsert, section, name, entry)
     except ConfigError as exc:
         raise ToolError(str(exc)) from exc
     return settings
@@ -1119,15 +1153,13 @@ async def list_entries(
     offset: int,
     *,
     words: FamilyWords,
-    describe: Callable[[Held | None, str, Mapping[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
     """The `*_list` answer: every entry as the file has it, with its state.
 
     Settles first, for the reason the hub's `servers()` does: this is the
     answer to "why is my tool missing", and a server that started a moment ago
     reads as one still starting — two different problems this tool exists to
-    tell apart.  The row is the family's own, because an MCP entry is a command
-    or a URL and a REST entry is a spec and a base URL.
+    tell apart.  The row is `describe_entry`'s, one builder for both families.
 
     **An empty section is an empty page and not a sentence**: an answer naming
     another tool in prose is a cross-reference to keep in step, where `total`
@@ -1137,7 +1169,10 @@ async def list_entries(
     family.connecting()
     await family.settle()
     entries = configfile.read_section(words.section)
-    rows = [describe(family.held(name), name, raw) for name, raw in entries.items()]
+    rows = [
+        describe_entry(family.held(name), name, raw, words=words)
+        for name, raw in entries.items()
+    ]
     return listed(rows, words.collection, limit, offset, cap=LIST_PAGE)
 
 
@@ -1167,7 +1202,7 @@ async def remove_entry(
             f"'{name}' is not {words.entry} under `{words.section}:` — "
             f"see `{words.list_tool}`."
         )
-    removed = configfile.remove(words.section, name)
+    removed = await off_loop(configfile.remove, words.section, name)
     stopped = await family.remove(name)
     if removed:
         logger.info("%s name=%s", words.remove_log, name)
@@ -1195,7 +1230,7 @@ async def switch_entry(
             f"'{name}' is not in `{words.section}:` — `{words.set_tool}` adds it, "
             f"`{words.list_tool}` shows what is there."
         )
-    configfile.set_enabled(words.section, name, enabled)
+    await off_loop(configfile.set_enabled, words.section, name, enabled)
     one = await family.set_enabled(name, enabled)
     if one is None:
         return {"name": name, "enabled": enabled, "state": "not held"}
@@ -1552,9 +1587,11 @@ def build_family_server(
         Not per client, for the reason the hub's is not: this process's pool is
         the process's, and a client disconnecting is not a reason to restart
         every stdio server behind it.
+
+        Nothing is started here: homes are built on the first ask, and
+        `on_build=Family.start` starts each as it is built — at lifespan start
+        there is no home yet to start.
         """
-        for one in family.every():
-            one.start()
         try:
             yield {}
         finally:

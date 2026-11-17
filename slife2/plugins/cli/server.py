@@ -44,6 +44,7 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.helpers.threads import off_loop
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     CLI_SERVER_NAME,
@@ -148,7 +149,7 @@ def rows(entries: Mapping[str, CliToolSettings]) -> list[dict[str, Any]]:
 # actually on this machine.
 
 
-def _prepare(name: str, config: CliConfig) -> CliToolSettings:
+async def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     """Validate a `cli:` entry and write it, or raise why it cannot be.
 
     **Raised, not returned**, which is the contract `skill_set` and `skill_use`
@@ -187,7 +188,9 @@ def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     entry = cli_entry(config)
     try:
         settings = _cli_tool(entry, name)
-        configfile.upsert(SECTION, name, entry)
+        # The write takes the cross-process config lock — blocking work on the
+        # loop that serves every conversation this plugin holds, so it hops.
+        await off_loop(configfile.upsert, SECTION, name, entry)
     except ConfigError as exc:
         raise ToolError(str(exc)) from exc
     return settings
@@ -388,7 +391,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             name: The key it is recorded under.
             config: The whole entry — the `config` object `cli_get` returned.
         """
-        settings = _prepare(name, config)
+        settings = await _prepare(name, config)
         homes.current().entries[name] = settings
         logger.info("cli_set name=%s", name)
         answer: dict[str, Any] = {

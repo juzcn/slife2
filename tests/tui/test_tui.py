@@ -460,6 +460,97 @@ async def test_final_answer_replaces_what_was_streamed() -> None:
     assert "garb" not in text
 
 
+async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
+    """The drawn-prefix account's purpose, kept: a note closes a block inside
+    the answer that is still streaming, and the authoritative text covers what
+    that block held — so the final block writes only the remainder, and the
+    words appear once across the transcript rather than twice.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("The answer"))
+        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(TextDelta(" is 42"))
+        return "The answer is 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+
+    assert blocks == ["The answer", " is 42"], (
+        "the closed block's prefix was drawn a second time"
+    )
+
+
+async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> None:
+    """The account is bounded to the model call in flight.
+
+    The authoritative answer is the *last* call's text, and a tool panel ends
+    the call that streamed before it.  A note that closed a block in an earlier
+    iteration recorded words the final answer does not contain — carrying them
+    across the panel trimmed an answer that happened to begin with them:
+    "Let me check the results: 42" became " the results: 42".
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("Let me check"))
+        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name="calc",
+                ok=True,
+                result_preview="42",
+                result_chars=2,
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("Let me check the results: 42"))
+        return "Let me check the results: 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+
+    assert blocks[-1] == "Let me check the results: 42", (
+        "an earlier iteration's words trimmed the final answer"
+    )
+
+
+async def test_a_cut_in_does_not_trim_the_final_answer() -> None:
+    """A cut-in closes an iteration the same way a tool panel does.
+
+    The message is taken at a tool boundary — the harness pair draws no panel
+    of its own — and the answer still coming is the next call's text.  What
+    streamed before the cut-in line is not a prefix of it, so the drawn-prefix
+    account starts over there too.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("Let me check"))
+        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(MessageCutIn(text="also look at the logs", channel="wechat"))
+        on_event(TextDelta("Let me check the results: 42"))
+        return "Let me check the results: 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+        text = shown(app)
+
+    assert "also look at the logs" in text
+    assert blocks[-1] == "Let me check the results: 42", (
+        "the words before the cut-in trimmed the final answer"
+    )
+
+
 async def test_model_output_is_not_parsed_as_markup() -> None:
     """`[bold]` from a model is text, not an instruction to the renderer.
 
@@ -1346,6 +1437,74 @@ async def test_a_refused_plan_write_is_not_drawn() -> None:
     assert "a plan nobody wrote" not in text
 
 
+async def test_a_cancelled_turn_leaves_no_parked_plan_write() -> None:
+    """A write whose outcome never came is parked no longer than its turn.
+
+    The parking is by call id, and only a matching finish pops it — a turn
+    cancelled mid-write left the entry for the session's life, and a later
+    turn's reused id popped it and drew a stale plan as a committed one.  The
+    settle every ending passes through clears it; the old plan stands.
+    """
+    started = asyncio.Event()
+    stale = [{"text": "a plan never committed", "status": "active"}]
+
+    async def writes_then_hangs(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
+        on_event(
+            ToolCallStarted(call_id="p1", name="plan_write", arguments={"items": stale})
+        )
+        started.set()
+        await asyncio.sleep(30)
+        return TurnReply("never")
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = writes_then_hangs  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
+        view = app.query_one(PlanView)
+        assert view._started, "the write is parked while its turn runs"
+
+        await pilot.press("escape")
+        await settle(pilot, app)
+        assert "[interrupted]" in shown(app)
+        assert not view._started, "the cancelled turn's write leaked"
+        assert not view.display, "a write never committed draws no plan"
+
+        # A later turn reuses the id and finishes it without a start of its
+        # own: nothing is parked for it, so the stale items are not drawn.
+        async def finishes_only(
+            prompt, on_event, *, channel="tui", images=None, receipt=""
+        ):
+            on_event(
+                ToolCallFinished(
+                    call_id="p1",
+                    name="plan_write",
+                    ok=True,
+                    result_preview="{}",
+                    result_chars=2,
+                    elapsed_ms=1,
+                )
+            )
+            return TurnReply("done")
+
+        app._client_factory().run_turn = finishes_only  # type: ignore[method-assign]
+        await submit(pilot, "again")
+        await settle(pilot, app)
+        text = view.plain_text()
+
+    assert "a plan never committed" not in text, (
+        "a reused call id popped the cancelled turn's stale write"
+    )
+    assert not view.display
+
+
 def context_of(kept: int, recalled: int, rerank: str = "", discriminator: str = ""):
     """A scripted client whose turn reports the discriminator's answer first."""
 
@@ -1422,6 +1581,23 @@ async def test_a_reranker_that_cannot_be_used_is_reported_once_per_change() -> N
 
     assert "rerank off — the recall keeps its fused order" in first
     assert second.count("rerank off") == 1, "the same status is not news twice"
+
+
+async def test_an_unknown_rerank_status_is_drawn_as_its_own_word() -> None:
+    """A newer server's vocabulary is not a failure verdict.
+
+    The status set is closed; a word outside it is one this build has no
+    sentence for, and the generic failure would report a verdict the event
+    never carried.  The raw word reaches the reader instead (SDD Appendix A,
+    invariant 11: refuse, don't reinterpret).
+    """
+    app = window(FakeAgentClient(context_of(2, 1, rerank="throttled")))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        text = shown(app)
+
+    assert "[throttled]" in text, "the server's own word, verbatim"
+    assert "rerank failed" not in text, "an unknown word is not a failure"
 
 
 async def test_a_failed_discriminator_reads_as_a_failed_recall_not_a_zero() -> None:
@@ -2610,6 +2786,79 @@ async def test_ctrl_c_quits_when_no_turn_is_running() -> None:
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running
+
+
+async def test_ctrl_c_interrupts_a_turn_that_is_still_connecting() -> None:
+    """The cold-start window: the drain is connecting and restoring, and the
+    submission's call is already in flight.
+
+    `_turn` is None until the drain mounts the first block, but the send started
+    the moment the words arrived — so ctrl+c here interrupts work that is
+    running rather than quitting over it.  The call is cancelled; when the
+    connect lands, the drain draws the line and `[interrupted]`, and the app
+    stays up.
+    """
+    gate = asyncio.Event()
+    client = FakeAgentClient(answering("unused"))
+
+    async def slow_connect() -> None:
+        await gate.wait()
+        client.connected = True
+
+    client.connect = slow_connect  # type: ignore[method-assign]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert app._turn is None and app._order, "the drain is still connecting"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "ctrl+c quit over a turn that was still in flight"
+        assert app._interrupting is True
+
+        gate.set()
+        await settle(pilot, app)
+        assert "[interrupted]" in shown(app)
+        assert app.is_running
+
+    assert client.prompts == [], "the cancelled send never reached run_turn"
+
+
+async def test_ctrl_c_does_not_quit_while_a_replys_tail_is_flushed() -> None:
+    """The post-reply window: the answer arrived, and the drain is applying the
+    turn's last events before it finalises the entry.
+
+    `_turn` is done but `_order` still holds the submission — work is in flight,
+    so ctrl+c is not the "nothing to stop" that quits.  The reply already
+    arrived, so the interrupt changes nothing about the answer: it lands, and
+    the app stays up.
+    """
+    app = make_app(answering("the answer"))
+    gate = asyncio.Event()
+    flush = app._flush_events
+
+    async def held_flush() -> None:
+        await gate.wait()
+        await flush()
+
+    app._flush_events = held_flush  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert await settled(
+            pilot, lambda: app._turn is not None and app._turn.done()
+        ), "the reply never came back"
+        assert app._order, "the entry was finalised before the flush"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "ctrl+c quit while the reply was being finalised"
+
+        gate.set()
+        await settle(pilot, app)
+        assert "the answer" in shown(app)
+        assert "[interrupted]" not in shown(app)
 
 
 async def test_a_cancelled_turn_accepts_nothing_more() -> None:

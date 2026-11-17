@@ -22,10 +22,13 @@ is the trade, and it is worth it at three observers.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol, assert_never
 
 from slife2.libs.turn.messages import Usage
+
+logger = logging.getLogger(__name__)
 
 #: How much of a tool result travels in a progress notification.  The model
 #: still receives the full result — this caps only what is *displayed*, and the
@@ -166,7 +169,8 @@ class ToolApprovalRequested:
     """A tool call is waiting for somebody to confirm it.
 
     The model asked to be checked (`_approve`), and this is the request on its
-    way to whoever is watching — the loop emits it and then waits.  **The answer
+    way to whoever is watching — the caller's approval callback emits it and
+    then waits.  **The answer
     does not travel back on this stream**: it arrives as a *call* (`answer_
     approval`) on whatever is watching, because a turn's progress channel runs
     one way and a prompt that could only be answered by a reply to a
@@ -288,6 +292,33 @@ class NullObserver:
 #: The default observer.  Stateless and immutable in practice, so one shared
 #: instance is enough.
 NULL_OBSERVER = NullObserver()
+
+
+async def emit(observer: TurnObserver, event: TurnEvent) -> bool:
+    """Hand an event to the observer, swallowing its failures.
+
+    A fact about observers, not about the loop: the loop emits its own events
+    through this, and so do the callers that emit beside it (the agent server's
+    approval request, its tools-counted and context-chosen lines, the agent
+    task's), which is why it lives here rather than as a private method one of
+    them asks the class for.
+
+    A UI that throws must not end a turn — the answer is still correct and
+    still returned.  `CancelledError` is deliberately not caught: it derives
+    from BaseException precisely so that cancellation cannot be swallowed, and
+    the loop depends on that.
+
+    **`True` means the observer took it**, and the one caller that reads the
+    answer is the approval request: a request nobody could be told about is a
+    turn parked on a future no client saw, so the caller refuses the call
+    instead of waiting (see `slife2.plugins.agent.server`'s `ask`).
+    """
+    try:
+        await observer.on_event(event)
+    except Exception:  # noqa: BLE001
+        logger.warning("observer failed on %s", type(event).__name__, exc_info=True)
+        return False
+    return True
 
 
 def encode(event: TurnEvent) -> str:

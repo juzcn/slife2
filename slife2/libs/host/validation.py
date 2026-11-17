@@ -20,14 +20,20 @@ def validation_refusal(where: str, exc: ValidationError) -> ValueError:
 
     **The field path is the part a model acts on**, so it is always there, and
     the offending value is appended only when pydantic kept a value that is safe
-    to echo — an enum's choice, a switch's boolean, a quirk's name.  A missing
-    field's `input` is the whole parent mapping, and an unknown key's value can
-    be a literal API key; neither is repeated.
+    to echo — an enum's choice, a switch's boolean, a quirk's name, and only a
+    *scalar* one: a mapping given to a switch is the credential case itself
+    (`reasoning: {api_key: …}`), so it is named by its type, not repeated.  A
+    missing field's `input` is the whole parent mapping, and an unknown key's
+    value can be a literal API key; neither is repeated.
     """
     first = exc.errors()[0]
     path = ".".join(str(part) for part in first.get("loc", ()))
     got = first.get("input", _MISSING)
-    shown = first.get("type") in ("literal_error", "bool_type") and got is not _MISSING
+    shown = (
+        first.get("type") in ("literal_error", "bool_type")
+        and got is not _MISSING
+        and isinstance(got, (str, bool, int, float))
+    )
     suffix = f" (got {got!r})" if shown else ""
     where = f"{where}.{path}" if path else where
     return ValueError(f"{where}: {first['msg']}{suffix}")

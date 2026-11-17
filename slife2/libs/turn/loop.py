@@ -31,10 +31,10 @@ from slife2.libs.turn.events import (
     ThinkingDelta,
     ToolCallFinished,
     ToolCallStarted,
-    TurnEvent,
     TurnFinished,
     TurnObserver,
     UsageReported,
+    emit,
     preview,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
@@ -173,10 +173,6 @@ class TurnResult:
     #: the next request's size: the final batch of tool results was appended
     #: after that call, so those tokens are not in it.
     last_usage: Usage
-
-    @property
-    def hit_iteration_limit(self) -> bool:
-        return self.stop_reason == "max_iterations"
 
 
 def _not_run(call: ToolCall, why: str) -> ToolCall:
@@ -446,7 +442,7 @@ class AgentLoop:
                 # drawn on this event, and the message is still queued for its
                 # own turn — marking it drawn would suppress that turn's line.
                 if took:
-                    await self._emit(
+                    await emit(
                         observer,
                         MessageCutIn(
                             text=text,
@@ -490,9 +486,12 @@ class AgentLoop:
                 content=result.text or None,
                 # Kept on the message rather than only streamed at the
                 # reader: it is part of what the model said, and the turn
-                # log is where a conversation is read back from.  It does
-                # not go to the model again — `Message.to_wire` leaves it
-                # out, which is the whole of that decision.
+                # log is where a conversation is read back from.  Whether it
+                # goes to the model again is the provider adapter's decision
+                # and not this one: `Message.to_wire` carries it, the openai
+                # server re-sends it as DeepSeek's `reasoning_content`, and
+                # the anthropic and responses servers drop it because they
+                # have nowhere to put it (`Message.thinking`).
                 thinking=result.thinking,
                 tool_calls=list(result.tool_calls),
             )
@@ -519,8 +518,8 @@ class AgentLoop:
                 # number for the whole turn.  Emitted after the answer is in the
                 # list, so a cancellation in this await cannot lose the answer
                 # the call produced (the batch path below has its own guard).
-                await self._emit(observer, UsageReported(last_usage=result.usage))
-                await self._emit(
+                await emit(observer, UsageReported(last_usage=result.usage))
+                await emit(
                     observer,
                     TurnFinished(
                         text=result.text,
@@ -546,7 +545,7 @@ class AgentLoop:
             # does: none of the calls ran, and `INTERRUPTED` is the sentence that
             # promises no result is coming.
             try:
-                await self._emit(observer, UsageReported(last_usage=result.usage))
+                await emit(observer, UsageReported(last_usage=result.usage))
             except asyncio.CancelledError:
                 messages.append(answer)
                 messages.extend(interrupted_results(result.tool_calls))
@@ -598,16 +597,26 @@ class AgentLoop:
                     # entry stayed undelivered and its caller ran its own turn
                     # with the same prompt: the words appeared once as the
                     # interrupted call's result and again as a user message.
+                    cut_in_channel = ""
                     if (
                         folded is not None
                         and injected is not None
                         and injected() > before
                     ):
-                        folded()
+                        found = folded()
+                        if found is not None:
+                            cut_in_channel, _receipt = found
                         took_any = True
-                    answers.extend(
-                        interrupted_results(result.tool_calls[index:], returned)
-                    )
+                    tail = interrupted_results(result.tool_calls[index:], returned)
+                    # **The taken message's channel rides its answer here too**,
+                    # the same display metadata the success path writes below:
+                    # a cut-in folded just before the interruption is a message
+                    # the conversation holds, and a rebuilt transcript draws its
+                    # line from this field — without it the line wears the
+                    # window's bubble (`slife2.tui.restore`), as though the
+                    # person had typed it there.
+                    tail[0].channel = cut_in_channel
+                    answers.extend(tail)
                     messages.append(answer)
                     messages.extend(answers)
                     # The completed batch is a written pair, so the take is a
@@ -648,7 +657,7 @@ class AgentLoop:
             # conversation already holds, and a rebuilt transcript can draw the
             # same line from the channel on the tool message.
             for cutin_text, cutin_channel, cutin_receipt in cutins:
-                await self._emit(
+                await emit(
                     observer,
                     MessageCutIn(
                         text=cutin_text,
@@ -660,7 +669,7 @@ class AgentLoop:
         # Only a capped turn ever gets here: with no cap the iterator does not
         # end, so the only way out of the loop is the return above.
         logger.warning("turn hit the %d-iteration limit", self._max_iterations)
-        await self._emit(
+        await emit(
             observer,
             TurnFinished(
                 text=last_text,
@@ -760,7 +769,7 @@ class AgentLoop:
             logger.info("tool_denied name=%s", call.name)
             return DENIED, False
 
-        await self._emit(
+        await emit(
             observer,
             ToolCallStarted(
                 call.id,
@@ -786,7 +795,7 @@ class AgentLoop:
         # Recorded before the event, because the event can be cancelled: the
         # call has returned, and the interruption's repair reads this.
         answered.append((text, ok))
-        await self._emit(
+        await emit(
             observer,
             ToolCallFinished(
                 call_id=call.id,
@@ -976,9 +985,9 @@ class AgentLoop:
                 # that mixes the two is unreadable in a way that is hard to
                 # notice and impossible to undo.
                 if chunk.thinking:
-                    await self._emit(observer, ThinkingDelta(chunk.thinking))
+                    await emit(observer, ThinkingDelta(chunk.thinking))
                 if chunk.text:
-                    await self._emit(observer, TextDelta(chunk.text))
+                    await emit(observer, TextDelta(chunk.text))
         finally:
             aclose = getattr(chunks, "aclose", None)
             if aclose is not None:
@@ -986,24 +995,3 @@ class AgentLoop:
                     await aclose()
                 except Exception:  # noqa: BLE001 - closing must not mask a cancel
                     logger.debug("closing the chunk stream failed", exc_info=True)
-
-    @staticmethod
-    async def _emit(observer: TurnObserver, event: TurnEvent) -> bool:
-        """Hand an event to the observer, swallowing its failures.
-
-        A UI that throws must not end a turn — the answer is still correct and
-        still returned.  `CancelledError` is deliberately not caught: it derives
-        from BaseException precisely so that cancellation cannot be swallowed,
-        and the loop depends on that.
-
-        **`True` means the observer took it**, and the one caller that reads the
-        answer is the approval request: a request nobody could be told about is
-        a turn parked on a future no client saw, so the caller refuses the call
-        instead of waiting (see `slife2.plugins.agent.server`'s `ask`).
-        """
-        try:
-            await observer.on_event(event)
-        except Exception:  # noqa: BLE001
-            logger.warning("observer failed on %s", type(event).__name__, exc_info=True)
-            return False
-        return True

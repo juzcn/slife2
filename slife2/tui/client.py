@@ -514,7 +514,16 @@ class MCPAgentClient:
                 "approved": approved,
             },
         )
-        return str((result.data or {}).get("text") or "")
+        # **The empty sentence is a real answer — a waiting turn took it — so
+        # a shape this build cannot read is refused, not read as that empty.**
+        # The server writes `text` on both outcomes; a payload without one is
+        # a different build, and reporting it as "the turn moved on" would
+        # present a failure as a verdict (SDD Appendix C, invariant 11).
+        payload = result.data
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str):
+            raise _unreadable("answer the approval", payload)
+        return text
 
     async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
         """Hold this conversation's watch open.  See `WatchClient.watch`.

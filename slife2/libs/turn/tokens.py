@@ -79,6 +79,13 @@ _CACHE_KEY = hashlib.sha1(_VOCAB_URL.encode()).hexdigest()
 #: `__file__` is a real path; a zipped import is not a mode this project ships.
 _BUNDLED_CACHE = Path(__file__).with_name("tiktoken_cache")
 
+#: The content hash the installed tiktoken pins for the vocabulary file
+#: (`tiktoken_ext.openai_public.o200k_base`, tiktoken 0.14.0).  Verified before
+#: the load, because tiktoken answers a mismatched cache file by deleting it and
+#: fetching — the network path this module promises never to take.  The bundle's
+#: README records the same hash and the procedure for updating it.
+_BUNDLED_SHA256 = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+
 #: Resolved once per process, on the first estimate.  `None` means "not resolved
 #: yet"; `_failed_at` says when the last attempt failed, which is what the retry
 #: cooldown is measured from.
@@ -104,6 +111,14 @@ def _openai_encoding() -> Any:
     bundled file is named with the SHA-1 of the URL it would fetch, so pointing
     the variable at the package directory is the whole of the integration.
     `setdefault` leaves an operator's own cache directory alone.
+
+    **The read is proven local before tiktoken is asked.**  A missing or
+    hash-mismatched cache file sends tiktoken 0.14.0 to `requests.get` with *no
+    timeout*, so a broken install on a black-holed network would hang the turn
+    rather than reach the script measure.  The file tiktoken will read is
+    therefore checked here first — present, and the content hash tiktoken pins —
+    and a broken install falls back immediately, through the same warning and
+    cooldown a failed load always had.
     """
     global _encoding, _failed_at
     if _encoding is None:
@@ -113,8 +128,24 @@ def _openai_encoding() -> Any:
         try:
             import tiktoken
 
-            if (_BUNDLED_CACHE / _CACHE_KEY).is_file():
-                os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(_BUNDLED_CACHE))
+            # The directory tiktoken will read: an operator's own when they set
+            # one, the bundle otherwise — and the file in it is held to the
+            # same check either way, so no configuration of this variable can
+            # turn the load into a fetch.
+            cache_dir = os.environ.get("TIKTOKEN_CACHE_DIR")
+            if cache_dir is None:
+                cache_dir = str(_BUNDLED_CACHE)
+                os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+            bundle = Path(cache_dir) / _CACHE_KEY
+            if not bundle.is_file():
+                raise FileNotFoundError(
+                    f"the vocabulary cache file is missing: {bundle}"
+                )
+            if hashlib.sha256(bundle.read_bytes()).hexdigest() != _BUNDLED_SHA256:
+                raise ValueError(
+                    f"the vocabulary cache file does not match the hash "
+                    f"tiktoken pins: {bundle}"
+                )
             _encoding = tiktoken.get_encoding(_ENCODING)
         except Exception as exc:  # noqa: BLE001 — any failure means "no vocabulary"
             _failed_at = now

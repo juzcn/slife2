@@ -42,7 +42,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 import slife2.plugins.schedule.server as schedule_server
-from slife2.helpers.clock import now
+from slife2.helpers.clock import at, now
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings, default_config
 from slife2.libs.plugin.audience import (
@@ -50,6 +50,7 @@ from slife2.libs.plugin.audience import (
     for_the_model,
     request_conversation,
 )
+from slife2.libs.plugin.vocabulary import AGENT_TASK_LIST
 from slife2.libs.plugin.vocabulary import (
     FAILED as TASK_FAILED,
 )
@@ -559,6 +560,21 @@ async def test_a_damaged_anchor_is_replaced_by_the_next_fire() -> None:
 
     after = store.task("daily")
     assert after is not None and after.last_due == repaired
+
+
+async def test_a_connection_is_closed_on_the_way_out(tmp_path: Path) -> None:
+    """`with sqlite3.connect(...)` commits; it does not close.
+
+    A connection per call that is never closed is a handle leak, and on Windows
+    it is a file another process cannot delete — the rule the turn store and the
+    cabinet already state, which the ledger now keeps through the same shared
+    lifetime (`connection_to`).
+    """
+    store = ScheduleStore(tmp_path / "schedule.db", tmp_path)
+    with store._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
 
 
 async def test_a_cron_that_can_never_fire_is_refused() -> None:
@@ -1345,6 +1361,51 @@ async def test_a_run_is_found_by_the_moment_rather_than_its_spelling() -> None:
     assert skipped["status"] == SKIPPED
 
 
+async def test_a_run_is_found_by_its_instant_when_the_offset_has_moved() -> None:
+    """**A run written before a fall-back is found by the instant, not the string.**
+
+    The stored key carries the offset in force when it was written; a model
+    handing the same instant back has it normalized to *today's* local offset
+    (`normalize_bound`), which equals no stored key once the offset has moved —
+    so both string lookups answered "no such run" about a run that was there.
+    The lookup that remains compares the moments (`julianday`) and answers with
+    the key the row actually holds.
+
+    The stored spelling is built to differ from this machine's *current* offset
+    whatever that is (UTC when the machine is not UTC, an hour ahead when it is),
+    so the instant fallback is the path that finds it on every runner — not a
+    coincidence of the test machine's zone.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    moment = datetime.fromisoformat(now())
+    other = UTC if moment.utcoffset() != timedelta(0) else timezone(timedelta(hours=1))
+    stored = moment.astimezone(other).isoformat(timespec="seconds")
+    store.record(task, stored)
+
+    async with Client(build()) as client:
+        # The same instant in the machine's own spelling: neither string lookup
+        # matches the stored key, so only the instant comparison can place it.
+        skipped = await ask(
+            client,
+            SCHEDULE_RUN_SKIP,
+            {"name": "daily", "due_at": at(moment), "note": "by instant"},
+        )
+        # A different instant is still a real no-match, not a false positive.
+        with pytest.raises(ToolError, match="has no run due at"):
+            await ask(
+                client,
+                SCHEDULE_RUN_SKIP,
+                {"name": "daily", "due_at": at(moment + timedelta(hours=5))},
+            )
+
+    assert skipped["due_at"] == stored
+    assert skipped["status"] == SKIPPED
+
+
 async def test_a_due_at_in_no_grammar_is_told_apart_from_a_run_that_is_gone(
     tasks: Tasks,
 ) -> None:
@@ -1565,6 +1626,66 @@ async def test_the_sweep_closes_a_stopped_dispatch_the_peer_does_not_hold(
     assert any("resolved from a stopped dispatch" in line for line in did)
 
 
+async def test_a_run_now_during_a_dispatch_resolution_is_not_settled_failed(
+    tasks: Tasks,
+) -> None:
+    """**A manual run dispatched while a resolution is parked stays in flight.**
+
+    The resolution reads the marked runs and asks the peer once; a
+    `schedule_run_now` landing in that window reopens and dispatches the very run
+    the resolution holds a stale list about.  Settling it `failed` on that list
+    would close the run while its work runs and delivers.  Under the task's lock
+    the resolution re-reads the row and leaves a run that is no longer a marked
+    `pending` to the decision that owns it.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+
+    class GatedList:
+        """The peer, holding its first list answer until the test lets it go."""
+
+        def __init__(self, inner: Client) -> None:
+            self.inner = inner
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+            self.gated = False
+
+        async def call_tool(self, name: str, args: dict, **kwargs: Any) -> Any:
+            if name == AGENT_TASK_LIST and not self.gated:
+                self.gated = True
+                answer = await self.inner.call_tool(name, args, **kwargs)
+                self.entered.set()
+                await self.gate.wait()
+                return answer
+            return await self.inner.call_tool(name, args, **kwargs)
+
+    gated = GatedList(tasks.client)
+    resolving = asyncio.create_task(
+        sweep_once(default_config(), tasks_client=gated, locks=RunLocks())
+    )
+    # The resolution holds the list it fetched before the manual run's task existed.
+    await asyncio.wait_for(gated.entered.wait(), timeout=5.0)
+
+    async with Client(build(tasks=tasks)) as client:
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": stamp})
+    assert run["status"] == PENDING and run["agent_task_id"]
+
+    gated.gate.set()
+    await resolving
+
+    after = ledger().run("daily", stamp)
+    assert after is not None and after.status == PENDING
+    assert after.agent_task_id == run["agent_task_id"], (
+        "the resolution left the in-flight run to the dispatch that owns it"
+    )
+
+
 async def test_a_ledger_from_another_build_is_refused_not_migrated() -> None:
     """**There is no migration layer, and the ledger is the reason it cannot
     have one.**  A file whose `scheduled_runs` predates this build's columns is
@@ -1701,6 +1822,56 @@ async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
     # The good ledger fired; the bad one was skipped rather than aborting the pass.
     assert [entry["agent"] for entry in window.asked] == [OTHER]
     assert any(OTHER in line for line in did)
+
+
+async def test_a_damaged_anchor_is_repaired_and_its_siblings_still_fire(
+    window: Window, tasks: Tasks
+) -> None:
+    """**A hand-edited anchor is repaired per task, not skipped for ever.**
+
+    `due` parses the anchor before it asks cron anything, so a `last_due` that is
+    not a time raised *upstream* of `record` — the one place the ledger's repair
+    (`advance`'s `julianday(last_due) IS NULL` branch) runs from.  Left to the
+    per-ledger guard it took every task of the agent with it, on every pass.  The
+    poll now asks for the repair itself: the damaged task is skipped for the pass,
+    its siblings in the same ledger fire, and the next pass reads a whole anchor
+    and fires it too.
+    """
+    async with Client(build(window, tasks)) as client:
+        await write(client, name="mine", cron=EVERY_MINUTE)
+        await write(client, name="sibling", cron=EVERY_MINUTE)
+
+    # Damage one task's anchor, leaving its sibling whole.
+    connection = sqlite3.connect(paths.schedule_db(AGENT))
+    connection.execute(
+        "UPDATE scheduled_tasks SET last_due = 'not-a-time' WHERE name = 'mine'"
+    )
+    connection.commit()
+    connection.close()
+
+    await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
+
+    # The sibling fired on the same pass; the damaged task was skipped, and its
+    # anchor is a time again rather than the damage it was.
+    assert ledger().runs("sibling")[1] == 1
+    assert ledger().runs("mine")[1] == 0
+    repaired = ledger().task("mine")
+    assert repaired is not None and repaired.last_due != "not-a-time"
+    datetime.fromisoformat(repaired.last_due)  # the repair parses as a moment
+
+    # The next pass fires the repaired task too.
+    await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(150),
+    )
+    assert ledger().runs("mine")[1] == 1
 
 
 async def test_a_ledger_in_another_home_is_fired_in_that_home(

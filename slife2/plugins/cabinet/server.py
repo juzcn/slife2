@@ -96,7 +96,8 @@ import os
 import re
 import shutil
 import urllib.parse
-from collections.abc import Iterable, Iterator, Sequence
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import date as _date
 from pathlib import Path
 from typing import Any, Literal
@@ -108,7 +109,12 @@ from fastmcp.exceptions import ToolError
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers import timeouts as _T
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.config import CABINET_SERVER_NAME, Config
+from slife2.libs.host.config import (
+    CABINET_SERVER_NAME,
+    Config,
+    for_the_call,
+    load_cached,
+)
 from slife2.libs.host.paths import local_path
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
@@ -123,8 +129,10 @@ from slife2.plugins.cabinet.store import (
     FILE,
     IMAGE,
     NOTE,
+    PICTURES_DIR,
     REPLACE,
     REPORT,
+    SPECS,
     UPSERT,
     CabinetStore,
     accessible_path,
@@ -224,14 +232,21 @@ OTHER = "other"
 
 #: Names a `category` may not take, because they are the cabinet's own
 #: directories.  **The flattening is what makes this necessary**: the categories
-#: sit beside `notes/`, `diary/` and `reports/` at the cabinet root, so
-#: `category="notes"` would put a saved file among the notes' own mirrors and
-#: `file_list(category="notes")` would list both as one thing.  `pictures` is
-#: the `image` kind's directory: a file saved there would be indistinguishable
-#: from a picture a turn's `[Image:…]` reference points at.
-#: `dumps` is the dump mirror: a file saved there is silently overwritten by a
-#: later `dump_save` whose mirror stem matches its name.
-RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports", "pictures", "dumps"})
+#: sit beside the mirrors at the cabinet root, so `category="notes"` would put a
+#: saved file among the notes' own mirrors and `file_list(category="notes")`
+#: would list both as one thing; a file filed under `dumps` is silently
+#: overwritten by a later `dump_save` whose mirror stem matches its name, and one
+#: under `pictures` is indistinguishable from a picture a turn's `[Image:…]`
+#: reference points at.
+#:
+#: **Derived from the one place that owns the directories**, not respelled: the
+#: mirror dirs are `SPECS`' (`notes`, `diary`, `reports`, `dumps`) and the image
+#: kind's bytes dir is `PICTURES_DIR`.  A mirror rename in `SPECS` therefore
+#: moves the collision guard with it, where a hand-written set would silently
+#: stop guarding the directory it was meant to.
+RESERVED_CATEGORIES = frozenset(
+    {spec.mirror for spec in SPECS.values() if spec.mirror} | {PICTURES_DIR}
+)
 
 
 def category_for(name: str) -> str:
@@ -610,7 +625,12 @@ def _head_encoding(head: bytes) -> str:
     return "binary"
 
 
-def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP:
+def build_server(
+    config: Config,
+    *,
+    embedder: Embedder | None = None,
+    source: Callable[[], Config] | None = None,
+) -> FastMCP:
     """Build the cabinet server.
 
     `embedder` is the seam, and it is injectable for the reason
@@ -619,8 +639,26 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     no embedding endpoint behind it.  In production it is opened once against
     the embeddings server, because a write places its vector in the same call
     and a store that cannot embed stores nothing.
+
+    `source` is the config to read at call time — `load_cached` in production,
+    nothing when a test hands a config in (`slife2.libs.host.config.for_the_call`).
+    The readers' budget goes through `current()`, so an operator's edit to
+    `tool_result.bytes` reaches the next read rather than waiting for a restart.
     """
     embedding = EmbedderConnection(config, embedder=embedder)
+
+    def current() -> Config:
+        """The config this call is served from, not the one this daemon started on.
+
+        **The readers' cap and the harness's budget are one number** (the store's
+        docstring says so), and the harness reads it live (`current().tool_result.bytes`
+        in the agent server).  A cabinet that captured the boot snapshot would
+        diverge from it after an operator edit until a restart — the reader
+        handing back more than the budget, or less, which is the loop the bound
+        exists to close.  So the budget is read per call, the same rule the agent
+        server and the hub follow (SDD Invariant 9).
+        """
+        return for_the_call(source, config)
 
     #: Cabinets whose indexes have been brought up to date, once per process.
     #: A cabinet opened after this pass is not re-synced on every call: its own
@@ -964,16 +1002,17 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """Read one day's diary entry.
 
         Args:
-            date: The day, `YYYY-MM-DD`.
+            date: The day, `YYYY-MM-DD`. Empty means today.
 
         Returns:
             The day's `kind`, `key`, `title`, `time`, `tags`, `summary` and
             `path` — the file an agent's own tools can open — and its whole
             file text under `text`; the date is the key, not part of the text.
         """
-        row = await missing_row(
-            ctx, DIARY, date, f"there is no diary entry for {date}."
-        )
+        # The same key rule the write uses: a day written as `20260105` is read
+        # back as that day, not refused as a key the store never held.
+        day = _diary_key(date)
+        row = await missing_row(ctx, DIARY, day, f"there is no diary entry for {day}.")
         return _document(row, text=await document_text(ctx, row))
 
     @mcp.tool(name="diary_update", meta=FOR_THE_MODEL)
@@ -1019,15 +1058,18 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         A day is one document, so this removes everything written for it.
 
         Args:
-            date: The day, `YYYY-MM-DD`.
+            date: The day, `YYYY-MM-DD`. Empty means today.
 
         Returns:
             `kind`, `key` and `removed` — always `true`, because a day with no
             entry is refused rather than answered.
         """
-        await remove_of(ctx, DIARY, date, f"there is no diary entry for {date}.")
-        logger.info("diary_remove date=%s", date)
-        return {"kind": DIARY, "key": date, "removed": True}
+        # The write's key rule again, so a day written in any accepted spelling
+        # is the day this removes.
+        day = _diary_key(date)
+        await remove_of(ctx, DIARY, day, f"there is no diary entry for {day}.")
+        logger.info("diary_remove date=%s", day)
+        return {"kind": DIARY, "key": day, "removed": True}
 
     @mcp.tool(name="diary_list", meta=FOR_THE_MODEL)
     async def diary_list(
@@ -1187,7 +1229,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.bytes,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="file_grep", meta=FOR_THE_MODEL)
@@ -1246,7 +1288,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.bytes,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="file_list", meta=FOR_THE_MODEL)
@@ -1482,7 +1524,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.bytes,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="dump_grep", meta=FOR_THE_MODEL)
@@ -1544,7 +1586,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.bytes,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="dump_save")
@@ -1649,7 +1691,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """
         opened = await cabinet(ctx)
         if url.startswith(("http://", "https://")):
-            key = f"pictures/url-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]}"
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+            key = f"{PICTURES_DIR}/url-{digest}"
             mime = mimetypes.guess_type(url)[0] or ""
             row = await opened.write(
                 IMAGE,
@@ -1679,14 +1722,21 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             "application/octet-stream"
         )
         relative = (
-            f"pictures/{hashlib.sha256(data).hexdigest()[:16]}"
+            f"{PICTURES_DIR}/{hashlib.sha256(data).hexdigest()[:16]}"
             f"{mimetypes.guess_extension(mime) or '.img'}"
         )
         target = opened.root / relative
+        # **The bytes are content-addressed, so a target already there holds
+        # exactly these bytes** — an existing file is success, not a collision,
+        # and this call takes no ownership of it for the take-back below.
         created = not target.exists()
         if created:
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
+            # **A temp name per write, not per process.**  Two saves of one new
+            # image overlap normally, and a shared `<name>.<pid>.part` let the
+            # two writers interleave, or one's `os.replace` find the other had
+            # already moved it — a failed save for a picture that was stored.
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
             try:
                 with temporary.open("wb") as handle:
                     handle.write(data)
@@ -1705,10 +1755,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 size=len(data),
             )
         except Exception:
-            # **Only a file this call created is taken back.**  A content
-            # address can already hold the bytes of an earlier save, and that
-            # row (and every marker pointing at it) still needs them.
-            if created:
+            # **Only a file this call created is taken back, and only while no
+            # row needs it.**  A content address can already hold the bytes of an
+            # earlier save, and a concurrent save of this same picture may have
+            # committed its row in the window — that row (and every marker
+            # pointing at it) still needs the bytes, so a file a row references
+            # is left in place.
+            if created and opened.get(IMAGE, relative) is None:
                 discard_file(target)
             raise
         assert row is not None, "an upsert always writes"
@@ -2659,7 +2712,9 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        # `load_cached` rather than the boot config: a reader's budget follows
+        # an edit to `tool_result.bytes` on the next call, not on restart.
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 

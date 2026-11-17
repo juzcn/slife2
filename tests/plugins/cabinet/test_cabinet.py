@@ -1035,6 +1035,44 @@ async def test_removing_an_image_takes_its_bytes_with_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_image_save_keeps_bytes_a_row_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A take-back must not orphan a concurrent save's row.**
+
+    The bytes are content-addressed, so two saves of one picture share one file.
+    A save whose row-write fails takes the file back only while no row needs it:
+    a concurrent save that committed its row in the window still points at the
+    bytes, and discarding them would leave that row (and every marker naming it)
+    over a file that is gone.
+    """
+    real_write = CabinetStore.write
+
+    async def commit_then_fail(self, kind, key, **kwargs):
+        if kind == IMAGE:
+            # A concurrent save commits the row for this same content address…
+            await real_write(self, kind, key, **kwargs)
+            # …and then this call's own row-write fails.
+            raise RuntimeError("the row write failed")
+        return await real_write(self, kind, key, **kwargs)
+
+    monkeypatch.setattr(CabinetStore, "write", commit_then_fail)
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError):
+            await ask(client, "image_save", url="data:image/png;base64,AAAA")
+
+    opened = store_of(index_path("jack"))
+    with opened._connect() as connection:
+        rows = connection.execute(
+            "SELECT file_path FROM cabinet_doc WHERE kind = ?", (IMAGE,)
+        ).fetchall()
+    assert len(rows) == 1, "the concurrent save's row is there"
+    assert (opened.root / str(rows[0]["file_path"])).is_file(), (
+        "a row references the bytes, so they were not taken back"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_file_with_no_text_is_read_as_an_escaped_rendering() -> None:
     """**A binary file is not refused; it is shown, bounded, for what it is.**
 
@@ -1833,6 +1871,27 @@ async def test_a_reserved_category_cannot_be_reached_by_another_spelling() -> No
             assert "cannot be filed under it" in answer["failed"][0]["error"], category
 
 
+def test_the_reserved_categories_are_the_cabinets_own_directories() -> None:
+    """**The guard is derived from the one place that owns the directories.**
+
+    The mirror dirs are `SPECS`' and the image kind's bytes dir is `PICTURES_DIR`;
+    a hand-written set would silently stop guarding a directory the moment a
+    mirror was renamed.  The set's meaning is unchanged — the four mirrors and
+    `pictures` — but it now moves with the facts it guards.
+    """
+    assert cabinet_server.RESERVED_CATEGORIES == frozenset(
+        {spec.mirror for spec in cabinet_store.SPECS.values() if spec.mirror}
+        | {cabinet_store.PICTURES_DIR}
+    )
+    assert cabinet_server.RESERVED_CATEGORIES == {
+        "notes",
+        "diary",
+        "reports",
+        "dumps",
+        "pictures",
+    }
+
+
 # --- the rules the store keeps when nobody is watching ------------------------
 
 
@@ -1993,6 +2052,45 @@ async def test_a_mirror_the_filesystem_refuses_keeps_the_update_whole(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_unlink_refuses_the_remove_and_keeps_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The file goes inside the remove's transaction, before the commit.**
+
+    The stem is a function of the key, so a concurrent re-create of the same key
+    lands on the same file — unlinking after the commit deleted the live
+    successor's file.  Inside the transaction, a filesystem that refuses the
+    unlink (an editor holding the file open) rolls the whole remove back: the
+    row, its keyword text and its file are all still there, and the remove can be
+    retried once the file is let go.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    written = await store.write(NOTE, "held", body="body", embedder=embedder)
+    assert written is not None
+    mirror = bag() / str(written["mirror"])
+    assert mirror.is_file()
+
+    def refused(path: Path) -> None:
+        raise PermissionError(path)
+
+    monkeypatch.setattr(cabinet_store, "_unlink_document", refused)
+    with pytest.raises(PermissionError):
+        await store.remove(NOTE, "held")
+
+    kept = store.get(NOTE, "held")
+    assert kept is not None, "the row went back with the refused unlink"
+    assert mirror.is_file(), "the file was never unlinked"
+    assert store.body_of(kept) == "body"
+    with store._connect() as connection:
+        indexed = connection.execute(
+            "SELECT COUNT(*) AS n FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
+        ).fetchone()["n"]
+    assert int(indexed) == 1, "the keyword text rolled back too"
+
+
+@pytest.mark.asyncio
 async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
     """**A saved file has no vector.**  A summary is written and indexed as
     words, and `annotate` does not ask the embedding model at all.
@@ -2019,6 +2117,61 @@ async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
             "SELECT search FROM cabinet_fts WHERE rowid = ?", (int(after["id"]),)
         ).fetchone()["search"]
     assert "needleword" in indexed, "the summary is keyword text"
+
+
+@pytest.mark.asyncio
+async def test_annotate_reads_and_writes_under_one_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The summary is composed and written in one transaction.**
+
+    The row and its body were read on one connection and the summary written on
+    another, so a concurrent update or remove could land between them — the
+    older body's keyword text overwriting the newer, or an orphan index entry
+    over a removed row.  The read now happens inside the write transaction:
+    while annotate is between its read and its write, a second writer cannot
+    take the lock.
+    """
+    store = store_of(index_path("jack"))
+    await store.sync(StubEmbedder())
+    await store.write(NOTE, "locked", body="first", embedder=StubEmbedder())
+
+    read_done = threading.Event()
+    resume = threading.Event()
+    real = cabinet_store.CabinetStore._with_body
+
+    def paused(self, row):
+        found = real(self, row)
+        read_done.set()
+        resume.wait(timeout=5.0)  # timeouts: a hang guard, not a budget
+        return found
+
+    monkeypatch.setattr(cabinet_store.CabinetStore, "_with_body", paused)
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result["row"] = asyncio.run(store.annotate(NOTE, "locked", summary="about it"))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert read_done.wait(timeout=5.0)  # timeouts: a hang guard, not a budget
+        # annotate is between its read and its write, holding the write lock: a
+        # second writer cannot begin.  (The two-connection code held no lock
+        # here, and this BEGIN IMMEDIATE succeeded.)
+        other = connect_to(store.path)
+        try:
+            other.execute("PRAGMA busy_timeout=50")
+            with pytest.raises(sqlite3.OperationalError):
+                other.execute("BEGIN IMMEDIATE")
+        finally:
+            other.close()
+    finally:
+        resume.set()
+        thread.join(timeout=5.0)  # timeouts: a hang guard, not a budget
+
+    assert result["row"] is not None
+    assert result["row"]["summary"] == "about it"
 
 
 @pytest.mark.asyncio
@@ -2230,6 +2383,34 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     assert window["chars"] == len(body)
     assert window["path"] == "agents/jack/cabinet/dumps/call_big.md"
     assert window["next"] == len(shown) + 1, "the next window starts where this stopped"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_edit_reaches_the_next_dump_read() -> None:
+    """**The reader's budget is read per call, not captured at boot.**
+
+    The harness reads `tool_result.bytes` live, and the reader's cap and that
+    budget are one number.  A cabinet that captured the boot snapshot would
+    diverge from it after an operator edit until a restart — the reader handing
+    back more (or less) than the budget.  The source seam is what makes the
+    reader follow the file on the next call.
+    """
+    await save_dump("call_live", dump_body())
+    live = replace(load(), tool_result=ToolResultSettings(bytes=2_048))
+
+    def source() -> Any:
+        return live
+
+    async with Client(
+        build_server(load(), embedder=StubEmbedder(), source=source)
+    ) as client:
+        tight = await ask(client, "dump_read", call="call_live")
+        # An operator raises the budget; the next read follows without a restart.
+        live = replace(live, tool_result=ToolResultSettings(bytes=8_192))
+        wider = await ask(client, "dump_read", call="call_live")
+
+    assert text_size(tight) <= 2_048
+    assert 2_048 < text_size(wider) <= 8_192
 
 
 @pytest.mark.asyncio
@@ -2800,3 +2981,30 @@ def test_every_spelling_of_a_day_is_one_diary_key() -> None:
     assert cabinet_server._diary_key("20260105") == "2026-01-05"
     assert cabinet_server._diary_key("2026-W02-1") == "2026-01-05"
     assert cabinet_server._diary_key("2026-01-05") == "2026-01-05"
+
+
+@pytest.mark.asyncio
+async def test_a_diary_day_is_read_and_removed_in_any_accepted_spelling() -> None:
+    """**The read and the remove use the write's key rule.**
+
+    A day written as `20260105` is stored under `2026-01-05`; reading or removing
+    it in another accepted spelling of that same day must find it, not refuse a
+    key the store never held.  An invalid date is refused the same way the write
+    refuses it.
+    """
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "diary_write", content="the day", date="20260105")
+        assert wrote["key"] == "2026-01-05"
+        # Read it back in another accepted spelling of the same day.
+        read = await payload(client, "diary_read", date="2026-W02-1")
+        assert read["key"] == "2026-01-05"
+        assert read["text"] == "the day"
+        # Remove it in yet another spelling, then it is gone.
+        removed = await payload(client, "diary_remove", date="20260105")
+        assert removed["key"] == "2026-01-05"
+        assert removed["removed"] is True
+        with pytest.raises(ToolError, match="no diary entry"):
+            await ask(client, "diary_read", date="2026-01-05")
+        # An invalid date is refused, consistent with the write.
+        with pytest.raises(ToolError, match="is not a date"):
+            await ask(client, "diary_read", date="not-a-date")

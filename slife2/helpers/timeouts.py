@@ -314,8 +314,8 @@ class Deliver:
     keepalive: float = 25.0
     #: The gap allowed between two frames of one task reply.  The profile's
     #: default is 30 s; the responder's keepalive is 25 s, so a live task still
-    #: answers inside this window.  Past it the requester asks ``GetTask``
-    #: rather than re-publishing the request.
+    #: answers inside this window (`validate` keeps it > ``keepalive``).  Past
+    #: it the requester asks ``GetTask`` rather than re-publishing the request.
     stream_idle: float = 30.0
     #: One probe's whole task budget: a headless window may run the task for as
     #: long as its turns take, and the probe waits for its `task_response`.
@@ -401,8 +401,8 @@ class Pacing:
     #: How long an agent may stay `online` after its window's `join` ended.  A
     #: join ends for two reasons — the process is exiting, or the stream dropped
     #: and the window retries it — and only the first is a departure.  Longer
-    #: than `reconnect`, because the retry also has to reconnect and re-join
-    #: before it holds again.
+    #: than `reconnect` (`validate`), because the retry also has to reconnect
+    #: and re-join before it holds again.
     mesh_departure: float = 5.0
     #: How long a terminal inbound task is kept for retry dedup, and how long
     #: an interrupted one is kept waiting for a continuation.  The profile's
@@ -544,6 +544,21 @@ def validate(ts: Timeouts) -> list[str]:
         errs.append("invariant: transport.media_request <= transport.media_deadline")
     if ts.pacing.typing_max_lifetime < ts.pacing.typing_refresh:
         errs.append("invariant: pacing.typing_max_lifetime >= pacing.typing_refresh")
+    if ts.deliver.stream_idle <= ts.deliver.keepalive:
+        # A live task answers with a keepalive frame; an idle window that
+        # closes before one is due reads a working responder as a stalled
+        # stream, and goes asking GetTask for a task that is fine.
+        errs.append(
+            "invariant: deliver.stream_idle > deliver.keepalive (a live "
+            "task's keepalive must land inside the stream's idle window)"
+        )
+    if ts.pacing.mesh_departure <= ts.pacing.reconnect:
+        # The retry has to reconnect and re-join inside the departure window,
+        # or a window healing its own dropped stream is announced as gone.
+        errs.append(
+            "invariant: pacing.mesh_departure > pacing.reconnect (a retry "
+            "must hold its join again before the departure is believed)"
+        )
     return errs
 
 

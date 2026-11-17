@@ -2052,21 +2052,22 @@ def test_a_remote_mesh_with_no_broker_meets_where_the_subagent_network_does(
 
 
 def test_a_subagent_network_is_one_mesh_per_agent(tmp_path, monkeypatch) -> None:
-    """**A mesh is `{org}/{unit}`, and on this side that pair is the agent's.**
+    """**A mesh is `{org}/{unit}`, and on this side the unit is the agent's.**
 
-    The unit is the agent's own name and the org is this network's word
-    (`SUBAGENT_ORG`), so an agent and its subagents are one mesh and two agents
-    are two — which is what the file cannot be trusted to say: a unit that was
-    anything but the agent's name would put two agents' subagents in one MQTT
-    identity, and an org left at the remote network's would put the two networks
-    in one mesh.
+    The unit is the agent's own name — which is what the file cannot be trusted
+    to say: a unit that was anything but the agent's name would put two agents'
+    subagents in one MQTT identity.  The org is this network's word
+    (`SUBAGENT_ORG` by default) and an `org:` the file writes overrides it to
+    group meshes (SDD §4.5.5), so the namespace reads the org the settings hold
+    rather than a constant that ignores the override.
     """
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
     config = load(write(tmp_path, A_MESH_AND_LOCAL))
 
     local = net_settings(config, LOCAL)
-    assert LOCAL.namespace(local, "jack") == ("subagent", "jack")
-    assert LOCAL.namespace(local, "jill") == ("subagent", "jill")
+    # The fixture writes `org: a-local-org`, and the namespace honours it.
+    assert LOCAL.namespace(local, "jack") == ("a-local-org", "jack")
+    assert LOCAL.namespace(local, "jill") == ("a-local-org", "jill")
     # The org may be overridden to group meshes; the unit is the agent's, so what
     # an operator wrote there is refused rather than ignored.
     assert local.org == "a-local-org"
@@ -2202,3 +2203,97 @@ def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -
 
     assert log_url(settings) == "mqtt://[::1]:2883"
     assert endpoint_key(log_url(settings))
+
+
+def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None:
+    """**A key nobody reads is a switch nobody throws** (SDD §11.1).
+
+    The hand-written sections refused unknown keys in some readers and not
+    others; a misspelt `embeddings.active` silently selected the first provider
+    and changed the index's vector identity with nothing said.  Every section
+    now refuses the key it does not take, naming the ones it does.
+    """
+    from slife2.libs.host.config import ConfigError, load
+
+    base = (
+        "providers:\n"
+        "  local:\n"
+        "    api: openai-completions\n"
+        "    base_url: https://example.test/v1\n"
+        "    models: [{model: big}]\n"
+        "embeddings:\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://127.0.0.1:17347/v1\n"
+        "      model: big-emb\n"
+    )
+    cases = {
+        "tool_load:\n  threshhold: 5\n": "threshold",
+        "tool_result:\n  bytse: 32768\n": "bytes",
+        "servers:\n  agent:\n    prot: 24000\n": "port",
+        "file-tunnel:\n  actve: ngrok\n": "active",
+    }
+    for extra, known in cases.items():
+        with pytest.raises(ConfigError) as refused:
+            load(write(tmp_path, base + extra))
+        assert known in str(refused.value), (extra, str(refused.value))
+    # The embeddings typo goes *into* the section the file already has — a
+    # second `embeddings:` block would be a duplicate key, a different refusal.
+    with pytest.raises(ConfigError) as refused:
+        load(
+            write(
+                tmp_path,
+                base.replace("embeddings:\n", "embeddings:\n  active: local\n"),
+            )
+        )
+    assert "active_model" in str(refused.value)
+
+
+def test_a_command_or_url_that_is_not_a_string_is_refused_not_coerced() -> None:
+    """`str(["npx", "foo"])` is a program name nobody meant.
+
+    A malformed `command:`/`url:` used to be `str()`-coerced into a row that
+    loaded cleanly and failed at spawn in another process.  The canonical
+    objects' `str` fields refuse a non-string; the hand-written readers do too.
+    """
+    from slife2.libs.host.tool_config import load_cli, load_mcp
+
+    with pytest.raises(ValueError, match="command"):
+        load_mcp({"command": ["npx", "foo"]}, where="mcp.x")
+    with pytest.raises(ValueError, match="url"):
+        load_mcp({"url": 8080}, where="mcp.x")
+    with pytest.raises(ValueError, match="command"):
+        load_cli({"command": False}, where="cli.x")
+    # A scalar number in an args list is text the command line takes; a
+    # container is a mistake (`_string_list`'s rule).
+    from slife2.libs.host.config import _string_list
+
+    assert _string_list([8080, "x"], "args") == ("8080", "x")
+    with pytest.raises(Exception, match="list of strings"):
+        _string_list([{"port": 8080}], "args")
+
+
+def test_a_credential_reference_is_one_rule_across_get_and_set() -> None:
+    """`to_reference` and `show_api_key` agree on what a reference is.
+
+    A malformed `${…}` the chain could never resolve is a literal, not a
+    reference: `set` refuses it, and `get` hides it (so `set(get())` keeps it
+    rather than accusing the model of writing a secret).  A well-formed one
+    passes both; a bare name is wrapped.
+    """
+    from slife2.libs.host.model_config import (
+        API_KEY_REFUSAL,
+        show_api_key,
+        to_reference,
+    )
+
+    assert to_reference("${OPENAI_API_KEY}") == "${OPENAI_API_KEY}"
+    assert to_reference("OPENAI_API_KEY") == "${OPENAI_API_KEY}"
+    assert to_reference("") == ""
+    assert show_api_key("${OPENAI_API_KEY}") == "${OPENAI_API_KEY}"
+    assert show_api_key("${MY-KEY}") == "", "a malformed reference is a literal"
+    assert show_api_key("sk-literal") == ""
+    for bad in ("${MY-KEY}", "${}", "sk-literal", "${FOO}bar"):
+        with pytest.raises(ValueError) as refused:
+            to_reference(bad)
+        assert str(refused.value) == API_KEY_REFUSAL

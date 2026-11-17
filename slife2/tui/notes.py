@@ -75,8 +75,9 @@ def kept(kept: int, recalled: int, *, failed: bool = False) -> str:
 
 
 #: The context server's rerank statuses and the sentence each one owes the
-#: person.  An unknown status is a newer server's word and falls back to the
-#: generic failure rather than showing a translation key.
+#: person.  The server's set is closed (`""` when the stage ran, then
+#: `unavailable`, `failed`, `empty`); a word outside it is a newer build's
+#: vocabulary, and the raw word is what the reader gets — see :func:`rerank`.
 _RERANK = {
     "unavailable": "rerank_unavailable",
     "failed": "rerank_failed",
@@ -85,8 +86,15 @@ _RERANK = {
 
 
 def rerank(status: str) -> str:
-    """A recall whose cross-encoder could not be used, and what that cost."""
-    return t(_RERANK.get(status, "rerank_failed"))
+    """A recall whose cross-encoder could not be used, and what that cost.
+
+    **An unknown status is drawn as its own word.**  It is a vocabulary this
+    build has no sentence for, and translating it into the generic failure
+    would report a verdict the event never carried — a newer server's word is
+    not a failure (SDD Appendix A, invariant 11: refuse, don't reinterpret).
+    """
+    key = _RERANK.get(status)
+    return t(key) if key is not None else status
 
 
 def interrupted() -> str:

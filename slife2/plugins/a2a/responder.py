@@ -71,6 +71,7 @@ from slife2.plugins.a2a.states import (
     REJECTED,
     TERMINAL_STATUSES,
     WORKING,
+    user_property,
 )
 
 log = logging.getLogger("slife2.plugins.a2a.responder")
@@ -129,15 +130,6 @@ class StreamCallback(Protocol):
     """Progress frames for the round's current correlation."""
 
     async def __call__(self, message: str, *, type: str = "text") -> None: ...
-
-
-def _user_property(props, key: str) -> str:
-    """One MQTT v5 User Property value, or ``""``."""
-    pairs = getattr(props, "UserProperty", None) or []
-    for name, value in pairs:
-        if name == key:
-            return str(value)
-    return ""
 
 
 def _raw_message(data: dict) -> tuple[str, str, str]:
@@ -431,7 +423,7 @@ class Responder(abc.ABC):
 
         # The profile's binding property is advisory for transport visibility;
         # when both the property and the JSON are present they must agree.
-        prop_context = _user_property(
+        prop_context = user_property(
             getattr(mqtt_msg, "properties", None), "a2a-context-id"
         )
         if prop_context and context_id and prop_context != context_id:
@@ -526,7 +518,17 @@ class Responder(abc.ABC):
 
         duplicate = bool(message_id and record.seen(message_id))
         if not message_id:
-            duplicate = text in record.seen_texts
+            # **No id: the task's LAST text is the retry's fingerprint**
+            # (SDD Appendix C).  Any of the remembered texts would swallow a
+            # continuation that repeats an older round's words as a retry of
+            # that round; only the last one is what a re-send of the current
+            # request repeats.  The comparison cannot tell a re-minted retry
+            # from a continuation that repeats the text — the distinction the
+            # register gives up — so the fallback says it fired: a debug line
+            # naming the peer and the task.
+            duplicate = bool(text) and text == record.last_text()
+            if duplicate:
+                log.debug("a2a_retry_by_text task=%s peer=%s", task_id, peer)
 
         if record.state in TERMINAL_STATUSES:
             if duplicate:
@@ -545,7 +547,13 @@ class Responder(abc.ABC):
             return
 
         if record.state == WORKING:
-            if duplicate or (message_id and text and text == record.last_text()):
+            # **A retry replays working; a new message is refused.**  The
+            # retry is the same `messageId` — this build's requester always
+            # stamps one and its ladder republishes the identical payload —
+            # or, for a peer that sends none, the last-text comparison above
+            # (SDD Appendix C).  A new id with repeated text is a new message,
+            # not a retry: the register's text fallback is the no-id case.
+            if duplicate:
                 await self._publish_status(
                     client,
                     response_topic,

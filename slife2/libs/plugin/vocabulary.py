@@ -267,3 +267,14 @@ FORGET = "forget"
 #: two readers: the terminal's restore and the TUI probe
 #: (`slife2.clients.tui`), which is why the name is here rather than in either.
 TRANSCRIPT = "transcript"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The turn log (`context`)
+# ═══════════════════════════════════════════════════════════════════════
+
+#: The annotation tool, named once: the context server registers it, and the
+#: agent server's in-flight scanner matches a model's call against it.  A
+#: rename on one side would silently stop the other applying annotations — the
+#: call still answers `captured`, and the save writes nothing.
+TURN_SUMMARIZE = "turn_summarize"

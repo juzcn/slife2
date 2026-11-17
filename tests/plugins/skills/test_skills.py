@@ -528,7 +528,12 @@ def test_a_config_value_that_resolved_to_nothing_is_not_a_value(root: Path) -> N
     assert unresolved("${K}")
     assert unresolved("${OTHER_NAME}")
     assert not unresolved("bce-v3/ALTAK-real")
+    # A reference *anywhere* in the value is a hole, not a value: the rule is
+    # `unresolved_reference`'s (search), not a whole-value match that would
+    # report `Bearer ${K}` present and hand the script the reference text.
+    assert unresolved("Bearer ${K}")
     assert "not configured" in readiness(scan()[0], {"K": "${K}"})
+    assert "not configured" in readiness(scan()[0], {"K": "Bearer ${K}"})
     assert "are met" in readiness(scan()[0], {"K": "a-real-key"})
 
 

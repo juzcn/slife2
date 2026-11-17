@@ -429,6 +429,36 @@ async def test_the_cap_drops_a_delivered_result_before_an_undelivered_one(
 
 
 @pytest.mark.asyncio
+async def test_the_cap_may_take_an_unread_result_and_the_refusal_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The memory bound wins eventually, and the sentence stays true.**  When
+    only undelivered finished tasks are left, the prune's second pass drops the
+    oldest — a result nobody read.  The refusal both tools answer with names
+    that third cause, rather than claiming the result was read already.
+    """
+
+    async def done() -> tuple[str, bool]:
+        return "the answer nobody read", True
+
+    monkeypatch.setattr(async_tasks, "MAX_ASYNC_TASKS", 1)
+
+    first = async_tasks.schedule(done(), call_id="c", tool="t")
+    for _ in range(50):
+        task = async_tasks._get_task(first)  # noqa: SLF001 - the registry under test
+        if task is not None and task.handle.done():
+            break
+        await asyncio.sleep(0)
+
+    async_tasks.schedule(done(), call_id="c", tool="t")  # over the cap
+    assert async_tasks._get_task(first) is None, "the unread result was dropped"
+
+    with pytest.raises(ToolFailed) as raised:
+        await check_async({"task_id": first})
+    assert "dropped to bound memory" in str(raised.value)
+
+
+@pytest.mark.asyncio
 async def test_a_background_result_is_windowed_before_it_is_handed_back() -> None:
     """**A result is bounded whichever road it took.**
 

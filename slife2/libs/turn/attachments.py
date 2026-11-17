@@ -44,11 +44,13 @@ a picture that is no longer in hand.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from collections.abc import Awaitable, Callable, MutableSequence, Sequence
 from pathlib import Path
 from typing import Any
+
+from slife2.helpers.threads import off_loop
+from slife2.libs.harness.markers import wrap
 
 logger = logging.getLogger(__name__)
 
@@ -217,8 +219,13 @@ async def resolve_sources(
 
     `lookup` is `None` for a caller with no cabinet: every failed source then
     keeps the encoder's own sentence, exactly as `resolve` answers.
+
+    **The split runs off the loop.**  It reads files — up to `MAX_BYTES` each —
+    and base64-encodes them, and this coroutine is awaited on the one loop every
+    conversation of a server shares: on it, a batch of screenshots stalls turns
+    that are attaching nothing (`slife2.helpers.threads` states the rule).
     """
-    pairs, keys = split(sources, base=base)
+    pairs, keys = await off_loop(split, sources, base=base)
     if not keys or lookup is None:
         return pairs, [refusal for _source, refusal in keys]
     more, refusals = await lookup(keys)
@@ -332,7 +339,6 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
 #: for a URL the provider fetches — and the fields a reader acts on, nothing
 #: else.  The image note is what a picture that was **not** kept leaves.
 IMAGE_PREFIX = "[Image:"
-IMAGE_SUFFIX = "]"
 
 
 def image_reference(
@@ -355,7 +361,7 @@ def image_reference(
         payload["mime"] = mime
     if size:
         payload["size"] = int(size)
-    return f"{IMAGE_PREFIX}{json.dumps(payload, ensure_ascii=False)}{IMAGE_SUFFIX}"
+    return wrap(IMAGE_PREFIX, payload)
 
 
 def image_note(part: dict[str, Any]) -> str:
@@ -386,6 +392,47 @@ def image_note(part: dict[str, Any]) -> str:
         f"[image not stored: {media_type}{size} — the source is in this turn, "
         f"and attaching it again sends it]"
     )
+
+
+#: The refusals `attach_image` answers with, written once for both servers that
+#: serve it — the agent's and the agent task's.  Each is model-facing text twice
+#: over, the same argument `image_note` makes: two spellings would be two claims
+#: about one call, and the model has no way to tell which of them is the lie.
+#: The batch rule is the module's; these are the half that hands it to the model.
+NO_SOURCE = (
+    "this call named no source; pass the paths, URLs or `data:` "
+    "URIs of the images to attach."
+)
+
+#: What a call gets when the live list holds no user message to carry the
+#: picture — a fault in the caller rather than something to report to a person
+#: (`inject` says why it answers a boolean).
+NO_MESSAGE = "there is no message here to attach an image to."
+
+
+def cannot_read_images(model: str) -> str:
+    """The refusal a non-vision model's call gets, naming the model and the fix.
+
+    Encoding is refused rather than letting a provider drop the images: the
+    refusal is the tool result the model reads, so it can tell the person —
+    rather than the harness writing an assistant message on the model's behalf.
+    """
+    return (
+        f"{model} cannot read images, so nothing was attached — "
+        f"move to a model whose config lists `image` under `input`."
+    )
+
+
+def cabinet_unreachable(refusal: str, exc: Exception) -> str:
+    """One source's refusal when the cabinet could not be asked about it.
+
+    A missing path is not a cabinet failure: the lookup is only how a string
+    that failed the encoder is checked against the cabinet's keys, so an
+    unreachable cabinet leaves each such source with the encoder's own sentence
+    — plus why the second check could not be made, because a key that never got
+    its turn is a different fact from a path that is genuinely absent.
+    """
+    return f"{refusal} (the cabinet could not be reached: {exc})"
 
 
 #: What a *person* is told when `drop` has just taken their picture away, as

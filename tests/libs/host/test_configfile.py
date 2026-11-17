@@ -830,3 +830,42 @@ def test_a_mode_that_could_not_be_kept_is_said_rather_than_swallowed(
 
     assert "the file's mode was not kept" in caplog.text
     assert load(path).mcp["new"].command == "x", "and the write still happened"
+
+
+def test_a_removal_keeps_the_survivors_inline_comment(tmp_path) -> None:
+    """**The inline comment on an entry's own last line is its own.**
+
+    ruamel merges that comment and the block introducing the *next* entry into
+    one trailing token (`command: a  # keep me` then the next entry's intro), so
+    a removal that overwrote the slot wholesale deleted the survivor's inline
+    comment along with the doomed entry's introduction — even when there was no
+    introduction to move at all.  The head stays; only the block remainder is
+    replaced.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "mcp:\n"
+        "  first:\n"
+        "    command: a  # keep me\n"
+        "  # Describes second, which is going.\n"
+        "  second:\n"
+        "    command: b\n"
+        "  # Describes third, which stays.\n"
+        "  third:\n"
+        "    command: c\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "second", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "# keep me" in after, "the survivor's inline comment is its own"
+    assert "Describes second" not in after, "the doomed introduction goes"
+    assert "Describes third" in after
+    assert after.index("Describes third") < after.index("third:")
+
+    # The last entry goes: there is no block to move, and the entry before it
+    # still keeps its inline comment (nothing to clear but the doomed intro).
+    assert remove("mcp", "third", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "Describes third" not in after, "the doomed introduction goes"
+    assert "# keep me" in after

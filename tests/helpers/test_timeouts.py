@@ -53,3 +53,37 @@ def test_an_unusable_policy_is_a_validation_error() -> None:
         assert any("pacing.wechat_retry" in e for e in errors), (
             "a bad retry policy passed validation"
         )
+
+
+def test_the_stream_idle_window_outlasts_the_responders_keepalive() -> None:
+    """The relation the value's comment declares, asserted (SDD §12.4).
+
+    A live task answers with a keepalive frame; an idle window that closes
+    before one is due reads a working responder as a stalled stream and goes
+    asking GetTask for a task that is fine.  Equal is already the race, so the
+    check is strict.
+    """
+    ts = Timeouts()
+    ts.deliver.stream_idle = ts.deliver.keepalive
+    assert any("deliver.stream_idle > deliver.keepalive" in e for e in validate(ts)), (
+        "an idle window that closes on the keepalive's own deadline passed"
+    )
+    ts.deliver.stream_idle = ts.deliver.keepalive - 1
+    assert any("deliver.stream_idle" in e for e in validate(ts))
+    ts.deliver.stream_idle = ts.deliver.keepalive + 1
+    assert not any("deliver.stream_idle" in e for e in validate(ts))
+
+
+def test_the_departure_window_outlasts_the_retry_pause() -> None:
+    """A window healing its own dropped stream must re-join before the mesh
+    believes it gone — the relation `mesh_departure`'s comment declares.
+    """
+    ts = Timeouts()
+    ts.pacing.mesh_departure = ts.pacing.reconnect
+    assert any("pacing.mesh_departure > pacing.reconnect" in e for e in validate(ts)), (
+        "a departure window the retry cannot beat passed"
+    )
+    ts.pacing.mesh_departure = ts.pacing.reconnect - 1
+    assert any("pacing.mesh_departure" in e for e in validate(ts))
+    ts.pacing.mesh_departure = ts.pacing.reconnect + 1
+    assert not any("pacing.mesh_departure" in e for e in validate(ts))

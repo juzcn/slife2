@@ -215,11 +215,6 @@ def checkout_root(directory: Path | None = None) -> Path | None:
     return None
 
 
-def in_checkout(directory: Path | None = None) -> bool:
-    """Whether this is a source checkout of slife2 rather than an installation."""
-    return checkout_root(directory) is not None
-
-
 def data_dir() -> Path:
     """The one directory slife2 keeps its files in.
 
@@ -345,7 +340,7 @@ def home() -> Path:
     return override if override is not None else data_dir()
 
 
-def local_path(entry: str) -> Path:
+def local_path(entry: str, base: Path | None = None) -> Path:
     """One path a caller wrote, with a relative one resolved in its home.
 
     **A relative path is the model's**, and its working directory is the data
@@ -358,26 +353,33 @@ def local_path(entry: str) -> Path:
     `expanduser` is part of the same rule: `~` is the person's home directory,
     and the process reading this is not the person.
 
-    **A Windows drive-relative path is the home's or it is refused.**  `C:foo`
+    **A Windows drive-relative path is the base's or it is refused.**  `C:foo`
     is not absolute — it means "foo under the current directory on C:" — and
     the current directory on a drive is a process-global fact this daemon must
-    not lend to a caller.  When the named drive is the home's, joining resolves
-    it under the home, which is the caller's working directory; when it is
+    not lend to a caller.  When the named drive is the base's, joining resolves
+    it under the base, which is the caller's working directory; when it is
     another drive there is no honest answer, and it is refused rather than left
     to resolve against the daemon's own directory (the failure this function
     exists to prevent).
 
-    This is the one spelling of that rule.  The cabinet and the file tunnel both
-    take a path from a model, and two copies would be two answers to which file
-    a caller named (`slife2.plugins.cabinet.server`, `slife2.plugins.file_tunnel.server`).
+    **The base is the working directory a caller's paths are relative to**, and
+    the home is the default.  A tool whose conversation works somewhere else —
+    the media tools resolve against `work_dir(agent, subagent)` — names that
+    directory here, so the rule stays one spelling rather than a copy per base.
+
+    This is the one spelling of that rule.  The cabinet, the file tunnel and the
+    media tools all take a path from a model, and two copies would be two answers
+    to which file a caller named (`slife2.plugins.cabinet.server`,
+    `slife2.plugins.file_tunnel.server`, `slife2.plugins.media.server`).
     """
     path = Path(entry).expanduser()
     if path.is_absolute():
         return path
-    root = home()
+    root = home() if base is None else base
     if path.drive and path.drive.casefold() != root.drive.casefold():
+        anchor = "this home" if base is None else f"the working directory {root}"
         raise ValueError(
-            f"{entry!r} is relative to drive {path.drive}, and this home is on "
+            f"{entry!r} is relative to drive {path.drive}, and {anchor} is on "
             f"{root.drive or 'another drive'} — write an absolute path"
         )
     return root / path
@@ -821,17 +823,20 @@ def work_path(agent: str, subagent: str = "") -> Path:
     maker's, so its cabinet and media live under its own directory and are
     removed with it.  ``subagent=""`` is the maker's own conversation, which
     uses the agent's directory.
+
+    The layout is `agent_path`'s — one directory is one answer, and the work
+    name is what a caller asking about private files calls it by.
     """
-    if subagent:
-        return subagent_path(agent, subagent)
-    return agents_dir() / _agent_segment(agent)
+    return agent_path(agent, subagent)
 
 
 def work_dir(agent: str, subagent: str = "") -> Path:
-    """The directory a conversation's private work lives in, made if needed."""
-    path = work_path(agent, subagent)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """The directory a conversation's private work lives in, made if needed.
+
+    `agent_dir`'s answer under the work name (`work_path` says why the two
+    names are one directory).
+    """
+    return agent_dir(agent, subagent)
 
 
 def _agent_segment(agent: str) -> str:

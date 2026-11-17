@@ -351,6 +351,47 @@ async def test_an_approval_over_a_watch_screen_is_drawn_where_it_can_be_seen() -
     assert client.answers == [("call-1", True)]
 
 
+async def test_escape_on_a_watch_denies_the_approval_it_shows() -> None:
+    """Esc beside a question is the answer to it, on the watch screen too.
+
+    The screen's escape binding is priority and so is the row's, and the
+    priority pass runs app → screen → focused widget — so the key reaches the
+    screen's close action first.  That action denies the pending row instead
+    of closing over it: the watch stays up, the answer leaves, and the turn is
+    not the thing Esc stopped.  A second Esc, with nothing pending, closes the
+    screen.
+    """
+    watch = FakeWatchClient(())
+    app, client = make_app(asking(), watch=watch)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await open_a_watch(pilot, app, client)
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+
+        app._submit("do it", WINDOW_CHANNEL)
+        await wait_for(
+            pilot, lambda: app._approval is not None, "the approval never arrived"
+        )
+        assert list(app.screen.query(ApprovalPrompt))
+
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: app._approval is None, "the answer never left")
+        assert isinstance(app.screen, WatchScreen), (
+            "Esc closed the watch instead of denying the row"
+        )
+        assert app._interrupting is False, "the turn was not the thing Esc stopped"
+
+        # With nothing pending, the same key closes the screen.
+        await pilot.press("escape")
+        await wait_for(
+            pilot,
+            lambda: not isinstance(app.screen, WatchScreen),
+            "the watch stayed after the answer",
+        )
+
+    assert client.answers == [("call-1", False)]
+
+
 async def test_a_pending_approval_comes_back_when_the_watch_closes() -> None:
     """**The row is a view of the question, and a second screen is a second view.**
 

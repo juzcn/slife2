@@ -29,7 +29,6 @@ and this is a set of rows the servers can be asked again.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 import re
@@ -42,6 +41,8 @@ from typing import Any
 import sqlite_vec
 
 from slife2.helpers.clock import now
+from slife2.helpers.threads import off_loop
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -56,6 +57,7 @@ from slife2.libs.store.index import (
     chunks,
     clear_vectors,
     connect_to,
+    connection_to,
     embed_rows,
     filter_clause,
     fuse_shortlist,
@@ -439,6 +441,20 @@ def _name_taken(name: str, owner: str) -> ValueError:
     )
 
 
+def unknown_category(category: str) -> str:
+    """The refusal for a category that is not one the table knows.
+
+    **One sentence, because the two places that can discover it are the same
+    fact.**  `_plan` sees a merge naming a category the table cannot hold;
+    `tool_list` sees a browse filtering by one.  The known words are in the
+    refusal because they are the correction; the browse adds its own clause
+    about listing all of them, and each caller raises its own kind.
+    """
+    return f"{category!r} is not a tool category; known: " + ", ".join(
+        sorted(CATEGORIES)
+    )
+
+
 def _search_dict(
     row: sqlite3.Row,
     similarity: float | None = None,
@@ -591,16 +607,8 @@ class ToolStore:
 
     @contextlib.contextmanager
     def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, closed on the way out.
-
-        The same correction `slife2.libs.store.db.TurnStore._connect` carries, and
-        for the same reason: `with sqlite3.connect(...)` commits and *leaves the
-        connection open*, so the close this file's call sites assume was the
-        collector's to make — late, and on Windows late enough that the file
-        cannot be deleted in the meantime.  The catalogue's file is not deleted
-        by slife2 itself, so nothing here met the turns' version of that; the
-        lifetime is stated once for both stores so that "a connection per call"
-        means the same thing in both.
+        """One connection for this call — `connection_to`'s lifetime, the same
+        rule the turn store and the cabinet keep.
 
         **`write=True` queues this process's writers.**  The file has one
         writing *process* by design — the hub — but not one writing *coroutine*:
@@ -614,14 +622,9 @@ class ToolStore:
         *other* processes.
         """
         lock = self._write_lock if write else contextlib.nullcontext()
-        with lock:
-            connection = connect_to(self.path)
-            try:
-                with connection:
-                    self._ensure_file(connection)
-                    yield connection
-            finally:
-                connection.close()
+        with lock, connection_to(self.path) as connection:
+            self._ensure_file(connection)
+            yield connection
 
     # --- the file -------------------------------------------------------------
 
@@ -834,13 +837,13 @@ class ToolStore:
                 input, and the second is a naming problem the caller can fix —
                 so it fails this source's list rather than the whole catalogue.
         """
-        plan = await asyncio.to_thread(self._plan, source, category, rows)
+        plan = await off_loop(self._plan, source, category, rows)
         # Before anything is written: a vector needs a table, the table needs a
         # width, and only the embedder knows the width.  One read of `meta` once
         # it is there.
-        await asyncio.to_thread(self.ensure_index, embedder)
+        await off_loop(self.ensure_index, embedder)
         vectors = await embed_rows(plan["documents"], embedder, noun="tool")
-        applied = await asyncio.to_thread(self._apply, plan, vectors)
+        applied = await off_loop(self._apply, plan, vectors)
         # **A merge that changed nothing is a DEBUG fact.**  An INFO line per
         # unchanged source floods the log on a repeated start-up; the counts
         # stay on the INFO line when anything actually moved.
@@ -872,10 +875,7 @@ class ToolStore:
         known, so a refused merge leaves the catalogue exactly as it was.
         """
         if category not in CATEGORIES:
-            raise ValueError(
-                f"{category!r} is not a tool category; known: "
-                + ", ".join(sorted(CATEGORIES))
-            )
+            raise ValueError(unknown_category(category))
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         reconnected: list[str] = []
@@ -1778,12 +1778,12 @@ class ToolStore:
         # are counted and the page widened by them, bounded by the same ceiling
         # the unfiltered page uses.
         if clauses:
-            excluded = await asyncio.to_thread(self._excluded_chunks, clauses, values)
+            excluded = await off_loop(self._excluded_chunks, clauses, values)
             over += excluded
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
-            keyword_hits = await asyncio.to_thread(
+            keyword_hits = await off_loop(
                 self._keyword_hits, expression, over, clauses, values
             )
 
@@ -1793,12 +1793,10 @@ class ToolStore:
         # `fuse_shortlist` scores the shortlist through `_meaning_of`, which
         # opens a connection and computes cosines in Python — blocking work that
         # belongs off the hub's shared loop, like every other DB call here.
-        ordered, meaning, worded = await asyncio.to_thread(
+        ordered, meaning, worded = await off_loop(
             fuse_shortlist, lists, keyword_hits, queries, self._meaning_of
         )
-        rows = await asyncio.to_thread(
-            self._rows_in_order, ordered, clauses, values, limit
-        )
+        rows = await off_loop(self._rows_in_order, ordered, clauses, values, limit)
 
         # **Where the words are, for the rows they matched** — `schema` is the
         # one column of the five a row is indexed by that the line does not
@@ -1808,9 +1806,7 @@ class ToolStore:
         # a mark that cannot be checked, so the answer says which side it is on.
         page = [int(row["rowid"]) for row in rows]
         inline = (
-            await asyncio.to_thread(self._matched_in_line, expression, page)
-            if worded
-            else set()
+            await off_loop(self._matched_in_line, expression, page) if worded else set()
         )
         return {
             "results": [
@@ -1873,8 +1869,9 @@ class ToolStore:
         (`slife2.libs.plugin.family.page_of`), and the reason it is a convention:
         a caller that names no size must not get the smallest legal page.
         """
-        size = DEFAULT_TOOL_PAGE if limit <= 0 else page_limit(limit, MAX_TOOL_PAGE)
-        start = max(0, int(offset))
+        size, start = page_window(
+            limit, offset, unset=DEFAULT_TOOL_PAGE, cap=MAX_TOOL_PAGE
+        )
         clauses, values = _tool_filters(
             category=category,
             source_id=source_id,
@@ -2033,9 +2030,7 @@ class ToolStore:
             so="this search cannot say what a tool is about",
         )
         return vectors, [
-            await asyncio.to_thread(
-                self._nearest, sqlite_vec.serialize_float32(vector), k
-            )
+            await off_loop(self._nearest, sqlite_vec.serialize_float32(vector), k)
             for vector in vectors
         ]
 
@@ -2157,8 +2152,8 @@ class ToolStore:
         matches, nothing is missing, and this is one read of `meta` and one
         query that returns no rows.
         """
-        await asyncio.to_thread(self._sync_text_index)
-        await asyncio.to_thread(self.ensure_index, embedder)
+        await off_loop(self._sync_text_index)
+        await off_loop(self.ensure_index, embedder)
         # **A batch at a time, and the loop is what finishes the index.**  A
         # first start over a config with a published server in it is thousands
         # of tools, and one request carrying every one of them is the request
@@ -2175,11 +2170,11 @@ class ToolStore:
         # ends either with every tool placed or with the failure named.
         placed = 0
         while True:
-            missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
+            missing = await off_loop(self.tools_without_vectors, SYNC_BATCH)
             if not missing:
                 break
             vectors = await embed_rows(missing, embedder, noun="tool")
-            await asyncio.to_thread(self._place, vectors)
+            await off_loop(self._place, vectors)
             placed += len(vectors)
         return {
             "vectors": placed,

@@ -113,12 +113,12 @@ INSTRUCTIONS = (
 # read at call time so a test can patch it.  Each value was arrived at against
 # the live bridge, and nothing here changes the bridge.
 
-#: How long a message that has already been seen is read as the bridge
-#: re-serving it rather than as somebody typing the same thing twice.
-#: How many messages one person's burst may have in flight before this process
-#: stops handing them over.  A bound rather than a queue: `send_message` blocks
-#: until its turn is done, so these are turns, and sixteen of them is somebody
-#: flooding a conversation rather than talking to it.
+#: How many hand-overs one session may have in flight before this process
+#: stops handing messages over.  A bound rather than a queue: a hand-over is
+#: the window's `submit`, which returns when the words are written to its
+#: stream — not when the turn they become is done — so these are short-lived
+#: delivery calls, and sixteen at once is somebody flooding a conversation
+#: rather than talking to it.
 MAX_INFLIGHT = 16
 
 #: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
@@ -285,7 +285,8 @@ class Session:
         #: One typing keep-alive per conversation, so a second message from the
         #: same person does not start a second refresher.
         self.typing: dict[str, asyncio.Task[None]] = {}
-        #: Turns this session has handed to the agent and is waiting on.
+        #: Hand-overs this session has spawned and is waiting on — delivery
+        #: calls, not the turns they become (`MAX_INFLIGHT`).
         self.inflight: set[asyncio.Task[None]] = set()
         #: The last cursor written to the file, so it is written on change only.
         self.persisted: str = ""
@@ -573,7 +574,7 @@ class Wechat:
         self._spawn_in_home(root, self._resume(self.session(agent, _home_key(root))))
 
     async def close(self) -> None:
-        """Take down every loop, keep-alive and in-flight turn."""
+        """Take down every loop, keep-alive and in-flight hand-over."""
         cancelled: list[asyncio.Task[Any]] = []
         for session in self._sessions.values():
             cancelled.extend(
@@ -944,12 +945,13 @@ class Wechat:
         """Give one message to the agent as a turn of its own.
 
         **A task, not an await** — and that is the difference between polling
-        and not.  `send_message` returns when its turn is *finished*, and a turn
-        is a model thinking: awaiting it here would stop watching the login for
-        the whole of every reply, so a second message sent mid-turn would sit at
-        the bridge instead of being folded into the turn that is already
-        running.  The agent server serialises one key's turns itself, so
-        handing them all over at once is exactly what it expects.
+        and not.  A hand-over returns when the window has taken the words, not
+        when the turn they become is done — but it can wait seconds for a
+        window that is attaching (`hand_over`'s retry patience), and awaiting
+        it here would stop watching the login for that whole wait.  The window
+        folds a message into the turn already running at its next iteration
+        boundary, so handing them over as they arrive is exactly what it
+        expects.
         """
         if len(session.inflight) >= MAX_INFLIGHT:
             # Said rather than dropped quietly: this is somebody's message, and
@@ -1319,7 +1321,7 @@ class Wechat:
         token: str,
         base_url: str,
     ) -> None:
-        """The scan worked: adopt the token, save it, and start watching."""
+        """The scan worked: adopt the token, start watching, and save it."""
         owner = str(status.get("ilink_user_id") or "")
         await session.client.start(
             token,
@@ -1331,14 +1333,32 @@ class Wechat:
             session.client.last_contact = {"from_id": owner, "context_token": ""}
         session.client.clear_session_faults()
         saved = session.client.get_session_dict()
-        save_session(session.agent, saved)
         session.saved_at = float(saved["saved_at"])
         session.persisted = ""
         session.heard_from = False
         # The note a failed restore left is stale the moment a login works.
         session.restore_note = ""
         session.qr_state = "confirmed"
+        # **The loop starts whether or not the file lands.**  The token is
+        # already the client's, so a save that raised here used to leave a
+        # login nothing polls: `ready` short-circuits on `is_logged_in`, no
+        # later call starts the loop, and `status` answered `connected` with
+        # `polling` false and an empty error — a zombie nobody could see the
+        # cause of.  The file is the login's record for the *next* start, not
+        # a condition of this one; `_persist` writes it again on the next
+        # cursor move (SDD Appendix C).
         self.watch(session)
+        try:
+            save_session(session.agent, saved)
+        except OSError as exc:
+            logger.warning(
+                "wechat %s: the login could not be saved to %s: %s — it is "
+                "live in this process and the next cursor write saves it "
+                "again; a restart before the file lands needs a new scan",
+                session.agent,
+                session_path(session.agent),
+                exc,
+            )
         logger.info("wechat %s: logged in", session.agent)
 
     # ── The tools ────────────────────────────────────────────────────────

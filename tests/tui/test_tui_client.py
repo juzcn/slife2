@@ -436,6 +436,71 @@ async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_approval_answer_is_not_a_taken_answer(monkeypatch) -> None:
+    """The empty sentence is a real answer, so an unreadable shape is refused.
+
+    `""` means a waiting turn took the answer — a race, not an error.  A
+    payload without a readable `text` read as that empty would present a
+    different build's answer as "the turn moved on", and a non-dict raised
+    `AttributeError` on the way there, reported as a delivery failure.  Both
+    refuse instead, quoting the payload, and the connection stays: the server
+    answered, and it is the answer this build cannot read (SDD Appendix C,
+    invariant 11).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    for payload in ({"answered": True}, ["text"], None):
+
+        async def odd_shape(name, arguments, _payload=payload, **kwargs):
+            if name == "answer_approval":
+                return SimpleNamespace(data=_payload)
+            return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+        monkeypatch.setattr(transport, "call_tool", odd_shape)
+        with pytest.raises(ConnectionError) as raised:
+            await client.answer_approval("call-1", True)
+        assert "answer the approval" in str(raised.value)
+        assert repr(payload) in str(raised.value), (
+            "the answer is quoted, not summarised"
+        )
+        assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_the_approval_answer_keeps_the_servers_sentence(monkeypatch) -> None:
+    """Both outcomes are the server's own: the empty when a turn took it, the
+    sentence when nothing was waiting — read verbatim, not coerced."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    async def taken(name, arguments, **kwargs):
+        if name == "answer_approval":
+            return SimpleNamespace(data={"answered": True, "text": ""})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", taken)
+    assert await client.answer_approval("call-1", True) == ""
+
+    async def overtaken(name, arguments, **kwargs):
+        if name == "answer_approval":
+            return SimpleNamespace(
+                data={"answered": False, "text": "Nothing is waiting for an answer"}
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", overtaken)
+    assert (
+        await client.answer_approval("call-1", False)
+        == "Nothing is waiting for an answer"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     monkeypatch,
 ) -> None:

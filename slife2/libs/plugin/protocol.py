@@ -120,6 +120,7 @@ from slife2.libs.host.secrets import masked, masked_obj
 from slife2.libs.plugin.audience import (
     FOREIGN_HOME,
     ConversationId,
+    conversation_of,
     foreign_home,
     request_conversation,
     request_home,
@@ -131,6 +132,12 @@ from slife2.libs.plugin.audience import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The remedy every build-conflict refusal names, whichever side found it —
+#: the launcher's stale record on the port, or this module's probe of a server
+#: that answers with an earlier build.  One clause, because it is one command
+#: the operator runs, and two spellings would be two claims about the fix.
+DOWN_HINT = "stop it with `slife2 down` and start again"
 
 #: The tool a plugin serves when it holds **sources** of its own — the ones it
 #: connects to on the operator's behalf, and the ones that are not tools at all.
@@ -325,13 +332,16 @@ def agent_or_blank(ctx: Any) -> str:
 class TraceMiddleware(Middleware):
     """Name the conversation and turn a tool call serves, for every line it writes.
 
-    **The conversation is in the arguments.**  Every tool that has one takes
-    `agent`, and most take `subagent`; a call that names neither (`now`, a
-    catalogue read) is about the machine and keeps whatever trace its caller set
-    (`slife2.helpers.logcontext.tracing`).  The a2a send tools are the one place
-    `agent` is the *recipient* rather than the caller: their lines are about the
-    message to that agent, which is the question a reader of those lines is
-    asking.
+    **The conversation is in the arguments, or in `_meta`.**  A management tool
+    takes `agent` and most take `subagent`; a model-facing tool carries its
+    conversation in `_meta` instead (`conversation_reader`), so arguments are
+    read first and `_meta` answers when they name nobody.  A call that names
+    neither anywhere (`now`, a catalogue read) is about the machine and keeps
+    whatever trace its caller set (`slife2.helpers.logcontext.tracing`).  The
+    a2a send tools are the one place `agent` is the *recipient* rather than the
+    caller: their lines are about the message to that agent, which is the
+    question a reader of those lines is asking — and arguments-first keeps it
+    that way.
 
     **The turn is in `_meta`.**  One process serves every turn of every
     conversation, so a call cannot infer the turn from its connection, and it is
@@ -361,6 +371,10 @@ class TraceMiddleware(Middleware):
             agent = str(arguments.get("agent") or "")
             subagent = str(arguments.get("subagent") or "")
         meta = request_meta(getattr(context, "fastmcp_context", None))
+        if not agent:
+            named = conversation_of(meta)
+            if named is not None:
+                agent, subagent = named
         with logcontext.tracing(agent, subagent), logcontext.turning(turn_of(meta)):
             return await call_next(context)
 
@@ -734,7 +748,7 @@ async def open_server(
             if info is not None and info.name == name and getattr(info, "version", ""):
                 raise ConnectionError(
                     f"{name} is build {info.version}, not this build {__version__}; "
-                    f"stop it with `slife2 down` and start again"
+                    f"{DOWN_HINT}"
                 )
             names = sorted(tool.name for tool in await client.list_tools())
             raise ConnectionError(f"not {name} (tools: {names or 'none'})")

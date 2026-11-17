@@ -88,7 +88,6 @@ import difflib
 import json
 import logging
 import os
-import re
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -99,6 +98,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from slife2.helpers.fs import confined
+from slife2.libs.host.config import unresolved_reference
 from slife2.libs.host.paths import skills_dir
 
 logger = logging.getLogger(__name__)
@@ -122,18 +122,16 @@ _FENCE = "---"
 USE_TOOL = "skill_use"
 
 
-#: A value that is still a `${...}` reference after resolution — what
-#: `slife2.libs.host.config.resolve_secret` leaves behind when neither the environment nor
-#: the keyring had the name.  Deliberately not an error there: it fails where
-#: the value is used, with its own name intact.  This is that failure seen from
-#: the other side, and the reason a configured key and a configured *reference*
-#: are not the same thing.
-_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
-
-
 def unresolved(value: str) -> bool:
-    """Whether a value meant to be a secret is still a reference to one."""
-    return bool(_REFERENCE.fullmatch(value.strip()))
+    """Whether a value meant to be a secret is still a reference to one.
+
+    The rule is `unresolved_reference`'s: a reference *anywhere* in the value is
+    one the chain could not resolve, and `Bearer ${TOK}` with `TOK` unset is a
+    credential with a hole in it — not a present one.  A whole-value match here
+    would report the requirement met and hand the script the reference text as
+    the credential, the permissive copy that function exists to end.
+    """
+    return bool(unresolved_reference(value))
 
 
 class SkillHeaderError(ValueError):

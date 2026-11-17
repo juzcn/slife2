@@ -1000,3 +1000,21 @@ async def test_one_home_cannot_block_a_removal_with_another_homes_conversation(
         "big",
         "small",
     ], "the other home's file is not this call's to edit"
+
+
+@pytest.mark.asyncio
+async def test_a_reference_is_the_same_reference_however_it_is_spaced(
+    isolated_runtime,
+) -> None:
+    """Every model tool reads the reference `_model_ref` reads.
+
+    `local / small` used to normalize in `model_set` and fail in `model_switch`
+    (the parts were not stripped), so one spelling was two behaviors.  The
+    switch now splits and strips the same way, and writes the canonical ref.
+    """
+    async with Client(server_for(isolated_runtime)) as client:
+        answer = await ask(client, "model_switch", ref="local / small")
+        assert read_scalar("default", path=isolated_runtime / "slife2.yaml") == (
+            "local/small"
+        )
+        assert answer["previous"] == "local/big"
