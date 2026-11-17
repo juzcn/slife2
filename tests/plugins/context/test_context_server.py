@@ -572,6 +572,30 @@ async def test_search_takes_sentences_as_well_as_words() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_search_can_leave_the_context_out() -> None:
+    """**The live list is a choice, not the tool's rule.**
+
+    The default is the whole log: a turn the conversation is already running on
+    is still one the model may want to read or name.  `exclude_context` drops
+    just those — the rebuild's rule, asked for deliberately.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        ids = await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
+        TurnStore(agent_dir("jack") / "turns.db").set_context_turns([ids[0]])
+        whole = await client.call_tool(
+            "turn_search", {"sentences": ["trump"]}, meta=conversation_meta("jack")
+        )
+        outside = await client.call_tool(
+            "turn_search",
+            {"sentences": ["trump"], "exclude_context": True},
+            meta=conversation_meta("jack"),
+        )
+
+    assert {entry["turn_id"] for entry in whole.data["results"]} == set(ids)
+    assert [entry["turn_id"] for entry in outside.data["results"]] == [ids[1]]
+
+
+@pytest.mark.asyncio
 async def test_search_honours_the_same_time_window_as_the_browse() -> None:
     """`since`/`until` reach the ranking, not only the listing."""
 

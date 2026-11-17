@@ -610,6 +610,7 @@ def build_server(
         since: str | None = None,
         until: str | None = None,
         limit: int = 10,
+        exclude_context: bool = False,
     ) -> dict[str, Any]:
         """Search your own history by what a turn was about, or by what it did.
 
@@ -627,6 +628,9 @@ def build_server(
         words were not found; there is no exact-only mode, so a nonsense query
         can come back with the history's closest turns.
 
+        The whole log is searched by default, the turns the conversation is
+        already running on included; `exclude_context` leaves those out.
+
         Args:
             keywords: Words to look for — names, paths, an exact string. They
                 rank turns that carry them first, but they are not a filter:
@@ -641,6 +645,9 @@ def build_server(
             until: Upper bound on the same grammar. A date means the whole day.
                 Omit for no upper bound.
             limit: How many hits this page may hold.
+            exclude_context: Leave the turns the conversation is already
+                running on out of the answer. False by default: a turn in the
+                context is still one you may want to read or name.
 
         Returns:
             The one search answer: `results` — `turn_id`, `created_at`,
@@ -673,6 +680,11 @@ def build_server(
         query = " ".join(words)
         # The search runs on the caller's `keyword_weight`, the same vote the
         # rebuild's recall reads: one home, one weight between the legs.
+        # **The live list is the caller's choice, not the tool's rule.**  A turn
+        # in the context is still history the model may want to read or name,
+        # so it is included unless `exclude_context` asks otherwise; only the
+        # rebuild's recall treats "in hand" as "not missing" (`_recall_into`).
+        live = await off_loop(store.context_turns) if exclude_context else []
         ranked = (
             await store.recall(
                 query=query,
@@ -681,6 +693,7 @@ def build_server(
                 since=since,
                 until=until,
                 limit=limit,
+                exclude=live,
                 keyword_weight=current().context.keyword_weight,
             )
         )[: page_limit(limit)]
