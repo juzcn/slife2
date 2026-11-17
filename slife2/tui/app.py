@@ -75,6 +75,7 @@ from slife2.libs.turn.events import (
     ToolsCounted,
     TurnEvent,
     TurnFinished,
+    UsageReported,
 )
 from slife2.tui import notes
 from slife2.tui.client import (
@@ -161,10 +162,10 @@ def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
     """How large the conversation was, from the turns a window has just drawn.
 
     **The same quantity a live turn reports, and the only place it can come from
-    on a window that has run no turn.**  `_context_tokens` is set from
-    `TurnFinished`'s `last_usage`, so a window that has only restored keeps its
-    initial zero — a rebuilt conversation would show `0 (0.0%)` directly under a
-    note saying its turns had come back.
+    on a window that has run no turn.**  `_context_tokens` is set from the
+    stream's `UsageReported` (and settled by `TurnFinished`), so a window that
+    has only restored keeps its initial zero — a rebuilt conversation would show
+    `0 (0.0%)` directly under a note saying its turns had come back.
 
     `TurnRecord.context_tokens` is documented as exactly this question ("how
     large the conversation had become by the end of it — the number the *next*
@@ -1143,6 +1144,15 @@ class SlifeApp(App[None]):
             # pair the bar shows, both halves from the same ask
             # (`slife2.libs.turn.events.ToolsCounted`).
             self._tool_counts = ToolCounts(loaded=event.loaded, total=event.total)
+            self._refresh_status()
+            return
+        # A per-call report of the conversation's size.  **This is what makes
+        # the bar move during a turn**: a turn that calls tools makes several
+        # model calls, and waiting for `TurnFinished` showed the previous turn's
+        # figure until the whole turn was over.  `TurnFinished` reports the last
+        # call's size again, which is what repairs a report the stream dropped.
+        if isinstance(event, UsageReported):
+            self._context_tokens = event.last_usage.total_tokens
             self._refresh_status()
             return
         if isinstance(event, ToolApprovalRequested):

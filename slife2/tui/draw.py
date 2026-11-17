@@ -16,10 +16,10 @@ the same sense:
 * **`TurnFinished`** carries the authoritative answer and the turn's bill.  The
   window reconciles the first with what it streamed and puts the second in the
   status bar; a watched screen closes its turn with the same text and has no bar.
-* **`ToolsCounted`** is the model's list against the catalogue's size, which is
-  the same kind of fact: the window's status bar shows it, and a watched screen
-  has no bar to put it in.  Drawing it would put a line about the tool set in
-  somebody's transcript.
+* **`ToolsCounted`** is the model's list against the catalogue's size, and
+  **`UsageReported`** is how full the context is after one model call.  Both are
+  the window's status bar; a watched screen has no bar, and drawing either would
+  put a fact about the window's chrome in somebody's transcript.
 
 `False` is the whole of what says "this one is yours"; anything left unmatched
 is a vocabulary this build was not taught, and `assert_never` turns that into a
@@ -41,6 +41,7 @@ from slife2.libs.turn.events import (
     ToolsCounted,
     TurnEvent,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.tools import is_harness
 from slife2.tui import notes
@@ -102,7 +103,9 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
             elapsed_ms=elapsed,
         ):
             chat.add_tool_end(call_id, ok, preview_text, chars, elapsed)
-        case ToolApprovalRequested() | ToolsCounted() | TurnFinished():
+        case (
+            ToolApprovalRequested() | ToolsCounted() | UsageReported() | TurnFinished()
+        ):
             return False
         case _:
             assert_never(event)

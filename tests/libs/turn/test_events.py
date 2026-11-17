@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from slife2.libs.turn.events import ContextChosen, TurnFinished, decode
+from slife2.libs.turn.events import ContextChosen, TurnFinished, UsageReported, decode
 from slife2.libs.turn.messages import Usage
 
 pytestmark = pytest.mark.unit
@@ -53,6 +53,21 @@ def test_a_usage_breakdown_with_a_string_is_dropped() -> None:
     assert decode(json.dumps({"t": "done", "usage": {"prompt_tokens": "ten"}})) is None
     assert decode(json.dumps({"t": "done", "usage": "none"})) is None
     assert decode(json.dumps({"t": "done", "iterations": 3})) is None
+
+
+def test_a_usage_report_carries_one_calls_counts() -> None:
+    """The per-call figure the bar follows, with its own breakdown.
+
+    `last_usage` is what a `TurnFinished` carries as its `last`, so the two
+    spellings of one measurement have to read back identically.
+    """
+    usage = Usage(7, 3, cache_read=2, cache_creation=1)
+    line = json.dumps({"t": "usage", "last": usage.to_wire()})
+    assert decode(line) == UsageReported(last_usage=usage)
+
+    # A hole is not a zero: every count this build writes, a payload missing one
+    # was not written by this build (the rule `_usage_ok` keeps).
+    assert decode(json.dumps({"t": "usage", "last": {"prompt_tokens": 7}})) is None
 
 
 def test_a_line_with_a_hole_is_not_read_as_a_zero() -> None:

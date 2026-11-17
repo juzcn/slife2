@@ -32,6 +32,7 @@ from slife2.libs.turn.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall
 from slife2.libs.turn.messages import (
@@ -116,7 +117,12 @@ async def test_text_only_turn() -> None:
     assert result.text == "hello there"
     assert result.iterations == 1
     assert result.stop_reason == "stop"
-    assert observer.kinds() == ["TextDelta", "TextDelta", "TurnFinished"]
+    assert observer.kinds() == [
+        "TextDelta",
+        "TextDelta",
+        "UsageReported",
+        "TurnFinished",
+    ]
     assert [m.role for m in messages] == ["user", "assistant"]
 
 
@@ -209,8 +215,10 @@ async def test_tool_call_runs_and_feeds_back() -> None:
     # the provider's business and asserting on it would make this test break
     # for a reason that is not a regression.
     assert [k for k in observer.kinds() if k != "TextDelta"] == [
+        "UsageReported",
         "ToolCallStarted",
         "ToolCallFinished",
+        "UsageReported",
         "TurnFinished",
     ]
 
@@ -842,6 +850,40 @@ async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:
     assert messages[-1].content == "the work's answer"
 
 
+async def test_an_interruption_in_the_usage_report_keeps_the_model_s_request() -> None:
+    """The call completed before the report, so its request is not lost.
+
+    `UsageReported` is an await between a completed call and the batch that
+    writes it down.  A cancellation landing in it — the report is emitted
+    through an observer whose `on_event` awaits — completes the batch with
+    `INTERRUPTED` rather than leaving the model's request unwritten: none of
+    the calls ran, and the sentence is what promises no result is coming.  It
+    is the same repair the batch loop makes for a cancellation inside a batch.
+    """
+
+    async def answer(_arguments: dict[str, Any]) -> str:
+        return "never asked"
+
+    backend = FakeBackend(tool_turn(ToolCall(id="c1", name="tool", arguments={})))
+    loop = AgentLoop(backend, ToolRegistry([a_tool("tool", answer)]))
+    messages: list[Message] = []
+    holder: list[asyncio.Task[Any]] = []
+
+    class Cancelling:
+        async def on_event(self, event: object) -> None:
+            if isinstance(event, UsageReported):
+                holder[0].cancel()
+                await asyncio.sleep(0)  # deliver the cancel inside the emit
+
+    task = asyncio.create_task(loop.run_turn(messages, "go", Cancelling()))
+    holder.append(task)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == INTERRUPTED
+
+
 async def test_observer_receives_deltas_in_order() -> None:
     backend = FakeBackend(text_turn("abc", chunks=["a", "b", "c"]))
     observer = ListObserver()
@@ -852,6 +894,44 @@ async def test_observer_receives_deltas_in_order() -> None:
         "a",
         "b",
         "c",
+    ]
+
+
+async def test_each_model_call_reports_the_size_it_left() -> None:
+    """**The bar follows the conversation per call, not per turn.**
+
+    A turn that calls a tool makes several model calls, and the context grows
+    with each.  Waiting for `TurnFinished` held the previous turn's figure for
+    the whole run — on a long tool loop, minutes of a bar describing a
+    conversation nobody is in any more.  Each report is that call's own usage,
+    never the running bill, and it arrives after the call's answer and before
+    the tool it asked for runs.
+    """
+    first = Usage(prompt_tokens=10, completion_tokens=2)
+    second = Usage(prompt_tokens=20, completion_tokens=3)
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                usage=first,
+                tool_calls=(ToolCall(id="c1", name="now", arguments={}),),
+                stop_reason="tool_calls",
+            )
+        ),
+        ScriptedTurn(result=StreamChatResult(text="done", usage=second)),
+    )
+    observer = ListObserver()
+
+    await AgentLoop(backend, registry()).run_turn([], "go", observer)
+
+    reports = [e for e in observer.events if isinstance(e, UsageReported)]
+    assert [report.last_usage for report in reports] == [first, second]
+    assert [k for k in observer.kinds() if k != "TextDelta"] == [
+        "UsageReported",
+        "ToolCallStarted",
+        "ToolCallFinished",
+        "UsageReported",
+        "TurnFinished",
     ]
 
 

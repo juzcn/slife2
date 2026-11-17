@@ -34,6 +34,7 @@ from slife2.libs.turn.events import (
     TurnEvent,
     TurnFinished,
     TurnObserver,
+    UsageReported,
     preview,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
@@ -512,6 +513,13 @@ class AgentLoop:
                         "so the turn has no answer to show or record"
                     )
                 messages.append(answer)
+                # **The bar's context figure, once per model call.**  It is the
+                # last call's own size, and a turn that takes several calls grows
+                # with each; waiting for `TurnFinished` held the previous turn's
+                # number for the whole turn.  Emitted after the answer is in the
+                # list, so a cancellation in this await cannot lose the answer
+                # the call produced (the batch path below has its own guard).
+                await self._emit(observer, UsageReported(last_usage=result.usage))
                 await self._emit(
                     observer,
                     TurnFinished(
@@ -529,6 +537,20 @@ class AgentLoop:
                     iterations=iteration,
                     stop_reason=result.stop_reason or "stop",
                 )
+
+            # **The report goes out before the batch runs**, so the bar moves
+            # when the call ended rather than when its tools have finished — a
+            # tool can take minutes.  This is an await between a completed call
+            # and the batch that writes it down, so a cancellation in it
+            # completes the batch the way the batch loop's own cancellation path
+            # does: none of the calls ran, and `INTERRUPTED` is the sentence that
+            # promises no result is coming.
+            try:
+                await self._emit(observer, UsageReported(last_usage=result.usage))
+            except asyncio.CancelledError:
+                messages.append(answer)
+                messages.extend(interrupted_results(result.tool_calls))
+                raise
 
             # Phase B: run the whole batch, and write it down only once every
             # call of it has an answer.

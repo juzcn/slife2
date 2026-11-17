@@ -50,6 +50,7 @@ from slife2.libs.turn.events import (
     ToolCallStarted,
     ToolsCounted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.watch import (
     Closed,
@@ -265,8 +266,8 @@ class WatchScreen(Screen[None]):
                 # emits none.  Drawing nothing is the right answer for one that
                 # arrived anyway: the person watching cannot answer it.
                 return
-            case ToolsCounted():
-                # The window's status bar is the only reader of this, and this
+            case ToolsCounted() | UsageReported():
+                # The window's status bar is the only reader of these, and this
                 # screen has none (`slife2.tui.draw` says the same on its side).
                 return
             case (

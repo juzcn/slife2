@@ -24,6 +24,7 @@ from slife2.libs.turn.events import (
     ToolCallStarted,
     ToolsCounted,
     TurnFinished,
+    UsageReported,
     decode,
     encode,
     preview,
@@ -47,6 +48,8 @@ EVENTS = [
     ContextChosen(kept=12, recalled=3, rerank="unavailable"),
     # The model's list against the catalogue: both halves on one ask.
     ToolsCounted(loaded=24, total=253),
+    # One model call's own usage, the figure the bar follows during a turn.
+    UsageReported(last_usage=Usage(7, 3, cache_read=2, cache_creation=1)),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
     # The iteration counter, and the two keys that are omitted at zero: the first

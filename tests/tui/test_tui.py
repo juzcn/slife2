@@ -38,6 +38,7 @@ from slife2.libs.turn.events import (
     ToolCallStarted,
     ToolsCounted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
@@ -2356,6 +2357,34 @@ async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
         assert "tools 24/253" in status(app)
         # The count is the bar's fact, not a line in the transcript.
         assert "tools 24/253" not in shown(app)
+
+
+async def test_a_usage_report_moves_the_bar_per_model_call() -> None:
+    """**The context figure follows a turn's calls**, not only its ending.
+
+    A turn that calls tools makes several model calls, so waiting for
+    `TurnFinished` held the previous turn's number for the whole run — exactly
+    when a long loop makes the figure worth watching.  This turn scripts the
+    per-call report and no `TurnFinished` at all (a stream whose last line was
+    dropped), so only the report can have moved the bar.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(UsageReported(last_usage=Usage(completion_tokens=25_000)))
+        on_event(TextDelta("working"))
+        return "working"
+
+    client = FakeAgentClient(respond)
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="m",
+        context_window=100_000,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await settle(pilot, app)
+        assert "25,000 (25.0%)" in status(app)
 
 
 async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:

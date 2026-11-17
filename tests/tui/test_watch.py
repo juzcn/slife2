@@ -20,6 +20,7 @@ from slife2.libs.turn.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.messages import Message, Usage
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
@@ -79,6 +80,10 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
             Snapshot([stored_turn()]),
             TurnStarted("what is 6*7?", "agent:jack"),
             TextDelta("It is "),
+            # The bar's per-call report crosses the watch stream too; this
+            # screen has no bar, and drawing it would put a figure in the
+            # transcript nobody typed (see `draw`'s module docstring).
+            UsageReported(last_usage=Usage(completion_tokens=9)),
             TextDelta("42."),
             finished("It is 42."),
         )
@@ -97,6 +102,7 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         assert "Agent(jack)>" in text, "the maker's bubble, not its own word"
         assert "It is 42." in text, "and the answer as it arrived"
         assert text.count("It is 42.") == 1, "deltas and the result are one block"
+        assert "9 tokens" not in text, "the bar's figure is not the watcher's line"
 
         # A subagent has no window, and this screen is not one: there is no
         # prompt to type into.

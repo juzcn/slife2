@@ -2080,9 +2080,12 @@ class StatusBar(Static):
         if vision:
             parts.append(f"[{PALETTE['dim']}]{GLYPHS['vision']} {t('model_vision')}[/]")
 
-        # The *last* turn's tokens, not a running total: what a context
-        # percentage is a percentage of is the conversation as it now stands,
-        # and a sum over every turn is a number that only ever grows.
+        # The *last model call's* tokens, not a running total and not the turn's
+        # bill: what a context percentage is a percentage of is the conversation
+        # as it now stands, and a sum over every call is a number that only ever
+        # grows.  It moves once per call (`UsageReported`), so a turn that calls
+        # tools several times does not hold the previous turn's figure until it
+        # ends.
         #
         # Shown from zero when the model has a window, rather than appearing
         # with the first answer: an indicator that is absent until it has

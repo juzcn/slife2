@@ -2262,6 +2262,10 @@ to an agent with no window is refused by name (`NO_WINDOW`).
 - **The status bar's `tools` count is loaded/total**, both from the hub's answer
   to one ask. A tool nobody has loaded is still a tool that exists. The window
   replaces both with the pair the last model call was built from.
+- **The status bar's context figure is the last model call's**, reported by
+  `UsageReported` as each call ends and settled by `TurnFinished`. It follows a
+  turn's calls rather than waiting for the turn to end, and it is never the
+  turn's bill.
 - **Model output is plain text.** Nothing a model produces is parsed as markup.
 - **A restored conversation is the server's.** `transcript` is read once when the
   window opens; the window keeps no copy. A failed read is not an empty

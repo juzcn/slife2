@@ -96,6 +96,22 @@ class ToolsCounted:
 
 
 @dataclass(frozen=True)
+class UsageReported:
+    """The size one model call left the conversation at, reported as it ends.
+
+    **One per model call, not one per turn.**  A turn that calls a tool makes
+    several model calls and the conversation grows with each; a display that
+    waited for `TurnFinished` held the previous turn's figure for the whole of a
+    long loop.  `last_usage` is the quantity `TurnFinished.last_usage` carries —
+    the call's own usage, which is what a "how full is the context" fraction is
+    a fraction of — and the turn's end reports it once more, so a dropped
+    notification cannot strand the bar on a stale number.
+    """
+
+    last_usage: Usage
+
+
+@dataclass(frozen=True)
 class TextDelta:
     """A piece of the assistant's visible answer."""
 
@@ -230,6 +246,7 @@ class TurnFinished:
 TurnEvent = (
     ContextChosen
     | ToolsCounted
+    | UsageReported
     | TextDelta
     | ThinkingDelta
     | ToolCallStarted
@@ -291,6 +308,9 @@ def encode(event: TurnEvent) -> str:
             # the volume this convention is for is per token and this is not,
             # but a second spelling of either count would be.
             payload = {"t": "tools", "n": total, "l": loaded}
+        case UsageReported(last_usage=last_usage):
+            # One per model call, so the key names can be short like the rest.
+            payload = {"t": "usage", "last": last_usage.to_wire()}
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -441,6 +461,8 @@ def decode(message: str) -> TurnEvent | None:
             )
         case "tools" if _counts_ok(payload, "n", "l"):
             return ToolsCounted(total=payload["n"], loaded=payload["l"])
+        case "usage" if _usage_ok(payload.get("last")):
+            return UsageReported(last_usage=Usage.from_wire(payload["last"]))
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):
