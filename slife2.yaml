@@ -61,6 +61,14 @@ providers:
     base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
     api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
     models:
+      - model: qwen4-max
+        name: Qwen4 Max
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1000000
+        max_tokens: 262144
       - model: glm-5.3
         name: GLM 5.3
         reasoning: true
@@ -82,15 +90,7 @@ providers:
           - image
         context_window: 1000000
         max_tokens: 131072
-      - model: qwen3.8-max
-        name: Qwen3.8 Max
-        reasoning: true
-        input:
-          - text
-          - image
-        context_window: 983616
-        max_tokens: 131072
-default: bailian/deepseek-v4.1-flash-1017
+default: deepseek/deepseek-flash
 
 agent:
   # Model calls per turn. 0 or absent means no cap.
