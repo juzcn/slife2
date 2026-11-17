@@ -61,7 +61,6 @@ from typing import Any, Protocol
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import (
@@ -205,6 +204,12 @@ async def _ask_model(
     call is a handshake per call.  Keyed by URL because a server speaks one wire
     format for every provider that uses it.
 
+    **No timeout of its own.**  This is a model call like the turn's own, so it
+    is bounded where every model call is — the provider's own limits inside the
+    model server — and a slow answer only makes the turn late.  A second, shorter
+    clock here was a knob with no job: it turned a working-but-slow provider
+    into a refused recall, and the refusal looked exactly like a broken one.
+
     **An answer this build cannot read is refused, not read as a silent one.**
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
@@ -224,7 +229,6 @@ async def _ask_model(
                 url,
                 name=API_SERVER_NAMES[provider.api],
                 fallback_tool="stream_chat",
-                timeout=_T.timeouts.work.model_call,
             )
     asked = [
         *messages,
@@ -251,7 +255,6 @@ async def _ask_model(
             "tools": [],
             "messages": asked,
         },
-        timeout=_T.timeouts.work.model_call,
     )
     if not isinstance(result.data, dict):
         raise unreadable("the model server", "return a stream_chat result", result.data)
@@ -1045,35 +1048,32 @@ def build_server(
     ) -> tuple[Decision | None, str]:
         """One model call — or two, when the first answer could not be read.
 
-        **Never raises, and the one retry is a repair.**  A timeout, a provider
-        failure and a reply that is not the requested object all return `None`,
-        and the caller's fallback — keep the context — is perfectly good.  A
-        timeout or a provider failure is *not* asked again: there is no answer to
-        correct, and a retry would double the pre-turn latency of a call whose
-        answer nobody needed.  An unreadable reply is different — the provider
-        answered, the answer is in hand, and the refusal names the field — so
-        the model is asked once more with its own reply and that reason
-        (`repair_note`).  A second refusal ends it; the repair is one round, not
-        a loop.
+        **Never raises, and the one retry is a repair.**  A provider failure and
+        a reply that is not the requested object both return `None`, and the
+        caller's fallback — keep the context — is perfectly good.  A provider
+        failure is *not* asked again: there is no answer to correct.  An
+        unreadable reply is different — the provider answered, the answer is in
+        hand, and the refusal names the field — so the model is asked once more
+        with its own reply and that reason (`repair_note`).  A second refusal
+        ends it; the repair is one round, not a loop.
+
+        **No clock of its own.**  The waits are the model service's, exactly as
+        for the turn's own calls: a slow provider makes the turn late, which the
+        design accepts, rather than making the recall fail for a reason that
+        says nothing about the answer.
 
         The second half is *why* there is no decision — `""` when the model
-        answered, otherwise `"timeout"`, `"failed"` or `"unparsed"`.  It rides
-        the rebuild's answer because `recalled: 0` is the same number for a
-        recall that found nothing and one nobody asked, and the person watching
-        is owed the difference.
+        answered, otherwise `"failed"` or `"unparsed"`.  It rides the rebuild's
+        answer because `recalled: 0` is the same number for a recall that found
+        nothing and one nobody asked, and the person watching is owed the
+        difference.
 
         The instruction travels as a user message *appended to the conversation*,
         which is what lets a follow-up be recognised as one: the subject of "what
         about the other one" is in the list above it and nowhere else.
         """
         try:
-            text = await asyncio.wait_for(
-                ask_model(agent, subagent, model, messages, user_input),
-                timeout=current().context.timeout,
-            )
-        except TimeoutError:
-            logger.info("recall_discriminator_failed reason=timeout")
-            return None, "timeout"
+            text = await ask_model(agent, subagent, model, messages, user_input)
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
@@ -1089,21 +1089,15 @@ def build_server(
         # correction, not a blind retry — and a model that cannot write the
         # object twice falls back exactly as before.
         try:
-            corrected = await asyncio.wait_for(
-                ask_model(
-                    agent,
-                    subagent,
-                    model,
-                    messages,
-                    user_input,
-                    previous=text,
-                    repair=refusal,
-                ),
-                timeout=current().context.timeout,
+            corrected = await ask_model(
+                agent,
+                subagent,
+                model,
+                messages,
+                user_input,
+                previous=text,
+                repair=refusal,
             )
-        except TimeoutError:
-            logger.info("recall_discriminator_repair_failed reason=timeout")
-            return None, "timeout"
         except Exception as exc:  # noqa: BLE001 — the same fallback as above
             logger.info(
                 "recall_discriminator_repair_failed reason=%s", type(exc).__name__
@@ -1239,9 +1233,9 @@ def build_server(
             question was asked, otherwise `"unavailable"`, `"failed"` or
             `"empty"`: the recall kept its fused order and the caller shows
             that rather than swallowing it — and `discriminator`, `""` when
-            there was a decision, otherwise `"timeout"`, `"failed"` or
-            `"unparsed"`: the recall never ran, and `recalled: 0` would
-            otherwise read as one that found nothing.
+            there was a decision, otherwise `"failed"` or `"unparsed"`: the
+            recall never ran, and `recalled: 0` would otherwise read as one
+            that found nothing.
         """
         store = await store_of(agent, subagent)
         decision, discriminator = await _discriminate(
@@ -1253,9 +1247,9 @@ def build_server(
         # (`recall_discriminator_failed` and `_unparsed` are written a moment
         # above and say *why* there was none), and a single `context_sufficient`
         # for both would make counting "the model decided the context was enough"
-        # count every timeout and every unreadable reply as a decision the model
-        # never made.  A decision that asks for nothing is the model's word; no
-        # decision at all is the transport's silence.
+        # count every failed call and every unreadable reply as a decision the
+        # model never made.  A decision that asks for nothing is the model's
+        # word; no decision at all is the transport's.
         if decision is None:
             logger.info("recall_not_needed reason=no_decision")
             return await _keep_in_hand(

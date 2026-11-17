@@ -1049,11 +1049,13 @@ Rules:
 - **An unreadable reply is asked once more, then it is not a decision.** The
   refusal names the field (`parse_with_reason`), and the discriminator is asked
   again with its own reply and that reason — a correction to an answer already in
-  hand, not the blind retry a timeout would be. A second refusal ends it: the
-  turn runs on the context it already has (Appendix C). The rebuild reports
-  `discriminator` (`timeout`, `failed`, `unparsed`, or empty), and the window
-  draws the kept line as `kept N, recall failed` — a recall nobody asked for is
-  not a recall that found nothing.
+  hand, not the blind retry a provider failure would be. A second refusal ends
+  it: the turn runs on the context it already has (Appendix C). The rebuild
+  reports `discriminator` (`failed`, `unparsed`, or empty), and the window draws
+  the kept line as `kept N, recall failed` — a recall nobody asked for is not a
+  recall that found nothing. **The discriminator has no clock of its own**: it
+  is a model call like the turn's own, bounded by the model service, and a slow
+  provider makes the turn late rather than the recall fail.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced.
@@ -1121,7 +1123,6 @@ The context parameters are in `context:`:
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
 | `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.3` drops keyword incidentals, `0.0` keeps everything it returned. |
-| `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
 
 **One budget, and it is the ceiling's.** The kept turns are estimated first;
 a recall may spend what they leave below `ceiling`, so keeping less leaves it
@@ -1138,7 +1139,7 @@ the cosine gate could not. A provider with no `rerank_model` simply omits the
 rerank stage.
 
 A missing store fails the turn, like any missing plugin. A discriminator
-timeout, provider error, or unreadable answer does not. There is no switch to
+provider error or unreadable answer does not. There is no switch to
 turn the decision off: an append-only context is bounded by nothing.
 
 ### 5.6 Cancellation and repair

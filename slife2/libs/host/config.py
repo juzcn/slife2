@@ -1423,16 +1423,6 @@ class ContextSettings:
     #: candidate in the fused recall pool (each leg's `recall_page_limit`, 80 by
     #: default) is reranked, so a hit RRF put low is still judged.
     rerank_min_score: float = 0.3
-    #: How long the discriminator call may take before the turn runs on the
-    #: context it already has.  Generous for a remote model, because the answer is
-    #: optional by design: a slow one only makes the turn late.
-    #:
-    #: **The default is the registry's** (`timeouts.work.recall_discriminator`),
-    #: read when a config is built through a factory rather than a def-time
-    #: default, which would capture it at import and ignore a patch.
-    timeout: float = field(
-        default_factory=lambda: _T.timeouts.work.recall_discriminator
-    )
 
 
 @dataclass(frozen=True)
@@ -3254,7 +3244,6 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         {
             "ceiling",
             "recall_page_limit",
-            "timeout",
             "min_similarity",
             "keyword_weight",
             "rerank_min_score",
@@ -3274,12 +3263,6 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     )
     if page < 1:
         raise ConfigError(f"context.recall_page_limit: {page} recalls nothing")
-    timeout = _optional_float(section.get("timeout"), "context.timeout")
-    if timeout is not None and timeout <= 0:
-        raise ConfigError(
-            f"context.timeout: {timeout} would abandon every discriminator call "
-            f"before it was made"
-        )
     similarity = _optional_float(
         section.get("min_similarity"), "context.min_similarity"
     )
@@ -3310,7 +3293,6 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
         rerank_min_score=(
             base.rerank_min_score if rerank_floor is None else rerank_floor
         ),
-        timeout=base.timeout if timeout is None else timeout,
     )
 
 

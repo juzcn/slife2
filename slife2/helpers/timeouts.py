@@ -150,16 +150,6 @@ class Work:
     #: **Not the turn** — a turn's length is the answer's own business, and the
     #: person watching has Esc (`slife2.tui.client`).
     management: float = 30.0
-    #: The pre-turn recall discriminator: how long the model it asks may take
-    #: before the turn runs on the context it already has.  `config.py` reads
-    #: this as the default of `context.timeout` — the one seat for the number,
-    #: with the config as an override rather than a second copy.
-    recall_discriminator: float = 20.0
-    #: The per-request clock on the *model client* a plugin makes its own calls
-    #: with (the context plugin's discriminator).  Larger than the bound its
-    #: caller puts around it, deliberately: the caller's is the operative one,
-    #: and this exists so a hung provider cannot park the plugin.
-    model_call: float = 600.0
 
 
 @dataclass

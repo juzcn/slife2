@@ -1266,27 +1266,16 @@ async def _down(*arguments: Any) -> str:
     raise RuntimeError("the model server is down")
 
 
-async def _slow(*arguments: Any) -> str:
-    """A discriminator that answers, but not before the configured timeout."""
-    await asyncio.sleep(0.05)
-    return "{}"
-
-
 @pytest.mark.parametrize(
-    ("ask", "timeout", "status"),
+    ("ask", "status"),
     [
-        (_down, None, "failed"),
-        (
-            Replies("a reply this build cannot read", "and still not one"),
-            None,
-            "unparsed",
-        ),
-        (_slow, 0.01, "timeout"),
+        (_down, "failed"),
+        (Replies("a reply this build cannot read", "and still not one"), "unparsed"),
     ],
 )
 @pytest.mark.asyncio
 async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
-    ask: Any, timeout: float | None, status: str
+    ask: Any, status: str
 ) -> None:
     """**A recall nobody asked for is not a recall that found nothing.**
 
@@ -1297,12 +1286,11 @@ async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
     on the context in hand — the fallback is unchanged, and an unreadable reply
     gets its one repair before it falls back (hence the two scripted answers).
     """
-    config = default_config()
-    if timeout is not None:
-        config = replace(config, context=replace(config.context, timeout=timeout))
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
-    async with Client(build_server(config, embedder=EMBEDDER, ask=ask)) as client:
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=ask)
+    ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
             "rebuild",
@@ -1973,24 +1961,23 @@ async def test_the_repair_tells_the_model_the_bound_grammar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_timeout_is_not_asked_again() -> None:
+async def test_a_failed_call_is_not_asked_again() -> None:
     """Nothing to correct: no answer came back, and a second ask would only
-    double the pre-turn latency of a decision nobody needed."""
+    spend a call on a provider that has already failed once."""
     calls: list[str] = []
 
-    async def slow(agent, subagent, model, messages, prompt, *, previous="", repair=""):
-        calls.append(repair)
-        await asyncio.sleep(0.05)
-        return "{}"
+    async def down(*arguments: Any, **keywords: Any) -> str:
+        calls.append(keywords.get("repair", ""))
+        raise RuntimeError("the model server is down")
 
-    config = default_config()
-    config = replace(config, context=replace(config.context, timeout=0.01))
-    async with Client(build_server(config, embedder=EMBEDDER, ask=slow)) as client:
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=down)
+    ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await _rebuild(client, "")
 
     assert calls == [""], "one ask, and the repair never ran"
-    assert answer.data["discriminator"] == "timeout"
+    assert answer.data["discriminator"] == "failed"
 
 
 @pytest.mark.asyncio

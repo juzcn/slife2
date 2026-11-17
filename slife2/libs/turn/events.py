@@ -71,11 +71,11 @@ class ContextChosen:
     #: sentence and shows one per change, not one per turn.
     rerank: str = ""
     #: Why there was no decision to act on — `""` when the discriminator
-    #: answered, otherwise `"timeout"`, `"failed"` or `"unparsed"`.  A decision
-    #: that asks for nothing is an *answer* and leaves this empty: the count of
-    #: recalled turns is not the question this field answers.  The display says
-    #: one thing for all three — the recall never ran — where `recalled: 0`
-    #: would be the count of a search nobody made.
+    #: answered, otherwise `"failed"` or `"unparsed"`.  A decision that asks for
+    #: nothing is an *answer* and leaves this empty: the count of recalled turns
+    #: is not the question this field answers.  The display says one thing for
+    #: both — the recall never ran — where `recalled: 0` would be the count of a
+    #: search nobody made.
     discriminator: str = ""
 
 
