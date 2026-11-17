@@ -86,6 +86,12 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     through the same provider as the turn.
     """
     config = stack["config"]
+    provider = stack["provider"]
+    # The discriminator first, then the turn's answer.  The stub's default
+    # repeats one answer for every call; a discriminator answered with the
+    # turn's prose is a reply this build refuses, and the refusal is asked to
+    # repair itself — a second call this test is not about.
+    provider.script = [ChatAnswer(text="{}"), ChatAnswer(text=ANSWER)]
     events: list[str] = []
     client = MCPAgentClient(config.agent.server.url, agent="e2e")
     await client.connect()

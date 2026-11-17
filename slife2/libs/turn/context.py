@@ -13,8 +13,11 @@ one is load-bearing:
 **The context is chosen, not accumulated.**  Before every turn the agent says
 what to keep of the turns in hand and what to *recall* from the turn log, and the
 turn runs on the two together.  One model call decides it — the *discriminator* —
-and it is the single most expensive thing here, which is why every way it can go
-wrong ends in "keep the context" rather than in a retry.
+and it is the single most expensive thing here, which is why a failure ends in
+"keep the context" rather than in a retry.  The exception is an answer this build
+cannot read: the refusal names the field (`parse_with_reason`) and the model is
+asked once more with that reason, because correcting an answer already in hand is
+not the same bet as asking a silent provider again.
 
 **The union is what makes "keep this and add that" expressible.**  Kept and
 recalled are joined by id and never reconciled: a turn both kept and recalled is
@@ -147,18 +150,22 @@ TURN_FAILED_PREFIX = "[TURN-FAILED:"
 TURN_SUFFIX = "]"
 
 
-class _Rejected:
-    """The answer "this reply is not the object that was asked for".
+@dataclass(frozen=True)
+class _Refused:
+    """Why a reply is not the object that was asked for — one sentence, for the model.
 
-    A sentinel rather than `None`, because `None` is a *value* in both fields:
-    it is what "keep everything" and "recall nothing" parse to.  Collapsing the
-    two would make a malformed reply indistinguishable from a decision to do
-    nothing, and those want opposite handling — one is logged as a failure, the
-    other is the ordinary case.
+    A refusal rather than `None`, because `None` is a *value* in both fields: it
+    is what "keep everything" and "recall nothing" parse to.  Collapsing the two
+    would make a malformed reply indistinguishable from a decision to do
+    nothing, and those want opposite handling — one is asked to correct itself,
+    the other is the ordinary case.
+
+    `reason` names the field and the shape it takes, because its reader is the
+    discriminator: `parse_with_reason` hands it back for the one repair round,
+    and a reason the model cannot act on would be a retry with no point.
     """
 
-
-REJECTED = _Rejected()
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -243,10 +250,10 @@ def _is_id(value: Any) -> bool:
     return False
 
 
-def _keep(raw: Any) -> list[int] | _Rejected | None:
+def _keep(raw: Any) -> list[int] | _Refused | None:
     """The `context` field, as a keep-list.
 
-    Three answers and one rejection: absent or `"keep"` is every turn in hand,
+    Three answers and one refusal: absent or `"keep"` is every turn in hand,
     `"clear"` is none of them, a list of ids is those, and anything else is a
     reply this build does not act on.  `bool` is excluded from the ids on the
     way through, because it is a subclass of `int` and `true` would otherwise
@@ -255,7 +262,7 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
     **The filter asks `_is_id` rather than `isinstance(item, int)`**, and that
     was a bug of the silent kind: a model that wrote `["7", "9"]` — JSON of
     whatever the encoder wrote, which is the source `normalise_ids`'s docstring
-    names — made *every* id resolve to `REJECTED`, so `parse` answered `None` and
+    names — made *every* id resolve to a refusal, so `parse` answered `None` and
     dropped the other half of the decision with it.  A valid `recall` beside the
     keep-list was thrown away and the model's instruction was ignored, with only
     `recall_discriminator_unparsed` in the log to say so.
@@ -267,15 +274,15 @@ def _keep(raw: Any) -> list[int] | _Rejected | None:
             return None
         if raw.strip() == KEEP_NONE:
             return []
-        return REJECTED
+        return _Refused('"context" is omitted, "keep", "clear", or a list of turn ids')
     if isinstance(raw, list):
         if not all(_is_id(item) for item in raw):
-            return REJECTED
+            return _Refused('"context" holds turn ids only — whole numbers')
         return normalise_ids(raw)
-    return REJECTED
+    return _Refused('"context" is omitted, "keep", "clear", or a list of turn ids')
 
 
-def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | None:
+def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | None:
     """The `recall` field, as one condition.
 
     **One condition, never several.**  A period and a question are the two halves
@@ -293,7 +300,9 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | 
     surface is written into the instruction, and a model that added a field of
     its own has still answered the question that was asked.  A *value* of the
     wrong type is different — that is a reply whose condition cannot be read, and
-    acting on half of it would be worse than keeping the context.
+    acting on half of it would be worse than keeping the context.  Each refusal
+    names the field, because the reason is fed back to the model for the one
+    repair round.
 
     A value of the right type in a grammar this build does not speak is the same
     thing as a wrong type, and refused the same way.  `anchor` has always been
@@ -303,26 +312,28 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | 
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        return REJECTED
+        return _Refused('"recall" is one object holding the condition')
     sentences = raw.get("sentences")
     if sentences is not None:
         if not isinstance(sentences, list) or not all(
             isinstance(sentence, str) for sentence in sentences
         ):
-            return REJECTED
+            return _Refused(
+                '"recall.sentences" is a list of strings, one sentence per idea'
+            )
         sentences = [sentence for sentence in sentences if sentence.strip()]
     prompt_as_sentence = raw.get("prompt_as_sentence")
     if prompt_as_sentence is not None and not isinstance(prompt_as_sentence, bool):
-        return REJECTED
+        return _Refused('"recall.prompt_as_sentence" is true or false')
     for key in RECALL_KEYS:
         if key in ("sentences", "prompt_as_sentence"):
             continue
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
-            return REJECTED
+            return _Refused(f'"recall.{key}" is a string')
     anchor = raw.get("anchor")
     if anchor is not None and anchor not in ANCHORS:
-        return REJECTED
+        return _Refused('"recall.anchor" is "newest" or "oldest"')
     # **A bound the store cannot place is the third kind of unreadable value.**
     # `since` and `until` are checked as *strings* above and for grammar here,
     # because the two are different questions: `2026-13-99` is the right type
@@ -334,7 +345,9 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | 
     for key in ("since", "until"):
         bound = raw.get(key)
         if bound and not can_place(bound, role=key):
-            return REJECTED
+            return _Refused(
+                f'"recall.{key}" is not a time I can place — expected {BOUND_GRAMMAR}'
+            )
     condition = {key: raw.get(key) for key in RECALL_KEYS}
     # The filtered list, not the raw one: a list of blank sentences is a field
     # present and empty, and the `asked` below has to read it as nothing asked.
@@ -351,14 +364,13 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Rejected | 
     return condition if asked else None
 
 
-def parse(text: str) -> Decision | None:
-    """The decision in a discriminator's reply, or `None` if there is not one.
+def parse_with_reason(text: str) -> tuple[Decision | None, str]:
+    """The decision in a discriminator's reply, and why there is none if there isn't.
 
-    **Degrading is the whole point.**  A timeout, a provider failure and a reply
-    that is not the requested object all arrive here as "nothing usable", and the
-    caller's fallback — keep the context — is perfectly good, so this never
-    retries and never raises.  Retrying would double the pre-turn latency of a
-    call whose answer nobody needed.
+    **The reason is for the model, not the log.**  A refusal names the field and
+    the shape it takes (`_Refused`), which is what the caller hands back with the
+    reply it refused so the model can write the object it was asked for.  `""`
+    with a decision, and no decision with a reason — never both, never neither.
 
     The outer braces are taken rather than the whole text parsed, because a
     model that wraps its JSON in a sentence has still written the JSON; `find`
@@ -369,22 +381,57 @@ def parse(text: str) -> Decision | None:
     """
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end < start:
-        return None
+        return None, "the reply is not one JSON object"
     try:
         raw = json.loads(text[start : end + 1])
     except ValueError:
-        return None
+        return None, "the reply is not one JSON object"
     if not isinstance(raw, dict):
-        return None
-    if not set(raw) <= {"context", "recall"}:
-        return None
+        return None, "the reply is not one JSON object"
+    unknown = set(raw) - {"context", "recall"}
+    if unknown:
+        names = ", ".join(
+            sorted(json.dumps(name, ensure_ascii=False) for name in unknown)
+        )
+        return (
+            None,
+            f'only "context" and "recall" are read, and the reply also held {names}',
+        )
     keep = _keep(raw.get("context"))
-    if isinstance(keep, _Rejected):
-        return None
+    if isinstance(keep, _Refused):
+        return None, keep.reason
     recall = _recall(raw.get("recall"))
-    if isinstance(recall, _Rejected):
-        return None
-    return Decision(keep=keep, recall=recall)
+    if isinstance(recall, _Refused):
+        return None, recall.reason
+    return Decision(keep=keep, recall=recall), ""
+
+
+def parse(text: str) -> Decision | None:
+    """The decision in a discriminator's reply, or `None` if there is not one.
+
+    **Degrading is the whole point.**  A timeout, a provider failure and a reply
+    that is not the requested object all arrive here as "nothing usable", and the
+    caller's fallback — keep the context — is perfectly good.  Nothing here
+    raises and nothing here retries; `parse_with_reason` is the same answer for
+    the caller that can say *why*, which is what makes one correction round
+    possible.
+    """
+    return parse_with_reason(text)[0]
+
+
+def repair_note(reason: str) -> str:
+    """What a refused reply is answered with, before the one correction round.
+
+    **One round, not a loop.**  The schema the correction refers to is the
+    instruction already in the conversation, so the note does not repeat it; the
+    reply that was refused is there too, sent beside it.  A second refusal is
+    where the repair stops and the turn keeps the context it has.
+    """
+    return (
+        f"That reply could not be read: {reason}. "
+        "Reply again with ONE JSON object holding the fields asked for, and "
+        "nothing else."
+    )
 
 
 def instruction(user_input: str) -> str:

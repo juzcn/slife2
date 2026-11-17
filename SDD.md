@@ -1046,8 +1046,11 @@ that asks for exactly what is in hand rebuilds nothing.
 
 Rules:
 
-- **An unreadable reply is not a decision.** `parse` returns `None`, and the turn
-  runs on the context it already has (Appendix C). The rebuild reports
+- **An unreadable reply is asked once more, then it is not a decision.** The
+  refusal names the field (`parse_with_reason`), and the discriminator is asked
+  again with its own reply and that reason — a correction to an answer already in
+  hand, not the blind retry a timeout would be. A second refusal ends it: the
+  turn runs on the context it already has (Appendix C). The rebuild reports
   `discriminator` (`timeout`, `failed`, `unparsed`, or empty), and the window
   draws the kept line as `kept N, recall failed` — a recall nobody asked for is
   not a recall that found nothing.

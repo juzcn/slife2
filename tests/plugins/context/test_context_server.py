@@ -24,6 +24,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 import slife2.plugins.context.server as context_server
+from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.host.config import default_config
 from slife2.libs.host.paths import agent_dir, subagent_path
 from slife2.libs.plugin.audience import conversation_meta
@@ -111,16 +112,26 @@ class Replies:
 
     The seam is the *decision*, not the transport, so what a test varies is what
     the model said — which is the only thing a rebuild does with the answer.
+    Each call is recorded as `(prompt, previous, repair)`, so a test can read the
+    correction a refused answer was asked to make.
     """
 
     def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
-        self.asked: list[str] = []
+        self.asked: list[tuple[str, str, str]] = []
 
     async def __call__(
-        self, agent: str, subagent: str, model: str, messages: list, prompt: str
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list,
+        prompt: str,
+        *,
+        previous: str = "",
+        repair: str = "",
     ) -> str:
-        self.asked.append(prompt)
+        self.asked.append((prompt, previous, repair))
         return self.replies.pop(0) if self.replies else "{}"
 
 
@@ -1265,7 +1276,11 @@ async def _slow(*arguments: Any) -> str:
     ("ask", "timeout", "status"),
     [
         (_down, None, "failed"),
-        (Replies("a reply this build cannot read"), None, "unparsed"),
+        (
+            Replies("a reply this build cannot read", "and still not one"),
+            None,
+            "unparsed",
+        ),
         (_slow, 0.01, "timeout"),
     ],
 )
@@ -1279,7 +1294,8 @@ async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
     never arrived, so the two were one line on screen.  The reason was logged
     and lost at the wire; the answer carries it now, and the window turns it
     into `recall failed` where the count would be a lie.  The turn still runs
-    on the context in hand — the fallback is unchanged.
+    on the context in hand — the fallback is unchanged, and an unreadable reply
+    gets its one repair before it falls back (hence the two scripted answers).
     """
     config = default_config()
     if timeout is not None:
@@ -1885,18 +1901,18 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
 
 @pytest.mark.asyncio
 async def test_an_unreadable_reply_keeps_the_context() -> None:
-    """Degrading, not retrying: the fallback is perfectly good.
+    """**One repair, then degrade.**  The fallback is perfectly good.
 
-    A timeout, a provider failure and a reply that is not the requested object
-    all arrive as the same answer, and the price of guessing wrong is a context
-    nobody decided on.
+    A reply refused twice is where the repair stops: the model was shown its own
+    answer and the reason, and a third ask would spend a call on a shape the
+    model has now missed twice.  The turn runs on the context in hand, and the
+    price of guessing wrong is a context nobody decided on.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
+    replies = Replies("I could not decide.", "still not the object")
 
     async with Client(
-        build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies("I could not decide.")
-        )
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
@@ -1904,8 +1920,77 @@ async def test_an_unreadable_reply_keeps_the_context() -> None:
             {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
         )
 
+    assert len(replies.asked) == 2, "one ask, one repair, and no third"
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
+
+
+@pytest.mark.asyncio
+async def test_a_refused_reply_is_asked_again_with_the_reason() -> None:
+    """**The correction is to an answer already in hand.**  The model sees what
+    it said and what was wrong with it, and the corrected decision is what the
+    turn runs on — where an unreadable answer used to end the recall."""
+    replies = Replies("I could not decide.", '{"context": "clear"}')
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        answer = await _rebuild(client, "")
+
+    assert len(replies.asked) == 2, "the refused answer was asked again"
+    _prompt, previous, repair = replies.asked[1]
+    assert previous == "I could not decide.", "the model sees what it said"
+    assert "not one JSON object" in repair, "and what was wrong with it"
+    assert answer.data["changed"] is True, "the corrected decision was acted on"
+    assert answer.data["discriminator"] == "", "a repaired reply is a decision"
+    assert answer.data["turn_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_repair_tells_the_model_the_bound_grammar() -> None:
+    """A refusal is a sentence the model can act on, not the word "unparsed".
+
+    `since` in no grammar this build speaks used to end the recall for the turn;
+    now the model is told the grammar and can write the bound it meant.
+    """
+    replies = Replies(
+        '{"recall": {"since": "whenever"}}',
+        '{"recall": {"since": "yesterday"}}',
+    )
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await _rebuild(client, "")
+
+    assert len(replies.asked) == 2
+    _prompt, _previous, repair = replies.asked[1]
+    assert BOUND_GRAMMAR in repair, "the model is told the grammar it missed"
+    assert answer.data["changed"] is True, "the corrected bound ran"
+    assert answer.data["recalled"] == 1, "the turn outside the context came back"
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_not_asked_again() -> None:
+    """Nothing to correct: no answer came back, and a second ask would only
+    double the pre-turn latency of a decision nobody needed."""
+    calls: list[str] = []
+
+    async def slow(agent, subagent, model, messages, prompt, *, previous="", repair=""):
+        calls.append(repair)
+        await asyncio.sleep(0.05)
+        return "{}"
+
+    config = default_config()
+    config = replace(config, context=replace(config.context, timeout=0.01))
+    async with Client(build_server(config, embedder=EMBEDDER, ask=slow)) as client:
+        await _seed(client, "jack", ("one", "1"))
+        answer = await _rebuild(client, "")
+
+    assert calls == [""], "one ask, and the repair never ran"
+    assert answer.data["discriminator"] == "timeout"
 
 
 @pytest.mark.asyncio
@@ -1915,17 +2000,17 @@ async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
     A reply of the right *shape* whose `since` is in no grammar this build speaks
     — `whenever`, `sometime last year` — is a boundary case the two halves of the
     system answer differently: a bound the *model* passes to `turn_list` is a
-    `ToolError` it reads and corrects (the test above), and a bound the
-    *discriminator* writes is not, because nothing is left to read a refusal.
-    Handed to the store it would raise from inside a query and fail the turn, so
-    the reply is dropped where dropping is still something a caller can decide —
-    and the fallback is the same perfectly good one.
+    `ToolError` it reads and corrects, while a bound the *discriminator* writes is
+    refused with the grammar and asked once more (the repair above).  Handed to
+    the store it would raise from inside a query and fail the turn, so the reply
+    is dropped where dropping is still something a caller can decide — and a
+    second bad bound ends in the same perfectly good fallback.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
     reply = '{"context": "clear", "recall": {"query": "one", "since": "whenever"}}'
 
     async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply, reply))
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
@@ -2299,6 +2384,29 @@ def test_a_recall_can_say_the_input_is_not_a_question() -> None:
         assert parse(not_a_bool) is None, not_a_bool
 
 
+def test_a_refusal_names_the_field_a_repair_has_to_fix() -> None:
+    """**The reason is the model's instruction, not a log word.**
+
+    Every refusal is fed back with the reply it refused, so it has to say what
+    the field is and what shape it takes — "unparsed" would be a repair with
+    nothing to act on.
+    """
+    from slife2.libs.turn.context import parse_with_reason
+
+    for reply, fragment in (
+        ("no object here", "not one JSON object"),
+        ('{"context": [true]}', "turn ids"),
+        ('{"recall": {"sentences": "one"}}', "list of strings"),
+        ('{"recall": {"prompt_as_sentence": "no"}}', "true or false"),
+        ('{"recall": {"anchor": "first"}}', '"newest" or "oldest"'),
+        ('{"recall": {"since": "whenever"}}', BOUND_GRAMMAR),
+        ('{"context": [], "why": "because"}', '"why"'),
+    ):
+        decision, reason = parse_with_reason(reply)
+        assert decision is None, reply
+        assert fragment in reason, (reply, reason)
+
+
 # --- the four ways a rebuild keeps the context, and what the log says ---------
 
 
@@ -2324,11 +2432,16 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     """
     caplog.set_level(logging.INFO, logger=CONTEXT_LOGGER)
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # One server, one scripted discriminator, four calls: an unreadable reply,
-    # a decision that asks for nothing, a decision equal to what is held, and a
-    # keep-list naming a turn the log does not have.
+    # One server, one scripted discriminator, four calls: an unreadable reply
+    # (and its repair, also unreadable), a decision that asks for nothing, a
+    # decision equal to what is held, and a keep-list naming a turn the log does
+    # not have.
     replies = Replies(
-        "I could not decide.", "{}", '{"context": [1]}', '{"context": [99]}'
+        "I could not decide.",
+        "still not an object",
+        "{}",
+        '{"context": [1]}',
+        '{"context": [99]}',
     )
     answers = []
     async with Client(
@@ -2371,7 +2484,9 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
         assert answer.data["changed"] is False, "nothing was fetched or written"
         assert answer.data["recalled"] == 0
     said = [record.getMessage() for record in caplog.records]
-    assert "recall_discriminator_unparsed" in said, "the failure is named"
+    assert any(line.startswith("recall_discriminator_unparsed") for line in said), (
+        "the failure is named, and twice: the repair was refused too"
+    )
     assert "recall_not_needed reason=no_decision" in said, "and it is not a decision"
     assert "recall_not_needed reason=context_sufficient" in said
     assert "recall_not_needed reason=context_unchanged" in said
@@ -2392,7 +2507,9 @@ async def test_a_rebuild_that_writes_nothing_still_reads_the_live_context() -> N
     again.  A moved list is adopted, exactly as a lost compare-and-set is.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    replies = Replies("I could not decide.")
+    # Refused twice: the one repair ran and was refused too, so this is the
+    # "no decision" exit rather than a repaired one.
+    replies = Replies("I could not decide.", "still not an object")
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=replies)
     ) as client:

@@ -56,7 +56,7 @@ import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -152,13 +152,26 @@ INSTRUCTIONS = (
     "conversation is made of, and no model calls them."
 )
 
+
 #: The discriminator call, as a seam: the conversation and the input in, whatever
 #: the model said out.  A test injects one; production uses the model server
 #: named by the conversation's model.
-Discriminator = Callable[
-    [str, str, str, list[dict[str, Any]], str],
-    Awaitable[str],
-]
+#:
+#: `previous` and `repair` are the second half of one call's life — the reply
+#: that could not be read, and why — and are empty on the first ask.  A test that
+#: varies what the model said can ignore them unless it is about the repair.
+class Discriminator(Protocol):
+    def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        user_input: str,
+        *,
+        previous: str = "",
+        repair: str = "",
+    ) -> Awaitable[str]: ...
 
 
 async def _ask_model(
@@ -170,6 +183,9 @@ async def _ask_model(
     model: str,
     messages: list[dict[str, Any]],
     user_input: str,
+    *,
+    previous: str = "",
+    repair: str = "",
 ) -> str:
     """One `stream_chat` call, with no tools and nothing listening to it.
 
@@ -177,6 +193,12 @@ async def _ask_model(
     reports progress only to a caller that asked for a token, so a discriminator
     turn reaches no transcript and no observer by construction rather than by a
     filter somebody has to remember.
+
+    **A repair ask is the same call with the conversation extended**: the
+    instruction, the refused answer as the model's own message, and the reason
+    it was refused (`decisions.repair_note`).  All of it is a prompt for one
+    call and none of it is stored — the repair is how a bad answer is corrected,
+    not a turn.
 
     The client is opened once per *model server* and kept for the process — the
     agent server's arrangement, for the agent server's reason: a handshake per
@@ -208,6 +230,13 @@ async def _ask_model(
         *messages,
         {"role": "user", "content": decisions.instruction(user_input)},
     ]
+    if repair:
+        # The model's own refused answer, then what was wrong with it.  An empty
+        # answer has nothing to show, and a provider may refuse an empty
+        # assistant message — the note alone is the correction then.
+        if previous:
+            asked.append({"role": "assistant", "content": previous})
+        asked.append({"role": "user", "content": decisions.repair_note(repair)})
     result = await clients[url].call_tool(
         "stream_chat",
         {
@@ -1004,12 +1033,18 @@ def build_server(
         messages: list[dict[str, Any]],
         user_input: str,
     ) -> tuple[Decision | None, str]:
-        """One model call: what to keep, and what to recall.  `None` if unusable.
+        """One model call — or two, when the first answer could not be read.
 
-        **Never raises and never retries.**  A timeout, a provider failure and a
-        reply that is not the requested object all return `None`, and the
-        caller's fallback — keep the context — is perfectly good, so retrying
-        would double the pre-turn latency of a call whose answer nobody needed.
+        **Never raises, and the one retry is a repair.**  A timeout, a provider
+        failure and a reply that is not the requested object all return `None`,
+        and the caller's fallback — keep the context — is perfectly good.  A
+        timeout or a provider failure is *not* asked again: there is no answer to
+        correct, and a retry would double the pre-turn latency of a call whose
+        answer nobody needed.  An unreadable reply is different — the provider
+        answered, the answer is in hand, and the refusal names the field — so
+        the model is asked once more with its own reply and that reason
+        (`repair_note`).  A second refusal ends it; the repair is one round, not
+        a loop.
 
         The second half is *why* there is no decision — `""` when the model
         answered, otherwise `"timeout"`, `"failed"` or `"unparsed"`.  It rides
@@ -1033,19 +1068,63 @@ def build_server(
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
             return None, "failed"
-        decision = decisions.parse(text)
-        if decision is None:
-            logger.info("recall_discriminator_unparsed")
-            return None, "unparsed"
-        return decision, ""
+        decision, refusal = decisions.parse_with_reason(text)
+        if decision is not None:
+            return decision, ""
+        logger.info("recall_discriminator_unparsed reason=%s", refusal)
+        # **The one retry, and it is not the same bet as asking again.**  The
+        # model has already answered, so the provider works and the round trip
+        # is priced; what failed is the shape, and the shape is what the refusal
+        # names.  Asking once more with the answer and the reason is a
+        # correction, not a blind retry — and a model that cannot write the
+        # object twice falls back exactly as before.
+        try:
+            corrected = await asyncio.wait_for(
+                ask_model(
+                    agent,
+                    subagent,
+                    model,
+                    messages,
+                    user_input,
+                    previous=text,
+                    repair=refusal,
+                ),
+                timeout=current().context.timeout,
+            )
+        except TimeoutError:
+            logger.info("recall_discriminator_repair_failed reason=timeout")
+            return None, "timeout"
+        except Exception as exc:  # noqa: BLE001 — the same fallback as above
+            logger.info(
+                "recall_discriminator_repair_failed reason=%s", type(exc).__name__
+            )
+            logger.debug("the repair call raised", exc_info=True)
+            return None, "failed"
+        decision, refusal = decisions.parse_with_reason(corrected)
+        if decision is not None:
+            logger.info("recall_discriminator_repaired")
+            return decision, ""
+        logger.info("recall_discriminator_unparsed reason=%s attempt=repair", refusal)
+        return None, "unparsed"
 
     #: The discriminator call: a test's, or one client per model server kept for
     #: the process.
     model_clients: dict[str, Client] = {}
     opening = asyncio.Lock()
     ask_model: Discriminator = injected or (
-        lambda agent, subagent, model, messages, prompt: _ask_model(
-            current(), model_clients, opening, agent, subagent, model, messages, prompt
+        lambda agent, subagent, model, messages, user_input, *, previous="", repair="": (
+            _ask_model(
+                current(),
+                model_clients,
+                opening,
+                agent,
+                subagent,
+                model,
+                messages,
+                user_input,
+                previous=previous,
+                repair=repair,
+            )
         )
     )
 
