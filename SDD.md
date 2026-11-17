@@ -1061,8 +1061,10 @@ Rules:
 - **The person's input is a meaning question too**, unless the decision sets
   `prompt_as_sentence: false` for input that names nothing. A keyword-only recall
   keeps its query as the one meaning question; a period recall is not narrowed.
-- **A recall is asked for what is missing.** Kept turns are excluded from its
-  candidates, so nothing already in hand spends retrieval depth or budget.
+- **A recall is asked for what is missing.** Every turn in hand is excluded from
+  its candidates — the discriminator read all of them, so a turn it dropped from
+  the keep-list was dropped deliberately — and nothing already in hand spends
+  retrieval depth or budget.
 - **The recall is hybrid, and the ranker is the last word.** The two legs
   are fused by weighted RRF (k=60, `keyword_weight` on the sparse leg), and
   `min_similarity` drops a measured candidate below the embedding model's

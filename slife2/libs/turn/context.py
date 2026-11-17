@@ -18,12 +18,11 @@ wrong ends in "keep the context" rather than in a retry.
 
 **The union is what makes "keep this and add that" expressible.**  Kept and
 recalled are joined by id and never reconciled: a turn both kept and recalled is
-the same turn, so there is no incumbent to defend and no need to exclude turns
-already in context.  An empty recall is therefore *harmless* — a union with
-nothing is the base — where an overriding selection would have discarded the
-context it replaced, so a query that merely failed to match would empty it and
-the turn would be answered from the system prompt alone.  Clearing is only ever
-the explicit clear.
+the same turn, so there is no incumbent to defend.  An empty recall is therefore
+*harmless* — a union with nothing is the base — where an overriding selection
+would have discarded the context it replaced, so a query that merely failed to
+match would empty it and the turn would be answered from the system prompt
+alone.  Clearing is only ever the explicit clear.
 
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from

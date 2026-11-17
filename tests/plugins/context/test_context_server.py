@@ -946,7 +946,7 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
 
     async with Client(server) as client:
         await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
-        answer = await _rebuild(client, "")
+        answer = await _rebuild(client, "", turn_ids=[])
 
     assert answer.data["recalled"] == 2, "the caller's floor kept both"
 
@@ -1450,6 +1450,39 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
     store = TurnStore(agent_dir("jack") / "turns.db")
     ranked = await store.recall(query="工具", embedder=EMBEDDER, limit=10)
     assert [turn_id for turn_id, _ in ranked] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> None:
+    """**Every turn in hand is excluded, not only the kept ones.**
+
+    The discriminator read the whole conversation, so a turn it left out of the
+    keep-list was left out deliberately: a recall that answered a query with it
+    would overturn the decision it was made in.  The turn outside the
+    conversation is still recalled — that is what the recall is for.
+    """
+    reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "trump one"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": [ids[0]],
+                "prompt": "and the other?",
+            },
+        )
+
+    assert answer.data["turn_ids"] == [ids[1]], "the dropped turn stays dropped"
+    assert answer.data["recalled"] == 1
 
 
 @pytest.mark.asyncio

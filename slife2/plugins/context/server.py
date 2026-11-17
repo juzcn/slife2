@@ -1096,12 +1096,13 @@ def build_server(
         One model call decides: which of the turns in hand to keep, and what to
         recall from the turn log.  The two are joined by id and never reconciled,
         so an empty recall is harmless and only an explicit `"clear"` empties the
-        context (`slife2.libs.turn.context` is where that is argued).  What was
-        kept is excluded from the recall: the decision's two halves are one
-        answer, and a turn in both would spend retrieval depth and budget on
-        something the union would collapse anyway.  When the decision asks in
-        sentences, the input is read by meaning beside them, so the model's
-        paraphrase is never the only way the subject is asked for.
+        context (`slife2.libs.turn.context` is where that is argued).  Every
+        turn in hand is excluded from the recall: the discriminator read all of
+        them, so a turn it dropped from the keep-list was dropped deliberately,
+        and a turn in both would spend retrieval depth and budget on something
+        the union would collapse anyway.  When the decision asks in sentences,
+        the input is read by meaning beside them, so the model's paraphrase is
+        never the only way the subject is asked for.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -1207,7 +1208,7 @@ def build_server(
         rerank = ""
         if decision.recall is not None:
             recalled, rerank = await _recall_into(
-                store, decision.recall, base, model, prompt
+                store, decision.recall, base, turn_ids, model, prompt
             )
 
         target = decisions.union(base, recalled)
@@ -1301,6 +1302,7 @@ def build_server(
         store: TurnStore,
         condition: dict[str, Any],
         base: list[int],
+        in_hand: Sequence[int],
         model: str,
         prompt: str,
     ) -> tuple[list[int], str]:
@@ -1341,11 +1343,13 @@ def build_server(
         leaves the recall more; a kept context at the ceiling leaves it
         nothing, so the two halves cannot overfill the window by construction.
 
-        **What was kept is excluded from what is recalled.**  The two halves are
-        joined by id, so a turn in both is one turn; the recall would have spent
-        retrieval depth and a share of the budget on a turn the caller already
-        holds.  The exclusion is handed to the store, which can look past those
-        turns for more rather than filtering a short answer here.
+        **Every turn in hand is excluded from what is recalled.**  The
+        discriminator read the whole conversation, so a turn it left out of the
+        keep-list was left out deliberately; a recall that answered a query with
+        it would overturn that, and spend retrieval depth and a share of the
+        budget on a turn the caller already holds.  The exclusion is handed to
+        the store, which can look past those turns for more rather than
+        filtering a short answer here.
 
         **The person's own words are a question too.**  When the decision asked
         in sentences, the input joins them: the model's sentence is a paraphrase
@@ -1449,12 +1453,12 @@ def build_server(
             until=until,
             anchor=anchor,
             limit=policy.recall_page_limit,
-            # The keep-list is what is *in hand*, so it is also what a recall
-            # must not spend retrieval depth or budget on: the union collapses
-            # a turn in both, so retrieving it would spend on something already
-            # held.  The model's keep is the more accurate half of its decision,
-            # which is exactly why the recall is the half that looks elsewhere.
-            exclude=base,
+            # **What is in hand, not only what was kept.**  The discriminator
+            # read every turn in the conversation, so a turn it dropped was
+            # dropped deliberately; and a turn in both would spend retrieval
+            # depth or budget on something already held.  The exclusion is what
+            # makes the recall the half that looks elsewhere.
+            exclude=in_hand,
             keyword_weight=policy.keyword_weight,
         )
         gated = decisions.gate(ranked, policy.min_similarity)

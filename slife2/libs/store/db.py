@@ -1310,11 +1310,11 @@ class TurnStore:
         them all (see `recall`).
 
         **The scan is widened by the excluded ids, not the answer.**  A period
-        recall asks for the newest (or oldest) turns; a kept turn in that list
-        is one the caller already holds, so the window is read past it and the
-        filter below is the guarantee that `limit` *new* turns come back.  The
-        SQL clause is skipped when the kept list is too large to bind, and the
-        filter is exact either way.
+        recall asks for the newest (or oldest) turns; an excluded turn in that
+        list is one the caller already holds, so the window is read past it and
+        the filter below is the guarantee that `limit` *new* turns come back.
+        The SQL clause is skipped when the excluded list is too large to bind,
+        and the filter is exact either way.
         """
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(set(excluded))
@@ -1378,7 +1378,7 @@ class TurnStore:
 
         **`limit` is each leg's page, and the answer is their fusion.**  Each
         meaning question's leg brings up to `limit + len(excluded) +
-        excluded_chunks` candidates — the kept context's *chunks* are what
+        excluded_chunks` candidates — the excluded turns' *chunks* are what
         occupy the KNN — the keyword leg as many, and what is returned is their
         fused union, never cut by this store.
         The similarity floor, the rerank floor and the token budget are the
@@ -1394,15 +1394,16 @@ class TurnStore:
         signal than a cosine neighbourhood, and "no number" is not evidence
         against it.
 
-        **`exclude` is the caller's keep-list.**  A rebuild decides both halves
-        in one call — what stays in hand and what is missing — and a turn in
-        both is a turn the union collapses: recalling it spends a candidate
-        slot, a place in the `k` and a share of the token budget on something
-        already there.  The keyword leg and the time-ranked branch filter them
-        in SQL; the semantic leg cannot (a `vec0` KNN has no turn id to filter
-        on), so its answer is filtered after fusion — where the time window is
-        filtered too — and `over` is widened by **the chunks the excluded turns
-        hold**, which is what they really occupy in a `k` that counts chunks.
+        **`exclude` is what the caller already holds.**  A rebuild passes the
+        live list: the discriminator read every turn in it, so a recall is asked
+        for what is missing rather than for what is in hand, and a turn in it
+        would spend a candidate slot, a place in the `k` and a share of the
+        token budget on something already there.  The keyword leg and the
+        time-ranked branch filter them in SQL; the semantic leg cannot (a `vec0`
+        KNN has no turn id to filter on), so its answer is filtered after fusion
+        — where the time window is filtered too — and `over` is widened by **the
+        chunks the excluded turns hold**, which is what they really occupy in a
+        `k` that counts chunks.
 
         Raises:
             EmptyQuery: If no sentence is given and the query holds no term.
@@ -1433,11 +1434,11 @@ class TurnStore:
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
         # **`k` counts chunks, while `exclude` names turns.**  The semantic leg
-        # is a `vec0` KNN and cannot filter a keep-list out of its candidates, so
-        # the turns excluded are removed after fusion — which means every chunk
+        # is a `vec0` KNN and cannot filter the excluded turns out of its
+        # candidates, so they are removed after fusion — which means every chunk
         # of every excluded turn still occupies a place in the k.  Widening by
         # `len(excluded)` repays one chunk per excluded turn, not the four an
-        # ordinary turn holds, so a kept context can fill the whole page and a
+        # ordinary turn holds, so a full context can fill the whole page and a
         # semantic recall comes back holding nothing but turns the caller
         # already has.  The chunk count is what the excluded turns really took.
         excluded_chunks = (
@@ -1446,7 +1447,7 @@ class TurnStore:
         # **Not capped by `MAX_SQL_VARS`.**  That number is how many values one
         # statement may *bind*; this is a count of candidates for a KNN's `k`
         # and a SQL `LIMIT`, both plain numbers.  Capping it starved the recall:
-        # a large kept context filled all 900 places with turns the caller
+        # a large live context filled all 900 places with turns the caller
         # already had, the filter below removed them, and a semantic recall came
         # back empty while a matching turn sat beyond the page.
         over = limit + len(excluded) + excluded_chunks
@@ -1836,8 +1837,8 @@ class TurnStore:
         **The unit `k` is counted in.**  A `vec0` KNN ranks chunks, so an
         excluded turn takes one place per chunk it owns — and the recall has to
         widen its page by that many to leave the same number of places for the
-        turns the caller is asking for.  Chunked, because the keep-list can be
-        longer than one statement may bind (`MAX_SQL_VARS`).
+        turns the caller is asking for.  Chunked, because the excluded list can
+        be longer than one statement may bind (`MAX_SQL_VARS`).
         """
         wanted = normalise_ids(turn_ids)
         if not wanted:
