@@ -1346,11 +1346,18 @@ async def test_a_refused_plan_write_is_not_drawn() -> None:
     assert "a plan nobody wrote" not in text
 
 
-def context_of(kept: int, recalled: int, rerank: str = ""):
+def context_of(kept: int, recalled: int, rerank: str = "", discriminator: str = ""):
     """A scripted client whose turn reports the discriminator's answer first."""
 
     def respond(prompt: str, on_event):
-        on_event(ContextChosen(kept=kept, recalled=recalled, rerank=rerank))
+        on_event(
+            ContextChosen(
+                kept=kept,
+                recalled=recalled,
+                rerank=rerank,
+                discriminator=discriminator,
+            )
+        )
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
@@ -1415,6 +1422,23 @@ async def test_a_reranker_that_cannot_be_used_is_reported_once_per_change() -> N
 
     assert "rerank off — the recall keeps its fused order" in first
     assert second.count("rerank off") == 1, "the same status is not news twice"
+
+
+async def test_a_failed_discriminator_reads_as_a_failed_recall_not_a_zero() -> None:
+    """**The count and the word are different facts.**
+
+    `recalled 0` is what a recall that found nothing reports; a discriminator
+    that never answered asked for no recall at all, and drawing the zero left
+    the person unable to tell a quiet log from a broken decision.  The reason
+    stays in the server's log; the line says what it cost.
+    """
+    app = window(FakeAgentClient(context_of(29, 0, discriminator="timeout")))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        text = shown(app)
+
+    assert "[kept 29 turns, recall failed]" in text
+    assert "recalled 0" not in text
 
 
 async def test_the_restored_history_says_how_much_came_back() -> None:

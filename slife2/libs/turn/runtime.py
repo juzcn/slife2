@@ -411,8 +411,9 @@ class TurnRuntime:
         **All of the answer is read before the caller adopts any of it.**  An
         answer that replaced the list but omitted the counts would draw
         `[kept 0, recalled 0]`, a note reporting a decision nobody made; a
-        rerank status is part of the same shape, and an unrecognised one still
-        reaches the window, which is where its words live.
+        rerank status and the reason no decision was made are part of the same
+        shape, and an unrecognised one still reaches the window, which is where
+        its words live.
         """
         carried = max(len(messages) - covered, 0)
         payload = tool_payload(
@@ -446,12 +447,24 @@ class TurnRuntime:
             raise unreadable(
                 "the context store", "report the recall's rerank status", payload
             )
+        discriminator = payload.get("discriminator")
+        if not isinstance(discriminator, str):
+            raise unreadable(
+                "the context store",
+                "report the discriminator's status",
+                payload,
+            )
         rebuilt = [Message.from_wire(item) for item in raw]
         return Rebuilt(
             messages=rebuilt,
             turn_ids=[int(turn_id) for turn_id in rebuilt_ids],
             covered=len(rebuilt) - carried,
-            chosen=ContextChosen(kept=int(kept), recalled=int(recalled), rerank=rerank),
+            chosen=ContextChosen(
+                kept=int(kept),
+                recalled=int(recalled),
+                rerank=rerank,
+                discriminator=discriminator,
+            ),
         )
 
     # ── the turn boundary ────────────────────────────────────────────────

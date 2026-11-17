@@ -1246,7 +1246,63 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
+    assert answer.data["discriminator"] == "", "the model answered"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+async def _down(*arguments: Any) -> str:
+    """A discriminator whose model server never answers."""
+    raise RuntimeError("the model server is down")
+
+
+async def _slow(*arguments: Any) -> str:
+    """A discriminator that answers, but not before the configured timeout."""
+    await asyncio.sleep(0.05)
+    return "{}"
+
+
+@pytest.mark.parametrize(
+    ("ask", "timeout", "status"),
+    [
+        (_down, None, "failed"),
+        (Replies("a reply this build cannot read"), None, "unparsed"),
+        (_slow, 0.01, "timeout"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
+    ask: Any, timeout: float | None, status: str
+) -> None:
+    """**A recall nobody asked for is not a recall that found nothing.**
+
+    `recalled: 0` is the same count for an empty log and for a decision that
+    never arrived, so the two were one line on screen.  The reason was logged
+    and lost at the wire; the answer carries it now, and the window turns it
+    into `recall failed` where the count would be a lie.  The turn still runs
+    on the context in hand — the fallback is unchanged.
+    """
+    config = default_config()
+    if timeout is not None:
+        config = replace(config, context=replace(config.context, timeout=timeout))
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+
+    async with Client(build_server(config, embedder=EMBEDDER, ask=ask)) as client:
+        await _seed(client, "jack", ("one", "1"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": hold,
+                "turn_ids": [1],
+                "prompt": "and then?",
+            },
+        )
+
+    assert answer.data["messages"] == hold, "the fallback still keeps the context"
+    assert answer.data["changed"] is False
+    assert answer.data["kept"] == 1
+    assert answer.data["recalled"] == 0
+    assert answer.data["discriminator"] == status
 
 
 @pytest.mark.asyncio
@@ -1388,6 +1444,7 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
     assert answer.data["turn_ids"] == ids
     assert answer.data["recalled"] == 1
+    assert answer.data["discriminator"] == "", "the decision answered"
     # The premise: the kept turn ranks first, so without the exclusion it would
     # be the first thing the recall spends the headroom on.
     store = TurnStore(agent_dir("jack") / "turns.db")

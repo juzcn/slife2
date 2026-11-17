@@ -46,6 +46,8 @@ EVENTS = [
     # The same event with the rerank stage's report — the key is omitted when
     # empty, so both shapes have to round trip.
     ContextChosen(kept=12, recalled=3, rerank="unavailable"),
+    # And with the discriminator's: no decision, so the recall never ran.
+    ContextChosen(kept=12, recalled=0, discriminator="failed"),
     # The model's list against the catalogue: both halves on one ask.
     ToolsCounted(loaded=24, total=253),
     # One model call's own usage, the figure the bar follows during a turn.

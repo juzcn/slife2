@@ -27,11 +27,17 @@ def test_a_known_line_is_decoded() -> None:
     assert decode(
         json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": "unavailable"})
     ) == ContextChosen(kept=2, recalled=1, rerank="unavailable")
+    assert decode(
+        json.dumps({"t": "context", "kept": 2, "recalled": 1, "d": "timeout"})
+    ) == ContextChosen(kept=2, recalled=1, discriminator="timeout")
 
     # A status of another type is a line this build does not know, not one
     # whose status is empty.
     assert (
         decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": 3})) is None
+    )
+    assert (
+        decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "d": 3})) is None
     )
 
 

@@ -60,8 +60,17 @@ def restored(count: int) -> str:
     return t("restored", turns=as_turns(count))
 
 
-def kept(kept: int, recalled: int) -> str:
-    """What one turn's discriminator decided to run on."""
+def kept(kept: int, recalled: int, *, failed: bool = False) -> str:
+    """What one turn's discriminator decided to run on.
+
+    `failed` is the case where it decided nothing: no recall was asked for, and
+    the number would otherwise say it asked and found none.  The reason
+    (timeout, failure, an unreadable reply) lives in the server's log; what the
+    person watching needs is the difference between "nothing matched" and
+    "nobody looked".
+    """
+    if failed:
+        return t("kept_failed", turns=as_turns(kept))
     return t("kept", turns=as_turns(kept), recalled=recalled)
 
 

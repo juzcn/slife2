@@ -145,6 +145,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "kept {turns}, recalled {recalled}",
         "zh": "保留 {turns}，召回 {recalled}",
     },
+    # The same line when the discriminator never answered: no recall was asked
+    # for, and `recalled 0` would be the count of a search nobody made.
+    "kept_failed": {
+        "en": "kept {turns}, recall failed",
+        "zh": "保留 {turns}，召回 失败",
+    },
     # A recall that could not use its cross-encoder.  The status is the context
     # server's (`"unavailable"`, `"failed"`, `"empty"`); the sentence is the
     # window's, and it says what the person actually lost — the fused order

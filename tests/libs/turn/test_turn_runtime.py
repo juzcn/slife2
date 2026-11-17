@@ -162,6 +162,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
             "kept": 2,
             "recalled": 1,
             "rerank": "unavailable",
+            "discriminator": "",
         }
     )
     messages = [
@@ -177,7 +178,9 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
 
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
     assert rebuilt.turn_ids == [7, 8]
-    assert rebuilt.chosen == ContextChosen(kept=2, recalled=1, rerank="unavailable")
+    assert rebuilt.chosen == ContextChosen(
+        kept=2, recalled=1, rerank="unavailable", discriminator=""
+    )
     name, arguments = store.calls[0]
     assert name == "rebuild"
     assert arguments == {
@@ -195,12 +198,40 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
 @pytest.mark.parametrize(
     ("answer", "sentence"),
     [
-        ({"turn_ids": [], "kept": 0, "recalled": 0, "rerank": ""}, "message list"),
-        ({"messages": [], "kept": 0, "recalled": 0, "rerank": ""}, "turn-id list"),
+        (
+            {
+                "turn_ids": [],
+                "kept": 0,
+                "recalled": 0,
+                "rerank": "",
+                "discriminator": "",
+            },
+            "message list",
+        ),
+        (
+            {
+                "messages": [],
+                "kept": 0,
+                "recalled": 0,
+                "rerank": "",
+                "discriminator": "",
+            },
+            "turn-id list",
+        ),
         ({"messages": [], "turn_ids": []}, "counts"),
         (
             {"messages": [], "turn_ids": [], "kept": 0, "recalled": 0},
             "rerank status",
+        ),
+        (
+            {
+                "messages": [],
+                "turn_ids": [],
+                "kept": 0,
+                "recalled": 0,
+                "rerank": "",
+            },
+            "discriminator's status",
         ),
     ],
 )

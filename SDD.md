@@ -1047,7 +1047,10 @@ that asks for exactly what is in hand rebuilds nothing.
 Rules:
 
 - **An unreadable reply is not a decision.** `parse` returns `None`, and the turn
-  runs on the context it already has (Appendix C).
+  runs on the context it already has (Appendix C). The rebuild reports
+  `discriminator` (`timeout`, `failed`, `unparsed`, or empty), and the window
+  draws the kept line as `kept N, recall failed` — a recall nobody asked for is
+  not a recall that found nothing.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced.

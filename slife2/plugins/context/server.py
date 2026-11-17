@@ -764,6 +764,7 @@ def build_server(
         messages: Sequence[dict[str, Any]],
         turn_ids: Sequence[int],
         rerank: str = "",
+        discriminator: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
@@ -794,6 +795,11 @@ def build_server(
         selection still equals what is in hand.  The exits that never asked
         for a recall leave it empty; they did not lose a reranker, they never
         needed one.
+
+        `discriminator` is why no decision was made — the one exit above that is
+        a failure rather than an answer.  It is what the caller reads to say the
+        recall *failed* rather than found nothing; the four exits are still one
+        answer, and only this one has something to report.
         """
         return {
             "messages": list(messages),
@@ -802,6 +808,7 @@ def build_server(
             "kept": len(turn_ids),
             "recalled": 0,
             "rerank": rerank,
+            "discriminator": discriminator,
         }
 
     async def _keep_in_hand(
@@ -811,6 +818,7 @@ def build_server(
         turn_ids: list[int],
         expected: list[int] | None,
         rerank: str = "",
+        discriminator: str = "",
     ) -> dict[str, Any]:
         """`_in_hand`, once the store agrees the caller's list is still the one.
 
@@ -830,10 +838,14 @@ def build_server(
         mean two things depending on the branch.
         """
         if expected is None:
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return _in_hand(
+                messages, turn_ids, rerank=rerank, discriminator=discriminator
+            )
         current = await off_loop(store.context_turns)
         if list(current) == list(expected):
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return _in_hand(
+                messages, turn_ids, rerank=rerank, discriminator=discriminator
+            )
         return await _adopt_stored(store, messages, carried, turn_ids)
 
     async def _adopt_stored(
@@ -902,8 +914,11 @@ def build_server(
             # No recall of this rebuild's ran — the decision was discarded with
             # the snapshot it was composed against — but the key is part of the
             # answer's shape the caller reads strictly (`rebuild_into`), so it
-            # is written as the empty report rather than left absent.
+            # is written as the empty report rather than left absent.  The same
+            # goes for the discriminator: one did answer, and this answer is
+            # not its failure.
             "rerank": "",
+            "discriminator": "",
         }
 
     @mcp.tool
@@ -988,13 +1003,19 @@ def build_server(
         model: str,
         messages: list[dict[str, Any]],
         user_input: str,
-    ) -> Decision | None:
+    ) -> tuple[Decision | None, str]:
         """One model call: what to keep, and what to recall.  `None` if unusable.
 
         **Never raises and never retries.**  A timeout, a provider failure and a
         reply that is not the requested object all return `None`, and the
         caller's fallback — keep the context — is perfectly good, so retrying
         would double the pre-turn latency of a call whose answer nobody needed.
+
+        The second half is *why* there is no decision — `""` when the model
+        answered, otherwise `"timeout"`, `"failed"` or `"unparsed"`.  It rides
+        the rebuild's answer because `recalled: 0` is the same number for a
+        recall that found nothing and one nobody asked, and the person watching
+        is owed the difference.
 
         The instruction travels as a user message *appended to the conversation*,
         which is what lets a follow-up be recognised as one: the subject of "what
@@ -1007,15 +1028,16 @@ def build_server(
             )
         except TimeoutError:
             logger.info("recall_discriminator_failed reason=timeout")
-            return None
+            return None, "timeout"
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
-            return None
+            return None, "failed"
         decision = decisions.parse(text)
         if decision is None:
             logger.info("recall_discriminator_unparsed")
-        return decision
+            return None, "unparsed"
+        return decision, ""
 
     #: The discriminator call: a test's, or one client per model server kept for
     #: the process.
@@ -1123,13 +1145,18 @@ def build_server(
             `messages` (what the turn should run on), `turn_ids` (what it was
             built from), `changed` (whether anything moved), `recalled` (how
             many of the selected turns came from the turn log rather than from
-            in hand), and `rerank` — `""` when the cross-encoder ran or no
+            in hand), `rerank` — `""` when the cross-encoder ran or no
             question was asked, otherwise `"unavailable"`, `"failed"` or
             `"empty"`: the recall kept its fused order and the caller shows
-            that rather than swallowing it.
+            that rather than swallowing it — and `discriminator`, `""` when
+            there was a decision, otherwise `"timeout"`, `"failed"` or
+            `"unparsed"`: the recall never ran, and `recalled: 0` would
+            otherwise read as one that found nothing.
         """
         store = await store_of(agent, subagent)
-        decision = await _discriminate(agent, subagent, model, messages, prompt)
+        decision, discriminator = await _discriminate(
+            agent, subagent, model, messages, prompt
+        )
         # **Two ways to have no decision, and the log keeps them apart.**  Both
         # fall back to the turns in hand, and neither may be reported as the
         # other: this line is the only sight anybody gets of the discriminator
@@ -1141,7 +1168,14 @@ def build_server(
         # decision at all is the transport's silence.
         if decision is None:
             logger.info("recall_not_needed reason=no_decision")
-            return await _keep_in_hand(store, messages, carried, turn_ids, expected)
+            return await _keep_in_hand(
+                store,
+                messages,
+                carried,
+                turn_ids,
+                expected,
+                discriminator=discriminator,
+            )
         if decision.asks_for_nothing:
             # The ordinary case, and the one this fallback is for: the turns in
             # hand are the answer.  Nothing is fetched, nothing is rendered,
@@ -1258,6 +1292,9 @@ def build_server(
             # was asked.  A recall that kept the fused order is a fact the
             # caller shows, not one it silently absorbs.
             "rerank": rerank,
+            # There *was* a decision — this path is only reached past the
+            # `None` branch — so no failure is owed to the caller.
+            "discriminator": "",
         }
 
     async def _recall_into(
