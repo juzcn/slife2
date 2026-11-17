@@ -2265,6 +2265,43 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
+@pytest.mark.asyncio
+async def test_a_rebuild_that_writes_nothing_still_reads_the_live_context() -> None:
+    """**The exits that keep the context compare with the store too.**
+
+    Another process — a render, a reset, a turn of the same agent — can move
+    the live-context list while a caller holds its snapshot.  The exits that
+    write nothing (here the discriminator deciding nothing) used to answer with
+    the caller's list without looking, so the loop and the store disagreed
+    until the next rebuild and the caller's `expected` could never match
+    again.  A moved list is adopted, exactly as a lost compare-and-set is.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+    replies = Replies("I could not decide.")
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
+    ) as client:
+        # Two turns saved by somebody else after this caller's snapshot was
+        # taken: the caller believes the conversation is [1] alone.
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": hold,
+                "turn_ids": [1],
+                "expected": [1],
+                "prompt": "hi",
+            },
+        )
+
+    assert answer.data["turn_ids"] == [1, 2], "the store's list is the answer"
+    assert answer.data["changed"] is True, "the caller adopts it"
+    assert answer.data["kept"] == 2
+    assert answer.data["recalled"] == 0, "none of this was a recall"
+    assert "two" in json.dumps(answer.data["messages"]), "the missing turn is back"
+
+
 # --- the transport, which the discriminator cannot see from where it sits ------
 
 

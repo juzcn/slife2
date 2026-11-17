@@ -376,6 +376,10 @@ class Session:
     #: **A count per reason rather than a set of them**, so two holders of one
     #: reason are two reasons to stay (`hold`).
     reasons: dict[str, int] = field(default_factory=dict)
+    #: How many reasons have been taken, ever.  The departure timer reads it to
+    #: tell a holder that was already there when the wait began from one that
+    #: arrived during it — see :meth:`_depart`.
+    holds: int = 0
 
     def hold(self, reason: str) -> None:
         """Add one reason for this agent to be on the mesh: one more *holder*.
@@ -389,6 +393,7 @@ class Session:
         holder something.
         """
         self.reasons[reason] = self.reasons.get(reason, 0) + 1
+        self.holds += 1
 
     def release(self, reason: str) -> bool:
         """Give up one holder of *reason*.  True when it was the last one."""
@@ -418,26 +423,45 @@ class Session:
         """
         if self.departure is not None and not self.departure.done():
             return
-        self.departure = asyncio.create_task(self._depart())
+        # The baseline is taken here, under the caller's lock, and not when the
+        # task first runs: a call that takes the mesh between the two is an
+        # arrival during the wait, and a baseline read a loop turn later would
+        # count it as one that was already there.
+        self.departure = asyncio.create_task(self._depart(self.holds))
 
-    async def _depart(self) -> None:
-        """The wait `leave_later` starts: leave once no window is held."""
-        await asyncio.sleep(_T.timeouts.pacing.mesh_departure)
-        async with self.lock:
-            if self.reasons.get(WINDOW):
-                return  # the window came back; its `join` is the presence again
-            # The callers that held `USED` belonged to the process that has just
-            # gone; a reason nothing can act on is not a reason to stay.
-            self.reasons.pop(USED, None)
-            try:
-                await self.mesh.disconnect()
-            except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left (SDD §9.2)
-                logger.error(
-                    "a2a %s: the mesh would not leave the broker as its window "
-                    "left, so the agent may stay advertised: %s",
-                    self.agent,
-                    e,
-                )
+    async def _depart(self, taken: int) -> None:
+        """The wait `leave_later` starts: leave once no window is held.
+
+        **A reason taken during the wait restarts it.**  That holder is a call
+        this process accepted after the window went — a send whose retry ladder
+        is in flight — and the teardown at the original deadline would cancel a
+        message the caller was told was sent.  Giving it its own window lets the
+        send finish; the next deadline still leaves, so a call cannot keep an
+        unreachable card up for ever.  `taken` (the count when the wait began)
+        is what tells that arrival apart from the `USED` holders that were
+        already there.
+        """
+        while True:
+            await asyncio.sleep(_T.timeouts.pacing.mesh_departure)
+            async with self.lock:
+                if self.reasons.get(WINDOW):
+                    return  # the window came back; its `join` is the presence again
+                if self.holds != taken:
+                    taken = self.holds
+                    continue  # a call accepted during the wait: its own window
+                # The callers that held `USED` belonged to the process that has
+                # just gone; a reason nothing can act on is not a reason to stay.
+                self.reasons.pop(USED, None)
+                try:
+                    await self.mesh.disconnect()
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left (SDD §9.2)
+                    logger.error(
+                        "a2a %s: the mesh would not leave the broker as its window "
+                        "left, so the agent may stay advertised: %s",
+                        self.agent,
+                        e,
+                    )
+                return
 
     def settle(self, task_id: str, outcome: str, text: str = "") -> None:
         """Settle the round a queued line belongs to, when it can.
@@ -1333,14 +1357,23 @@ def build_server(
 
         Read per use rather than once at build, which is `current`'s rule for
         the model config: the section is a file an operator edits, and whether
-        this machine is on the network at all is a live answer.  The address a
-        member's mesh was **built** with is not re-read (`mesh_for` runs on the
-        session's first ask), so an edit reaches a member that has not been
-        built yet and a restart reaches the rest; two members of one network can
-        therefore be on two addresses until it.  SDD §14.1 records the
-        limitation rather than pretending the per-use read rebinds a live mesh.
+        this machine is on the network at all is a live answer.  A member built
+        on an older address is moved by `rebind` — the mesh is not re-pointed
+        underneath a live connection, it is replaced on the next call.
         """
         return net_settings(live(), net)
+
+    def settings_for(maker: str) -> A2ASettings:
+        """The address and namespace this maker's mesh belongs to, as the
+        config has them *now*.
+
+        Split from `mesh_for` because the two readers need it apart: building a
+        member reads it once, and an existing member compares its mesh's own
+        settings with it on every call (`rebind`).
+        """
+        found = mesh_settings()
+        org, unit = net.namespace(found, maker)
+        return replace(found, org=org, unit=unit)
 
     def mesh_for(maker: str, subagent: str = "") -> A2AMesh:
         """A member's mesh, on this network and in the mesh it belongs to.
@@ -1363,13 +1396,50 @@ def build_server(
         one for a name that never joins is a card and an in-flight table, not a
         connection.
         """
-        found = mesh_settings()
-        org, unit = net.namespace(found, maker)
-        return A2AMesh(
-            replace(found, org=org, unit=unit),
-            maker,
-            subagent=subagent,
+        return A2AMesh(settings_for(maker), maker, subagent=subagent)
+
+    async def rebind(session: Session) -> None:
+        """Move a member onto the address the config names now, if it moved.
+
+        **The caller holds the session's lock.**  That is the same lock every
+        connect and departure takes, so the mesh cannot be swapped under a call
+        deciding whether it is up.  The section is read per use, but a member is
+        built once; without this an edit reached only members built afterwards,
+        and an existing one kept the old broker and namespace until a restart —
+        two members of one network talking past each other.  The old mesh is
+        abandoned, not revived: a send on it is over, and its ladder is told so
+        like any other teardown.  A pending departure belonged to the mesh being
+        replaced and is cancelled with it.
+        """
+        wanted = settings_for(session.agent)
+        if session.mesh.settings == wanted:
+            return
+        if session.departure is not None:
+            session.departure.cancel()
+            session.departure = None
+        previous = session.mesh
+        session.mesh = A2AMesh(wanted, session.agent, subagent=session.subagent)
+        # The callbacks are the mesh's, so the new one has none until this runs.
+        _wire(session)
+        logger.info(
+            "a2a_mesh_rebound agent=%s from=%s/%s/%s to=%s/%s/%s",
+            describe((session.agent, session.subagent)),
+            previous.settings.broker_host,
+            previous.settings.broker_port,
+            f"{previous.settings.org}/{previous.settings.unit}",
+            wanted.broker_host,
+            wanted.broker_port,
+            f"{wanted.org}/{wanted.unit}",
         )
+        try:
+            await previous.disconnect()
+        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the old card is how a peer sees this member leave that network (SDD §9.2)
+            logger.error(
+                "a2a %s: the mesh replaced by a config edit would not leave its "
+                "broker, so the agent may stay advertised there: %s",
+                describe((session.agent, session.subagent)),
+                e,
+            )
 
     async def writer_in(root: Path, session: Session) -> None:
         """Run *session*'s writer **in its own home**, for the life of this process.
@@ -1491,6 +1561,12 @@ def build_server(
         together must not both dial the broker, and a mesh whose connect failed
         is discarded rather than half-kept, so a retry starts from nothing.
 
+        **The address is the config's, as it is now.**  A member's mesh is built
+        once, so a section edited after that is a different mesh: `rebind` swaps
+        it under this lock before anything reads whether the mesh is up, and a
+        call that finds it changed dials the new address rather than the one the
+        member was born on.
+
         **The fast path is inside that lock too, and the lock is the same one the
         release takes** (`join`'s `finally`), because the two are one decision
         read from either end: a caller may hold this mesh only if nothing is
@@ -1521,6 +1597,7 @@ def build_server(
             raise ToolError(switch_off(net))
         session = session_of(agent, subagent)
         async with session.lock:
+            await rebind(session)
             if session.mesh.is_connected:
                 session.hold(reason)
                 return session
@@ -2240,6 +2317,11 @@ def build_server(
             # The remote network's presence is its window's `join`; a read must
             # not put an agent on it that nobody is showing.
             session = session_of(agent, mine)
+        async with session.lock:
+            # The roster is read from the mesh the config names now; a member
+            # built before an address edit would otherwise list the peers of a
+            # network this process has left.
+            await rebind(session)
         mesh = session.mesh
         own, *peers = mesh.list_agents()
         found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}

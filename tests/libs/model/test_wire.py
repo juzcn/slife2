@@ -312,6 +312,31 @@ def test_a_stream_chat_result_with_a_hole_is_refused() -> None:
         StreamChatResult.from_wire(wire)
 
 
+@pytest.mark.parametrize(
+    "key", ["text", "tool_calls", "thinking", "usage", "stop_reason"]
+)
+def test_a_stream_chat_result_with_a_null_field_is_refused(key: str) -> None:
+    """**A null is a value `to_wire` never writes, not an empty answer.**
+
+    A server from another build can send `tool_calls: null`, `thinking: null`
+    or `usage: null`; read as no calls, no reasoning and zero tokens it turns
+    an unreadable answer into a confident empty one — the model's real reply
+    discarded and the turn reported as a success.
+    """
+    wire = StreamChatResult(text="answer").to_wire()
+    wire[key] = None
+    with pytest.raises(KeyError, match=key):
+        StreamChatResult.from_wire(wire)
+
+
+def test_a_stream_chat_result_with_a_malformed_tool_call_is_refused() -> None:
+    """A list is the shape; a null element in it is not a call."""
+    wire = StreamChatResult(text="answer").to_wire()
+    wire["tool_calls"] = [None]
+    with pytest.raises(KeyError, match="tool call"):
+        StreamChatResult.from_wire(wire)
+
+
 # --- preview truncation ------------------------------------------------------
 
 

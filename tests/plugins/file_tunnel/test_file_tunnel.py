@@ -80,6 +80,7 @@ class FakeTunnel:
         state: str | None = None,
         reason: str = "",
         vanishes: bool = False,
+        inherited: bool = False,
     ) -> None:
         self.url = url
         self.active = active
@@ -90,6 +91,8 @@ class FakeTunnel:
         #: Reports a URL, then cannot build one — the tunnel dying between the
         #: reachability check and the call that hands the link over.
         self.vanishes = vanishes
+        #: Whether the URL it reports is another process's (`SLIFE2_FILE_TUNNEL_URL`).
+        self.inherited = inherited
         self.started: list[int] = []
         self.monitors: list[int] = []
         self.stops = 0
@@ -324,6 +327,22 @@ async def test_exposing_answers_with_a_public_url(tmp_path: Path) -> None:
     # so it is answered as a field of its own rather than left to be cut out.
     assert answer["token"] == exposed_url(answer).rsplit("/", 1)[-1]
     assert len(answer["token"]) == 30
+
+
+@pytest.mark.asyncio
+async def test_an_inherited_url_refuses_to_expose(tmp_path: Path) -> None:
+    """**A URL another process started is served by that process.**
+
+    `SLIFE2_FILE_TUNNEL_URL` names a tunnel whose share listener is not this
+    process's, and `Exposed` is per process: a token minted here is a link the
+    far end answers 403 for.  The tool refuses rather than handing one out.
+    """
+    picture = tmp_path / "photo.png"
+    picture.write_bytes(b"png-bytes")
+
+    async with Client(server_for(FakeTunnel(inherited=True))) as client:
+        with pytest.raises(ToolError, match="403"):
+            await ask_json(client, "expose_local_image", path=str(picture))
 
 
 @pytest.mark.asyncio

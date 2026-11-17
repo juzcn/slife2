@@ -691,6 +691,20 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 f"while the tunnel is up, so this would publish it."
             )
 
+        if tunnel.inherited:
+            # **A URL another process started is served by another process.**
+            # Its tunnel forwards to that process's share listener, and this
+            # process's `Exposed` map is the private registry that listener
+            # knows nothing about — a token minted here is a link the far end
+            # answers 403 for.  Refusing is the honest answer; registering one
+            # only moved the failure to whoever fetched it.
+            raise ToolError(
+                "the public URL this process reports is another process's "
+                "tunnel (`SLIFE2_FILE_TUNNEL_URL`), and that process's share "
+                "listener does not know this one's links — a URL minted here "
+                "would answer 403. Expose the file from the process that owns "
+                "the tunnel."
+            )
         await _ensure(tunnel, share.port)
         if not tunnel.is_active:
             raise ToolError(

@@ -39,6 +39,8 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
+from slife2.libs.host.paths import replace_file
+
 
 def reader() -> YAML:
     """A reader and writer for a state file, in block style.
@@ -72,7 +74,10 @@ def write(path: Path, payload: Mapping[str, Any]) -> None:
             reader().dump(dict(payload), opened)
             opened.flush()
             os.fsync(opened.fileno())
-        os.replace(tmp, path)
+        # `replace_file`, not `os.replace`: the poll loop and a reader on the
+        # other side of this file overlap, and Windows refuses the rename for as
+        # long as that reader holds it (`slife2.libs.host.paths.replace_file`).
+        replace_file(Path(tmp), path)
     except BaseException:
         # **The temporary file does not outlive the attempt**: a write that
         # failed leaves the old file standing and nothing else beside it, which

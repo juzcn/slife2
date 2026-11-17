@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import digest, runtime_dir
+from slife2.libs.host.paths import digest, replace_file, runtime_dir
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +267,10 @@ def _write_json_atomic(path: Path, obj: Any) -> bool:
     tmp = path.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(asdict(obj), indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        # `replace_file` rather than `os.replace`: a reader — a `status`, or
+        # another instance's claim check — holds the record open for as long as
+        # its read takes, and Windows refuses the rename until it lets go.
+        replace_file(tmp, path)
     except OSError as exc:
         logger.warning(
             "could not write %s (%s); whatever it records is now invisible to "

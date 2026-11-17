@@ -804,6 +804,38 @@ def build_server(
             "rerank": rerank,
         }
 
+    async def _keep_in_hand(
+        store: TurnStore,
+        messages: list[dict[str, Any]],
+        carried: int,
+        turn_ids: list[int],
+        expected: list[int] | None,
+        rerank: str = "",
+    ) -> dict[str, Any]:
+        """`_in_hand`, once the store agrees the caller's list is still the one.
+
+        **The same compare the write path makes, on the paths that write
+        nothing.**  A render or a reset from another process can move the
+        live-context list while a decision runs; answering with the caller's
+        snapshot without looking would leave its `expected` behind the store on
+        every later turn — refusing every rebuild for the life of the loop, the
+        failure the compare-and-set exists to prevent, reached through the exit
+        that never asked it.  A moved list is adopted exactly as a lost write
+        is (`_adopt_stored`): the turn runs on the conversation it is really
+        part of, and the next snapshot matches.
+
+        **No `expected`, no compare.**  The argument is the caller saying which
+        list it read, and without it the write path is the old unconditional
+        one; a non-writing exit that compared anyway would make the argument
+        mean two things depending on the branch.
+        """
+        if expected is None:
+            return _in_hand(messages, turn_ids, rerank=rerank)
+        current = await off_loop(store.context_turns)
+        if list(current) == list(expected):
+            return _in_hand(messages, turn_ids, rerank=rerank)
+        return await _adopt_stored(store, messages, carried, turn_ids)
+
     async def _adopt_stored(
         store: TurnStore,
         messages: list[dict[str, Any]],
@@ -1109,14 +1141,15 @@ def build_server(
         # decision at all is the transport's silence.
         if decision is None:
             logger.info("recall_not_needed reason=no_decision")
-            return _in_hand(messages, turn_ids)
+            return await _keep_in_hand(store, messages, carried, turn_ids, expected)
         if decision.asks_for_nothing:
             # The ordinary case, and the one this fallback is for: the turns in
             # hand are the answer.  Nothing is fetched, nothing is rendered,
             # nothing is written — and the list already on disk still describes
-            # what the caller is holding.
+            # what the caller is holding, which is why it is read once before
+            # this answer counts.
             logger.info("recall_not_needed reason=context_sufficient")
-            return _in_hand(messages, turn_ids)
+            return await _keep_in_hand(store, messages, carried, turn_ids, expected)
 
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
@@ -1149,7 +1182,9 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return await _keep_in_hand(
+                store, messages, carried, turn_ids, expected, rerank=rerank
+            )
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
@@ -1158,7 +1193,9 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return await _keep_in_hand(
+                store, messages, carried, turn_ids, expected, rerank=rerank
+            )
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))

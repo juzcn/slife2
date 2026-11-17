@@ -2724,6 +2724,48 @@ async def test_a_call_does_not_keep_a_card_up_after_its_window_has_gone(
 
 
 @pytest.mark.asyncio
+async def test_a_call_accepted_during_the_departure_gets_its_own_window(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**A send taken during the wait is not cancelled under its own ladder.**
+
+    The departure timer removed `USED` without asking when it was taken, so a
+    call that arrived after the window went — one whose caller had already been
+    told the message was sent — had its connection closed at the next deadline.
+    A holder that arrives during the wait restarts it; the mesh still leaves
+    once that send has had its window.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "mesh_departure", 0.2)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", settings())
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: holds != [], "the join never reached its hold")
+        sessions[0].hold(USED)  # a send before the window went: still dropped
+        holding.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await holding
+
+        # The wait is running.  A call accepted inside it is a send whose
+        # caller was just told it went out.
+        await asyncio.sleep(0.1)
+        sessions[0].hold(USED)
+
+        # Past the first deadline: the restarted wait has not run out yet.
+        await asyncio.sleep(0.25)
+        assert left == [], "the mesh left under a send accepted during the wait"
+
+        await until(lambda: left == [AGENT], "the restarted wait never left")
+
+
+@pytest.mark.asyncio
 async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
     monkeypatch: pytest.MonkeyPatch, window: Window
 ) -> None:
@@ -2763,6 +2805,64 @@ async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
         with contextlib.suppress(asyncio.CancelledError):
             await second
         await until(lambda: left == [AGENT], "the second departure never came")
+
+
+@pytest.mark.asyncio
+async def test_an_edited_mesh_address_reaches_a_member_that_already_exists(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**The address is read per call, and an existing member moves with it.**
+
+    `mesh_for` runs when a session is first built, so an edited `peer_agent:`
+    used to reach only members built afterwards; an existing one kept its old
+    broker and namespace until a restart, and two members of one network could
+    not hear each other.  The member is rebuilt on the address the config names
+    at its next call, and the abandoned mesh is torn down rather than left
+    answering on a network this process has left.
+    """
+    joined: list[tuple[str, str]] = []
+    left: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        joined.append((self.agent_name, self.settings.address))
+
+    async def disconnect(self: Any) -> None:
+        left.append(self.agent_name)
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+
+    old = settings(broker_host="old.test", broker_port=1883)
+    new = replace(old, broker_host="new.test", broker_port=1884)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", old)
+    mcp = build_server(
+        config, source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        first = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 1, "the join never reached its hold")
+        assert sessions[0].mesh.settings.address == old.address
+        assert joined == [(AGENT, old.address)]
+
+        # The operator edits the section while that member is on the old broker.
+        object.__setattr__(config, "peer_agent", new)
+        second = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 2, "the second join never arrived")
+
+        assert sessions[0].mesh.settings.address == new.address
+        assert joined[-1] == (AGENT, new.address), "the call dialled the new broker"
+        assert left == [AGENT], "the mesh on the old address was abandoned"
+
+        for task in (first, second):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await until(lambda: left.count(AGENT) >= 2, "the new mesh never left")
 
 
 def _a_mesh_that_records_its_ends(

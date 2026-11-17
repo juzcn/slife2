@@ -839,6 +839,17 @@ class A2AMesh:
         return f"{self._config.broker_host}:{self._config.broker_port}"
 
     @property
+    def settings(self) -> A2ASettings:
+        """The address and namespace this mesh was built with.
+
+        Kept so a member can tell whether the config it was built from still
+        describes the network it is on: the section is read per call, and an
+        edited broker or namespace is a different mesh rather than a value this
+        one can be pointed at (`slife2.plugins.a2a.server.mesh_for`).
+        """
+        return self._config
+
+    @property
     def collision(self) -> str:
         """Why this mesh refused the name — empty when it holds it.
 

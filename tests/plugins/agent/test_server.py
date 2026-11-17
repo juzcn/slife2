@@ -4835,6 +4835,90 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_watch_does_not_replay_a_turn_whose_record_is_still_in_flight(
+    context, hub
+) -> None:
+    """**The store can have the row before the tap has its id.**
+
+    A turn's write commits the row and only then answers, and `recorded_turn`
+    is set from that answer.  A watcher whose snapshot read lands in between
+    used to see the turn in the snapshot *and* replay the tap — the same turn
+    drawn twice.  `Tap.writing` is the in-flight write, and the watcher waits
+    it out before deciding.
+    """
+
+    class Gated:
+        """The context client, with `remember` parked after its row is committed."""
+
+        def __init__(self, client: Client) -> None:
+            self.client = client
+            self.committed = asyncio.Event()
+            self.read = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def call_tool(self, name: str, arguments=None, **kwargs):
+            result = await self.client.call_tool(name, arguments, **kwargs)
+            if name == "remember":
+                self.committed.set()
+                await self.release.wait()
+            elif name == "restore":
+                self.read.set()
+            return result
+
+    gated = Gated(context)
+    server = build_server(
+        config(), context_client=gated, hub_client=hub, backend=answering("hello back")
+    )
+    await create_subagent(server, "scout")
+    turn = asyncio.create_task(send(server, "hello", subagent="scout"))
+    try:
+        await asyncio.wait_for(gated.committed.wait(), timeout=10)
+
+        frames: list[Any] = []
+        snapshot = asyncio.Event()
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ):
+            item = decode_watch(message or "")
+            if item is None:
+                return
+            frames.append(item)
+            if isinstance(item, Snapshot):
+                snapshot.set()
+
+        async with Client(server) as client:
+            watching = asyncio.create_task(
+                client.call_tool(
+                    "watch",
+                    {"agent": DEFAULT_AGENT, "subagent": "scout"},
+                    progress_handler=on_progress,
+                    timeout=None,
+                )
+            )
+            try:
+                # The snapshot has been read; the write is still parked, so the
+                # row is in the store and the tap does not have its id yet.
+                await asyncio.wait_for(gated.read.wait(), timeout=10)
+                await asyncio.sleep(0.05)
+                gated.release.set()
+                await asyncio.wait_for(snapshot.wait(), timeout=10)
+                await asyncio.sleep(0.05)
+                assert [type(item) for item in frames] == [Snapshot], (
+                    "the turn was replayed as well as snapshotted"
+                )
+                assert frames[0].turns, "the snapshot is the recorded turn"
+            finally:
+                if not watching.done():
+                    watching.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watching
+    finally:
+        gated.release.set()
+        await turn
+
+
+@pytest.mark.asyncio
 async def test_a_watch_snapshot_carries_the_conversations_plan(context, hub) -> None:
     """A plan is not a turn, so the snapshot's turns cannot supply it.
 

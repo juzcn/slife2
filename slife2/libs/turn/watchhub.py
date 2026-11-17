@@ -55,7 +55,9 @@ class Tap:
     watcher uses it to tell whether the snapshot it has just read already
     contains this turn: the same turn may be both in the store and here, and
     drawing it twice is the duplicate this field exists to prevent.  A task has
-    no store and leaves it `None`.
+    no store and leaves it `None`.  **The id is set by the write, not by the
+    store**, so `writing` is how a watcher tells "not recorded" from "not
+    recorded yet" — the two are the same `recorded_turn` and opposite answers.
 
     **One per key, replaced when the next turn starts.**  A turn's record is
     awaited before its lock is released (or taken up by the next turn's
@@ -67,6 +69,15 @@ class Tap:
     started: StartFrame
     events: list[TurnEvent] = field(default_factory=list)
     recorded_turn: int | None = None
+    #: The write that gives this turn its store id, while it is still running.
+    #:
+    #: **The id is knowable only after the store has the row, and the store can
+    #: have it before `recorded_turn` is set.**  A watcher that reads a snapshot
+    #: in that window cannot tell whether the turn it holds is already in it, so
+    #: it waits for this task before deciding — otherwise the turn is drawn in
+    #: both the snapshot and the replay.  `None` once the turn has no write in
+    #: flight, or never had one (a turn that died before it opened a tap).
+    writing: asyncio.Task[int | None] | None = None
 
 
 @dataclass(eq=False)

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,7 @@ from slife2.libs.host.paths import (
     known_homes,
     local_path,
     register_home,
+    replace_file,
     runtime_dir,
     schedule_dbs,
     skills_dir,
@@ -506,3 +510,37 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
     assert "jack/subagents/researcher/cabinet/turns.db" not in found, (
         "and neither is a name"
     )
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="a sharing violation is a Windows failure"
+)
+def test_a_swap_waits_out_a_reader_that_holds_the_destination(tmp_path) -> None:
+    """**A reader is not a reason to fail a swap.**
+
+    Windows refuses to rename onto a file another process has open, and every
+    reader in this codebase — a status line, a config load, a poll loop — holds
+    it that way for the length of one read.  The retry turns that transient
+    refusal into a wait; the file is still published whole, and nothing is left
+    beside it.
+    """
+    destination = tmp_path / "record.json"
+    destination.write_text("old", encoding="utf-8")
+    staged = tmp_path / "record.tmp"
+    staged.write_text("new", encoding="utf-8")
+
+    handle = destination.open("rb")
+
+    def release() -> None:
+        time.sleep(0.1)
+        handle.close()
+
+    reader = threading.Thread(target=release, daemon=True)
+    reader.start()
+    try:
+        replace_file(staged, destination)
+    finally:
+        reader.join(timeout=5)
+
+    assert destination.read_text(encoding="utf-8") == "new"
+    assert not staged.exists(), "the staged copy was published, not copied"

@@ -439,20 +439,41 @@ class StreamChatResult:
         `None` is FastMCP's "the far end sent no structured content" and reads
         as an empty result; the caller that cannot tell that from an empty
         answer must guard the shape before it gets here (`slife2.clients.model`).
-        A mapping must carry every key `to_wire` writes: a hole is not an empty
-        answer, and defaulting it would invent one.
+
+        **A mapping must carry every key `to_wire` writes, in the shape it
+        writes.**  A hole and a null are two spellings of a value this build
+        cannot read: `to_wire` never emits either, so defaulting one would
+        invent an empty answer out of another build's unreadable one — the
+        confident negative SDD Appendix C forbids.  The value check is one rule
+        for all five keys rather than a special case per null the field names.
         """
         if raw is None:
             return cls()
-        missing = sorted(
-            {"text", "tool_calls", "thinking", "usage", "stop_reason"} - raw.keys()
-        )
+        shape: dict[str, type] = {
+            "text": str,
+            "tool_calls": list,
+            "thinking": str,
+            "usage": dict,
+            "stop_reason": str,
+        }
+        missing = sorted(shape.keys() - raw.keys())
         if missing:
             raise KeyError(f"stream_chat result is missing {', '.join(missing)}")
+        wrong = sorted(
+            key for key, kind in shape.items() if not isinstance(raw[key], kind)
+        )
+        if wrong:
+            raise KeyError(
+                f"stream_chat result has no readable {', '.join(wrong)}: this "
+                "build writes one value of a known shape for every key, and "
+                "this is not one"
+            )
+        if not all(isinstance(call, dict) for call in raw["tool_calls"]):
+            raise KeyError("stream_chat result has a tool call that is not an object")
         return cls(
-            text=str(raw["text"] or ""),
-            tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"] or []),
-            thinking=str(raw["thinking"] or ""),
+            text=raw["text"],
+            tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"]),
+            thinking=raw["thinking"],
             usage=Usage.from_wire(raw["usage"]),
-            stop_reason=str(raw["stop_reason"] or ""),
+            stop_reason=raw["stop_reason"],
         )

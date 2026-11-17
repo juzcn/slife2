@@ -767,8 +767,11 @@ agent server exposes two read-only management tools:
   snapshot of the stored turns — `transcript`'s own read, so history ends at the
   same place for a watcher and a restarted window. A turn in flight is replayed
   from a `TurnStarted` frame followed by the events already produced; live turn
-  events follow. A cancelled call is the detach. When the subagent is removed,
-  the last frame is `Closed` and the call returns.
+  events follow. A turn whose record is still being written is waited out
+  before that decision: the store can hold the row before the tap knows its id,
+  and replaying in that window would draw the turn twice. A cancelled call is
+  the detach. When the subagent is removed, the last frame is `Closed` and the
+  call returns.
 
 Watching is a read: it starts no turn, chooses no context, spends no model call,
 and never answers an approval request. The watched turn remains unattended
@@ -1075,6 +1078,11 @@ Rules:
   (§14.2).
 - **The live-context list's order is authoritative.** Reads replay it as written
   and never re-sort or re-slice it; a selection is not always contiguous.
+- **A rebuild that writes nothing still reads the live-context list** when the
+  caller supplied its `expected`. A list moved by another process while the
+  decision ran is adopted exactly as a lost compare-and-set is, so the loop
+  never keeps a snapshot the store has left behind and its next `expected`
+  matches again.
 - **`send_message` answers with every key present**, including `refused` where
   nothing could be refused. A turn is an object, not a call, because a message
   can arrive mid-turn and must wait rather than displace the turn in flight.
@@ -1246,7 +1254,10 @@ Rules:
   may be dropped, delayed, or coalesced by the transport.
 - **An unreadable result is refused, not read as an empty answer.** A missing
   result read as an empty assistant message is a turn that "succeeds" with
-  nothing in it.
+  nothing in it. A field whose value is `null`, or a tool-call list holding
+  something that is not an object, is unreadable in the same sense: this build
+  writes a value for every key `to_wire` emits, and defaulting one would turn
+  another build's answer into a confident empty one.
 - **A stream that goes quiet is a stall, not a long answer.** The clock is on the
   wait for one chunk, never on the call; a model that streams for an hour is
   fine. The watchdog is armed by iterating chunks, so every caller must read the
@@ -1893,7 +1904,10 @@ Rules specific to this system:
 
 1. **Presence follows a window.** A `join` call held open puts an agent on the
    mesh. Online and offline are notes, not messages; no turn runs and the model
-   is not told. The roster is `peer_agent_list`.
+   is not told. The roster is `peer_agent_list`. A call that takes the mesh
+   during the departure wait restarts it rather than being disconnected under:
+   the send was accepted, and its retry ladder gets its own window before the
+   agent leaves.
 2. **A round is settled by the model's own call.** `peer_agent_task_response`
    settles it with `completed`, `failed` or `rejected`; `input_required` and
    `auth_required` pause it instead, and `peer_agent_continue_task` resumes a
@@ -1979,6 +1993,12 @@ Rules specific to this system:
     settled as `rejected` with the reason, and a bare `message` reports
     `completed` only after the conversation has taken it. The peer reads the
     ending and decides whether to send it again.
+22. **The broker address and namespace are read per call.** An edited
+    `peer_agent:` reaches a member that already exists at its next call: the
+    mesh built for the old address is torn down and a new one is built on the
+    address the config names now. A roster read follows the same rule. The
+    address is not rebound underneath a connected mesh; the old one is
+    abandoned, and its outstanding sends end like any teardown's.
 
 **Why directed topics.** Group traffic uses
 `event/{org}/{unit}/member:<name>`, one topic per recipient, subscribed by that
@@ -2552,8 +2572,11 @@ its entry.
 ### 11.8 Configuration edits
 
 A model may edit the sections it can read. Every management tool writes through
-`libs/host/configfile.py`, the single writer described in §4.1; the result is
-validated by the same loader a start uses, and a refused entry is restored.
+`libs/host/configfile.py`, the single writer described in §4.1; the rendered
+document is staged beside the file and validated by the same loader a start
+uses before it is published, so a refused entry is never written. An atomic
+swap waits briefly for a Windows reader that holds the destination open rather
+than failing the edit; a destination that stays locked still raises.
 
 A `set` writes the whole entry, not a patch. A field left out is a field the
 entry does not have, which is what makes switching an entry from `url` to
@@ -2610,6 +2633,12 @@ refuses rather than handing out a dead link. A merely unreachable transport gets
 a heal window before being respawned. A stop that lands while a start is
 establishing the transport invalidates that attempt: the worker releases whatever
 it established instead of publishing after `stop` returned.
+
+**An inherited URL is another process's tunnel.** `SLIFE2_FILE_TUNNEL_URL` makes
+the URL active and leaves it alone (Appendix C), but its share listener is the
+other process's, and this process's tokens are not in that listener's map —
+`expose_local_image` refuses rather than handing out a link that answers 403.
+The process that owns the tunnel is the one that can expose a file.
 
 The tunnel is pointed at a loopback listener that serves `GET /share/{token}`
 and nothing else, on a port of its own; the MCP endpoint keeps
@@ -2786,38 +2815,9 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-Each is verified against the code and, where reachability allows, reproduced.
-None blocks the shipped flows; each is a state the design has not closed.
-
-- **A rebuild's non-writing exits do not compare with the store.** The
-  `no_decision` and `context_sufficient` branches return the caller's snapshot
-  without reading the live-context list, and the compare-and-set only runs on
-  the write path. A render or reset from another process in that window leaves
-  the loop's list ahead of the store until its next rebuild.
-- **A member's `USED` taken during the mesh departure wait is dropped.** The
-  departure timer removes `USED` and disconnects without distinguishing a
-  holder that arrived after it started; a send accepted in that window is
-  cancelled or reported unreachable. The window is `pacing.mesh_departure`.
-- **An edited mesh address reaches new members only.** `mesh_for` reads the
-  section when a session is first built; an existing member keeps its broker
-  and namespace until a restart, while a member built later joins the new one.
-- **A watch can draw a finished turn twice.** `Tap.recorded_turn` is written
-  after the store's save answers, not atomically with it; a watcher whose
-  snapshot is read in that window sees the turn in both the snapshot and the
-  replay.
-- **An inherited file-tunnel URL does not share its tokens.**
-  `SLIFE2_FILE_TUNNEL_URL` makes the child publish through another process's
-  listener, but `Exposed` is per process: a token minted in the child is not in
-  the parent's map, so the parent answers 403 for it.
-- **`os.replace` on Windows while a reader holds the file.** The atomic-swap
-  writes used by `configfile`, `statefile` and the runtime can raise
-  `PermissionError` when another process has the destination open. A config
-  edit whose validation then fails can have its rollback refused too, leaving
-  the refused file on disk for the next start.
-- **A foreign model server's nulls are read as empties.** `StreamChatResult`
-  checks key presence, not value shape: `tool_calls: null`, `thinking: null`
-  and `usage: null` are accepted as no calls, no reasoning and zero tokens
-  rather than refused as an unreadable answer from another build.
+None in this version. A state the design has not closed is recorded here with
+what it costs and how the current code behaves; the previous version's were
+closed against the code rather than carried forward.
 
 ### 14.2 Deferred capabilities
 

@@ -280,6 +280,11 @@ class Storage:
     sqlite_busy: float = 5.0
     #: Waiting for a config file's write lock.
     filelock: float = 30.0
+    #: How long an atomic swap waits for a reader that has the destination open.
+    #: Windows refuses the rename while it is open; a reader here is a status
+    #: line or a config load, so the wait is a bound on a race rather than a
+    #: budget — past it the destination is genuinely locked and the error stands.
+    replace_wait: float = 1.0
 
 
 @dataclass

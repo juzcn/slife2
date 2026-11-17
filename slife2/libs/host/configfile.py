@@ -21,10 +21,12 @@ document in round-trip mode and edits it *as a document*: a key added under
 `mcp:` is a key added to the mapping that is already there, and every comment
 around it stays where the operator put it.
 
-**A write is validated by the reader before it counts.**  After the swap, the
-whole file goes back through `slife2.libs.host.config.load`, and a file it refuses is
-rolled back to what was there and the caller gets the error.  The alternative —
-trusting the edit — fails one process later, at the next start, in a process
+**A write is validated by the reader before it counts.** The rendered document
+is staged beside the file and the whole staged copy goes back through
+`slife2.libs.host.config.load`; only a candidate the loader accepts is renamed
+onto the path.  A file it refuses is never published, so there is nothing to
+roll back and no window in which a refused config is on disk.  The alternative
+— trusting the edit — fails one process later, at the next start, in a process
 that has no idea an edit happened; and the entry that produced it (a `mcp:`
 entry with neither `command` nor `url`, say) would be one the tool reported as
 written.
@@ -37,6 +39,7 @@ whether a lock is stale — see `exclusive`'s own docstring for why that matters
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import tempfile
@@ -52,6 +55,7 @@ from ruamel.yaml.tokens import CommentToken
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import Config, ConfigError, find_config_path, load
+from slife2.libs.host.paths import replace_file
 from slife2.libs.host.runtime import config_key, exclusive
 
 logger = logging.getLogger(__name__)
@@ -113,13 +117,14 @@ def _render(document: CommentedMap) -> str:
     return stream.getvalue()
 
 
-def _swap(path: Path, text: str) -> None:
-    """Put *text* at *path*, atomically, keeping the file's mode.
+def _stage(path: Path, text: str) -> Path:
+    """Write *text* beside *path*, flushed and with the file's mode; answer it.
 
-    A temp file in the same directory and `os.replace`, so a reader sees the old
-    file or the new one and never a half-written one.  The mode is copied from
-    the file being replaced because `mkstemp` creates `0600`, which would
-    silently tighten a config somebody had made group-readable.
+    A temp file in the same directory, so the rename that follows is atomic on
+    the filesystem the file lives on and a reader sees the old document or the
+    new one.  The mode is copied from the file being replaced because `mkstemp`
+    creates `0600`, which would silently tighten a config somebody had made
+    group-readable.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -139,13 +144,75 @@ def _swap(path: Path, text: str) -> None:
                 # unreadable config for another user of the same machine, and
                 # nothing anywhere to say why (SDD Appendix C).
                 logger.warning("%s: the file's mode was not kept: %s", path, exc)
-        os.replace(tmp, path)
+        return Path(tmp)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
+
+
+def _edit(
+    path: Path,
+    mutate: Callable[[CommentedMap], None],
+    check: Callable[[Config], None] | None = None,
+) -> None:
+    """One locked, validated read-modify-write of the config file.
+
+    Everything that writes goes through here, so the four properties a config
+    edit needs — held across processes, comment-preserving, atomic, and refused
+    by the loader if it produced nonsense — are stated once.
+
+    `check` is the caller's own judge, run on the parsed config *inside the
+    lock* and before the write counts.  `load` alone accepts things that are
+    only wrong in the light of a section's meaning — a `default:` naming no
+    model is a valid string — so a caller that knows its value passes a
+    predicate here, and it must raise `ConfigError` to refuse.
+
+    **The candidate is judged before it is published.**  The file used to be
+    swapped in first and rolled back when the loader refused it, which put the
+    refused document on disk for the window between the two swaps — and on
+    Windows the rollback itself could be refused by a reader holding the file
+    it was restoring.  Instead the rendered text is staged beside the file, the
+    staged copy is loaded — same directory, so `config_dir` and every relative
+    resolution are the ones the installed file would get — and only a candidate
+    the loader (and `check`) accept is renamed onto the path.  A refused edit
+    therefore never touches the file at all.
+    """
+    with exclusive(config_key(path), timeout=_T.timeouts.storage.filelock):
+        before = path.read_text(encoding="utf-8") if path.exists() else ""
+        document = _document(before, path)
+        mutate(document)
+        text = _render(document)
+        if text == before:
+            # An edit that found nothing to change — a `remove` of an entry that
+            # was not there — is not a write.  Rewriting the same bytes would
+            # only move the file's mtime and make a reader think something
+            # happened.
+            return
+        staged = _stage(path, text)
+        try:
+            # The reader is the judge: an entry this refuses is one the next
+            # `slife2` would fail to start on, so it must never be published.
+            config = load(staged)
+            if check is not None:
+                check(config)
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            # The judge can refuse with more than `ConfigError`: `load` resolves
+            # a `skills:` entry's environment eagerly, and a keyring that refuses
+            # mid-session raises its own error.  Whatever the refusal, an edit
+            # that did not validate is not an edit that happened — and the file
+            # it would have replaced is still exactly as it was.
+            if isinstance(exc, ConfigError):
+                raise ConfigError(f"refused, so nothing was written: {exc}") from exc
+            raise
+        try:
+            replace_file(staged, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            raise
 
 
 def read_section(
@@ -240,57 +307,6 @@ def _section(
     current = CommentedMap()
     document[section] = current
     return current
-
-
-def _edit(
-    path: Path,
-    mutate: Callable[[CommentedMap], None],
-    check: Callable[[Config], None] | None = None,
-) -> None:
-    """One locked, validated read-modify-write of the config file.
-
-    Everything that writes goes through here, so the four properties a config
-    edit needs — held across processes, comment-preserving, atomic, and refused
-    by the loader if it produced nonsense — are stated once.
-
-    `check` is the caller's own judge, run on the parsed config *inside the
-    lock* and before the write counts.  `load` alone accepts things that are
-    only wrong in the light of a section's meaning — a `default:` naming no
-    model is a valid string — so a caller that knows its value passes a
-    predicate here, and it must raise `ConfigError` to refuse, which rolls the
-    file back exactly as the loader's own refusal does.
-    """
-    with exclusive(config_key(path), timeout=_T.timeouts.storage.filelock):
-        existed = path.exists()
-        before = path.read_text(encoding="utf-8") if existed else ""
-        document = _document(before, path)
-        mutate(document)
-        text = _render(document)
-        if text == before:
-            # An edit that found nothing to change — a `remove` of an entry that
-            # was not there — is not a write.  Rewriting the same bytes would
-            # only move the file's mtime and make a reader think something
-            # happened.
-            return
-        _swap(path, text)
-        try:
-            # The reader is the judge: an entry this refuses is one the next
-            # `slife2` would fail to start on, so it must not be left on disk.
-            config = load(path)
-            if check is not None:
-                check(config)
-        except Exception as exc:
-            # The judge can refuse with more than `ConfigError`: `load` resolves
-            # a `skills:` entry's environment eagerly, and a keyring that refuses
-            # mid-session raises its own error.  Whatever the refusal, an edit
-            # that did not validate is not an edit that happened — roll it back.
-            if existed:
-                _swap(path, before)
-            else:
-                path.unlink(missing_ok=True)
-            if isinstance(exc, ConfigError):
-                raise ConfigError(f"refused, so nothing was written: {exc}") from exc
-            raise
 
 
 def _without_empties(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -686,8 +702,8 @@ def set_scalar(
     `check` is the judge for a value `load` alone would accept — `default:` is a
     plain string to the loader and a reference only to `Config.resolve`, so a
     caller that knows its value passes `lambda c: c.resolve(ref)` and an edit
-    naming no model is rolled back rather than left for the next conversation to
-    trip over.
+    naming no model is refused before it is published rather than left for the
+    next conversation to trip over.
     """
     target = path or config_path()
 

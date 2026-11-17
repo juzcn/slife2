@@ -334,6 +334,17 @@ class TunnelProvider(Protocol):
     def is_active(self) -> bool: ...
 
     @property
+    def inherited(self) -> bool:
+        """Whether the URL is another process's tunnel, not one started here.
+
+        `SLIFE2_FILE_TUNNEL_URL` names a tunnel this process did not start: its
+        listener is the other process's, so a token minted in this process is
+        not in the map that listener serves.  Read by `expose_local_image`,
+        which refuses rather than handing out a link that answers 403.
+        """
+        ...
+
+    @property
     def is_starting(self) -> bool:
         """Whether a start attempt is in flight (the single-flight guard).
 
@@ -433,6 +444,19 @@ class _TunnelProviderBase:
     def is_active(self) -> bool:
         """True when the tunnel is running."""
         return self.public_url is not None
+
+    @property
+    def inherited(self) -> bool:
+        """Whether the URL is another process's tunnel, not one started here.
+
+        `SLIFE2_FILE_TUNNEL_URL` names a tunnel this process did not start: its
+        listener is the other process's, so a token minted in this process is
+        not in the map that listener serves.  The URL is still active and still
+        belongs in `tunnel_status` (Appendix C: treat it as active and leave it
+        alone); what this property separates is the one thing that cannot work
+        through it — exposing a file here (`slife2.plugins.file_tunnel.server`).
+        """
+        return self._public_url is None and self.public_url is not None
 
     @property
     def is_starting(self) -> bool:

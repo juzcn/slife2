@@ -1641,6 +1641,30 @@ def build_server(
             completed_at=outcome.completed_at,
         )
 
+    async def record_into(
+        tap: Tap | None, loop: Loop, item: Pending, outcome: Outcome
+    ) -> int | None:
+        """`record`, and the tap learns the id **before** the write answers.
+
+        **The store and the tap are two facts, and the watcher reads both.**  A
+        turn's row is visible the moment the store commits it, while
+        `tap.recorded_turn` used to be written by the caller after the write
+        answered — so a watcher could read a snapshot that already held the turn
+        while the tap still said it did not, and draw it twice.  Setting the id
+        here, inside the task the watcher waits on (`Tap.writing`), makes the
+        two answer one way: a write in flight is waited out, and a write that
+        failed leaves the field alone and the replay is the missing half rather
+        than a duplicate.
+
+        A turn with nothing to record — a caller cancelled while queued — and a
+        failed write both answer `None`, which is the same thing this leaves the
+        tap saying.
+        """
+        turn_id = await record(loop, item, outcome)
+        if tap is not None and isinstance(turn_id, int):
+            tap.recorded_turn = turn_id
+        return turn_id
+
     # --- the two decisions, and the one place they are asked for -------------
     #
     #  Both are the context plugin's, and this server is the caller — it is the
@@ -3655,16 +3679,18 @@ def build_server(
                     # while the live list had already let them go is the
                     # disagreement `repaired_error` exists to prevent.
                     repaired = repaired_error(loop, exc)
-                    written = detach(record(loop, item, outcome))
+                    written = detach(record_into(tap, loop, item, outcome))
                     # **The id reaches the tap when the write does**, and
                     # that is what lets a watcher tell whether the snapshot
                     # it has just read already contains this turn: the same
                     # turn can be in the store and in the tap, and drawing
                     # both is the duplicate this field exists to prevent.
-                    # A turn that died before its announcement has no tap to
-                    # tell.
+                    # `Tap.writing` is the half that closes the window between
+                    # the store's commit and the field being set — a watcher
+                    # waits it out instead of guessing.  A turn that died
+                    # before its announcement has no tap to tell.
                     if tap is not None:
-                        written.add_done_callback(partial(_recorded_into, tap))
+                        tap.writing = written
                     # An id backs a *prefix*, so it can only be claimed when
                     # this turn began on a wholly backed list — where it began
                     # being `began`, derived rather than kept because
@@ -3715,8 +3741,8 @@ def build_server(
                     # cancellation landing in the save does not throw the turn
                     # away: the task outlives this scope and the next turn takes
                     # its id up (`record_pending` / `settle_record`).
-                    written = detach(record(loop, item, outcome))
-                    written.add_done_callback(partial(_recorded_into, tap))
+                    written = detach(record_into(tap, loop, item, outcome))
+                    tap.writing = written
                     try:
                         turn_id = await asyncio.shield(written)
                     except asyncio.CancelledError:
@@ -3741,10 +3767,10 @@ def build_server(
                         roll_back(loop, outcome)
                         watching.drop_if(key, tap)
                         raise
-                    # The store has this turn now.  Recorded on the tap so a
-                    # watcher's snapshot can decide whether replaying the tap
-                    # would duplicate it.
-                    tap.recorded_turn = turn_id
+                    # The store has this turn now, and `record_into` has put its
+                    # id on the tap — where a watcher's snapshot decision reads
+                    # it.  The local `turn_id` is what `covered` and
+                    # `address_turn` below are built from.
                     # **A turn joins `turn_ids` only when the list it follows is
                     # wholly accounted for**, and this is the second half of what
                     # `covered` means.  `covered` is a count from the *start*, so
@@ -3973,7 +3999,9 @@ def build_server(
         conversation's tap (`Tap`) and handed over before the live stream; a
         watcher that joined mid-turn would otherwise see an answer to a question
         it never saw.  A tap whose record is already in the snapshot is skipped,
-        which is the one way the same turn could be drawn twice.
+        which is the one way the same turn could be drawn twice — and a record
+        that is still being written is waited out before that decision, because
+        the snapshot can hold the row before the tap has its id.
 
         The person watching never slows the turn: the observer appends to the
         tap and `put_nowait`s for each watcher, and the reporting happens on this
@@ -4008,8 +4036,23 @@ def build_server(
         while True:
             before = watching.tap(key)
             stored = await stored_conversation(agent, subagent)
-            if watching.tap(key) is before:
-                break
+            if watching.tap(key) is not before:
+                continue
+            if (
+                before is not None
+                and before.writing is not None
+                and not before.writing.done()
+            ):
+                # **The row can be in the store before the tap has its id.**
+                # `writing` is that write; a snapshot read in this window
+                # already contains the turn while `recorded_turn` still says
+                # None, and replaying the tap would draw it twice.  Waiting for
+                # the write and then reading the store again is what makes the
+                # two facts agree — and if the write fails, the field stays None
+                # and the replay is the half the store is missing.
+                await asyncio.wait({before.writing})
+                continue
+            break
         watcher = watching.watch(key)
         replay = watching.replay(key)
         if subagent and not subagent_file(agent, subagent).is_file():
@@ -4594,27 +4637,6 @@ def _image_url(part: Any) -> str | None:
     image = part.get("image_url")
     url = image.get("url") if isinstance(image, dict) else None
     return url if isinstance(url, str) and url else None
-
-
-def _recorded_into(tap: Tap, task: asyncio.Task[Any]) -> None:
-    """Take up a detached record's id for the tap that turn left behind.
-
-    Only an `int` is a turn the store can be asked about; `None` is a turn with
-    nothing to record, and leaving the tap's field alone is the honest answer —
-    a watcher then replays the tap rather than trusting an id the snapshot
-    cannot contain.
-
-    A cancelled or failed write leaves it alone too.  `detach` already says that
-    failure in the log; this callback is not the place to say it a second time.
-    """
-    if task.cancelled():
-        return
-    try:
-        found = task.result()
-    except Exception:  # noqa: BLE001 — the write's failure is `detach`'s to report
-        return
-    if isinstance(found, int):
-        tap.recorded_turn = found
 
 
 def _reply(

@@ -122,11 +122,15 @@ import contextlib
 import hashlib
 import json
 import os
+import sys
 import tempfile
+import time
 from collections.abc import Generator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import NamedTuple
+
+import slife2.helpers.timeouts as _T
 
 #: The environment variable naming the data directory.
 DATA_ENV_VAR = "SLIFE2_DATA_DIR"
@@ -568,6 +572,32 @@ def register_home(root: Path | None = None) -> Path:
     return target
 
 
+def replace_file(src: Path, dst: Path) -> None:
+    """`os.replace`, waiting out a Windows reader that holds *dst* open.
+
+    **A sharing violation is transient and the rename is right.**  On Windows
+    `os.replace` raises `PermissionError` while another process has the
+    destination open without delete sharing — every `read_text` of a record, a
+    state file or the config holds it exactly that way for as long as the read
+    takes.  Retrying briefly turns that race into a wait; a destination that is
+    really locked still raises, at the deadline.  The caller's atomicity is
+    untouched: nothing is published before this returns, and a copy that never
+    returns is deleted by the caller like any other failed write.
+
+    Elsewhere a `PermissionError` is the directory's refusal and no retry can
+    change it, so only Windows waits.
+    """
+    deadline = time.monotonic() + _T.timeouts.storage.replace_wait
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or time.monotonic() >= deadline:
+                raise
+            time.sleep(_T.timeouts.pacing.file_release)
+
+
 def _write_atomically(path: Path, text: str) -> None:
     """Put *text* at *path* so a reader sees all of it or none of it.
 
@@ -600,7 +630,7 @@ def _write_atomically(path: Path, text: str) -> None:
             # the same failure `statefile.write` flushes and fsyncs to prevent.
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        replace_file(Path(tmp), path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
