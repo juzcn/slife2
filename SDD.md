@@ -1639,7 +1639,10 @@ only for the cabinet's both-empty call; the other two refuse it and name their
 listing tool) and `limit` (the page size applied). `libs/store/answer.py` is the
 one home of the envelope and of the floors behind `confidence`; the floors are
 the embedder's, measured on the catalogue (§7.5), the words override them in
-every corpus, and the tier labels a page without cutting it.
+every corpus, and the tier labels a page without cutting it. **`turn_search`
+alone takes `exclude_context`** (default false): the turns a conversation is
+running on are still its history, and leaving them out is the caller's request,
+not the search's rule.
 
 Rules:
 

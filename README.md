@@ -617,8 +617,10 @@ and tags with `turn_summarize`. `turn_list` is newest first, one line per turn,
 with `since`/`until` accepting an ISO date or a phrase such as `yesterday`, and
 `limit`/`offset` paging against `total`. `turn_search` takes the same window and
 returns the same line plus a `similarity` score; its `keywords` rank exact
-matches first but are not a filter. None of the tools takes an agent argument: a
-model reads its own history only.
+matches first but are not a filter. It searches the whole log by default;
+`exclude_context: true` leaves out the turns the conversation is already running
+on. None of the tools takes an agent argument: a model reads its own history
+only.
 
 `turn_search`, `cabinet_search` and `tool_search` share one spelling: they take
 `keywords` and `sentences`, and answer `results` with `best`, `confidence`,

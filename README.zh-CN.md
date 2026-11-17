@@ -548,7 +548,8 @@ schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有�
 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list` 按最新优先，每轮一行；
 `since`/`until` 接受 ISO 日期或 `yesterday` 之类的说法，`limit`/`offset` 按
 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的一行外加 `similarity`
-分数；它的 `keywords` 把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受
+分数；它的 `keywords` 把包含这些词的轮次排在前面，但不是过滤器。默认搜索整个日志；
+`exclude_context: true` 会把当前对话正在使用的轮次排除在外。这些工具都不接受
 agent 参数：模型只能读取自己的历史。
 
 `turn_search`、`cabinet_search` 和 `tool_search` 共用一套写法：都接受 `keywords`
