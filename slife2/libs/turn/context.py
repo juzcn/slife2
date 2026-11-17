@@ -45,7 +45,7 @@ from datetime import datetime
 from typing import Any
 
 from slife2.helpers.clock import now
-from slife2.helpers.timeutil import can_place
+from slife2.helpers.timeutil import BOUND_GRAMMAR, can_place
 from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import INTERRUPTED
 
@@ -396,11 +396,17 @@ def instruction(user_input: str) -> str:
     conversation in hand is carrying.  The model reads the conversation — the
     instruction is appended to it — and this is what tells it which input the
     decision is about.
+
+    **The bound grammar is the module's one spelling**, not a list copied into
+    the template: the tools' schemas print `BOUND_GRAMMAR` and the code that
+    decides reads it, and the template's own copy had fallen behind it — no
+    `tomorrow`, `now`, `quarter` or datetime.
     """
     return render_instruction(
         INSTRUCTION_TEMPLATE,
         user_input=user_input,
         recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),
+        bound_grammar=BOUND_GRAMMAR,
     )
 
 

@@ -1,17 +1,34 @@
 """The pure half of the context decision: repairing a rebuilt message list.
 
 `consistent` is the one function here whose failure is not a wrong answer but a
-turn no provider will accept, so its rules are stated as cases.
+turn no provider will accept, so its rules are stated as cases.  `instruction`
+renders the discriminator's prompt, and its bound grammar is checked here too:
+the prompt is the other place a model reads it, and a copy in the template is a
+copy that drifts.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from slife2.libs.turn.context import consistent
+from slife2.helpers.timeutil import BOUND_GRAMMAR
+from slife2.libs.turn.context import consistent, instruction
 from slife2.libs.turn.tools import INTERRUPTED
 
 pytestmark = pytest.mark.unit
+
+
+def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None:
+    """**The template must not carry a second copy of the grammar.**
+
+    `BOUND_GRAMMAR` is the sentence `turn_list`/`turn_search` print in their
+    schemas and `normalize_bound` raises with; the recall template's own list
+    had fallen behind it and told the discriminator less than `since` and
+    `until` accept — no `tomorrow`, `now`, `quarter` or datetime.
+    """
+    text = instruction("what did we decide?")
+
+    assert BOUND_GRAMMAR in text
 
 
 def call(call_id: str, name: str = "search") -> dict:
