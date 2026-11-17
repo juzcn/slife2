@@ -2257,6 +2257,14 @@ to an agent with no window is refused by name (`NO_WINDOW`).
   updated by a `plan_write` call that succeeded. Its four statuses are the
   model's claims, not the harness's measurements, so `done` is not drawn in the
   colour a tool panel's verified result wears.
+- **A question is a strip above the plan**, not a row in the transcript: an
+  undecided picker (`Ctrl+S`, `Ctrl+O`) is current state, so it stays fixed
+  while the loop keeps writing, and both strips stay visible. The choice writes
+  no line of its own: `Ctrl+O` opens the watch screen, whose header names it,
+  and `Ctrl+S` ends in the server's note; `Esc` is silent. A list longer than
+  the strip's cap scrolls inside it, with the cursor row kept in view. Only one
+  question is open at a time; the other key is ignored until it is picked or
+  `Esc`ed.
 - **A connection has two states on screen**: online and offline. The reasons
   live in the status tool.
 - **The status bar's `tools` count is loaded/total**, both from the hub's answer

@@ -359,18 +359,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "cancel",
         "zh": "取消",
     },
-    "picker_cancelled": {
-        "en": "Cancelled",
-        "zh": "已取消",
-    },
-    # Trailing space: the reference the person chose follows it.  **"Selected",
-    # not "Switched to"**: the picker draws this the moment Enter resolves it,
-    # and the switch is a call that can still fail — the success line is the
-    # window's note after the server answers.
-    "picker_switched": {
-        "en": "Selected ",
-        "zh": "已选择 ",
-    },
     # ── the conversation picker (`slife2.tui.widgets.ConversationPicker`) ─
     "conversation_picker_title": {
         "en": "Watch a subagent or agent task",
@@ -385,18 +373,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     "picker_kind_task": {
         "en": "task",
         "zh": "task",
-    },
-    # The decision line, once a row has been chosen.  **"Selected", not
-    # "Watching"**: the line is drawn when Enter resolves the picker, and the
-    # watch call that follows can fail; the screen that opens is the one that
-    # says it is watching.
-    "conversation_watching": {
-        "en": "Selected {name}",
-        "zh": "已选择 {name}",
-    },
-    "conversation_watching_task": {
-        "en": "Selected task {name}",
-        "zh": "已选择 task {name}",
     },
     # `Ctrl+O` with nothing to offer.  Said rather than shown as an empty
     # picker, for `no_models`'s reason: a list with no rows is a key that looks

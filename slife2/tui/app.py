@@ -57,7 +57,7 @@ import logging
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from fastmcp.exceptions import ToolError
 from textual.app import App, ComposeResult
@@ -104,6 +104,7 @@ from slife2.tui.widgets import (
     ModelChoice,
     ModelPicker,
     PlanView,
+    QuestionStrip,
     StatusBar,
     WatchChoice,
 )
@@ -220,6 +221,11 @@ def model_choices(rows: Sequence[Mapping[str, Any]]) -> list[ModelChoice]:
             )
         )
     return choices
+
+
+#: What a picker's future resolves to — `ModelChoice` or `WatchChoice`.  The
+#: question strip's helper is the one shape both keys share.
+_Choice = TypeVar("_Choice")
 
 
 class SlifeApp(App[None]):
@@ -485,7 +491,12 @@ class SlifeApp(App[None]):
         # The transcript signs its messages with the agent name, so a
         # conversation reads `You> ...` / `jack> ...` on both sides.
         yield ChatView(self._agent)
-        # The plan sits between the conversation and the prompt: it is current
+        # A question is current state while it asks, so it waits here, out of
+        # the transcript's scroll — and stacked above the plan strip, which
+        # stays the strip directly above the prompt.  Hidden until a question
+        # opens (`QuestionStrip`).
+        yield QuestionStrip(id="question-strip")
+        # The plan sits between the question and the prompt: it is current
         # state rather than history, so it stays put while the transcript
         # scrolls.  Hidden until there is a plan (`PlanView`).
         yield PlanView()
@@ -1302,18 +1313,62 @@ class SlifeApp(App[None]):
         worked.
         """
         if self._switching or self._choosing:
-            # The two inline pickers share the tail of the transcript and the
-            # focus.  Opening one over the other blurred and cancelled both —
-            # Ctrl+S then Ctrl+O left two "Cancelled" rows and no switch.
+            # **One question at a time, and it is the user's to finish.**  A
+            # second key would steal the focus from the open picker, whose blur
+            # cancels it: the first question gone without an answer.  The next
+            # key works once the first is picked or `Esc`ed.
             return
         # **Only the window's own screen offers this**, for `action_watch`'s
-        # reason: with a watch up, the picker would mount in the transcript
-        # underneath it — invisible — and the latch would make the key look dead
-        # until the watch closed.
+        # reason: with a watch up, the picker would mount in the window's own
+        # question strip underneath it — invisible — and the latch would make
+        # the key look dead until the watch closed.
         if self.screen is not self.screen_stack[0]:
             return
         self._switching = True
         self.run_worker(self._switch_model(), group="model", exit_on_error=False)
+
+    async def _ask_picker(
+        self,
+        picker: ModelPicker | ConversationPicker,
+        future: asyncio.Future[_Choice | None],
+        css_class: str,
+    ) -> _Choice | None:
+        """Put a picker in the question strip and wait for its decision.
+
+        **One question at a time.**  The caller's latch is what ignores the
+        other key while this one waits; two pickers would fight over the focus,
+        and the second would cancel the first on the blur it caused.
+
+        **The strip, not the transcript.**  A picker mounted at the tail of the
+        transcript scrolls away under the loop that is still writing: the keys
+        keep reaching it while the list stops being readable.  The strip is
+        fixed, and the plan strip above the prompt stays visible underneath it.
+
+        **The choice writes no line of its own.**  `Ctrl+O` opens the watch
+        screen, whose header names what is being watched; `Ctrl+S` ends in the
+        server's own note after the switch; `Esc` closes the question, and
+        nothing happened worth recording.  Adding a "Selected" line would be a
+        second spelling of a fact the interface already says.
+
+        **The prompt takes the focus back whether or not anything was chosen**:
+        the picker had it while it asked, and what the person did before the key
+        was type.  A cancelled worker (the window closing) leaves no record —
+        nothing was decided.
+        """
+        strip = self.query_one(QuestionStrip)
+        strip.display = True
+        # The class is the question's clothes (`app.tcss`): the strip's cap and
+        # the drawn edge both hang off it.
+        picker.add_class(css_class)
+        strip.mount(picker)
+        picker.focus()
+        try:
+            choice = await future
+        finally:
+            await picker.remove()
+            strip.display = False
+            self.query_one(HistoryInput).focus()
+        return choice
 
     async def _switch_model(self) -> None:
         """Read the models, ask which one, and switch the conversation onto it.
@@ -1345,17 +1400,11 @@ class SlifeApp(App[None]):
                 self._transcript.add_error(t("no_models"), ends_turn=False)
                 return
             future: asyncio.Future[ModelChoice | None] = asyncio.Future()
-            picker = self._transcript.add_picker(
-                ModelPicker(choices, self._model, future)
+            choice = await self._ask_picker(
+                ModelPicker(choices, self._model, future), future, "model-picker"
             )
-            picker.focus()
-            choice = await future
-            # The prompt takes the focus back, whether or not anything was
-            # chosen: the picker had it while it asked, and what the person did
-            # before ctrl+s was type.
-            self.query_one(HistoryInput).focus()
             if choice is None:
-                return  # cancelled — the picker's own line is the whole answer
+                return  # cancelled — nothing to switch, nothing to say
 
             try:
                 answer = await self._client.switch_model(choice.ref)
@@ -1401,12 +1450,14 @@ class SlifeApp(App[None]):
         resolves the picker.  A worker does both.
         """
         if self._choosing or self._switching:
-            # See `action_switch_model`: one picker at a time.
+            # See `action_switch_model`: one question at a time, until the
+            # person picks or presses `Esc`.
             return
         # **Only the window's own screen offers this.**  With a watch screen
-        # up, the picker would mount in the transcript underneath it — invisible
-        # — and the choice would push a second screen over the first.  `Esc` is
-        # how you leave a watch; the next `Ctrl+O` then opens the picker again.
+        # up, the picker would mount in the window's own question strip
+        # underneath it — invisible — and the choice would push a second screen
+        # over the first.  `Esc` is how you leave a watch; the next `Ctrl+O`
+        # then opens the picker again.
         if self.screen is not self.screen_stack[0]:
             return
         # **And not over a question the person has to answer.**  The approval row
@@ -1468,16 +1519,11 @@ class SlifeApp(App[None]):
                 WatchChoice("task", str(row["name"])) for row in running
             ]
             future: asyncio.Future[WatchChoice | None] = asyncio.Future()
-            picker = self._transcript.add_conversation_picker(
-                ConversationPicker(choices, future)
+            choice = await self._ask_picker(
+                ConversationPicker(choices, future), future, "conversation-picker"
             )
-            picker.focus()
-            choice = await future
-            # The prompt takes the focus back whether or not anything was
-            # chosen: what the person did before `Ctrl+O` was type.
-            self.query_one(HistoryInput).focus()
             if choice is None:
-                return  # cancelled — the picker's own line is the whole answer
+                return  # cancelled — nothing to watch, nothing to say
 
             def show_window(_result: None) -> None:
                 """The watch is gone; put a pending question back in front."""

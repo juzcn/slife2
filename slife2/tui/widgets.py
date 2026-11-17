@@ -674,26 +674,6 @@ class ChatView(VerticalScroll):
         self._close_block()
         self._add(Static(plain(f"[{text}]", PALETTE["dim"])), "system-message")
 
-    def add_picker(self, picker: ModelPicker) -> ModelPicker:
-        """Mount the model picker inline, at the tail.
-
-        **Nothing is closed for it**, unlike every message above: a picker
-        opened while an answer is streaming belongs *between* two pieces of that
-        answer, and `_close_block` would end the block the rest of the answer
-        still has to arrive in — under a second signature, because a block is
-        opened by the first thing that has something to put in it.
-        """
-        return self._add(picker, "model-picker")
-
-    def add_conversation_picker(self, picker: ConversationPicker) -> ConversationPicker:
-        """Mount the subagent picker inline, at the tail.
-
-        **Nothing is closed for it**, for `add_picker`'s reason exactly: an
-        answer that is still streaming stays above the question, and the line
-        the decision leaves appears under it.
-        """
-        return self._add(picker, "conversation-picker")
-
     def add_approval(self, prompt: ApprovalPrompt) -> ApprovalPrompt:
         """Mount an approval row inline, at the tail.
 
@@ -940,11 +920,9 @@ class ChatView(VerticalScroll):
         lines = []
         for widget in self.query(
             ".user-message, .assistant-message, .system-message, .tool-call, "
-            ".model-picker, .conversation-picker, .approval-prompt"
+            ".approval-prompt"
         ):
             if isinstance(widget, ToolCallWidget):
-                lines.append(widget.plain_text())
-            elif isinstance(widget, (ModelPicker, ConversationPicker)):
                 lines.append(widget.plain_text())
             elif isinstance(widget, Static):
                 lines.append(content_text(widget.content))
@@ -1513,16 +1491,62 @@ class ModelChoice:
     vision: bool = False
 
 
+def keep_line_visible(widget: Widget, line: int) -> None:
+    """Scroll *widget* so content line *line* is inside its visible window.
+
+    **The question strip is capped, so the cursor can leave the window.**  The
+    cap is what keeps a long list from pushing the transcript off the screen;
+    this is what keeps every row reachable through it — a cursor moved below
+    the fold is a choice nobody can read.  *line* is the row's index in the
+    rendered body, which the caller builds and so knows.
+
+    Called after the body changes and once after mount.  The first call can
+    arrive before the first layout has given the widget a height; it asks
+    again once that has happened, and only while the widget is still mounted.
+    """
+    visible = widget.content_size.height
+    if visible <= 0:
+        if widget.is_mounted:
+            widget.call_after_refresh(keep_line_visible, widget, line)
+        return
+    top = int(widget.scroll_y)
+    if line < top:
+        widget.scroll_to(y=line, animate=False)
+    elif line >= top + visible:
+        widget.scroll_to(y=line - visible + 1, animate=False)
+
+
+def keep_cursor_visible(picker: Widget, line: int) -> None:
+    """Scroll a picker's strip so the cursor's content line is in view.
+
+    The scroller is the strip (`QuestionStrip`), not the picker: a `Static`
+    capped in height does not count its hidden rows in its virtual size, so the
+    strip is what measures the picker's full body.  The picker's line is offset
+    by the margin and border above it, which is what the strip's content
+    coordinates need.
+    """
+    strip = picker.parent
+    if not isinstance(strip, Widget):
+        return
+    keep_line_visible(strip, line + picker.styles.margin.top + picker.styles.gutter.top)
+
+
 class ModelPicker(Static):
-    """The models this config defines, inline in the transcript.
+    """The models this config defines, asked in the fixed strip above the prompt.
 
     The interaction is fixed: `↑`/`↓` move a cursor, `Enter` picks, `Esc`
-    cancels, the row re-renders itself to a status line once decided, and the
-    caller mounts it, focuses it and awaits the future it was handed.  The
-    cursor opens on the model the conversation is already on, so a bare `Enter`
-    is a no-op rather than a surprise.  **A conversation on a model this list
-    does not offer has no such row**, so the cursor starts under nothing, the row
-    says which model is missing, and `Enter` picks nothing — rather than
+    cancels, and the caller mounts it in the question strip, focuses it and
+    awaits the future it was handed.  **The strip is what keeps the question
+    readable**: a picker in the transcript scrolls away under the loop that is
+    still writing, and the keys keep reaching it while the list stops being
+    visible.  **A choice writes no line of its own**: the switch's outcome is
+    the server's fact and the window's note (`model_switched`), and a cancelled
+    question draws nothing.
+
+    The cursor opens on the model the conversation is already on, so a bare
+    `Enter` is a no-op rather than a surprise.  **A conversation on a model this
+    list does not offer has no such row**, so the cursor starts under nothing,
+    the row says which model is missing, and `Enter` picks nothing — rather than
     defaulting to the first model and switching the conversation onto it.
 
     **The bindings are `priority`, and that is what makes the keys the picker's.**
@@ -1571,17 +1595,35 @@ class ModelPicker(Static):
 
     # --- the keys ------------------------------------------------------------
 
+    def on_mount(self) -> None:
+        """Bring the opening cursor into view.
+
+        The cursor opens on the model in use, and a long list puts that row
+        below the strip's cap; a question that opened scrolled to the top would
+        hide the very row a bare `Enter` takes.
+        """
+        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+
+    @property
+    def _cursor_line(self) -> int:
+        """The content line the cursor is on, for `keep_cursor_visible`."""
+        # The title, then either the missing-model line (no row under the
+        # cursor) or the row the cursor is on.
+        return 1 if self._cursor < 0 else 1 + self._cursor
+
     def action_cursor_up(self) -> None:
         """Move the cursor up, clamped at the top."""
         if not self._decided and self._cursor > 0:
             self._cursor -= 1
             self.update(self._body())
+            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
     def action_cursor_down(self) -> None:
         """Move the cursor down, clamped at the bottom."""
         if not self._decided and self._cursor < len(self._choices) - 1:
             self._cursor += 1
             self.update(self._body())
+            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
     def action_pick(self) -> None:
         """Choose the model under the cursor, or nothing when no row is under it.
@@ -1602,7 +1644,12 @@ class ModelPicker(Static):
         self._decide(None)
 
     def _decide(self, choice: ModelChoice | None) -> None:
-        """Resolve the future once, and re-render as the decision.
+        """Resolve the future once.
+
+        **Nothing is drawn from this decision here, and no re-render is owed.**
+        The app removes the widget from the strip; what the choice changed is
+        the server's fact and the window's note, and a cancelled question
+        reports on nothing.
 
         Once, because the blur that follows every decided picker would
         otherwise set the same future a second time, and a resolved future
@@ -1620,15 +1667,13 @@ class ModelPicker(Static):
         if self._decided:
             return
         self._decided = True
-        self._chosen = choice
         if not self._future.done():
             self._future.set_result(choice)
-        self.update(self._body())
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        """The row, as it stands: the list, or the line the decision left.
+        """The list, as it stands.
 
         **Not `_render`**, which is the name this wants and cannot have: Textual
         has one, it is the hook `get_content_height` calls to measure a widget,
@@ -1636,8 +1681,6 @@ class ModelPicker(Static):
         wants a visual — a layout crash at the first resize, nowhere near the
         line that caused it.
         """
-        if self._decided:
-            return self._decided_line()
         line = Text()
         line.append(t("picker_title"), f"bold {PALETTE['text']}")
         if self._cursor < 0:
@@ -1687,17 +1730,6 @@ class ModelPicker(Static):
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
-    def _decided_line(self) -> Text:
-        line = Text()
-        if self._chosen is None:
-            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
-            return line
-        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-        line.append(t("picker_switched"), f"bold {PALETTE['green']}")
-        line.append(self._chosen.ref, f"bold {PALETTE['text']}")
-        return line
-
     def plain_text(self) -> str:
         """What this row shows, for the transcript's own `plain_text`."""
         return content_text(self.content)
@@ -1723,16 +1755,17 @@ class WatchChoice:
 
 
 class ConversationPicker(Static):
-    """The conversations this window can watch, inline in the transcript.
+    """The conversations this window can watch, asked in the fixed strip.
 
     Its rows are the agent's subagents and its running agent tasks — two
     servers, one question, so one key.  The model picker's shape, one decision
     smaller: a cursor, `Enter` picks, `Esc` cancels, a blur cancels (a question
-    abandoned is worse than a wasted keystroke), and the row re-renders as the
-    line the decision left.  The bindings are `priority` for the picker's
-    reason: the focused widget is the prompt, whose `TextArea` would otherwise
-    take `↑`/`↓` for its draft history — the wrong list to move while a
-    conversation is being chosen.
+    abandoned is worse than a wasted keystroke).  **A choice writes no line in
+    the window's transcript**: it opens the watch screen, and that screen's
+    header is what names what is being watched.  The bindings are `priority`
+    for the picker's reason: the focused widget is the prompt, whose
+    `TextArea` would otherwise take `↑`/`↓` for its draft history — the wrong
+    list to move while a conversation is being chosen.
 
     **No active row and no missing-row case**, unlike the model picker: there is
     no setting this changes, so there is nothing the list could already be on.
@@ -1758,21 +1791,31 @@ class ConversationPicker(Static):
         self._choices = list(choices)
         self._future = future
         self._decided = False
-        self._chosen: WatchChoice | None = None
         self._cursor = 0 if self._choices else -1
         self.update(self._body())
 
     # --- the keys ------------------------------------------------------------
 
+    def on_mount(self) -> None:
+        """Bring the opening cursor into view.  See `ModelPicker.on_mount`."""
+        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+
+    @property
+    def _cursor_line(self) -> int:
+        """The content line the cursor is on, for `keep_cursor_visible`."""
+        return 1 + max(self._cursor, 0)
+
     def action_cursor_up(self) -> None:
         if not self._decided and self._cursor > 0:
             self._cursor -= 1
             self.update(self._body())
+            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
     def action_cursor_down(self) -> None:
         if not self._decided and self._cursor < len(self._choices) - 1:
             self._cursor += 1
             self.update(self._body())
+            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
     def action_pick(self) -> None:
         """Choose the row under the cursor, or nothing when none is under it."""
@@ -1787,25 +1830,21 @@ class ConversationPicker(Static):
         self._decide(None)
 
     def _decide(self, choice: WatchChoice | None) -> None:
-        """Resolve the future once, and re-render as the decision.
+        """Resolve the future once.
 
-        Once, because the blur that follows every decided picker would otherwise
-        set the same future a second time and raise out of the message pump —
-        the guard `ModelPicker._decide` and `ApprovalPrompt._decide` both carry.
+        Nothing is drawn from the decision: the app removes the widget, and a
+        choice opens the watch screen whose header names it.  See
+        `ModelPicker._decide` for the once-guard's reason.
         """
         if self._decided:
             return
         self._decided = True
-        self._chosen = choice
         if not self._future.done():
             self._future.set_result(choice)
-        self.update(self._body())
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        if self._decided:
-            return self._decided_line()
         line = Text()
         line.append(t("conversation_picker_title"), f"bold {PALETTE['text']}")
         for index, choice in enumerate(self._choices):
@@ -1824,24 +1863,6 @@ class ConversationPicker(Static):
         line.append(t("picker_pick"), f"bold {PALETTE['green']}")
         line.append("  Esc ", PALETTE["dim"])
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
-        return line
-
-    def _decided_line(self) -> Text:
-        line = Text()
-        if self._chosen is None:
-            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
-            return line
-        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-        key = (
-            "conversation_watching_task"
-            if self._chosen.kind == "task"
-            else "conversation_watching"
-        )
-        line.append(
-            t(key, name=self._chosen.name),
-            f"bold {PALETTE['green']}",
-        )
         return line
 
     def plain_text(self) -> str:
@@ -2218,3 +2239,36 @@ class PlanView(Static):
     def plain_text(self) -> str:
         """What the strip shows, for a test that reads the screen."""
         return content_text(self.content)
+
+
+class QuestionStrip(VerticalScroll):
+    """The fixed slot an undecided question waits in.
+
+    **A question is current state, not history.**  A picker mounted in the
+    transcript scrolls away under the turn loop that keeps writing — the keys
+    still reach it, but the list stops being readable, which is the one thing a
+    question must not do.  So the picker waits here, out of the transcript's
+    scroll; the loop's output lands above it and moves nothing.
+
+    **Stacked above the plan strip, not in its place.**  The plan is the strip
+    directly above the prompt; a question that pops up later stacks above it,
+    and both stay visible.  The strip is hidden while no question is open, and
+    only one question can be open at a time (the app's latches; a second
+    `Ctrl+S`/`Ctrl+O` is ignored until the first is decided or cancelled).
+
+    **The choice leaves no line of its own.**  `Ctrl+O` opens the watch screen,
+    whose header names what is being watched; `Ctrl+S` ends in the server's
+    own note; `Esc` closes the question silently.  This strip only ever holds
+    the asking.
+
+    **This is the scroller, not the picker.**  A `Static` capped in height
+    cannot scroll its own text: the cap is what Textual measures, so the rows
+    below it are not in its virtual size.  A `VerticalScroll` measures its
+    children — the picker's full body — so the cap is a window and every row is
+    reachable.  The picker keeps the cursor row in view through
+    `keep_cursor_visible`.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.display = False

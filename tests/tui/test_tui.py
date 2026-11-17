@@ -53,6 +53,7 @@ from slife2.tui.widgets import (
     HistoryInput,
     ModelPicker,
     PlanView,
+    QuestionStrip,
     StatusBar,
     ToolCallWidget,
 )
@@ -2891,7 +2892,7 @@ async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
         await pilot.press("ctrl+s")
         assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
-        listing = shown(app)
+        listing = app.query_one(ModelPicker).plain_text()
         assert "local/big" in listing and "local/small" in listing
         assert "ctx 100,000" in listing, "what the model is, beside its name"
         assert "Big" in listing and "thinking" in listing
@@ -2933,7 +2934,9 @@ async def test_ctrl_s_lists_the_models_the_server_answers_with_now() -> None:
         # The config moved under the window, as `model_remove` makes it move.
         client.models_answer = MODEL_ROWS[:1]
         await pilot.press("ctrl+s")
-        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 2)
+        # One picker: the cancelled one was replaced by its line in the
+        # transcript, and the new question took the strip.
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
         latest = app.query(ModelPicker)[-1]
         assert "local/big" in latest.plain_text()
@@ -2964,7 +2967,7 @@ async def test_a_model_the_list_does_not_offer_is_said_so_and_enter_picks_nothin
         await pilot.press("ctrl+s")
         assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
-        listing = shown(app)
+        listing = app.query_one(ModelPicker).plain_text()
         assert "local/gone" in listing, "the model in use is named"
         assert "not one of these" in listing
 
@@ -3007,7 +3010,9 @@ async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
         await pilot.pause()
 
         assert client.switches == ["local/small"]
-        assert "Selected local/small" in shown(app), "the picker's own line"
+        # **No "Selected" line**: the note below is the window's whole record
+        # of the switch, and a second line saying the same thing is noise.
+        assert "Selected" not in shown(app), "the choice wrote its own line"
         # And the window's note, drawn from the server's *facts* — which model it
         # is now, which it was, and how many conversations moved, which is the
         # half only the server knows.
@@ -3022,7 +3027,9 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
     """A picker is a question, and a question can be left unanswered.
 
     Nothing is switched, the conversation keeps its model, and the prompt has
-    the keys back — the picker is not a mode that has to be exited from.
+    the keys back — the picker is not a mode that has to be exited from.  `Esc`
+    is silent: a question closed without a choice is not a fact the transcript
+    records.
     """
     client = FakeAgentClient(answering("ok"))
     client.models_answer = MODEL_ROWS
@@ -3041,7 +3048,8 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
         await pilot.pause()
 
         assert client.switches == []
-        assert "Cancelled" in shown(app)
+        assert shown(app) == "", "a cancelled question left a line"
+        assert not app.query_one(QuestionStrip).display, "the question is still up"
         assert "local/big" in status(app)
         assert isinstance(app.focused, HistoryInput)
         assert app.is_running
@@ -3070,6 +3078,144 @@ async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert app._switching, "and a later Ctrl+S opens one again"
+
+
+async def test_the_other_key_is_ignored_while_a_question_is_open() -> None:
+    """**One question at a time, and only the user ends it.**
+
+    `Ctrl+O` while `Ctrl+S` is asking must not open a second picker: the
+    second would take the focus, and the blur would cancel the first — two
+    questions gone and no answer.  A stray letter is not an answer either;
+    the choice or `Esc` is, and the other key works again after it.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    client.subagents_answer = [{"name": "scout"}]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        await pilot.press("ctrl+o")
+        await pilot.press("a")
+        await pilot.pause()
+        assert not app.query(ConversationPicker), "a second question opened"
+        assert len(app.query(ModelPicker)) == 1, "the open question was dismissed"
+        assert app._switching, "and its latch is still the one waiting"
+
+        # `Esc` is the way out, and the other key works again.
+        await pilot.press("escape")
+        assert await settled(pilot, lambda: not app._switching)
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+
+
+async def test_a_question_waits_in_the_fixed_strip_not_the_transcript() -> None:
+    """**A question is current state, not history, while it asks.**
+
+    A picker mounted in the transcript scrolled away under a running turn: the
+    keys kept reaching it while the list stopped being readable.  It now waits
+    in the fixed strip, so what the loop draws lands above it and moves
+    nothing.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+        picker = app.query_one(ConversationPicker)
+        assert app.query_one(QuestionStrip).query(ConversationPicker), "left the strip"
+        assert not app.query_one(ChatView).query(ConversationPicker), (
+            "the question is in the transcript"
+        )
+
+        # What the loop draws lands above the question; the question stays.
+        for index in range(40):
+            app.query_one(ChatView).add_note(f"line {index}")
+        await pilot.pause()
+        assert "Watch a subagent or agent task" in "\n".join(visible_lines(app))
+        assert app.query_one(ConversationPicker) is picker
+
+
+async def test_a_question_stacks_above_the_plan_and_the_plan_stays_put() -> None:
+    """**The plan is not displaced by a question.**  The plan is the strip
+    directly above the prompt; the later question stacks above it, and both
+    stay visible.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        app.query_one(PlanView).set_plan(
+            [{"text": "map the module", "status": "pending"}]
+        )
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        lines = visible_lines(app)
+        plan_top = next(i for i, line in enumerate(lines) if "map the module" in line)
+        question_top = next(i for i, line in enumerate(lines) if "local/big" in line)
+        assert question_top < plan_top, (
+            "the later question did not stack above the plan"
+        )
+        assert "Switch model" in "\n".join(lines)
+
+
+async def test_a_long_picker_scrolls_to_keep_the_cursor_in_view() -> None:
+    """The strip is capped; the cursor is not.
+
+    Every row stays reachable: the cap makes the list scroll, and the widget
+    scrolls the row under the cursor into view — otherwise a choice below the
+    cap is one the person cannot read.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = [
+        {
+            "ref": f"local/m{index}",
+            "provider": "local",
+            "model": f"m{index}",
+            "name": f"m{index}",
+            "marks": [],
+            "context_window": 0,
+            "max_tokens": 0,
+        }
+        for index in range(20)
+    ]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/m0",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        for _ in range(15):
+            await pilot.press("down")
+        await pilot.pause()
+
+        strip = app.query_one(QuestionStrip)
+        assert strip.scroll_y > 0, "the capped list did not scroll"
+        assert "local/m15" in "\n".join(visible_lines(app))
 
 
 async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
@@ -3686,12 +3832,12 @@ async def test_ctrl_o_offers_the_subagents_the_server_lists() -> None:
         assert "Watch a subagent or agent task" in listing
         assert "subagent" in listing
 
-        # Escape is the cancel, and it leaves a line saying so rather than a
-        # picker that vanished.
+        # Escape closes the question silently: nothing happened to report.
         await pilot.press("escape")
         await pilot.pause()
         await pilot.pause()
-        assert "Cancelled" in shown(app)
+        assert not app.query(ConversationPicker)
+        assert shown(app) == "", "a cancelled question left a line"
 
 
 async def test_ctrl_o_with_nothing_to_watch_names_the_tools_that_make_one() -> None:
@@ -3755,9 +3901,9 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
         assert "It is 42." in text
 
         # `Ctrl+O` is the window's key, not the watch's: with the screen up it
-        # does nothing rather than mounting a picker underneath it.  The
-        # decided picker from the first press is still in the window's
-        # transcript, so the count is what says a second one was not mounted.
+        # does nothing rather than mounting a picker underneath it.  The first
+        # press's picker was removed when it was decided, so the count is what
+        # says a second one was not mounted.
         mounted = len(app.query(ConversationPicker))
         await pilot.press("ctrl+o")
         await pilot.pause()
@@ -3766,10 +3912,10 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
 
         await pilot.press("escape")
         assert await settled(pilot, lambda: len(app.screen_stack) == 1)
-        # The picker left its decision line in the window's transcript — that
-        # is the window's own record of the key — and nothing the watched
+        # The choice left no line in the window's transcript — the watch
+        # header was its record while it was up — and nothing the watched
         # conversation said is in it.
-        assert "Selected scout" in shown(app)
+        assert shown(app) == ""
         assert "what is 6*7?" not in shown(app)
         assert "It is 42." not in shown(app)
 
@@ -3870,6 +4016,8 @@ async def test_choosing_a_task_watches_its_brief_and_its_turn() -> None:
 
         await pilot.press("escape")
         assert await settled(pilot, lambda: len(app.screen_stack) == 1)
-        assert "Selected task research" in shown(app)
+        # The choice wrote nothing: the watch header carried the name while
+        # the screen was up.
+        assert shown(app) == ""
 
     assert watch.closed is True, "leaving the screen is the detach"
