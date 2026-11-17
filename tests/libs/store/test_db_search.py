@@ -447,6 +447,47 @@ async def test_a_window_narrows_a_search(tmp_path) -> None:
     assert await store.recall(query="工具", embedder=embedder, since="2026-06-01") == []
 
 
+@pytest.mark.asyncio
+async def test_a_narrow_window_reaches_the_turns_inside_it(tmp_path) -> None:
+    """**The window must restrict the semantic page, not filter it after.**
+
+    The KNN used to rank the whole log and the window removed what was left, so
+    a narrow window over a large history answered with almost nothing: every
+    place in the page had been spent on turns outside it.  Here the nearer turn
+    is the old one, so a post-filtered global page of one would come back
+    empty — which is the reported bug — while a window-scoped page is the turn
+    the caller asked for.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    old = await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump trump"},
+            {"role": "assistant", "content": "old"},
+        ],
+        embedder=embedder,
+        created_at="2020-01-01T10:00:00+08:00",
+    )
+    inside = await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump 工具"},
+            {"role": "assistant", "content": "new"},
+        ],
+        embedder=embedder,
+        created_at="2026-11-17T10:00:00+08:00",
+    )
+
+    # The premise: the nearer turn is the one outside the window.
+    assert _ids(
+        await store.recall(sentences=["trump"], embedder=embedder, limit=1)
+    ) == [old]
+    assert _ids(
+        await store.recall(
+            sentences=["trump"], embedder=embedder, limit=1, since="2026-11-16"
+        )
+    ) == [inside]
+
+
 # --- the semantic leg ---------------------------------------------------------
 
 
@@ -471,7 +512,7 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    nearest = (await store._semantic_lists(["工具"], embedder, 3))[0]
+    nearest = (await store._semantic_lists(["工具"], embedder, 3, [], []))[0]
 
     # Each question's list is nearest-first: the *order* is what the fusion
     # reads and the value is the similarity a recall gates on, so both halves

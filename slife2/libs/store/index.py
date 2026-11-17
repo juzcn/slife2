@@ -479,8 +479,8 @@ def rows_in_order(
     The truncation that used to answer that — keep the top of the list — was
     worse than it looked: the ranking was already complete, the caller's list is
     already in its final order, and a page that had quietly lost its tail is the
-    one thing a caller cannot tell from a short page.  `_ids_in_window` binds in
-    the same chunks for the same reason.
+    one thing a caller cannot tell from a short page.  The turn store binds its
+    own page in the same chunks for the same reason.
     """
     wanted = list(ordered)
     if not wanted:

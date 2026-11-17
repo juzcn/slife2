@@ -1268,32 +1268,6 @@ class TurnStore:
             )
         return [found[turn_id] for turn_id in wanted if turn_id in found]
 
-    def _ids_in_window(
-        self, turn_ids: Sequence[int], clauses: list[str], params: list[str]
-    ) -> set[int]:
-        """Which of those ids fall inside a `created_at` window.
-
-        The semantic leg cannot be windowed in SQL — a KNN has no column to
-        filter on — so the window is applied to the fused answer instead, which
-        is the one place the two legs can be held to one rule.
-        """
-        if not turn_ids:
-            return set()
-        if not clauses:
-            return set(turn_ids)
-        allowed: set[int] = set()
-        with self._connect() as connection:
-            for start in range(0, len(turn_ids), MAX_SQL_VARS):
-                chunk = turn_ids[start : start + MAX_SQL_VARS]
-                marks = _marks(chunk)
-                rows = connection.execute(
-                    f"SELECT rowid AS turn_id FROM turn WHERE rowid IN ({marks})"
-                    f" {where_clause(clauses)}",
-                    (*chunk, *params),
-                ).fetchall()
-                allowed |= {int(row["turn_id"]) for row in rows}
-        return allowed
-
     def _time_ranked(
         self,
         since: str | None,
@@ -1400,10 +1374,17 @@ class TurnStore:
         would spend a candidate slot, a place in the `k` and a share of the
         token budget on something already there.  The keyword leg and the
         time-ranked branch filter them in SQL; the semantic leg cannot (a `vec0`
-        KNN has no turn id to filter on), so its answer is filtered after fusion
-        — where the time window is filtered too — and `over` is widened by **the
+        KNN takes only the rowid restriction above, not a join against `turn`),
+        so its answer is filtered after fusion, and `over` is widened by **the
         chunks the excluded turns hold**, which is what they really occupy in a
         `k` that counts chunks.
+
+        **The time window is inside every leg**, including the semantic one:
+        `since`/`until` restrict the KNN's rowids before it ranks, so a narrow
+        window gets the nearest turns inside it rather than a page spent outside
+        it and then filtered.  Filtering the fused answer instead was the
+        starvation bug — a one-day window over a large log answered with one
+        turn.
 
         Raises:
             EmptyQuery: If no sentence is given and the query holds no term.
@@ -1474,16 +1455,17 @@ class TurnStore:
                     [*clauses, *exclude_clauses],
                     [*params, *exclude_params],
                 )
-        lists = await self._semantic_lists(meaning or [words], embedder, over)
+        lists = await self._semantic_lists(
+            meaning or [words], embedder, over, clauses, params
+        )
         nearest: dict[int, float] = {}
         for found in lists:
             for turn_id, similarity in found:
                 if similarity > nearest.get(turn_id, float("-inf")):
                     nearest[turn_id] = similarity
-        # The fused list is bound in chunks below (`_ids_in_window`), so it is
-        # not truncated here: a cut before the filter would decide membership by
-        # rank, and a cut after it would hide candidates the caller's own
-        # floors and budget are meant to choose between.
+        # The fused list is not truncated here: a cut before the filter would
+        # decide membership by rank, and a cut after it would hide candidates
+        # the caller's own floors and budget are meant to choose between.
         fused = [
             turn_id
             for turn_id in _fuse_questions(
@@ -1493,14 +1475,11 @@ class TurnStore:
             )
             if turn_id not in excluded
         ]
-        allowed = await off_loop(self._ids_in_window, fused, clauses, params)
         # **Not cut to `limit`.**  The legs' pages fuse to a union that is not
         # this store's to cut, and the caller's floors and budget decide what
         # survives; a count here would make the cheap RRF order decide
         # membership again.
-        return [
-            (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
-        ]
+        return [(turn_id, nearest.get(turn_id)) for turn_id in fused]
 
     def matched_words(self, query: str, turn_ids: Sequence[int]) -> set[int]:
         """Which of *turn_ids* the keyword leg finds for *query*.
@@ -1788,7 +1767,12 @@ class TurnStore:
         return [int(row["turn_id"]) for row in rows]
 
     async def _semantic_lists(
-        self, queries: Sequence[str], embedder: Embedder, k: int
+        self,
+        queries: Sequence[str],
+        embedder: Embedder,
+        k: int,
+        clauses: list[str],
+        params: Sequence[Any],
     ) -> list[list[tuple[int, float]]]:
         """One ranked list per question, out of **one** `embed`, nearest first.
 
@@ -1801,10 +1785,14 @@ class TurnStore:
         `k` counts **chunks**, not turns, so a turn with four chunks can occupy
         four of the k places and the answer holds fewer turns than the caller
         asked for.  Deduplicated in `_nearest_turns` rather than in SQL
-        because a vec0 KNN refuses `GROUP BY`.  The window is *not* applied — a
-        KNN cannot be constrained by a column it does not have — so `recall`
-        filters the fused answer instead, and a window narrow enough to exclude
-        the k nearest chunks can return fewer turns than it asked for.
+        because a vec0 KNN refuses `GROUP BY`.
+
+        **The window is applied inside the KNN**, not to the fused answer: the
+        `rowid IN (…)` subquery restricts what the vector leg may rank, so a
+        narrow window gets the nearest turns *inside it* rather than whatever
+        the global page happened to leave after a filter.  Filtering after the
+        page was the starvation bug: `since` narrowed the answer only by
+        removing candidates the page had already spent on turns outside it.
 
         Each list is sorted by similarity, ties to the older turn, so the rank a
         fusion reads is stable whatever order `vec0` returned equal distances
@@ -1826,7 +1814,11 @@ class TurnStore:
         lists: list[list[tuple[int, float]]] = []
         for vector in vectors:
             found = await off_loop(
-                self._nearest_turns, sqlite_vec.serialize_float32(vector), k
+                self._nearest_turns,
+                sqlite_vec.serialize_float32(vector),
+                k,
+                clauses,
+                params,
             )
             lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
         return lists
@@ -1856,7 +1848,13 @@ class TurnStore:
                 )
         return total
 
-    def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
+    def _nearest_turns(
+        self,
+        query_vector: bytes,
+        k: int,
+        clauses: list[str],
+        params: Sequence[Any],
+    ) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.
 
         **The *best* chunk of a turn stands for the turn**, which is what the
@@ -1864,17 +1862,33 @@ class TurnStore:
         seen for a turn is its nearest, and a later, worse chunk must not
         overwrite it.
 
+        **A window is a `rowid IN (…)` subquery, and the KNN honours it.**
+        `sqlite-vec` 0.1.9 refuses a plain `WHERE` on the virtual table but
+        applies a `rowid IN (SELECT …)` restriction before it ranks, which is
+        what lets `since`/`until` bound what this leg may retrieve instead of
+        filtering its page afterwards.  The comparison operators are the trap:
+        `rowid = ?` and `rowid >= ?` are accepted and answer *nothing* rather
+        than raising, so the subquery is the only form used here.
+
         `1 - distance` is a similarity only because the DDL says `cosine` — on an
         L2 table that arithmetic yields numbers that are plausible and wrong
         rather than visibly broken, which is what `vector_ddl` exists to
         prevent.
         """
+        window = (
+            " AND v.rowid IN ("
+            "SELECT c2.id FROM turn_chunk c2"
+            " JOIN turn t ON t.rowid = c2.turn_id"
+            f" {filter_clause(clauses)})"
+            if clauses
+            else ""
+        )
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT c.turn_id AS turn_id, v.distance AS distance"
                 " FROM turn_vec v JOIN turn_chunk c ON c.id = v.rowid"
-                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-                (query_vector, k),
+                f" WHERE v.embedding MATCH ? AND k = ?{window} ORDER BY v.distance",
+                (query_vector, k, *params),
             ).fetchall()
         nearest: dict[int, float] = {}
         for row in rows:

@@ -1073,9 +1073,12 @@ Rules:
 - **The recall is hybrid, and the ranker is the last word.** The two legs
   are fused by weighted RRF (k=60, `keyword_weight` on the sparse leg), and
   `min_similarity` drops a measured candidate below the embedding model's
-  noise floor. **No term is cut for being common**: a word that appears in
-  half the log can still be the one exact string a query is about, and the
-  reranker can only judge a candidate it is given.
+  noise floor. **A window is applied inside each leg**, the semantic KNN
+  included, so `since`/`until` choose what the page may contain rather than
+  filtering a page already spent outside it. **No term is cut for being
+  common**: a word that appears in half the log can still be the one exact
+  string a query is about, and the reranker can only judge a candidate it is
+  given.
 - **A cross-encoder reranks the whole fused pool** when the embeddings
   provider names a `rerank_model`: each leg retrieves `recall_page_limit`
   candidates (80 by default), fusion returns their union — twice that for one
