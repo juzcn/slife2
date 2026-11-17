@@ -463,6 +463,31 @@ async def test_an_exact_word_match_is_evidence_even_when_meaning_also_scored_it(
 
 
 @pytest.mark.asyncio
+async def test_a_page_the_words_do_not_reach_is_not_worded() -> None:
+    """**The words are evidence only when the keyword leg finds them.**
+
+    `worded` is asked of the leg over the page's own ids.  An `async def` left
+    on the blocking side of the thread hop answered with an un-awaited
+    coroutine — truthy whatever it found — so every search that passed words
+    reported evidence, and a meaning-only page under the weak floor read
+    `weak` where the honest tier is `none`.  The turn below shares no word
+    with the query and is orthogonal to it, so the meaning leg still brings it
+    with a cosine of zero.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("计算 计算", "a0"))
+        found = await client.call_tool(
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
+        )
+
+    assert [hit["similarity"] for hit in found.data["results"]] == [0.0], (
+        "the premise: the page was measured, and measured below both floors"
+    )
+    assert found.data["best"] == 0.0
+    assert found.data["confidence"] == "none"
+
+
+@pytest.mark.asyncio
 async def test_search_reads_only_the_callers_conversation() -> None:
     """The same boundary `turn_list` has: no argument names whose memory."""
 

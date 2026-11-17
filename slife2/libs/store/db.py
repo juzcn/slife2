@@ -1501,7 +1501,7 @@ class TurnStore:
             (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
         ]
 
-    async def matched_words(self, query: str, turn_ids: Sequence[int]) -> set[int]:
+    def matched_words(self, query: str, turn_ids: Sequence[int]) -> set[int]:
         """Which of *turn_ids* the keyword leg finds for *query*.
 
         **Word evidence is not the absence of a similarity.**  A turn found by
