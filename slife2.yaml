@@ -90,7 +90,7 @@ providers:
           - image
         context_window: 983616
         max_tokens: 131072
-default: bailian/qwen3.8-flash
+default: bailian/deepseek-v4.1-flash-1017
 
 agent:
   # Model calls per turn. 0 or absent means no cap.
