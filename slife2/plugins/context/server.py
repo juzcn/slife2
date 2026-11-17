@@ -875,13 +875,14 @@ def build_server(
             return _in_hand(
                 messages, turn_ids, rerank=rerank, discriminator=discriminator
             )
-        return await _adopt_stored(store, messages, carried, turn_ids)
+        return await _adopt_stored(store, messages, carried, turn_ids, discriminator)
 
     async def _adopt_stored(
         store: TurnStore,
         messages: list[dict[str, Any]],
         carried: int,
         stale_ids: Sequence[int],
+        discriminator: str = "",
     ) -> dict[str, Any]:
         """The conversation **as the store holds it**, for a rebuild that lost.
 
@@ -908,10 +909,18 @@ def build_server(
         row that is gone would make every later `expected` mismatch and disable
         the recall for the life of the file.  A repair that itself loses to a
         newer writer keeps the caller's list and waits for the next rebuild.
+
+        **A failure survives the adoption.**  `discriminator` is the exit's
+        report and is carried through: a rebuild that gave up on the
+        discriminator still gave up, and the window would otherwise draw
+        `recalled 0` — the count of a search nobody made, which is the one thing
+        the status exists to prevent.  The write-lost path passes nothing,
+        because that rebuild had a decision; only the adopting exits that came
+        from no decision at all have a failure to report.
         """
         current = await off_loop(store.context_turns)
         if list(current) == list(stale_ids):
-            return _in_hand(messages, stale_ids)
+            return _in_hand(messages, stale_ids, discriminator=discriminator)
         rows = await off_loop(_rows, store, current) if current else []
         if len(rows) != len(current):
             # **The stored list names a row the log no longer holds.**  `restore`
@@ -927,7 +936,7 @@ def build_server(
             )
             if repaired is None:
                 logger.warning("recall_abandoned reason=stored_list_damaged")
-                return _in_hand(messages, stale_ids)
+                return _in_hand(messages, stale_ids, discriminator=discriminator)
             current = repaired
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -943,11 +952,12 @@ def build_server(
             # No recall of this rebuild's ran — the decision was discarded with
             # the snapshot it was composed against — but the key is part of the
             # answer's shape the caller reads strictly (`rebuild_into`), so it
-            # is written as the empty report rather than left absent.  The same
-            # goes for the discriminator: one did answer, and this answer is
-            # not its failure.
+            # is written as the empty report rather than left absent.
             "rerank": "",
-            "discriminator": "",
+            # The one failure this answer can carry: a rebuild that had no
+            # decision (and whose failure is why) still has none after adopting
+            # the stored list.
+            "discriminator": discriminator,
         }
 
     @mcp.tool

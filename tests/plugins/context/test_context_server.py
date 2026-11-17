@@ -2534,6 +2534,40 @@ async def test_a_rebuild_that_writes_nothing_still_reads_the_live_context() -> N
     assert "two" in json.dumps(answer.data["messages"]), "the missing turn is back"
 
 
+@pytest.mark.asyncio
+async def test_a_failed_discriminator_still_says_so_when_the_list_moved() -> None:
+    """**Adopting the store's list is not a decision.**  The failure survives it.
+
+    The exit that adopts a moved conversation reported no discriminator status,
+    so the window drew `recalled 0` — the count of a search nobody made, which
+    is the one thing the status exists to prevent.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+    # Refused twice, so the exit that reaches the adopted list is the
+    # no-decision one: the repair ran and was refused too.
+    replies = Replies("I could not decide.", "still not an object")
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
+    ) as client:
+        # The store holds two turns; the caller's snapshot says one.
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": hold,
+                "turn_ids": [1],
+                "expected": [1],
+                "prompt": "hi",
+            },
+        )
+
+    assert answer.data["turn_ids"] == [1, 2], "the store's list is adopted"
+    assert answer.data["recalled"] == 0, "no recall ran for it"
+    assert answer.data["discriminator"] == "unparsed", "and the failure is named"
+
+
 # --- the transport, which the discriminator cannot see from where it sits ------
 
 
