@@ -2775,7 +2775,7 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
                 subagent.network.broker_port,
             ),
         ),
-        default=str(raw.get("default") or _first_reference(providers)),
+        default=str(raw.get("default") or first_reference(providers_raw)),
     )
     return _with_port_offset(config, port_offset(raw.get("wsl_port_offset")))
 
@@ -3705,11 +3705,38 @@ def _template_path(raw: Any, config_dir: Path | None, default: str) -> str:
     return str(path)
 
 
-def _first_reference(providers: dict[str, ProviderSettings]) -> str:
-    """`provider/model` for the first configured model, as a fallback default."""
-    for name, provider in providers.items():
-        if provider.models:
-            return f"{name}/{next(iter(provider.models))}"
+def first_reference(providers: Mapping[str, Any], reference: str = "") -> str:
+    """The `provider/model` *reference* names, read off the raw `providers:` mapping.
+
+    **A provider named alone means its first model**, the reading `Config.resolve`
+    gives `default:` and `--model`; and no reference at all is the fallback
+    `default:` gets when the file names none — the first model of the first
+    provider that has one, or `""`.
+
+    **Raw dicts, because that is what both callers hold.**  The loader defaults
+    `default:` while it still has the file's mapping, and the agent's model tools
+    re-read the section after each edit so the answer reflects the file rather
+    than the config they booted with.  One function over that shape is what keeps
+    those two readings of the rule from drifting.
+    """
+    if reference:
+        name, slash, model_id = reference.partition("/")
+        if slash and model_id:
+            return reference
+        model_id = _first_model(providers.get(name))
+        return f"{name}/{model_id}" if model_id else reference
+    for name, entry in providers.items():
+        model_id = _first_model(entry)
+        if model_id:
+            return f"{name}/{model_id}"
+    return ""
+
+
+def _first_model(entry: Any) -> str:
+    """The `model:` of a raw `providers:` entry's first model, or `""`."""
+    models = entry.get("models") if isinstance(entry, dict) else None
+    if isinstance(models, list) and models and isinstance(models[0], dict):
+        return str(models[0].get("model") or "")
     return ""
 
 

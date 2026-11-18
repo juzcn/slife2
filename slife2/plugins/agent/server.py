@@ -122,6 +122,7 @@ from slife2.libs.host.config import (
     LOCAL,
     Config,
     ConfigError,
+    first_reference,
     load_cached,
 )
 from slife2.libs.host.model_config import (
@@ -2849,31 +2850,15 @@ def build_server(
     def _active_default(providers: dict[str, dict[str, Any]]) -> str:
         """The model reference the system runs on, read off the file.
 
-        The `default:` scalar when the file has one, else the first model of the
-        first provider — `slife2.libs.host.config._first_reference`'s rule, read here so
-        that it reflects an edit this process has just made rather than the
-        config it booted with.
+        `default:` when the file has one, else the first model of the first
+        provider — `slife2.libs.host.config.first_reference`'s rule, read from the
+        file rather than from `Config` so that it reflects an edit this process
+        has just made.  **A bare provider is the reference its first model
+        makes**, which is `Config.resolve`'s reading: the loader accepts
+        `default: deepseek`, so comparing the raw scalar here made the "it is the
+        default model" guard compare two spellings of one model and never fire.
         """
-        explicit = configfile.read_scalar("default")
-        if explicit:
-            # **A bare provider is the reference its first model makes.**  The
-            # loader accepts `default: deepseek` and `Config.resolve` answers
-            # with that provider's first model, so the raw scalar here made the
-            # "it is the default model" guard compare two different spellings
-            # of one model and never fire — removing it silently changed what
-            # the system runs on.
-            if "/" in explicit:
-                return explicit
-            entry = providers.get(explicit)
-            models = entry.get("models") if isinstance(entry, dict) else None
-            if isinstance(models, list) and models and isinstance(models[0], dict):
-                return f"{explicit}/{models[0].get('model', '')}"
-            return explicit
-        for name, entry in providers.items():
-            models = entry.get("models")
-            if isinstance(models, list) and models and isinstance(models[0], dict):
-                return f"{name}/{models[0].get('model', '')}"
-        return ""
+        return first_reference(providers, configfile.read_scalar("default"))
 
     def _model_ref(ref: str) -> tuple[str, str]:
         """`provider/model`, split and stripped — the one reference check every

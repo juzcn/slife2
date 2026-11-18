@@ -24,6 +24,7 @@ from slife2.libs.host.config import (
     ConfigError,
     default_config,
     find_config_path,
+    first_reference,
     load,
     load_cached,
     net_settings,
@@ -944,6 +945,26 @@ providers:
 """,
     )
     assert load(path).default == "p/only"
+
+
+def test_first_reference_reads_the_raw_providers_mapping() -> None:
+    """The rule the loader's fallback and the agent's model tools both ask.
+
+    A bare provider is its first model, as `Config.resolve` reads one; nothing
+    at all is the first model of the first provider that has one.  One function
+    over the file's own shape is what keeps those two readers from answering
+    differently.
+    """
+    providers = {
+        "empty": {"models": []},
+        "local": {"models": [{"model": "big"}, {"model": "small"}]},
+    }
+    assert first_reference(providers) == "local/big"
+    assert first_reference(providers, "local") == "local/big"
+    assert first_reference(providers, "local/") == "local/big"
+    assert first_reference(providers, "local/small") == "local/small"
+    assert first_reference(providers, "unknown") == "unknown"
+    assert first_reference({}) == ""
 
 
 # --- file discovery ----------------------------------------------------------

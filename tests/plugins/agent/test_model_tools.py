@@ -583,6 +583,27 @@ async def test_the_default_model_cannot_be_removed(isolated_runtime) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_file_without_a_default_names_the_model_it_falls_back_to(
+    isolated_runtime,
+) -> None:
+    """The fallback is the loader's, read off the same file the tools read.
+
+    `_active_default` answers `first_reference(providers, default)` — one rule
+    for both the "what does the system run on" answer and the guard — so a file
+    that leaves `default:` out still reports, and protects, its first model.
+    """
+    no_default = CONFIG.replace("default: local/big\n", "")
+
+    async with Client(server_for(isolated_runtime, no_default)) as client:
+        listed = await ask(client, "model_list")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_remove", ref="local/big")
+
+    assert listed["default"] == "local/big"
+    assert "default model" in str(refused.value)
+
+
+@pytest.mark.asyncio
 async def test_the_default_written_as_a_bare_provider_cannot_be_removed(
     isolated_runtime,
 ) -> None:
