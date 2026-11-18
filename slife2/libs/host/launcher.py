@@ -25,6 +25,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -459,6 +460,24 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
 #: is the wait; on Windows it is a harmless status read.
 _spawned: list[subprocess.Popen] = []
 
+#: Guards `_spawned`.  `ensure_all` submits a whole start wave to `ensure` at
+#: once, so the reap below and the append in `_bring_up` run on several threads:
+#: two of them removing the same exited child was
+#: `ValueError: list.remove(x): x not in list` out of a start rather than an
+#: outcome (ubuntu and macOS CI, 2026-11-17).
+_spawned_lock = threading.Lock()
+
+
+def _reap_spawned() -> None:
+    """Wait on the children that already exited, so POSIX does not hold them.
+
+    **The whole rewrite is one operation under the lock**, not a removal per
+    child: an append racing a rewrite is a process the list never again sees,
+    and one it cannot see is one nobody reaps.
+    """
+    with _spawned_lock:
+        _spawned[:] = [proc for proc in _spawned if proc.poll() is None]
+
 
 def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     """Make sure a server is up, reusing one that already is — and time it.
@@ -469,9 +488,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     almost every launch finds everything already running, and a warm start that
     says `12ms` per server is the honest report of a start that did nothing.
     """
-    for proc in list(_spawned):
-        if proc.poll() is not None:
-            _spawned.remove(proc)
+    _reap_spawned()
     started = time.monotonic()
     outcome = _bring_up(spec, config_path=config_path)
     return replace(outcome, seconds=time.monotonic() - started)
@@ -516,7 +533,8 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
             proc = spawn(_argv(spec), url=spec.url)
-            _spawned.append(proc)
+            with _spawned_lock:
+                _spawned.append(proc)
             _wait_ready(spec, proc)
             # The record is written by the server itself, not here: it is the
             # only party that knows which config it read, and that is what

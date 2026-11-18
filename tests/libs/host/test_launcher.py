@@ -941,6 +941,47 @@ def test_a_missing_server_is_spawned_and_recorded(
     assert again.status is Status.RUNNING
 
 
+def test_a_start_wave_reaps_a_dead_child_without_racing_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several threads reaping one exited child is not a `ValueError`.
+
+    `ensure_all` puts a whole wave through `ensure` at once, so the reap at the
+    top of it runs on every thread.  Two threads that both saw an exited child
+    in their snapshot then both removed it, and the loser's `list.remove(x): x
+    not in list` came out of a start as a traceback — ubuntu and macOS CI,
+    2026-11-17, on a loaded runner where the overlap was wide.  Windows
+    happened not to lose that race.
+
+    **The barrier is inside `poll`, which is where the window is**: a `poll`
+    that waits is what lets two threads hold the same child at once.  Under
+    the lock only one thread ever reaches the barrier, so the wait runs out
+    instead of hanging — a hang detector, not a budget, and the only half a
+    second this test costs.
+    """
+    gate = threading.Barrier(2, timeout=0.5)
+
+    class ExitedProc:
+        def poll(self) -> int:
+            with contextlib.suppress(threading.BrokenBarrierError):
+                gate.wait()
+            return 0
+
+    monkeypatch.setattr(launcher, "_spawned", [ExitedProc()])
+    monkeypatch.setattr(
+        launcher,
+        "_bring_up",
+        lambda spec, config_path=None: launcher.Outcome(spec, Status.RUNNING),
+    )
+
+    outcomes = list(
+        launcher._concurrently(launcher.ensure, [SPEC, replace(SPEC, name="other")])
+    )
+
+    assert [one.status for one in outcomes] == [Status.RUNNING, Status.RUNNING]
+    assert launcher._spawned == []
+
+
 def test_the_spawn_command_uses_this_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

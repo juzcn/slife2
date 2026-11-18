@@ -336,9 +336,17 @@ async def stack(
                 # directory pytest had already deleted.  The assertion is the
                 # half that makes the next leak a failure instead of a mess.
                 stopped = list(launcher.stop(config))
-                assert all(one.status is launcher.Status.STOPPED for one in stopped), [
-                    (one.spec.name, one.status.value, one.detail) for one in stopped
-                ]
+                # **A server that was never started is not a leak.**  When
+                # `ensure_all` raises part-way — a start wave's own bug, a
+                # loaded runner — every spec it had not reached answers
+                # NOT_RUNNING, and asserting STOPPED there replaced the real
+                # error in CI's summary with an assertion about servers nothing
+                # had tried to start.  What this assertion is for is a process
+                # left alive, and NOT_RUNNING is the absence of one.
+                assert all(
+                    one.status in (launcher.Status.STOPPED, launcher.Status.NOT_RUNNING)
+                    for one in stopped
+                ), [(one.spec.name, one.status.value, one.detail) for one in stopped]
         finally:
             broker.stop()
             ilink.stop()
