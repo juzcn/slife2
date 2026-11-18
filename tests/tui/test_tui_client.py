@@ -170,6 +170,28 @@ async def test_a_payload_says_nothing_it_does_not_have_to(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_streams_with_no_deadline(monkeypatch) -> None:
+    """A turn's events arrive as progress, and its length is its own business.
+
+    Passing a handler is what makes the SDK attach a progress token; without
+    one the server's `report_progress` is a silent no-op and the window shows
+    nothing until the answer lands.  And the call has no clock, because a turn
+    lasts as long as the model takes — not as long as a management ask is
+    allowed to (`_stream_call`).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    await client.run_turn("hi", lambda event: None)
+
+    (options,) = transport.options
+    assert options["progress_handler"] is not None
+    assert options["timeout"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_name_is_carried_as_part_of_the_id(monkeypatch) -> None:
     """The second half of the id is what makes a worker a separate conversation.
 
@@ -509,7 +531,7 @@ async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     All three are ordinary asks of our own daemon, and each used to spell the
     same `try`/`except` out for itself — three copies of one rule, each a place
     the next caller could get it subtly wrong.  So the rule is pinned through one
-    of them (`_call_tool`): a `ToolError` is the server *answering* and the link
+    of them (`_call`): a `ToolError` is the server *answering* and the link
     stays; anything else is the transport itself, and dropping the client is what
     lets the app's lazy retry reconnect instead of believing it is connected to a
     server nothing is talking to.
@@ -535,6 +557,42 @@ async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     monkeypatch.setattr(transport, "call_tool", die)
     with pytest.raises(ConnectionError, match="socket"):
         await client.transcript()
+    assert not client.connected, "the transport is gone; so is the client"
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_call_drops_the_link_only_when_the_transport_does(
+    monkeypatch,
+) -> None:
+    """The same rule on a held-open call.
+
+    A stream has no answer to keep the link for, but a `ToolError` is still the
+    server refusing *on a live connection* — reconnecting would only repeat the
+    refusal — while anything else means the stream's own transport is gone.
+    Pinned through the agent's watch, which is the shape every streaming caller
+    now shares (`_stream_call` → `_call`).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    async def refuse(name, arguments, **kwargs):
+        if name == "watch":
+            raise ToolError("that conversation is not watchable")
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", refuse)
+    with pytest.raises(ToolError, match="not watchable"):
+        await client.watch(lambda item: None)
+    assert client.connected, "the server answered; the connection stays"
+
+    async def die(name, arguments, **kwargs):
+        raise ConnectionError("the socket went away")
+
+    monkeypatch.setattr(transport, "call_tool", die)
+    with pytest.raises(ConnectionError, match="socket"):
+        await client.watch(lambda item: None)
     assert not client.connected, "the transport is gone; so is the client"
 
 
