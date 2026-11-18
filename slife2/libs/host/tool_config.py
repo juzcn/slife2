@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from slife2.libs.host.section import SectionError, read_switch
 from slife2.libs.host.validation import validation_refusal
 
 Transport = Literal["stdio", "http"]
@@ -164,45 +165,17 @@ def read_enabled(
 ) -> bool:
     """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
 
-    The one rule for every section that carries the switch, and the one
-    sentence it is refused with; `error` is the exception the calling layer
-    refuses with (`ConfigError` at load, `ValueError` here).
-
-    **`bool(raw.get("enabled", True))` read a string as a switch.**  ruamel's
-    loader is YAML 1.2, so `enabled: no` and `enabled: off` are the *strings*
-    `no` and `off` — not the booleans PyYAML would have made of them — and every
-    non-empty string is true to `bool`.  So an entry the operator had switched
-    off came back on, and `family.py` dialled it at every start, because
-    `settings.enabled` is the whole of what decides whether a link is made.  The
-    reading is wrong in the one direction that costs something: the server is
-    started and asked, rather than not.
-
-    **The value is refused rather than guessed at.**  Coercing a string to a
-    boolean is the other half of the same mistake, one spelling over — it
-    replaces "the switch this says is on" with "the switch it did not say"; a
-    quoted `"false"` is a hand-edit that means nothing at all, and a *value that
-    cannot be read is not an absent one*.  Every other field of an entry is
-    refused at load with a sentence naming it, and a switch decides whether a
-    process is dialled, so it is refused the same way.  A key that is not there
-    is the one other answer, and it is the documented default: `enabled: true`
-    is what the file never writes and absent is what it means
-    (`slife2.libs.host.configfile.upsert`).
+    The rule is `slife2.libs.host.section.read_switch`'s, and that is where the
+    YAML-1.2 argument lives: `no` and `off` are strings there, and every
+    non-empty string is true, so a switch is refused rather than guessed at.
+    This is the one spelling for the sections whose entries are validated as
+    objects (`mcp:`, `rest-api:`, `cli:`); `error` is the exception the calling
+    layer refuses with (`ConfigError` at load, `ValueError` here).
     """
-    value = data.get("enabled", True)
-    if not isinstance(value, bool):
-        # A scalar is echoed; a mapping given to a switch can carry a literal
-        # credential, so it is named by its type (`validation_refusal`'s rule).
-        shown = (
-            repr(value)
-            if isinstance(value, (str, int, float))
-            else type(value).__name__
-        )
-        raise error(
-            f"{where}.enabled: expected `true` or `false`, got {shown} — YAML "
-            f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
-            f"strings; leave the key out for true"
-        )
-    return value
+    try:
+        return read_switch(data.get("enabled", True), f"{where}.enabled")
+    except SectionError as exc:
+        raise error(str(exc)) from exc
 
 
 def string_field(value: Any, where: str, *, strip: bool = True) -> str:

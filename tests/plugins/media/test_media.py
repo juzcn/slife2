@@ -565,19 +565,26 @@ def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
 def test_a_provider_entry_has_to_say_what_it_speaks_and_where() -> None:
     """Refused at load, which is right for where this parsing happens: the
     loader is the judge, rather than a call-time reader that has to skip a bad
-    entry."""
-    with pytest.raises(ConfigError, match="needs `api`"):
+    entry.
+
+    The section readers raise `SectionError` — the loader's own vocabulary —
+    and `slife2.libs.host.config._build` is the one boundary that turns it into
+    the `ConfigError` a person's command reports.
+    """
+    from slife2.libs.host.section import SectionError
+
+    with pytest.raises(SectionError, match="needs `api`"):
         _media(
             {"providers": {"p": {"base_url": "https://x", "models": []}}},
             MediaSettings(),
         )
-    with pytest.raises(ConfigError, match="needs `base_url`"):
+    with pytest.raises(SectionError, match="needs `base_url`"):
         _media({"providers": {"p": {"api": "a", "models": []}}}, MediaSettings())
-    with pytest.raises(ConfigError, match="needs `models`"):
+    with pytest.raises(SectionError, match="needs `models`"):
         _media(
             {"providers": {"p": {"api": "a", "base_url": "https://x"}}}, MediaSettings()
         )
-    with pytest.raises(ConfigError, match="`kind` must be one of"):
+    with pytest.raises(SectionError, match="`kind` must be one of"):
         _media(
             {
                 "providers": {
@@ -590,7 +597,7 @@ def test_a_provider_entry_has_to_say_what_it_speaks_and_where() -> None:
             },
             MediaSettings(),
         )
-    with pytest.raises(ConfigError, match="not a kind of media"):
+    with pytest.raises(SectionError, match="not a kind of media"):
         _media({"defaults": {"sound": "p/m"}}, MediaSettings())
 
 

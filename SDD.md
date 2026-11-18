@@ -557,6 +557,14 @@ is refused at load. The objects are complete — the loader applies the file's
 defaults; `*_set` requires every field, so a partial write is a schema error,
 not a silent reset.
 
+The sections with no canonical object — `agent:`, `context:`, `media:` and the
+rest — are read through one loader (`libs/host/section.py`). Each declares its
+keys as `Field`s carrying the reader, the bound and the sentence a missing
+required key is refused with, and the loader refuses an unknown key from that
+same list: a section cannot take a key it does not read, or read one it does
+not take. Typed coercion and bounds are therefore the same in every section,
+and an absent key takes the default the settings class states.
+
 `--a2a-broker HOST:PORT` overrides `peer_agent.broker` for one run, through the
 environment so a server started by this command reads the same address. It
 overrides the address only; `org`/`unit` remain the file's, and it cannot enable
@@ -2871,7 +2879,6 @@ silent debt. The order is roughly by severity.
 | **The embeddings server pins its provider at boot** (`plugins/llm/embeddings_server.py`) | An `embeddings:` edit (model/base_url/key) is silently ineffective until restart, and the stores' identity check cannot notice because `describe()` keeps answering the old identity — against invariant 9. | `build_server` captures `active_provider()` once; the chat backends read live via `LiveProviders`. The fix resolves the active provider per call via `load_cached`, as they do. |
 | **Jobs load on the event loop** (`plugins/jobs/server.py`, `registry.py`) | A job file's slow or blocking top-level code (model-authored, arbitrary) stalls the whole jobs plugin — every conversation's jobs and the hub's `list_sources` refresh — for its duration. | `job_set`/`job_list`/`job_run` call `load_job`/`scan_jobs_dir` synchronously inside async tools. The fix hops loading via `asyncio.to_thread`; sandboxing is the separate deferred capability (§14.3). |
 | **A removal re-hangs the last entry's own inline comment** (`libs/host/configfile.py::_drop_entry`) | Removing a section's last entry moves its own inline comment (`command: c  # bee`) onto the predecessor, because `_take_intro` lifts the whole merged token and there is no following entry to introduce. | The predecessor's inline is now preserved (fixed), but the doomed entry's own inline is re-hung rather than deleted. The fix separates the inline head (dies with the entry) from the block remainder (moves) in the drop path; `_swap_entry` keeps both, which is right for a replacement. |
-| **config.py's hand-written sections drift** (`libs/host/config.py`) | Eight parsers re-implement the same shape with per-section drift; the missing unknown-key refusals (now added) were what drift looks like, and coercion rules differ per reader. | A small section-spec helper — `parse_section(raw, name, base, fields)` with a per-field reader/default/bounds — would make unknown-key refusal and typed coercion uniform and the missing-refusal bug unspellable; the pydantic families already prove the pattern. Splitting the registry from the loader would let the loader's uniformity be tested in one place. |
 | **Content-part/image/system translation is duplicated across two wires** (`anthropic_server.py`, `openai_responses_server.py`) | The same drop-and-name part converter and image-URL splitter are spelled twice with wire-specific names; §6.3 says a provider difference is configuration, not a branch. | Hoist one part converter into `server_common`, parameterized by the wire's text/image part names. |
 | **The cabinet's `_window` reimplements `time_window`'s instant logic** (`plugins/cabinet/store.py`, `libs/store/index.py`) | The non-day branch (julianday comparison, `instant_bound`, exclusive date-only `until`) is one rule stated twice; a change to one can miss the other. | Parameterize `time_window(axis, *, day=False)`; the cabinet keeps only its day-granular advance. |
 | **Plugins import the terminal package for note vocabulary** (`plugins/a2a/mesh.py`, `plugins/wechat/server.py` → `slife2.tui.notes`) | A headless daemon carries `tui.i18n`/`tui.theme` to compose two presence sentences; the dependency direction (plugin → tui) inverts the layering. | Move `notes` (and the i18n/glyph slice it needs) into `libs/harness` or `libs/plugin/vocabulary`, where cross-process model/window text already lives; tui and both plugins import from there. |

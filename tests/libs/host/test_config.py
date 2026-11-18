@@ -2192,7 +2192,7 @@ def test_a_broker_port_in_the_file_is_refused_like_the_one_on_the_flag(
     (nothing binds this end of a broker connection), so the dial hangs until its
     timeout instead of failing on the line that named it — the same failure the
     flag's own refusal exists to prevent.  Both networks are checked because
-    `_a2a` parses both.
+    both read their `broker:` through the same field (`_BROKER_FIELDS`).
     """
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
 
@@ -2232,7 +2232,9 @@ def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None
     The hand-written sections refused unknown keys in some readers and not
     others; a misspelt `embeddings.active` silently selected the first provider
     and changed the index's vector identity with nothing said.  Every section
-    now refuses the key it does not take, naming the ones it does.
+    now reads through one loader (`slife2.libs.host.section`), whose key list is
+    the same tuple that reads the values — so this is one case per section
+    rather than one implementation per section.
     """
     from slife2.libs.host.config import ConfigError, load
 
@@ -2249,10 +2251,16 @@ def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None
         "      model: big-emb\n"
     )
     cases = {
+        "agent:\n  max_iteration: 5\n": "max_iterations",
+        "agent-task:\n  max_runnin: 5\n": "max_running",
+        "subagent:\n  max_runnin: 5\n": "max_running",
+        "peer_agent:\n  brker: {}\n": "broker",
+        "context:\n  floor: 0.2\n": "ceiling",
         "tool_load:\n  threshhold: 5\n": "threshold",
         "tool_result:\n  bytse: 32768\n": "bytes",
-        "servers:\n  agent:\n    prot: 24000\n": "port",
+        "media:\n  provider: {}\n": "providers",
         "file-tunnel:\n  actve: ngrok\n": "active",
+        "servers:\n  agent:\n    prot: 24000\n": "port",
     }
     for extra, known in cases.items():
         with pytest.raises(ConfigError) as refused:
@@ -2286,12 +2294,12 @@ def test_a_command_or_url_that_is_not_a_string_is_refused_not_coerced() -> None:
     with pytest.raises(ValueError, match="command"):
         load_cli({"command": False}, where="cli.x")
     # A scalar number in an args list is text the command line takes; a
-    # container is a mistake (`_string_list`'s rule).
-    from slife2.libs.host.config import _string_list
+    # container is a mistake (`read_list`'s rule).
+    from slife2.libs.host.section import read_list
 
-    assert _string_list([8080, "x"], "args") == ("8080", "x")
+    assert read_list([8080, "x"], "args") == ("8080", "x")
     with pytest.raises(Exception, match="list of strings"):
-        _string_list([{"port": 8080}], "args")
+        read_list([{"port": 8080}], "args")
 
 
 def test_a_credential_reference_is_one_rule_across_get_and_set() -> None:
