@@ -58,34 +58,97 @@ from slife2.libs.turn.tools import INTERRUPTED
 #: are.  Beside `system.j2` so both are found the same way.
 INSTRUCTION_TEMPLATE = "recall.j2"
 
-#: What the model is asked to reply with, and what each field means.  Rendered
-#: into the instruction rather than described in prose, because a field's
-#: *wording* is what a model copies and a description is what it paraphrases.
+#: The reply's schema: the types, the allowed values, and the one rule that
+#: couples the two fields.  Rendered into the instruction rather than described
+#: in prose (SDD §2.3, "Schema over prompt"): a field's wording is what a model
+#: copies, and a constraint that fits a schema is not a prompt sentence.
 RECALL_REPLY: dict[str, Any] = {
-    "context": (
-        'The turns in hand this input is answered from: omit or "keep" for all '
-        'of them, "clear" for none, or the turn_ids to keep, e.g. [12, 15]. For '
-        "a follow-up, keep the turn it continues, even when the input brings a "
-        "new word and does not name it. A turn dropped here cannot be recalled "
-        "back: the recall searches only the turn log outside the turns in hand "
-        "— not merely outside the turns kept."
-    ),
-    "recall": {
-        "sentences": (
-            "What to recall from the turn log, in your own words, one sentence "
-            "per idea. Read by meaning. Omit when you have none."
-        ),
-        "prompt_as_sentence": (
-            "Whether the input is read as a question beside the sentences. "
-            "Default true; set false when it does not carry its own subject."
-        ),
-        "query": (
-            "Words the keyword leg should find — names, paths, exact strings. "
-            "Omit for no words."
-        ),
-        "since": "Start of a period.",
-        "until": "End of a period.",
-        "anchor": '"newest" or "oldest". Omit for the newest end.',
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "context": {
+            "description": (
+                "The turns in hand this input is answered from. Omit for all of "
+                "them. A follow-up keeps the turn it continues, even when the "
+                'input brings a new word and does not name it. "clear" only '
+                "when the input stands on its own: a turn dropped here cannot be "
+                "recalled back — the recall searches only the turn log outside "
+                "the turns in hand, not merely outside the turns kept."
+            ),
+            "oneOf": [
+                {"const": "keep", "title": "all of them"},
+                {"const": "clear", "title": "none of them"},
+                {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "title": "these turn_ids",
+                },
+            ],
+        },
+        "recall": {
+            "description": (
+                "One condition: a period, a question, or both. Omit for no recall."
+            ),
+            "type": "object",
+            "anyOf": [
+                {"required": ["sentences"]},
+                {"required": ["query"]},
+                {"required": ["since"]},
+                {"required": ["until"]},
+                {"required": ["anchor"]},
+            ],
+            "properties": {
+                "sentences": {
+                    "description": (
+                        "What to recall from the turn log, in your own words, "
+                        "one sentence per idea. Read by meaning. Several "
+                        "sentences are several questions: another question is "
+                        "another chance to be found, and cannot cost a turn an "
+                        "earlier one found."
+                    ),
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                },
+                "query": {
+                    "description": (
+                        "Words the keyword leg should find — names, paths, "
+                        "exact strings. The fallback when no sentence names the "
+                        "subject; without a sentence it is also read by meaning."
+                    ),
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "prompt_as_sentence": {
+                    "description": (
+                        "Whether the input is read as a question beside the "
+                        "sentences. Default true; set false when it does not "
+                        'carry its own subject ("hi", "continue", "what about '
+                        'the other one?").'
+                    ),
+                    "type": "boolean",
+                    "default": True,
+                },
+                "since": {
+                    "description": f"Start of a period. Takes {BOUND_GRAMMAR}.",
+                    "type": "string",
+                },
+                "until": {
+                    "description": ('End of a period, in the same grammar as "since".'),
+                    "type": "string",
+                },
+                "anchor": {
+                    "description": (
+                        "Which end of a period to recall from; omit for the "
+                        "newest end. A period recall may truncate as the context "
+                        "is bounded, and the anchor chooses which end survives; a "
+                        "query recall is bounded by a narrower period instead. "
+                        "Alone, it reads the whole log from that end."
+                    ),
+                    "enum": ["newest", "oldest"],
+                },
+            },
+        },
     },
 }
 
@@ -432,16 +495,16 @@ def instruction(user_input: str) -> str:
     instruction is appended to it — and this is what tells it which input the
     decision is about.
 
-    **The bound grammar is the module's one spelling**, not a list copied into
-    the template: the tools' schemas print `BOUND_GRAMMAR` and the code that
-    decides reads it, and the template's own copy had fallen behind it — no
+    **The bound grammar is the module's one spelling.**  It is inside the reply
+    schema's `since`/`until` descriptions (`RECALL_REPLY`), so the template
+    carries no copy of it: the tools' schemas print `BOUND_GRAMMAR` and the code
+    that decides reads it, and a copy in the template had fallen behind it — no
     `tomorrow`, `now`, `quarter` or datetime.
     """
     return render_instruction(
         INSTRUCTION_TEMPLATE,
         user_input=user_input,
         recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),
-        bound_grammar=BOUND_GRAMMAR,
     )
 
 

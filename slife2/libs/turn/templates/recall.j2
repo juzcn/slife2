@@ -1,40 +1,19 @@
 ▸ Context recall
 
 Decide what the next turn runs on: the turns to keep from those in hand, plus
-the turns to recall from the turn log outside the turns in hand. The turn runs
-on both, in time order.
+what to recall from the turn log. The turn runs on both, in time order.
 
 Current user input:
 {{ user_input }}
 
+Reply with ONE JSON object matching this schema, and nothing else. An empty
+object means the turns in hand are enough for this turn:
+
 {{ recall_reply }}
 
-Reply with ONE JSON object holding the fields above, and nothing else. An empty
-object means the turns in hand are enough for this turn.
+Cases:
 
-Rules:
-
-- "recall" holds one condition: a period, a question, or a question within a
-  period. Omit it for no recall.
-- A question has two spellings, and either may be omitted. "sentences" are read
-  by meaning, one per idea — several sentences are several questions, and
-  another question is another chance to be found, and cannot cost a turn an
-  earlier one found. "query" is the fallback when no sentence names the subject:
-  the words the keyword leg should find, also read by meaning when no sentence
-  is beside it.
-- The person's input is read as a question beside the sentences, so a sentence
-  need not repeat it — unless "prompt_as_sentence" is false, which is for an
-  input that does not carry its own subject ("hi", "continue", "what about the
-  other one?").
-- "since" and "until" take {{ bound_grammar }}.
-- The context is bounded, so a recall may return a truncated selection: use
-  "anchor" to guide the drop for a period recall, and a narrower period to bound
-  a query recall. "anchor" alone reads the whole log from the named end.
-
-Cases — each takes one value of each field.
-
-1. The turns in hand answer it — the common case, including a follow-up whose
-   subject is above even when the input brings a new word.
+1. The turns in hand answer it — the common case.
 
   input What did we decide about the retries?
     → {}
@@ -46,7 +25,7 @@ Cases — each takes one value of each field.
   input Let's go with the plan we just settled on
     → {"context": [31, 33]}
 
-3. Keep none — the input uses nothing in hand, or says to drop it.
+3. Keep none — a new task.
 
   input Translate this paragraph into French
     → {"context": "clear"}
@@ -83,7 +62,7 @@ Cases — each takes one value of each field.
     → {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
 10. A follow-up whose subject is above but not in hand — carry it into the
-    sentence; the input itself is not a question.
+    sentence.
 
   input What about the other one?
     → {"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}
@@ -93,8 +72,7 @@ Cases — each takes one value of each field.
   input What about the alumni fund?
     → {"context": "clear", "recall": {"sentences": ["the alumni fund"]}}
 
-12. The words exactly — a name, a path or an exact string that no sentence
-    says better.
+12. The words exactly.
 
   input Which turn was about the alumni fund?
     → {"context": "clear", "recall": {"query": "alumni fund"}}
