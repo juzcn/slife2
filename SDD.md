@@ -1842,7 +1842,11 @@ The one repeat the server makes is a connection that never opened — a
 `ConnectError` means nothing was sent and an embedding is idempotent, so the
 retry cannot double-charge or change the answer, and a transient blip in the
 link to a remote provider does not fail a cold catalogue build. A second failure
-is the caller's, and the hard dependency above stands.
+is the caller's, and the hard dependency above stands. **The client's repeat is
+on a reopened connection**: a keep-alive the server closed leaves a dead MCP
+session, not a dead socket a pool can replace, so the retry opens a new one
+first — and a reopen that describes another model is refused rather than ranked
+into an index built for the old one.
 
 The width is measured, and the input limit is asked for: an input limit cannot
 be measured without sending an oversized input, so a model whose endpoint
@@ -2868,7 +2872,6 @@ silent debt. The order is roughly by severity.
 | **The streaming-call transport rule is copied six times** (`slife2/tui/client.py`) | The `except ToolError: raise / except Exception: close(); raise` rule and three progress-decode closures are spelled per streaming caller; `_call_tool` owns it for management calls and exists so a fourth caller does not copy it wrongly. | One `_stream_call(name, payload, progress=None)` helper (timeout=None, progress_handler) shared by the five client classes. |
 | **ModelPicker and ConversationPicker duplicate the picker machinery** (`slife2/tui/widgets.py`) | Identical bindings, cursor plumbing and the once-guarded `_decide` (~100 lines) live in two places (ApprovalPrompt a partial third); the once-guard and blur-cancels rule are load-bearing and now have two homes. | A common `_Picker` base holding the keys, cursor plumbing and future guard; subclasses supply the body and active-row logic. |
 | **`_active_default` reimplements `config._first_reference`** (`plugins/agent/server.py`, `libs/host/config.py`) | The "bare provider → its first model; else first provider's first model" rule is written twice (over settings and over raw dicts); a change reaches one reader and not the other. | Expose one raw-dict helper from config.py and have `_active_default` call it after reading the section. |
-| **RemoteEmbedder's idle-keepalive retry may catch types the stack never raises** (`clients/embedder.py`) — unverified | If mcp 2.3.0 / fastmcp 4.2.0 surface transport failures as `MCPError(CONNECTION_CLOSED)` or an `ExceptionGroup` rather than a bare `httpx2.ReadError`, the documented cold-start retry is dead and the first embed after an idle gap fails the turn. | The retry catches bare `ReadError`/`RemoteProtocolError`; the test scripts that shape. Confirm against a live idle-gap call (or log the real type), then catch that shape and unwrap groups. |
 
 ### 14.2 Deferred capabilities
 
