@@ -313,6 +313,141 @@ def read_int(source: Any, attribute: str) -> int:
     return int(getattr(source, attribute, 0) or 0)
 
 
+@dataclass(frozen=True)
+class WireParts:
+    """What one wire calls the two parts a neutral content value is made of.
+
+    **Two of the three chat backends build a request field by field, and both
+    walk a content value the same way.**  A part the wire cannot carry is
+    dropped and *named* — passing it on is a 400 on every call that carries
+    one, and dropping it with no word loses the caller's attachment with
+    nothing anywhere saying so — and an image source neither wire can read is
+    refused the same way.  What differs is only what the wire calls the two
+    kinds and what surrounds an image URL inside its part, so that is all an
+    adapter supplies here; `content_parts` is the walk, and the rest of the
+    translation stays where the SDK is.
+    """
+
+    #: The name a drop is logged under, so a reader can tell which backend lost
+    #: the part.
+    server: str
+    #: This wire's `type` for a text part.
+    text: str
+    #: This wire's `type` for an image part.
+    image: str
+    #: The fields an image part carries beside its `type`, built from a URL
+    #: `content_parts` has already accepted.  None drops the part, for a rule
+    #: this wire owns — an empty `data:` payload has no bytes to read as
+    #: Anthropic's base64 source.
+    image_fields: Callable[[str], dict[str, Any] | None]
+
+
+def content_parts(content: Any, wire: WireParts) -> list[dict[str, Any]]:
+    """Neutral content — a string or OpenAI content parts — as one wire's parts.
+
+    **One walk, two wires.**  The parts this build produces are the neutral
+    ones (`slife2.libs.turn.attachments.parts`), and each protocol that builds
+    a request field by field renames them: a text part is `text` or
+    `input_text`, an image is `image` or `input_image`.  The *rules* around the
+    rename are not per-protocol — a part the wire cannot carry is dropped
+    rather than passed through, and is named when it is dropped, for the reason
+    SDD Appendix C gives about every silent degrade — so they are stated here
+    once and `wire` says only what this wire calls its parts.
+
+    **Both forms of an image URL go on, and neither is fetched here.**  A
+    `data:` URL is inline bytes and an `http(s)` one is downloaded by the
+    provider on its own side, which is why passing it through is exactly what
+    "no request leaves this process" looks like.  A URL in neither form — a
+    `file:` URL, a bare word — is a source the wire has no part to read it as,
+    so it is dropped and named by its scheme: an attachment that vanishes
+    without a word is the failure this module cannot see from inside.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": wire.text, "text": content}] if content else []
+
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            logger.warning(
+                "%s: dropping a content part that is %r, not a mapping — this "
+                "wire takes parts as mappings only, so it cannot be passed "
+                "through, but the caller's part is now missing",
+                wire.server,
+                type(part).__name__,
+            )
+            continue
+        match part.get("type"):
+            case "text":
+                text = part.get("text") or ""
+                if text:
+                    parts.append({"type": wire.text, "text": text})
+            case "image_url":
+                url = _image_url(part.get("image_url"), wire)
+                if url is not None:
+                    fields = wire.image_fields(url)
+                    if fields is not None:
+                        parts.append({"type": wire.image, **fields})
+            case other:
+                logger.warning(
+                    "%s: dropping a content part of type %r — it is not a part "
+                    "this wire takes, so it cannot be passed through, but the "
+                    "caller's attachment is now missing",
+                    wire.server,
+                    other,
+                )
+    return parts
+
+
+def _image_url(raw: Any, wire: WireParts) -> str | None:
+    """The URL in an `image_url` part, when it is a form a provider can read."""
+    url = (raw or {}).get("url") if isinstance(raw, dict) else None
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith(("data:", "http://", "https://")):
+        return url
+    scheme, _, _ = url.partition(":")
+    logger.warning(
+        "%s: dropping an image from a %r source — it is neither a `data:` URL "
+        "nor an http(s) one, so it is not a part this wire takes, and the "
+        "caller's attachment goes with it",
+        wire.server,
+        scheme,
+    )
+    return None
+
+
+def system_text(content: Any, wire: WireParts, field: str) -> str:
+    """A system turn's text, for a wire that takes the system prompt separately.
+
+    Both wires that build requests field by field have the same rule, and had a
+    copy each: the system prompt is a string parameter, so a system turn's
+    content parts have no field to live in — the text in them is taken and the
+    rest is *named*.  **It is taken, not dropped**: reading only `str` content
+    meant a system turn carrying blocks contributed nothing at all, with no
+    word anywhere, so a prompt the caller wrote left the request (SDD Appendix
+    C).  `field` is the name this wire gives the parameter, because that is
+    what the warning is about.
+    """
+    if isinstance(content, str):
+        return content
+    parts = content_parts(content, wire)
+    text = "".join(
+        str(part.get("text") or "") for part in parts if part.get("type") == wire.text
+    )
+    other = [str(part.get("type")) for part in parts if part.get("type") != wire.text]
+    if other:
+        logger.warning(
+            "%s: a system turn carries %s, which the %s has no field for — the "
+            "text beside it is kept and these are left out",
+            wire.server,
+            ", ".join(other),
+            field,
+        )
+    return text
+
+
 def render_tool_result(content: Any) -> str:
     """A tool result as the text every wire here takes, whatever shape it arrived in.
 

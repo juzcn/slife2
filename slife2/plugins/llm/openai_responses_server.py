@@ -40,12 +40,15 @@ from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolC
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
     Translate,
+    WireParts,
     build_backend_server,
+    content_parts,
     read_int,
     render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
+    system_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,77 +66,32 @@ SERVER_NAME = plugin(API).name
 DEFAULT_IMAGE_DETAIL = "auto"
 
 
-def to_responses_parts(content: Any) -> list[dict[str, Any]]:
-    """Neutral content parts as Responses input parts.
-
-    A part this function does not recognise is dropped rather than passed
-    through: an unknown item in the input list is a 400 on every call that
-    carries one, and the neutral form has exactly two kinds because that is what
-    the agent server can produce: `slife2.libs.turn.attachments.parts` builds them.  It is
-    *named* when it is dropped, because a part type this build does not know —
-    an attachment, or a newer kind — otherwise disappears without a word.  A
-    part that is not a mapping at all is dropped and named the same way.
-    """
-    parts: list[dict[str, Any]] = []
-    for part in content or []:
-        if not isinstance(part, dict):
-            logger.warning(
-                "openai-responses: dropping a content part that is %r, not a "
-                "mapping — this API takes input items as mappings only, so it "
-                "cannot be passed through, but the caller's part is now missing",
-                type(part).__name__,
-            )
-            continue
-        match part.get("type"):
-            case "text":
-                text = part.get("text") or ""
-                if text:
-                    parts.append({"type": "input_text", "text": text})
-            case "image_url":
-                image = to_input_image(part.get("image_url"))
-                if image is not None:
-                    parts.append(image)
-            case other:
-                logger.warning(
-                    "openai-responses: dropping a content part of type %r — it "
-                    "is not an item this API takes, so it cannot be passed "
-                    "through, but the caller's attachment is now missing",
-                    other,
-                )
-    return parts
-
-
-def to_input_image(raw: Any) -> dict[str, Any] | None:
-    """An image URL as an `input_image` part, or None if it is not one.
+def _image_fields(url: str) -> dict[str, Any]:
+    """An accepted image URL as the fields of an `input_image` part.
 
     **Both forms go on, and neither is fetched here.**  An inline `data:` URL and
     a remote `http(s)` one are both valid `input_image.image_url` values, and the
     API downloads the remote one on its own side — so passing it through *is* what
     "not fetching" looks like, and dropping it silently would lose the attachment
     the caller sent with nothing anywhere reporting the loss.  That case is
-    exactly what the file tunnel exists to serve (`slife2.libs.turn.attachments` passes an
-    `http(s)` URL through untouched for the provider to fetch).  Anything else — a
-    `file:` URL, a bare word — is an image source in neither form, and is dropped
-    rather than sent to 400 on every call that carries one.
+    exactly what the file tunnel exists to serve (`slife2.libs.turn.attachments`
+    passes an `http(s)` URL through untouched for the provider to fetch).
 
-    It is *named* when it is dropped, by its scheme, for the reason the
-    unrecognised part type one function up is named: an attachment that vanishes
-    without a word is the failure this module cannot see from inside (SDD Appendix C).
+    `detail` is part of the documented shape and `auto` is the documented
+    default, so this says out loud what the provider would have assumed — worth
+    doing for a field whose omission some compatible gateways reject.
     """
-    url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url:
-        return None
-    if not url.startswith(("data:", "http://", "https://")):
-        scheme, _, _ = url.partition(":")
-        logger.warning(
-            "openai-responses: dropping an image from a %r source — it is "
-            "neither a `data:` URL nor an http(s) one, so it is not an "
-            "`input_image` this API takes, and the caller's attachment goes "
-            "with it",
-            scheme,
-        )
-        return None
-    return {"type": "input_image", "image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
+    return {"image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
+
+
+#: This wire's part names, and the one part field that is its own: an
+#: `input_image` part carries the whole URL, not Anthropic's split source.
+_WIRE = WireParts(
+    server="openai-responses",
+    text="input_text",
+    image="input_image",
+    image_fields=_image_fields,
+)
 
 
 def to_responses_content(content: Any) -> Any:
@@ -146,7 +104,7 @@ def to_responses_content(content: Any) -> Any:
     """
     if isinstance(content, str):
         return content if content else None
-    return to_responses_parts(content) or None
+    return content_parts(content, _WIRE) or None
 
 
 def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
@@ -167,42 +125,11 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
 
     for message in messages:
         if message.role == "system":
-            # `instructions` is a string parameter, so a system turn's content
-            # parts have no field to live in — the text in them is taken and the
-            # rest is named.
-            #
-            # **Taken, and not dropped.**  Reading only `str` content meant a
-            # system turn carrying blocks contributed nothing at all, with no
-            # word anywhere: a prompt the caller wrote left the request, and the
-            # model answered a question nobody had asked (SDD Appendix C).  It
-            # is the same neutral `Message` the Anthropic adapter reads and the
-            # same failure it fixed on its own side, so this is the same answer:
-            # the parts come from the converter the other roles use, so a `str`
-            # is one text part and a list is what it says it is, and a part that
-            # is not text is dropped *with a warning*, because no field of
-            # `instructions` can carry it.
-            if isinstance(message.content, str):
-                if message.content:
-                    instructions.append(message.content)
-                continue
-            parts = to_responses_parts(message.content)
-            text = "".join(
-                str(part.get("text") or "")
-                for part in parts
-                if part.get("type") == "input_text"
-            )
-            other = [
-                str(part.get("type"))
-                for part in parts
-                if part.get("type") != "input_text"
-            ]
-            if other:
-                logger.warning(
-                    "openai-responses: a system turn carries %s, which the "
-                    "`instructions` parameter has no field for — the text beside "
-                    "it is kept and these are left out",
-                    ", ".join(other),
-                )
+            # `instructions` is a string parameter, so a system turn's parts are
+            # taken for the text in them and the rest is named — `system_text`
+            # is the one rule both wires that hoist the prompt follow, and it
+            # says why the text is taken rather than dropped.
+            text = system_text(message.content, _WIRE, "`instructions` parameter")
             if text:
                 instructions.append(text)
             continue

@@ -34,12 +34,15 @@ from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
     THINKING_BUDGET_SHARE,
     Translate,
+    WireParts,
     build_backend_server,
+    content_parts,
     read_int,
     render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
+    system_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,51 +71,16 @@ _CACHE_TTLS = {"5m": "5m", "1h": "1h"}
 def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
     """Neutral content — a string or OpenAI content parts — as Anthropic blocks.
 
-    The two APIs disagree about images in the usual way: OpenAI nests a data URL
-    under `image_url`, Anthropic wants the media type and the base64 payload as
-    separate fields.  A part this function does not recognise is dropped rather
-    than passed through, because passing an unknown block to the Messages API is
-    a 400 on every call that contains one — and it is *named* when it is dropped,
-    because an attachment or a newer part type that disappears without a word is
-    the failure this module cannot see from inside.  A part that is not a mapping
-    at all is dropped and named the same way, for the same reason.
+    The walk — drop-and-name, and refusing a source the API cannot read — is
+    `server_common.content_parts`.  What is Anthropic's here is only what a
+    block is called and what an image carries: the media type and the base64
+    payload as separate fields rather than one nested data URL.
     """
-    if content is None:
-        return []
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}] if content else []
-
-    blocks: list[dict[str, Any]] = []
-    for part in content:
-        if not isinstance(part, dict):
-            logger.warning(
-                "anthropic: dropping a content part that is %r, not a mapping "
-                "— the Messages API takes block mappings only, so it cannot be "
-                "passed through, but the caller's part is now missing",
-                type(part).__name__,
-            )
-            continue
-        match part.get("type"):
-            case "text":
-                text = part.get("text") or ""
-                if text:
-                    blocks.append({"type": "text", "text": text})
-            case "image_url":
-                source = _image_source(part.get("image_url"))
-                if source is not None:
-                    blocks.append({"type": "image", "source": source})
-            case other:
-                logger.warning(
-                    "anthropic: dropping a content part of type %r — it is not "
-                    "a block the Messages API takes, so it cannot be passed "
-                    "through, but the caller's attachment is now missing",
-                    other,
-                )
-    return blocks
+    return content_parts(content, _WIRE)
 
 
-def _image_source(raw: Any) -> dict[str, Any] | None:
-    """An `image_url` as Anthropic's source: inline data, or a URL.
+def _image_fields(url: str) -> dict[str, Any] | None:
+    """An accepted image URL as the fields of an `image` block's `source`.
 
     **Two forms and neither one is fetched here.**  A `data:` URL becomes a
     base64 source; a remote `http(s)` URL becomes a `url` source, which Anthropic
@@ -124,28 +92,14 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     was a capability this plugin should not have.  The premise was wrong for this
     form of it: the provider fetches.)
 
-    A url in neither form — a `file:` URL, a bare word — is dropped, because a
-    source the Messages API cannot read is a 400 on every call that carries one.
-    So is a `data:` URL that names a type and carries no payload: there are no
-    bytes to read.  Both are *named* when they are dropped — one by its scheme,
-    the other by the type it claimed — for the reason the unrecognised part type
-    one function up is named: an attachment that vanishes without a word is the
-    failure this module cannot see from inside (SDD Appendix C).
+    A `data:` URL that names a type and carries no payload has no bytes to read
+    as a base64 source, so it is dropped — and *named*, by the type it claimed,
+    for the reason `content_parts` names everything it drops: an attachment
+    that vanishes without a word is the failure this module cannot see from
+    inside (SDD Appendix C).
     """
-    url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url:
-        return None
     if url.startswith(("http://", "https://")):
-        return {"type": "url", "url": url}
-    if not url.startswith("data:"):
-        scheme, _, _ = url.partition(":")
-        logger.warning(
-            "anthropic: dropping an image from a %r source — it is neither a "
-            "`data:` URL nor an http(s) one, so the Messages API has no source "
-            "block to read it as, and the caller's attachment goes with it",
-            scheme,
-        )
-        return None
+        return {"source": {"type": "url", "url": url}}
     header, _, data = url.partition(",")
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
     if not data:
@@ -156,7 +110,14 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
             media_type,
         )
         return None
-    return {"type": "base64", "media_type": media_type, "data": data}
+    return {"source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+#: This wire's part names, and the one part field that is its own: what an
+#: `image` block carries beside its type.
+_WIRE = WireParts(
+    server="anthropic", text="text", image="image", image_fields=_image_fields
+)
 
 
 def to_anthropic_messages(
@@ -187,35 +148,11 @@ def to_anthropic_messages(
 
     for message in messages:
         if message.role == "system":
-            # The system prompt is a string parameter here, and a system message
-            # carrying content parts is not a thing either API supports — so a
-            # list is taken for the text in it and nothing else.
-            #
-            # **Taken, and not dropped**: reading only `str` content meant a
-            # system turn carrying blocks contributed nothing at all, with no
-            # word anywhere — a prompt the caller wrote left the request
-            # (SDD Appendix C).  The blocks are built by the same converter the
-            # other roles use, so a `str` is one text block and a list is what
-            # it says it is; a block that is not text is dropped with a warning,
-            # because the API has no field to put it in.
-            blocks = to_anthropic_blocks(message.content)
-            text = "".join(
-                str(block.get("text") or "")
-                for block in blocks
-                if block.get("type") == "text"
-            )
-            other = [
-                str(block.get("type"))
-                for block in blocks
-                if block.get("type") != "text"
-            ]
-            if other:
-                logger.warning(
-                    "anthropic: a system turn carries %s, which the system "
-                    "prompt has no field for — the text beside it is kept and "
-                    "these are left out",
-                    ", ".join(other),
-                )
+            # The system prompt is a string parameter here, so a system turn's
+            # parts are taken for the text in them and the rest is named —
+            # `system_text` is the one rule both wires that hoist the prompt
+            # follow, and it says why the text is taken rather than dropped.
+            text = system_text(message.content, _WIRE, "system prompt")
             if text:
                 system_parts.append(text)
             continue
