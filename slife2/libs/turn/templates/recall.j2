@@ -15,64 +15,64 @@ Cases:
 
 1. The turns in hand answer it — the common case.
 
-   input: What did we decide about the retries?
+   user input: What did we decide about the retries?
      your answer: {}
-   input: Is there a ready-made one?
+   user input: Is there a ready-made one?
      your answer: {}
 
 2. Keep part of them — the plan is in hand, the tool output around it is not.
 
-   input: Let's go with the plan we just settled on
+   user input: Let's go with the plan we just settled on
      your answer: {"context": [31, 33]}
 
 3. Keep none — a new task.
 
-   input: Translate this paragraph into French
+   user input: Translate this paragraph into French
      your answer: {"context": "clear"}
 
 4. A period — a range of time, and no topic.
 
-   input: What have I been doing these past two days?
+   user input: What have I been doing these past two days?
      your answer: {"recall": {"since": "yesterday"}}
 
 5. A period from its beginning.
 
-   input: Where did we start last month?
+   user input: Where did we start last month?
      your answer: {"recall": {"since": "last month", "anchor": "oldest"}}
 
 6. The earliest turns of all — no bound to name.
 
-   input: Let's look at our earliest conversations
+   user input: Let's look at our earliest conversations
      your answer: {"recall": {"anchor": "oldest"}}
 
 7. Part of them plus a question — the turn that answered this has left the
    context, and the tool dumps around it are dead weight.
 
-   input: Who did you say was the dean of the management school?
+   user input: Who did you say was the dean of the management school?
      your answer: {"context": [27, 28], "recall": {"sentences": ["the dean of the management school"]}}
 
 8. None plus a question in a period — a topic, and when.
 
-   input: What did we say about the anniversary last week?
+   user input: What did we say about the anniversary last week?
      your answer: {"context": "clear", "recall": {"sentences": ["what we said about the anniversary"], "since": "last week"}}
 
 9. A question in a period that has passed — a topic, and both ends of it.
 
-   input: What did we say about the anniversary last month?
+   user input: What did we say about the anniversary last month?
      your answer: {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
 10. A follow-up whose subject is above but not in hand — carry it into the
     sentence.
 
-   input: What about the other one?
+   user input: What about the other one?
      your answer: {"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}
 
 11. A topic the log may have, with nothing in hand.
 
-   input: What about the alumni fund?
+   user input: What about the alumni fund?
      your answer: {"context": "clear", "recall": {"sentences": ["the alumni fund"]}}
 
 12. The words exactly.
 
-   input: Which turn was about the alumni fund?
+   user input: Which turn was about the alumni fund?
      your answer: {"context": "clear", "recall": {"query": "alumni fund"}}
