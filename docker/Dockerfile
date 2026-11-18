@@ -1,25 +1,26 @@
 #
-# The real slife2 distribution in a container. The build context is staged
-# from the slife2 checkout (build.py), and the project's own installer runs
-# inside the image. The shipped slife2.yaml is used unchanged: this is not a
-# reduced bench configuration.
+# The real slife2 distribution in a container. The build context is the slife2
+# checkout, and the project's own installer runs inside the image, exactly as it
+# does on macOS and Linux. The shipped slife2.yaml is used unchanged: this is
+# not a reduced bench configuration.
 FROM python:3.13-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# mosquitto is installed as a system package so the installer does not have
-# to unpack Debian packages into ~/.local as a non-root user. ssh is the
-# localhost.run tunnel's client.
+# The platform packages the installer's requirements name — curl/git/ssh, the
+# tools its downloads need, mosquitto and ripgrep — are installed here. The rest
+# — uv, Node 24, the venv, credstore, cloudflared, yt-dlp, browser-harness and
+# every configured MCP/REST launcher — is `scripts/install.sh`'s work, the same
+# one a macOS or Linux host runs. The base image supplies Python 3.13, which the
+# installer checks exactly as it checks `python@3.13` on macOS. mosquitto is a
+# system package so the installer does not have to unpack Debian packages into
+# ~/.local as a non-root user; ssh is the localhost.run tunnel's client.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates curl git openssh-client xz-utils unzip dpkg \
       mosquitto mosquitto-clients ripgrep \
  && ln -sf /usr/sbin/mosquitto /usr/local/bin/mosquitto \
  && rm -rf /var/lib/apt/lists/*
-
-# The same uv the installer would fetch, installed from PyPI instead of the
-# ghcr.io image so a flaky registry TLS handshake does not block the build.
-RUN pip install --no-cache-dir uv==0.12.17
 
 RUN useradd --create-home --uid 1000 --shell /bin/bash slife2
 

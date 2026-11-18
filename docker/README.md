@@ -73,6 +73,7 @@ process table:
 ```bash
 cat > slife2.env <<'EOF'
 DEEPSEEK_API_KEY=...
+SILICONFLOW_API_KEY=...
 SERPER_API_KEY=...
 EOF
 
@@ -99,8 +100,10 @@ the container.
 
 - The full configuration names many external services (Serper, Tavily, AMap,
   Baidu, SiliconFlow, media providers, ...). Missing credentials are resolved
-  lazily: the stack starts, and a tool that needs a key fails at the call. Only
-  `DEEPSEEK_API_KEY` is needed for the basic model turn.
+  lazily: the stack starts, and a tool that needs a key fails at the call. A
+  basic turn needs `DEEPSEEK_API_KEY` (the default chat provider) and
+  `SILICONFLOW_API_KEY` (the default embedding provider): every turn is
+  embedded before it is saved, so a missing embedding key fails the turn.
 - **Keys are passed through the environment** (see Credentials above); a
   mounted `slife2.yaml` whose values are literals is the other supported
   source. The build runs `scripts/install.sh`, whose log lists the credential
