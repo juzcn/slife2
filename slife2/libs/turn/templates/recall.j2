@@ -1,8 +1,8 @@
 ▸ Context recall
 
-This call decides the context the turn runs on: what to keep of the turns in
-hand, plus what to recall from the turn log. The turn then runs on the two
-together, in time order.
+Decide what the next turn runs on: the turns to keep from those in hand, plus
+the turns to recall from the turn log outside the turns in hand. The turn runs
+on both, in time order.
 
 Current user input:
 {{ user_input }}
@@ -12,116 +12,89 @@ Current user input:
 Reply with ONE JSON object holding the fields above, and nothing else. An empty
 object means the turns in hand are enough for this turn.
 
-Part 1 — the decision
+Rules:
 
-What to keep of the turns in hand — "context": the turns this input is answered
-from. Leave it out (or "keep") for all of them, set it to the turn_ids in the
-current context worth keeping for some, or to "clear" for none — an input none
-of them carries is answered from memory or from nothing, and every turn kept is
-spent from the same window the recall is.
+- "recall" holds one condition: a period, a question, or a question within a
+  period. Omit it for no recall.
+- A question has two spellings, and either may be omitted. "sentences" are read
+  by meaning, one per idea — several sentences are several questions, and
+  another question is another chance to be found, and cannot cost a turn an
+  earlier one found. "query" is the fallback when no sentence names the subject:
+  the words the keyword leg should find, also read by meaning when no sentence
+  is beside it.
+- The person's input is read as a question beside the sentences, so a sentence
+  need not repeat it — unless "prompt_as_sentence" is false, which is for an
+  input that does not carry its own subject ("hi", "continue", "what about the
+  other one?").
+- "since" and "until" take {{ bound_grammar }}.
+- The context is bounded, so a recall may return a truncated selection: use
+  "anchor" to guide the drop for a period recall, and a narrower period to bound
+  a query recall. "anchor" alone reads the whole log from the named end.
 
-What to recall from the turn log — "recall": leave it out for nothing, or fill it
-in for one condition — a period (since / until), a question, or a question within
-a period. "anchor" alone reads the whole log from the named end.
+Cases — each takes one value of each field.
 
-It searches the turns outside the context in hand — not merely outside what
-"context" keeps: every turn in hand was read by this call, so a turn dropped
-from "context" is not one the recall can bring back.
-
-A question has two spellings, and either may be omitted.
-
-The "sentences" hold what you want to recall, in your own words, one sentence
-per idea — "the turn where we decided the dean of the management school". They
-are read by meaning, so they need not share words with the stored turn. Several
-sentences are several questions; another question is another chance to be found
-and cannot cost a turn an earlier one found. The person's input is read by
-meaning as well, so a sentence does not have to repeat it — unless you set
-"prompt_as_sentence": false, which you should when the input names nothing
-("hi", "continue", "what about the other one?") and only your sentence carries
-the subject.
-
-The "query" holds words the keyword leg should find — names, paths,
-identifiers, a command, an error string. It is the fallback when you cannot put
-the subject into a sentence, and then it is also read by meaning, so a recalled
-turn need not carry those words. "management school dean" is the shape.
-
-"since" and "until" take {{ bound_grammar }}.
-
-The context is bounded, so a recall might return a truncated selection. Use
-"anchor" to guide the drop for a period recall, and bound a query recall with
-a narrower period.
-
-Part 2 — the cases
-
-The two fields are not independent — "recall" searches only the turn log
-outside the turns in hand, so a turn dropped from "context" cannot be brought
-back. Each case below takes one value of each.
-
-1. Keep the turns in hand, recall nothing — the input is answered from what is
-in hand.
+1. The turns in hand answer it — the common case, including a follow-up whose
+   subject is above even when the input brings a new word.
 
   input What did we decide about the retries?
     → {}
+  input Is there a ready-made one?
+    → {}
 
-2. Keep part of them, recall nothing — the plan is in hand, the tool output
-around it is not.
+2. Keep part of them — the plan is in hand, the tool output around it is not.
 
   input Let's go with the plan we just settled on
     → {"context": [31, 33]}
 
-3. Keep none of them, recall nothing — the input uses nothing in hand, or says
-to drop it.
+3. Keep none — the input uses nothing in hand, or says to drop it.
 
   input Translate this paragraph into French
     → {"context": "clear"}
 
-4. Keep them and recall a period — a range of time, and no topic.
+4. A period — a range of time, and no topic.
 
   input What have I been doing these past two days?
     → {"recall": {"since": "yesterday"}}
 
-5. Keep them and recall a period from its beginning — the oldest turns in it.
+5. A period from its beginning.
 
   input Where did we start last month?
     → {"recall": {"since": "last month", "anchor": "oldest"}}
 
-6. Keep them and recall the earliest turns of all — no bound to name.
+6. The earliest turns of all — no bound to name.
 
   input Let's look at our earliest conversations
     → {"recall": {"anchor": "oldest"}}
 
-7. Keep part and recall a question — the turn that answered this has left the
-context, and the tool dumps around it are dead weight.
+7. Part of them plus a question — the turn that answered this has left the
+   context, and the tool dumps around it are dead weight.
 
   input Who did you say was the dean of the management school?
     → {"context": [27, 28], "recall": {"sentences": ["the dean of the management school"]}}
 
-8. Keep none and recall a question within a period — a topic, and when.
+8. None plus a question in a period — a topic, and when.
 
   input What did we say about the anniversary last week?
     → {"context": "clear", "recall": {"sentences": ["what we said about the anniversary"], "since": "last week"}}
 
-9. Keep them and recall a question in a period that has passed — a topic, and
-both ends of it.
+9. A question in a period that has passed — a topic, and both ends of it.
 
   input What did we say about the anniversary last month?
     → {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
-10. Keep them and recall a question for a follow-up — its subject is in the
-conversation above, so carry it into the sentence; the input itself names
-nothing, so it is not a question.
+10. A follow-up whose subject is above but not in hand — carry it into the
+    sentence; the input itself is not a question.
 
   input What about the other one?
     → {"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}
 
-11. Keep none and recall a question — nothing in hand carries this input, and
-the subject is one the turn log may.
+11. A topic the log may have, with nothing in hand.
 
   input What about the alumni fund?
     → {"context": "clear", "recall": {"sentences": ["the alumni fund"]}}
 
-12. Keep none and recall the words exactly — a name, a path or an exact string
-that no sentence says better.
+12. The words exactly — a name, a path or an exact string that no sentence
+    says better.
 
   input Which turn was about the alumni fund?
     → {"context": "clear", "recall": {"query": "alumni fund"}}
