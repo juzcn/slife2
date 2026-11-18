@@ -52,6 +52,7 @@ the persisted list and the write that maintains it, which both are.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -828,6 +829,35 @@ def build_server(
     def _rows(store: TurnStore, turn_ids: list[int]) -> list[dict[str, Any]]:
         return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
 
+    def _decision_words(decision: Decision) -> str:
+        """The decision's two fields as `recall_decided` spells them.
+
+        **The fields are otherwise invisible.**  `rebuild` reports its outcome
+        (`turns`, `recalled`) and the two fields that chose it are consumed and
+        dropped, so a line reading `turns=0 recalled=0` could not say whether
+        the model cleared the turns, kept none to begin with, or what it went to
+        the log for.  That was the question a live turn raised and no artifact
+        could answer.
+
+        The keep list's boundary values are spelled the way the reply spells
+        them (`KEEP_ALL` / `KEEP_NONE`) rather than as `None` and `[]`, because
+        the reader is comparing this line with the model's own answer.  An
+        absent recall is `none`; a present one is the condition as JSON, so a
+        sentence with Chinese in it stays readable in the log.
+        """
+        if decision.keep is None:
+            keep = decisions.KEEP_ALL
+        elif not decision.keep:
+            keep = decisions.KEEP_NONE
+        else:
+            keep = ",".join(str(turn_id) for turn_id in decision.keep)
+        recall = (
+            "none"
+            if decision.recall is None
+            else json.dumps(decision.recall, ensure_ascii=False)
+        )
+        return f"keep={keep} recall={recall}"
+
     def _in_hand(
         messages: Sequence[dict[str, Any]],
         turn_ids: Sequence[int],
@@ -1114,6 +1144,12 @@ def build_server(
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
             return None, "failed"
+        # **The raw reply, for the one question the parsed answer cannot
+        # answer**: *why* a model that wrote something the parser read a
+        # certain way wrote it that way.  DEBUG because it is the model's text
+        # and this line is for whoever is already looking at the protocol; the
+        # parsed fields are the INFO line `rebuild` writes.
+        logger.debug("recall_discriminator_reply attempt=first %r", text)
         decision, refusal = decisions.parse_with_reason(text)
         if decision is not None:
             return decision, ""
@@ -1140,6 +1176,7 @@ def build_server(
             )
             logger.debug("the repair call raised", exc_info=True)
             return None, "failed"
+        logger.debug("recall_discriminator_reply attempt=repair %r", corrected)
         decision, refusal = decisions.parse_with_reason(corrected)
         if decision is not None:
             logger.info("recall_discriminator_repaired")
@@ -1296,6 +1333,13 @@ def build_server(
                 expected,
                 discriminator=discriminator,
             )
+        # **What was decided, before what it led to.**  Every line below reports
+        # an outcome — `recall_not_needed`, `recall_abandoned`, `recall_rebuilt`
+        # — and none of them carries the two fields that chose it.  A live
+        # rebuild that logged `turns=0 recalled=0` was indistinguishable from a
+        # model that kept nothing and one that cleared what it had, which is the
+        # question this line exists to answer without a replay.
+        logger.info("recall_decided %s", _decision_words(decision))
         if decision.asks_for_nothing:
             # The ordinary case, and the one this fallback is for: the turns in
             # hand are the answer.  Nothing is fetched, nothing is rendered,

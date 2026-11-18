@@ -2444,9 +2444,9 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
 
     `rebuild`'s `_in_hand` is one answer for four situations — a discriminator
     that decided nothing, a decision that asks for nothing, a decision that
-    equals what is held, and a selection that cannot be fetched.  The line it
-    writes is the only sight anybody gets of the discriminator, and it reported
-    the first as the second: "no decision at all" was logged
+    equals what is held, and a selection that cannot be fetched.  The outcome
+    line it writes is the only sight anybody gets of *which exit* ran, and it
+    reported the first as the second: "no decision at all" was logged
     `reason=context_sufficient`, so every timeout and every unreadable reply —
     each named on the line above with its own reason — counted as the model
     having decided the context was enough.  Whoever counts decisions by that
@@ -2517,8 +2517,63 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     assert "recall_not_needed reason=context_sufficient" in said
     assert "recall_not_needed reason=context_unchanged" in said
     assert "recall_abandoned reason=unfetchable" in said
+    # The fields the outcome cannot report.  The unreadable reply has no
+    # `recall_decided` line at all; the other three say what they were.
+    assert "recall_decided keep=keep recall=none" in said
+    assert "recall_decided keep=1 recall=none" in said
+    assert "recall_decided keep=99 recall=none" in said
+    assert (
+        len([line for line in said if line.startswith("recall_decided")]) == 3
+    ), "one line per decision, and none for the unreadable reply"
     # It stayed [1] throughout: `_in_hand` is the answer that writes nothing.
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_discriminators_fields_are_logged(caplog) -> None:
+    """**The outcome cannot say what was decided.**
+
+    `recall_rebuilt turns=0 recalled=0` is the same line for a model that
+    cleared the turns and one that never had any, and a recall's condition —
+    the sentences, the words, the period — is consumed and dropped.  A live
+    rebuild raised exactly that question and no artifact could answer it, so
+    the decision is logged before its outcome, in the reply's own vocabulary.
+
+    The raw reply is DEBUG because it is the model's text: the parsed line is
+    what an operator reads, and the text is there for whoever is already
+    looking at the protocol.
+    """
+    caplog.set_level(logging.DEBUG, logger=CONTEXT_LOGGER)
+    reply = (
+        '{"context": "clear", "recall": {"sentences": ["the code review prompt"], '
+        '"prompt_as_sentence": false}}'
+    )
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM, {"role": "user", "content": "one"}],
+                "turn_ids": [1],
+                "prompt": "有现成的skill吗",
+            },
+        )
+
+    said = [record.getMessage() for record in caplog.records]
+    decided = next(
+        line for line in said if line.startswith("recall_decided keep=clear ")
+    )
+    recall = json.loads(decided.partition("recall=")[2])
+    assert recall["sentences"] == ["the code review prompt"]
+    assert recall["prompt_as_sentence"] is False
+    assert any(
+        line.startswith("recall_discriminator_reply attempt=first ")
+        for line in said
+    ), "the raw reply is kept for the shape the parser read"
 
 
 @pytest.mark.asyncio
