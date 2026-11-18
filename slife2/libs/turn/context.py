@@ -63,13 +63,19 @@ INSTRUCTION_TEMPLATE = "recall.j2"
 #: *wording* is what a model copies and a description is what it paraphrases.
 RECALL_REPLY: dict[str, Any] = {
     "context": (
-        'Which of the turns in hand to keep: all of them (omit or "keep"), '
-        'none ("clear"), or the turn_ids to keep, e.g. [12, 15].'
+        "Which of the turns in hand this input is answered from: all of them "
+        '(omit or "keep"), none ("clear"), or the turn_ids to keep, e.g. '
+        "[12, 15]. A follow-up's subject is in the turns above even when the "
+        "input does not name it, so keep the turn it continues. A turn dropped "
+        "here is dropped for this turn: the recall searches only the turn log "
+        "outside the turns in hand, so it cannot bring one back."
     ),
     "recall": {
         "sentences": (
-            "What to recall, in your own words, one sentence per idea. Read by "
-            "meaning. Omit when you have none."
+            "What to recall from the turn log, in your own words, one sentence "
+            "per idea. Read by meaning. The turns in hand are never searched — "
+            'a turn dropped from "context" cannot be recalled back. Omit when '
+            "you have none."
         ),
         "prompt_as_sentence": (
             "Whether the person's input is read by meaning beside the sentences. "

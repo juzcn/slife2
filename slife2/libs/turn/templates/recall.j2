@@ -24,9 +24,9 @@ What to recall from the turn log — "recall": leave it out for nothing, or fill
 in for one condition — a period (since / until), a question, or a question within
 a period. "anchor" alone reads the whole log from the named end.
 
-It searches the turns outside the context in hand: every turn in hand was read
-by this call, so a turn dropped from "context" is not one the recall can bring
-back.
+It searches the turns outside the context in hand — not merely outside what
+"context" keeps: every turn in hand was read by this call, so a turn dropped
+from "context" is not one the recall can bring back.
 
 A question has two spellings, and either may be omitted.
 
@@ -53,8 +53,9 @@ a narrower period.
 
 Part 2 — the cases
 
-The two fields are decided independently, and each case below takes one value
-of each.
+The two fields are not independent — "recall" searches only the turn log
+outside the turns in hand, so a turn dropped from "context" cannot be brought
+back. Each case below takes one value of each.
 
 1. Keep the turns in hand, recall nothing — the input is answered from what is
 in hand.
