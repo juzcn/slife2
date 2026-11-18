@@ -937,6 +937,39 @@ async def test_a_transcript_reads_three_answer_shapes(monkeypatch, tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_transcript_names_the_audios_own_format(monkeypatch, tmp_path) -> None:
+    """**The suffix is the only thing that knows what the bytes are.**
+
+    The vendor requires `parameters.format` and says to set it to match the
+    actual audio; the data URI's MIME is a second description with no documented
+    tie to it.  A fixed `wav` — and a fixed 16 kHz `sample_rate` — described
+    every mp3 and m4a wrongly.  A configured `sample_rate` still goes through.
+    """
+    audio = tmp_path / "a.MP3"
+    audio.write_bytes(b"ID3")
+    adapter = dashscope()
+    seen: dict[str, Any] = {}
+
+    async def fake_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        seen.update(json_body)
+        return {"output": {"text": "hi"}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    await adapter.transcribe_audio(
+        model="hear",
+        audio_path=audio,
+        extra_params={"format": "wav", "sample_rate": "8000"},
+    )
+
+    assert seen["parameters"] == {"format": "mp3", "sample_rate": "8000"}
+    data = seen["input"]["messages"][0]["content"][0]["input_audio"]["data"]
+    assert data.startswith("data:audio/mpeg;base64,")
+
+
+@pytest.mark.asyncio
 async def test_an_audio_format_the_adapter_does_not_know_is_refused(tmp_path) -> None:
     """The data URI's header decides how the far end decodes the bytes, so a
     guess is bytes nobody can read."""

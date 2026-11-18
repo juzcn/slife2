@@ -762,22 +762,29 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         first, which is what this vendor's endpoint takes.  Three answer shapes
         are read because the endpoint has three: `output.text`, a segmented
         `output.sentence.text`, and a `choices` list like a chat answer.
+
+        **`format` is the file's own suffix.**  The vendor marks it required and
+        says to set it to match the actual audio; the data URI's MIME describes
+        the same bytes, but the docs give no rule that the two agree.  A fixed
+        `wav` therefore mislabelled every mp3 and m4a.  `sample_rate` is
+        optional and not guessed here: this adapter reads a file, not a header.
         """
         # `~` and the disk read in one hop, the same way `_reference` does it:
         # a path a model wrote is a path a person would write, and `~/voice.mp3`
         # is one this process's own cwd would otherwise make a lie of.
-        if not await asyncio.to_thread(lambda: audio_path.expanduser().is_file()):
+        audio = audio_path.expanduser()
+        if not await asyncio.to_thread(audio.is_file):
             raise MediaAdapterError(f"no such audio file: {audio_path}")
         params = dict(extra_params or {})
-        params.setdefault("format", "wav")
-        params.setdefault("sample_rate", "16000")
+        # The suffix outranks a configured `format`: the file of *this* call is
+        # the only thing that knows what its bytes are, and one model entry
+        # serves every suffix.  A configured `sample_rate` passes through.
+        params["format"] = audio.suffix.lower().lstrip(".")
         content: list[dict[str, Any]] = [
             {
                 "type": "input_audio",
                 "input_audio": {
-                    "data": await self._data_uri(
-                        audio_path.expanduser(), AUDIO_MIME, "an audio format"
-                    )
+                    "data": await self._data_uri(audio, AUDIO_MIME, "an audio format")
                 },
             }
         ]
