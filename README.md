@@ -278,7 +278,7 @@ Options:
 | `--keep-servers` | Leave the shared servers running after this instance exits. |
 | `--headless` | Run the same window, servers, connections, and turns without a display. The agent remains reachable on the peer network. Exit with Ctrl+C. |
 | `--lang {en,zh}` | Set the window's language. Without the flag, it is detected from the operating system. |
-| `--json` | Print `status` as JSON (`ok`, `servers`, `broker`; each server row has its log path). |
+| `--json` | Print `status` as JSON (`ok`, `servers`, `brokers`; each row has its log path). |
 | `--force` | Stop the shared servers even when another client is using them. `down` only. |
 | `--prompt TEXT` | The task to ask a running agent. `probe` only. |
 | `--timeout SECONDS` | How long `probe` waits for the completed reply. Default: 3600. |

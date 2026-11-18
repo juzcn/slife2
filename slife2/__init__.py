@@ -743,12 +743,11 @@ def _status(config: Config, *, as_json: bool = False) -> int:
                 {
                     "ok": failed == 0,
                     "servers": [_status_row(outcome) for outcome in outcomes],
-                    # **One row, and that is the contract's shape**: `broker`
-                    # names the first address, the single row this field has
-                    # always carried.  The human report below reads every row;
-                    # a second broker's state reaches a script through the exit
-                    # code until the contract grows a list (SDD).
-                    "broker": brokers[0] if brokers else None,
+                    # **A list, and the human report below is the same list**:
+                    # both networks may name a broker, and a JSON consumer owes
+                    # every row — not the first — just as the exit code counts
+                    # every row.
+                    "brokers": brokers,
                 },
                 indent=2,
                 ensure_ascii=False,

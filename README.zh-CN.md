@@ -252,7 +252,7 @@ Commands:
 | `--keep-servers` | 本实例退出后保留共享 server。 |
 | `--headless` | 运行同一个窗口、server、连接和轮次，但不显示任何内容。agent 仍在 peer 网络上可达。Ctrl+C 退出。 |
 | `--lang {en,zh}` | 设置窗口语言。不带该参数时从操作系统检测。 |
-| `--json` | `status` 以 JSON 输出（`ok`、`servers`、`broker`；每个 server 行带日志路径）。 |
+| `--json` | `status` 以 JSON 输出（`ok`、`servers`、`brokers`；每行带日志路径）。 |
 | `--force` | 即使另一个客户端正在使用，也停止共享 server。仅 `down`。 |
 | `--prompt TEXT` | 要问运行中 agent 的任务。仅 `probe`。 |
 | `--timeout SECONDS` | `probe` 等待完整回答的秒数。默认 3600。 |

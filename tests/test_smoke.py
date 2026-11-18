@@ -321,7 +321,7 @@ def test_status_json_names_each_server_and_its_log(
     assert answer["servers"][0]["name"] == spec.name
     assert answer["servers"][0]["state"] == "not_running"
     assert answer["servers"][0]["log"] == str(runtime.log_path(spec.url))
-    assert answer["broker"] is None
+    assert answer["brokers"] == []
 
 
 def test_down_refuses_while_another_client_is_live(
@@ -546,9 +546,9 @@ def test_status_json_reports_the_broker(
 
     assert slife2._status(config, as_json=True) == 0
     answer = json.loads(capsys.readouterr().out)
-    assert answer["broker"]["name"] == "a2a-broker"
-    assert answer["broker"]["state"] == "running"
-    assert answer["broker"]["ok"] is True
+    assert answer["brokers"][0]["name"] == "a2a-broker"
+    assert answer["brokers"][0]["state"] == "running"
+    assert answer["brokers"][0]["ok"] is True
 
 
 def test_status_exits_nonzero_when_the_broker_is_down(
@@ -573,11 +573,9 @@ def test_status_reports_every_broker_the_config_names(
 ) -> None:
     """Both networks may name a broker, and a dead second one is a fact.
 
-    `_broker_settings` returns one row per address, and `down` and `logs`
-    iterate all of them; the report that read only the first left the second
-    broker's death invisible.  The human report loops the rows.  The JSON
-    `broker` field keeps its single-row contract, and the exit code tells a
-    script the whole truth either way.
+    `_broker_settings` returns one row per address; the human report, the JSON
+    and the exit code all read that same list, so a dead second broker is
+    visible and fails the command however it is asked.
     """
     from slife2.libs.host import launcher, runtime
     from slife2.libs.host.config import SubagentSettings
@@ -603,10 +601,13 @@ def test_status_reports_every_broker_the_config_names(
     assert slife2._status(config, as_json=True) == 2
     answer = json.loads(capsys.readouterr().out)
     assert answer["ok"] is False, "the exit code's truth is the JSON's too"
-    assert answer["broker"]["url"] == "mqtt://localhost:1883", (
-        "the single-row contract names the first address"
+    assert [row["url"] for row in answer["brokers"]] == [
+        "mqtt://localhost:1883",
+        "mqtt://localhost:2883",
+    ]
+    assert [row["ok"] for row in answer["brokers"]] == [True, False], (
+        "the dead second broker is a row, not a silence"
     )
-    assert answer["broker"]["ok"] is True
 
 
 def test_the_tui_connects_to_the_agent_server() -> None:

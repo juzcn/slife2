@@ -612,9 +612,10 @@ releases if the holder dies; there is no stale-lock protocol.
 ### 4.4 `status`, `down`, and `logs`
 
 `slife2 status` reports each server as `running` (with its pid and start time),
-`running (external)`, `port held by something else`, or `not running`, and the
-A2A broker when `peer_agent:` is configured. `--json` gives the same rows with
-each server's log path. It exits 0 only when every server and the broker are
+`running (external)`, `port held by something else`, or `not running`, and every
+A2A broker the configuration names — `peer_agent:` and `subagent.network:`, one
+row per address. `--json` gives the same rows as `servers` and `brokers`, with
+each row's log path. It exits 0 only when every server and every broker are
 usable, and 2 otherwise.
 
 `slife2 down` stops the servers this configuration names and that this build can
@@ -2869,7 +2870,6 @@ silent debt. The order is roughly by severity.
 | **`_active_default` reimplements `config._first_reference`** (`plugins/agent/server.py`, `libs/host/config.py`) | The "bare provider → its first model; else first provider's first model" rule is written twice (over settings and over raw dicts); a change reaches one reader and not the other. | Expose one raw-dict helper from config.py and have `_active_default` call it after reading the section. |
 | **RemoteEmbedder's idle-keepalive retry may catch types the stack never raises** (`clients/embedder.py`) — unverified | If mcp 2.3.0 / fastmcp 4.2.0 surface transport failures as `MCPError(CONNECTION_CLOSED)` or an `ExceptionGroup` rather than a bare `httpx2.ReadError`, the documented cold-start retry is dead and the first embed after an idle gap fails the turn. | The retry catches bare `ReadError`/`RemoteProtocolError`; the test scripts that shape. Confirm against a live idle-gap call (or log the real type), then catch that shape and unwrap groups. |
 | **DashScope transcription defaults `format=wav`/`sample_rate=16000` for any audio** (`plugins/media/adapters.py`) — unverified | If the vendor honors the `format` parameter over the data-URI MIME, an mp3/m4a transcript is misdecoded or refused. | `params.setdefault("format", "wav")` while the payload carries the true MIME from `AUDIO_MIME`. Confirm against a live non-wav transcription or the vendor docs; then derive `format` from the suffix and leave `sample_rate` to the caller/config. |
-| **`slife2 status --json` reports one broker** (`slife2/__init__.py`) | The human report loops both networks' brokers; the `--json` `"broker"` key is still a single-row contract, so a dead second broker is invisible to a JSON consumer and does not fail the exit code. | Widen the JSON contract to a list (a breaking shape change for consumers) or add a `"brokers"` key beside the legacy one. |
 
 ### 14.2 Deferred capabilities
 
