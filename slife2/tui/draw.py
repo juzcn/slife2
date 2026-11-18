@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import assert_never
 
+from slife2.libs.harness import notes
 from slife2.libs.turn.events import (
     ContextChosen,
     MessageCutIn,
@@ -44,7 +45,6 @@ from slife2.libs.turn.events import (
     UsageReported,
 )
 from slife2.libs.turn.tools import is_harness
-from slife2.tui import notes
 from slife2.tui.widgets import ChatView
 
 

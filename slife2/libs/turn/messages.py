@@ -200,6 +200,24 @@ class Message:
     #: has lost the reasoning has a hole in it, and the hole is exactly where
     #: the reader was looking.
     thinking: str = ""
+    #: The provider's own reasoning payload for this assistant turn, exactly as
+    #: it arrived — opaque to this build and returned unmodified by the adapter
+    #: that wrote it.
+    #:
+    #: Two wires require this, and neither accepts the readable `thinking` in its
+    #: place: Anthropic's Messages API rejects a tool loop whose assistant
+    #: thinking blocks were not returned beside the tool results (the signed
+    #: blocks must go back unmodified), and OpenAI's Responses API rejects one
+    #: whose reasoning items were dropped when `store: false`.  The drop was
+    #: deliberate and tested, and it is why a first-party reasoning model failed
+    #: on the second call of every tool loop.
+    #:
+    #: Shaped `{"model": <the API model that produced it>, "blocks": [<opaque>]}`
+    #: rather than a bare list: a conversation can be moved to another model
+    #: (`model_switch`), and a signed block replayed to a model that did not
+    #: produce it is a 400.  Each adapter sends the blocks only when the model
+    #: matches the one it is calling.  Empty means none.
+    reasoning: dict[str, Any] | None = None
     #: Assistant turns only — the calls this turn is asking for.
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: Tool turns only — which call this is the result of.
@@ -243,6 +261,8 @@ class Message:
 
         if self.thinking:
             payload["thinking"] = self.thinking
+        if self.reasoning:
+            payload["reasoning"] = self.reasoning
         if self.tool_calls:
             payload["tool_calls"] = [c.to_wire() for c in self.tool_calls]
         if self.tool_call_id is not None:
@@ -303,10 +323,32 @@ class Message:
             role=cast(Role, role),
             content=content,
             thinking=str(raw.get("thinking") or ""),
+            reasoning=_reasoning_payload(raw.get("reasoning")),
             tool_calls=tool_calls,
             tool_call_id=raw.get("tool_call_id"),
             channel=str(raw.get("channel") or ""),
         )
+
+
+def _reasoning_payload(raw: Any) -> dict[str, Any] | None:
+    """A message's opaque reasoning payload, read as absent when it is not one.
+
+    **Opaque is not unreadable.**  This build never looks inside the envelope,
+    but it does know its shape — a mapping with a `blocks` list — because the
+    adapters depend on that to find it.  A value of another shape is damage
+    from another build; it is named and dropped rather than passed to a
+    provider that would answer with a 400 about a field nobody wrote.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("blocks"), list):
+        return raw
+    logger.warning(
+        "a message carried a reasoning payload this build cannot read (%r); "
+        "dropping it",
+        type(raw).__name__,
+    )
+    return None
 
 
 @dataclass(frozen=True)
@@ -420,6 +462,10 @@ class StreamChatResult:
     #: the display channel for a fact about the record — which is the mistake
     #: this class exists to prevent, one field over.
     thinking: str = ""
+    #: The provider's own reasoning payload, as `Message.reasoning` carries it.
+    #: `{}` when there is none, so the wire keeps one type per key rather than a
+    #: null this build never writes.
+    reasoning: dict[str, Any] = field(default_factory=dict)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
 
@@ -428,6 +474,7 @@ class StreamChatResult:
             "text": self.text,
             "tool_calls": [c.to_wire() for c in self.tool_calls],
             "thinking": self.thinking,
+            "reasoning": self.reasoning,
             "usage": self.usage.to_wire(),
             "stop_reason": self.stop_reason,
         }
@@ -445,7 +492,7 @@ class StreamChatResult:
         cannot read: `to_wire` never emits either, so defaulting one would
         invent an empty answer out of another build's unreadable one — the
         confident negative SDD Appendix C forbids.  The value check is one rule
-        for all five keys rather than a special case per null the field names.
+        for all six keys rather than a special case per null the field names.
         """
         if raw is None:
             return cls()
@@ -453,6 +500,7 @@ class StreamChatResult:
             "text": str,
             "tool_calls": list,
             "thinking": str,
+            "reasoning": dict,
             "usage": dict,
             "stop_reason": str,
         }
@@ -470,10 +518,13 @@ class StreamChatResult:
             )
         if not all(isinstance(call, dict) for call in raw["tool_calls"]):
             raise KeyError("stream_chat result has a tool call that is not an object")
+        if raw["reasoning"] and not isinstance(raw["reasoning"].get("blocks"), list):
+            raise KeyError("stream_chat result has no readable reasoning")
         return cls(
             text=raw["text"],
             tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"]),
             thinking=raw["thinking"],
+            reasoning=raw["reasoning"],
             usage=Usage.from_wire(raw["usage"]),
             stop_reason=raw["stop_reason"],
         )

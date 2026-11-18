@@ -625,3 +625,60 @@ def test_each_refusal_status_gets_its_own_action() -> None:
     assert "in arrears" in provider_refusal(refusal(402))
     assert "api_key" in provider_refusal(refusal(401))
     assert "real-name" in provider_refusal(refusal(403))
+
+
+def test_an_embeddings_edit_reaches_the_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The process re-reads the section instead of pinning its provider at boot.**
+
+    An `embeddings:` edit — the model, its base URL or its key — used to be
+    silently ineffective until a restart, and `describe()` kept answering the
+    old identity, so a store's identity check could not notice either
+    (invariant 9).  The live provider follows `load_cached`'s object identity,
+    as the chat backends' `LiveProviders` does.
+    """
+    from dataclasses import replace
+
+    import slife2.plugins.llm.embeddings_server as embeddings
+    from slife2.libs.host.config import EmbeddingsSettings
+
+    one = EmbeddingProviderSettings(name="one", base_url="http://one/v1", model="m1")
+    two = EmbeddingProviderSettings(name="two", base_url="http://two/v1", model="m2")
+    first = replace(
+        default_config(),
+        embeddings=EmbeddingsSettings(providers={"one": one}, active="one"),
+    )
+    second = replace(
+        default_config(),
+        embeddings=EmbeddingsSettings(providers={"two": two}, active="two"),
+    )
+    current = {"config": first}
+    monkeypatch.setattr(embeddings, "load_cached", lambda: current["config"])
+
+    built: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, provider: EmbeddingProviderSettings) -> None:
+            self.provider = provider
+            self.closed = False
+            built.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(embeddings, "EmbeddingClient", FakeClient)
+
+    async def scenario() -> None:
+        live = embeddings.LiveEmbedding()
+        async with live.lease() as client:
+            assert client.provider.name == "one"
+        current["config"] = second
+        async with live.lease() as client:
+            assert client.provider.name == "two", "the edit did not reach the call"
+        assert built[0].closed, "the retired provider's client was left open"
+        assert not built[1].closed, "the live provider's client was closed"
+
+    import asyncio
+
+    asyncio.run(scenario())

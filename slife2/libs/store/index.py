@@ -60,7 +60,7 @@ import math
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -101,9 +101,9 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
 #: reason: `k` on a vector search counts *chunks*, and several of them can belong
 #: to one row.
 #:
-#: **The turn store's recall is the exception.**  Each of its legs asks for
-#: `limit + len(excluded) + excluded_chunks` candidates — the KNN counts chunks,
-#: and a kept turn's chunks occupy its places — and the union is returned uncut.
+#: **The turn store's recall asks for `limit`, not a multiple.**  Its union is
+#: returned uncut, and the turns the caller already holds are excluded inside
+#: the KNN itself, so no overfetch repays their places.
 _OVERFETCH = 4
 
 
@@ -427,14 +427,29 @@ def instant_bound(bound: str) -> str:
     return bound
 
 
-def time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
-    """`(clauses, params)` for a `created_at` window.
+def time_window(
+    since: str | None,
+    until: str | None,
+    *,
+    axis: str = "created_at",
+    day: bool = False,
+) -> tuple[list[str], list[Any]]:
+    """`(clauses, params)` for a window on one time axis.
 
     **Clauses and not a `WHERE`**, because there are three readers of this one
-    time axis now and they compose it differently: the browse puts it alone, and
-    both legs of a search put it beside a predicate of their own.  A second
-    spelling of `created_at >= ?` would be a second place for the column name
-    and the grammar to drift apart.
+    rule now and they compose it differently: the browse puts it alone, both
+    legs of a search put it beside a predicate of their own, and the cabinet
+    puts it on one of its kinds' axes.  A second spelling of
+    `julianday(x) >= julianday(?)` would be a second place for the comparison
+    and the grammar to drift apart — the cabinet had one, and the two had
+    already diverged in their comments rather than their code.
+
+    `axis` is the column; `day` says it holds days rather than instants.  **A
+    day axis takes the day part of the bound**, and its `until` is exclusive
+    because that is the only comparison a column of days has: `2026-10-07`
+    becomes `2026-10-08`, so the day named is the last one in.  A bound that
+    carries a time is put past its day here — `normalize_bound` only advances
+    a *date-only* `until` for an instant axis, where `<=` means that instant.
 
     Raises:
         InvalidTimeBound: If either bound is in no grammar `slife2.helpers.timeutil`
@@ -443,26 +458,37 @@ def time_window(since: str | None, until: str | None) -> tuple[list[str], list[s
             only one of them is the truth.
     """
     clauses: list[str] = []
-    params: list[str] = []
+    params: list[Any] = []
     if since:
-        # **By instant, not by string.**  `created_at` carries a local offset,
-        # and two rows written on either side of a DST change do not sort as
-        # strings in the order they happened: `01:15+00:00` is later than
-        # `01:30+01:00`, but it is smaller as text.  `julianday` reads the
-        # offset and compares the moments.
-        clauses.append("julianday(created_at) >= julianday(?)")
-        params.append(instant_bound(normalize_bound(since, role="since")))
+        bound = normalize_bound(since, role="since")
+        if day:
+            clauses.append(f"{axis} >= ?")
+            params.append(bound[:10])
+        else:
+            # **By instant, not by string.**  A timestamp carries a local offset,
+            # and two rows written on either side of a DST change do not sort as
+            # strings in the order they happened: `01:15+00:00` is later than
+            # `01:30+01:00`, but it is smaller as text.  `julianday` reads the
+            # offset and compares the moments.
+            clauses.append(f"julianday({axis}) >= julianday(?)")
+            params.append(instant_bound(bound))
     if until:
         bound = normalize_bound(until, role="until")
-        # **A date-only `until` stops *before* the next midnight.**  It was
-        # advanced by one day to name the end of its day, and comparing `<=`
-        # then included the first instant of the following day — a turn saved at
-        # exactly midnight belonged to a day the caller excluded.  A datetime
-        # names an instant and stays inclusive.
-        clauses.append(
-            f"julianday(created_at) {'<' if len(bound) == 10 else '<='} julianday(?)"
-        )
-        params.append(instant_bound(bound))
+        if day:
+            last = date.fromisoformat(bound[:10])
+            bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
+            clauses.append(f"{axis} < ?")
+            params.append(bound)
+        else:
+            # **A date-only `until` stops *before* the next midnight.**  It was
+            # advanced by one day to name the end of its day, and comparing `<=`
+            # then included the first instant of the following day — a row saved
+            # at exactly midnight belonged to a day the caller excluded.  A
+            # datetime names an instant and stays inclusive.
+            clauses.append(
+                f"julianday({axis}) {'<' if len(bound) == 10 else '<='} julianday(?)"
+            )
+            params.append(instant_bound(bound))
     return clauses, params
 
 

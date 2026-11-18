@@ -882,6 +882,12 @@ call is over when its status is final; delivery is a separate fact
 (`Task.delivered`). A task whose hand-back is still in flight is neither running
 nor a failed delivery.
 
+**A task id is not a capability.** Each task records the conversation it was
+scheduled in, and `check_async`/`cancel_async` answer only inside it: an id from
+another conversation is refused exactly as an unknown one, so the refusal cannot
+confirm that the id exists. A task scheduled outside any conversation — a test,
+a worker — is readable by any caller.
+
 #### 5.2.4 Dumps
 
 A tool result too large for the conversation is stored whole as a `dump` row in
@@ -1028,14 +1034,17 @@ The window draws the message inside the running turn, in its own bubble, without
 closing the answer still being streamed. There is one queue: the agent server's
 inbox.
 
-**A message folded into a turn is delivered by it once the pair is written.**
+**A message folded into a turn is delivered by it once its words are written.**
 If that turn then ends without an answer — cancelled or failed — the cut-in pair
 is still in its record, so its caller is answered as injected with no text.
 Running it again would put the same prompt in the conversation twice and have
-the model answer it twice. A take whose pair was never written — the fit failed,
-or the interruption landed before the append — is not a delivery: its caller
-still owes itself a turn and runs it. A refused record, whose messages are
-rolled back, leaves the message owing itself a turn the same way.
+the model answer it twice. A take whose words were never written — the fit
+failed, the interruption landed before the append, or the call was cut before it
+answered so the batch wrote `INTERRUPTED` — is not a delivery: its caller still
+owes itself a turn and runs it. The commit takes a count for exactly that
+reason; it marks only the takes whose words are in the conversation. A refused
+record, whose messages are rolled back, leaves the message owing itself a turn
+the same way.
 
 ### 5.5 Context decision and memory selection
 
@@ -1085,7 +1094,11 @@ Rules:
 - **A recall is asked for what is missing.** Every turn in hand is excluded from
   its candidates — the discriminator read all of them, so a turn it dropped from
   the keep-list was dropped deliberately — and nothing already in hand spends
-  retrieval depth or budget.
+  retrieval depth or budget. **The exclusion is part of the KNN's own
+  restriction**, through a per-call temp table, so an excluded turn's chunks
+  occupy no place and `k` stays the page size; widening `k` by them instead grew
+  past `sqlite-vec`'s 4096-candidate ceiling on a large live context. A
+  catalogue search's filters are pushed into its KNN the same way.
 - **The recall is hybrid, and the ranker is the last word.** The two legs
   are fused by weighted RRF (k=60, `keyword_weight` on the sparse leg), and
   `min_similarity` drops a measured candidate below the embedding model's
@@ -1300,6 +1313,18 @@ configuration, not a branch: `thinking`, `reasoning`, `store`, `temperature`,
 `top_p`, `max_tokens`, `stream_usage`, `cache_control`, `input` capabilities,
 and `context_window`. Each server sends only what its configuration asked for.
 A value the protocol does not know is refused by name where it is read.
+
+**A reasoning block a provider requires back is carried opaquely and replayed
+unmodified.** The readable reasoning is `Message.thinking`; `Message.reasoning`
+holds the adapter's own payload — Anthropic's signed thinking and
+redacted-thinking blocks, the Responses API's reasoning items — stamped with the
+model that produced it. The adapter that wrote it returns it beside the tool
+results, and only to that model: a conversation moved with `model_switch` does
+not replay model A's signed blocks to model B. This is what makes a first-party
+reasoning model's second tool-loop call work; dropping the payload was the
+deliberate behaviour that failed it. A Responses request with `store: false`
+asks for `reasoning.encrypted_content` in the same breath, because a stateless
+server has no other copy to replay.
 
 ### 6.4 Provider capability configuration
 
@@ -2282,7 +2307,14 @@ to an agent with no window is refused by name (`NO_WINDOW`).
 - **Markers are stripped for display** by the reader that knows the vocabulary.
 - **The channel prefix is decided in one function.**
 - **A tool call is drawn as a line with its argument.**
-- **Harness lines come from one place** (`tui/notes.py`).
+- **Harness lines come from one place** (`libs/harness/notes.py`), a library's
+  rather than the terminal's: a daemon that composes a presence line must not
+  import the window's package, and the window imports the library like any other
+  reader.
+- **Widgets are mutated only in Textual's message pump.** A callback from a
+  transport — the inbox's push, the progress stream — posts a `Message` and never
+  draws: a widget written from the transport's task can jump ahead of deltas
+  already queued, so a harness line lands above text streamed before it.
 - **A tool panel has four states**: `running`, `done`, `error`, and
   `interrupted`. `interrupted` is about the turn rather than the call: the turn
   ended, was cancelled, or failed while the window was waiting, so no result
@@ -2344,7 +2376,8 @@ the system. Detection is the operating system's answer, read once at import:
 4. Any detection failure degrades to English.
 
 `--lang` overrides detection and is applied before anything is built. The
-translation layer is one accessor over a two-language table (`tui/i18n.py`);
+translation layer is one accessor over a two-language table
+(`libs/harness/i18n.py`), shared with the harness lines a daemon composes;
 there are no catalog files and no dependency. A missing key or placeholder raises
 at the call site rather than rendering a blank slot.
 
@@ -2477,13 +2510,18 @@ not registered. An environment variable or a literal in the config is the
 operator's; protecting every secret was attempted, and the variety of shapes made
 it a maintenance burden.
 
-Resolution is lazy: a process nobody calls never touches the keyring. An
+Resolution is lazy: a process nobody calls never touches the keyring, and the
+loader defers every `${VAR}` in a tool server's `env:`/`headers:`, a `rest-api:`
+entry, a tunnel's options and a `skills:` entry. The process that consumes the
+value resolves it — the gateway when it dials, the skills plugin when it hands a
+playbook over — so a locked keyring fails the one call that needed the value
+rather than every config load on the machine, `slife2 down` included. An
 unresolved reference is left verbatim, and the consumer decides: a provider or
-media call refuses before use; a tool server's `env:`/`headers:` entry is left
-out of the connection with a warning, so an absent variable reaches a child that
-knows how to handle one. `config.unresolved_reference` is the single reader of
-"this is still a reference"; a reference MUST NOT travel as the secret. A
-keyring that is installed and refuses is an error, not "not found".
+media call refuses before use; a tool server's entry is left out of the
+connection with a warning, so an absent variable reaches a child that knows how
+to handle one; a skill reports it missing. `config.unresolved_reference` is the
+single reader of "this is still a reference"; a reference MUST NOT travel as the
+secret. A keyring that is installed and refuses is an error, not "not found".
 
 ### 11.3 Data directory
 
@@ -2863,25 +2901,11 @@ the field arrives as a test that fails without the fix.
 
 ### 14.1 Open issues
 
-A state the design has not closed is recorded here with what it costs and how
-the current code behaves. A whole-codebase audit (2026-11-17) fixed the local
-and mechanical defects against the code; these are the ones whose fix is a
-design change rather than an edit, so they are recorded rather than carried as
-silent debt. The order is roughly by severity.
-
-| Issue | What it costs | Current behavior |
-|---|---|---|
-| **KNN `k` can exceed sqlite-vec's 4096 cap** (`libs/store/db.py` recall, `catalogue.py` search) | A large live context (~2009 held turns at ≤400 tokens each) makes every semantic recall raise `OperationalError: k value … limit is 4096`; the rebuild fails, the context never shrinks, and every later turn fails until `forget`. A filtered catalogue search whose rejected rows hold >~3300 chunks raises the same. Confirmed against the pinned extension (k=4097 raises). | `k = limit + len(excluded) + excluded_chunks` (turns) and `limit·_OVERFETCH + excluded` (catalogue), unbounded. The fix pushes the exclusion into the KNN's rowid restriction (a per-call temp table) so `k` stays ~`limit`; a bare clamp to 4096 would restore the starvation the widening fixed. |
-| **An interrupted batch credits a wordless cut-in as delivered** (`libs/turn/loop.py` cancel path, agent `folded_commit`) | A `_check_new_input` take whose hub round-trip is interrupted after the inbox pop but before the answer arrives is marked `delivered`; the parked sender reads "injected, no text" and never re-runs — the words are in neither the inbox nor the conversation. | The cancel path commits every `loop.injected` entry when `injected() > before`, even when `returned is None`. The commit contract must become selective (commit only takes whose words were written) — a loop↔server change, not a local one. |
-| **Reasoning round-trip is lossy on the anthropic + responses wires** (`plugins/llm/*`, `libs/turn/messages.py`) | A first-party Anthropic model with `reasoning:true` 400s on the second call of every tool loop (the signed thinking blocks must be returned unmodified beside the tool results); an o-series responses model with `store:false` likewise. The shipped config uses gateways that do not enforce the contract, so it does not manifest there. | `Message.thinking` is a plain `str`; the adapters rebuild assistant turns without thinking blocks and never read `signature_delta`/`redacted_thinking` (anthropic) or reasoning items (responses). The drop is deliberate and tested. The fix carries a provider-opaque reasoning payload on the neutral message, or refuses `reasoning:true`+tools by name where it is read. |
-| **`skills:` env resolves secrets eagerly, in every process** (`libs/host/config.py`) | A locked credstore makes `get_credential` raise inside `_build`, outside `load`'s catch — every config load on the machine dies with a raw keyring traceback, including `slife2 down`. Against invariant 2 (a key is read only where used) and §11.2 (lazy resolution). | `_skills` uses `_secrets` (eager) while mcp/rest/tunnel use `_deferred_secrets`. The fix defers in the loader and resolves in the skills plugin where env is consumed — the gateway's pattern. |
-| **`check_async`/`cancel_async` are process-global** (`libs/harness/async_tasks.py`, the agent tools) | A model that learns or guesses an 8-hex task id can poll or cancel a background call belonging to another agent's conversation. Delivery is per-call bound; only the poll/cancel surface is unscoped. | The registry is keyed by task id alone — argued in the library, not declared in the SDD. Either carry the conversation id on `Task` at schedule time and refuse a foreign id, or declare the global scope as designed. |
-| **The embeddings server pins its provider at boot** (`plugins/llm/embeddings_server.py`) | An `embeddings:` edit (model/base_url/key) is silently ineffective until restart, and the stores' identity check cannot notice because `describe()` keeps answering the old identity — against invariant 9. | `build_server` captures `active_provider()` once; the chat backends read live via `LiveProviders`. The fix resolves the active provider per call via `load_cached`, as they do. |
-| **Jobs load on the event loop** (`plugins/jobs/server.py`, `registry.py`) | A job file's slow or blocking top-level code (model-authored, arbitrary) stalls the whole jobs plugin — every conversation's jobs and the hub's `list_sources` refresh — for its duration. | `job_set`/`job_list`/`job_run` call `load_job`/`scan_jobs_dir` synchronously inside async tools. The fix hops loading via `asyncio.to_thread`; sandboxing is the separate deferred capability (§14.3). |
-| **A removal re-hangs the last entry's own inline comment** (`libs/host/configfile.py::_drop_entry`) | Removing a section's last entry moves its own inline comment (`command: c  # bee`) onto the predecessor, because `_take_intro` lifts the whole merged token and there is no following entry to introduce. | The predecessor's inline is now preserved (fixed), but the doomed entry's own inline is re-hung rather than deleted. The fix separates the inline head (dies with the entry) from the block remainder (moves) in the drop path; `_swap_entry` keeps both, which is right for a replacement. |
-| **The cabinet's `_window` reimplements `time_window`'s instant logic** (`plugins/cabinet/store.py`, `libs/store/index.py`) | The non-day branch (julianday comparison, `instant_bound`, exclusive date-only `until`) is one rule stated twice; a change to one can miss the other. | Parameterize `time_window(axis, *, day=False)`; the cabinet keeps only its day-granular advance. |
-| **Plugins import the terminal package for note vocabulary** (`plugins/a2a/mesh.py`, `plugins/wechat/server.py` → `slife2.tui.notes`) | A headless daemon carries `tui.i18n`/`tui.theme` to compose two presence sentences; the dependency direction (plugin → tui) inverts the layering. | Move `notes` (and the i18n/glyph slice it needs) into `libs/harness` or `libs/plugin/vocabulary`, where cross-process model/window text already lives; tui and both plugins import from there. |
-| **The inbox callback writes widgets outside the message pump** (`slife2/tui/app.py`) | A note drawn synchronously on the MCP client's progress task can jump ahead of queued `TextDelta` messages, landing above text streamed before it — against the project's stated seam. | Carry the `Handover` in a Textual `Message` and branch in the handler, as `_on_event` otherwise keeps. |
+None. The whole-codebase audit (2026-11-17) is closed: its design changes were
+made on 2026-11-18, and each resulting rule now lives where its subject does. A
+new issue whose fix is a design change is recorded here with what it costs and
+how the current code behaves, rather than carried as silent debt. The order is
+roughly by severity.
 
 ### 14.2 Deferred capabilities
 

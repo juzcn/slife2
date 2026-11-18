@@ -856,7 +856,7 @@ async def test_an_interrupted_cut_in_keeps_the_channel_of_the_message_it_took() 
             messages,
             "go",
             folded=lambda: ("wechat", "submission-9"),
-            folded_commit=lambda: committed.append(True),
+            folded_commit=committed.append,
             injected=lambda: len(taken),
         )
     )
@@ -868,19 +868,21 @@ async def test_an_interrupted_cut_in_keeps_the_channel_of_the_message_it_took() 
     assert [m.role for m in messages] == ["user", "assistant", "tool"]
     assert messages[-1].content == "the message that arrived mid-turn"
     assert messages[-1].channel == "wechat", "the rebuilt line needs the bubble"
-    assert committed == [True], "the completed pair is a delivery"
+    assert committed == [1], "the completed pair is a delivery"
 
 
-async def test_an_interrupted_cut_in_that_never_answered_wears_its_channel() -> None:
-    """The channel is the take's, not the answer's — the success path's rule.
+async def test_an_interrupted_cut_in_that_never_answered_is_not_a_delivery() -> None:
+    """**A take whose words were never written stays owed its own turn.**
 
-    A call that took the message and was cut before it answered writes
-    `INTERRUPTED`, and the take is still credited as a delivery; the line a
-    rebuild draws for it wears the channel the message came in on, exactly as
-    a completed call's would.
+    The call took the message and was cut before it answered, so the batch
+    writes `INTERRUPTED` instead of the person's words.  Crediting the take
+    would answer its parked sender "delivered, no text" and the message would
+    be in neither the inbox nor the conversation.  It is committed as zero
+    written takes, and the `INTERRUPTED` line wears no bubble: the person's
+    message will run its own turn and draw itself there.
     """
     taken: list[str] = []
-    committed: list[bool] = []
+    committed: list[int] = []
     started = asyncio.Event()
 
     async def check_new_input(_arguments: dict[str, Any]) -> str:
@@ -903,7 +905,7 @@ async def test_an_interrupted_cut_in_that_never_answered_wears_its_channel() -> 
             messages,
             "go",
             folded=lambda: ("wechat", "submission-9"),
-            folded_commit=lambda: committed.append(True),
+            folded_commit=committed.append,
             injected=lambda: len(taken),
         )
     )
@@ -914,8 +916,8 @@ async def test_an_interrupted_cut_in_that_never_answered_wears_its_channel() -> 
 
     assert [m.role for m in messages] == ["user", "assistant", "tool"]
     assert messages[-1].content == INTERRUPTED
-    assert messages[-1].channel == "wechat"
-    assert committed == [True]
+    assert messages[-1].channel == "", "the harness line is not the person's bubble"
+    assert committed == [0], "a wordless take is not committed as delivered"
 
 
 async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:

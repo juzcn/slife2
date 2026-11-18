@@ -297,11 +297,10 @@ def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
 
 
 def test_an_edit_whose_judge_raises_a_non_config_error_is_rolled_back(tmp_path) -> None:
-    """The judge can refuse with more than `ConfigError`: `load` resolves a
-    `skills:` entry's environment eagerly, and a keyring that refuses mid-session
-    raises its own error.  Whatever the refusal, an edit that did not validate is
-    not an edit that happened — the file is restored, not left holding the write
-    while the tool reports failure."""
+    """The judge can refuse with more than `ConfigError`: a keyring, a socket,
+    any failure of its own.  Whatever the refusal, an edit that did not validate
+    is not an edit that happened — the file is restored, not left holding the
+    write while the tool reports failure."""
     path = tmp_path / "slife2.yaml"
     path.write_text(REQUIRED, encoding="utf-8")
     before = path.read_text(encoding="utf-8")
@@ -849,23 +848,53 @@ def test_a_removal_keeps_the_survivors_inline_comment(tmp_path) -> None:
         "    command: a  # keep me\n"
         "  # Describes second, which is going.\n"
         "  second:\n"
-        "    command: b\n"
+        "    command: b  # bee\n"
         "  # Describes third, which stays.\n"
         "  third:\n"
-        "    command: c\n",
+        "    command: c  # cee\n",
         encoding="utf-8",
     )
 
     assert remove("mcp", "second", path=path) is True
     after = path.read_text(encoding="utf-8")
     assert "# keep me" in after, "the survivor's inline comment is its own"
+    assert "# bee" not in after, "the doomed entry's own inline goes with it"
     assert "Describes second" not in after, "the doomed introduction goes"
     assert "Describes third" in after
     assert after.index("Describes third") < after.index("third:")
 
     # The last entry goes: there is no block to move, and the entry before it
     # still keeps its inline comment (nothing to clear but the doomed intro).
+    # **Its own inline comment goes with it** — it used to be re-hung on the
+    # predecessor, describing a value it was never written about.
     assert remove("mcp", "third", path=path) is True
     after = path.read_text(encoding="utf-8")
+    assert "# cee" not in after, "the last entry's own inline was re-hung"
     assert "Describes third" not in after, "the doomed introduction goes"
     assert "# keep me" in after
+
+
+def test_removing_the_first_entry_takes_its_inline_comment_with_it(tmp_path) -> None:
+    """The first-entry arm moves the next block above the new first key.
+
+    Its own inline comment rides the same trailing token, so it must not be
+    carried into the mapping's pending comment — the survivor's introduction
+    moves, and nothing of the doomed line does.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "mcp:\n"
+        "  first:\n"
+        "    command: a  # do not keep\n"
+        "  # Describes second, which stays.\n"
+        "  second:\n"
+        "    command: b\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "first", path=path) is True
+    after = path.read_text(encoding="utf-8")
+
+    assert "# do not keep" not in after
+    assert "Describes second" in after
+    assert after.index("Describes second") < after.index("second:")

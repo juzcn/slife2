@@ -38,6 +38,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.job as runtime
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import (
     JOB_SERVER_NAME,
     Config,
@@ -326,7 +327,11 @@ def build_server(
                 "text": f"{source!r} is not a source this plugin holds",
                 "ok": False,
             }
-        registry = homes.current()
+        # **The first ask for a home scans its folder**, which is a directory
+        # read and one arbitrary module per file — a job file's top-level code
+        # is model-written and may be slow.  Hopped, because this is the shared
+        # loop every conversation's jobs run on.
+        registry = await off_loop(_home)
         job = registry.find(tool)
         if job is None:
             return {"text": _unknown_job(tool, registry.names()), "ok": False}
@@ -366,8 +371,12 @@ def build_server(
             (`enabled` or `error`), and `error` when it did not load — plus
             `total`, `limit` and `offset`.
         """
+        # The first ask for a home scans its folder, and a job file's top-level
+        # code is model-written and may be slow; the shared loop carries every
+        # conversation's work, so the scan is hopped (`off_loop`).
+        registry = await off_loop(_home)
         rows: list[dict[str, Any]] = []
-        for job in _home().values():
+        for job in registry.values():
             row: dict[str, Any] = {
                 "name": job.name,
                 "tool": _exposed(job.name),
@@ -394,9 +403,9 @@ def build_server(
             `name`, `code` — the source as written — and `error`, which is
             empty for a job that loaded.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         try:
-            code = job.path.read_text(encoding="utf-8-sig")
+            code = await off_loop(job.path.read_text, encoding="utf-8-sig")
         except (OSError, ValueError) as exc:
             # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: a job
             # saved in the machine's codepage answered the documented repair
@@ -445,7 +454,10 @@ def build_server(
         if not code.strip():
             raise ToolError("a job needs code")
         text = code if code.endswith("\n") else code + "\n"
-        registry = _home()
+        # The first ask can scan the folder, and `load_job` below executes the
+        # submitted module's top-level code; both are hopped because this runs
+        # on the loop every conversation shares (`off_loop`).
+        registry = await off_loop(_home)
         final = registry.root / f"{name}.py"
         #: The bytes to put back if the new code will not load.  **Bytes, not
         #: text**: a file saved in the machine's codepage is not decodable as
@@ -476,7 +488,7 @@ def build_server(
                 f"could not write {name!r}: {exc} — close whatever holds the "
                 f"file (an editor, another slife2) and try `job_set` again"
             ) from exc
-        loaded = jobs.load_job(final, name=name)
+        loaded = await off_loop(jobs.load_job, final, name=name)
         if not loaded.ok:
             try:
                 if exists and previous is not None:
@@ -528,7 +540,7 @@ def build_server(
         Returns:
             `name` and `removed`, which a success makes true.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         try:
             job.path.unlink(missing_ok=True)
         except OSError as exc:
@@ -563,7 +575,7 @@ def build_server(
             the sentence saying why it failed. An unknown or unloaded job is
             refused as a failed call, not returned as an `ok` false result.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         if not job.ok:
             raise ToolError(_not_loaded(job))
         client = request_conversation(ctx) or ("", "")

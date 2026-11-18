@@ -1605,9 +1605,19 @@ skills:
 def test_a_skills_entry_resolves_through_the_same_chain(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """**The loader keeps the reference; the consumer resolves it.**
+
+    `load()` runs in every server of the stack.  Resolving here made every one
+    of them pay a keyring lookup for a skill it may never use — and a locked
+    keyring raised outside `load`'s catch, so every config load on the machine
+    died, including `slife2 down`.  `resolved_env()` is the skills plugin's,
+    called where a playbook is handed over.
+    """
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
     config = load(write(tmp_path, SKILLS))
-    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "resolved"
+    entry = config.skills["baidu-search"]
+    assert entry.env["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
+    assert entry.resolved_env()["BAIDU_API_KEY"] == "resolved"
 
 
 def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
@@ -1615,6 +1625,29 @@ def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
     nothing is the common case."""
     config = load(write(tmp_path, SKILLS))
     assert config.skills["quiet"].env == {}
+
+
+def test_a_locked_keyring_does_not_fail_a_config_load(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The credential lookup belongs to the process that uses the value.**
+
+    Resolving in the loader put the keyring inside `load`, outside its catch:
+    a locked keyring made every config load on the machine die with a raw
+    keyring traceback, including `slife2 down` — a command that reads the file
+    and no skill at all.  The load now keeps the reference; the failure lands
+    where the skill's value is consumed.
+    """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+
+    def refuse(key: str) -> None:
+        raise RuntimeError("keyring locked")
+
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", refuse)
+    config = load(write(tmp_path, SKILLS))
+
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        config.skills["baidu-search"].resolved_env()
 
 
 def test_an_unresolved_skill_secret_stays_a_reference(
@@ -1628,7 +1661,8 @@ def test_an_unresolved_skill_secret_stays_a_reference(
     monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
     monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
     config = load(write(tmp_path, SKILLS))
-    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
+    entry = config.skills["baidu-search"]
+    assert entry.resolved_env()["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
 
 
 def test_no_skills_section_is_no_skills(tmp_path) -> None:

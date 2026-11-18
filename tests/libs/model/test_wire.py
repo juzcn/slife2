@@ -278,6 +278,43 @@ def test_a_message_without_reasoning_has_no_thinking_key() -> None:
     assert Message.from_wire(wire).thinking == ""
 
 
+def test_the_opaque_reasoning_payload_round_trips() -> None:
+    """The adapter's own blocks are stored and travelled exactly as they arrived.
+
+    They are not display and not a provider field: each adapter replays its own
+    blocks and ignores the others, so the envelope has to survive the hop and
+    the turn log byte for byte.
+    """
+    payload = {
+        "model": "m",
+        "blocks": [
+            {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "zzz"},
+        ],
+    }
+    message = Message(role="assistant", content="42", reasoning=payload)
+
+    wire = message.to_wire()
+    assert wire["reasoning"] == payload
+    assert Message.from_wire(wire) == message
+    assert message.to_record()["reasoning"] == payload
+
+
+def test_an_unreadable_reasoning_payload_is_dropped_and_named(caplog) -> None:
+    """A structural value is not a payload, and a provider would answer 400.
+
+    The message keeps its place — the words are what the conversation is for —
+    and the loss is named rather than passing a shape nobody wrote downstream.
+    """
+    with caplog.at_level("WARNING"):
+        message = Message.from_wire(
+            {"role": "assistant", "content": "42", "reasoning": "not an envelope"}
+        )
+
+    assert message.reasoning is None
+    assert "reasoning payload" in caplog.text
+
+
 def test_a_message_without_a_readable_role_keeps_its_shape() -> None:
     """**A role that cannot be read is not permission to call it the user's.**
 
@@ -309,7 +346,7 @@ def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:
 
 
 def test_a_stream_chat_result_with_a_hole_is_refused() -> None:
-    """`to_wire` writes all five keys; a mapping missing one is not this
+    """`to_wire` writes all six keys; a mapping missing one is not this
     build's answer, and defaulting the hole would invent a fact."""
     wire = StreamChatResult(text="answer").to_wire()
     del wire["usage"]
@@ -318,7 +355,8 @@ def test_a_stream_chat_result_with_a_hole_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["text", "tool_calls", "thinking", "usage", "stop_reason"]
+    "key",
+    ["text", "tool_calls", "thinking", "reasoning", "usage", "stop_reason"],
 )
 def test_a_stream_chat_result_with_a_null_field_is_refused(key: str) -> None:
     """**A null is a value `to_wire` never writes, not an empty answer.**

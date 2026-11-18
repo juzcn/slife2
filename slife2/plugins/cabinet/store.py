@@ -128,7 +128,6 @@ import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +135,6 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.fs import confined
-from slife2.helpers.timeutil import normalize_bound
 from slife2.libs.host.paths import home, work_dir
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
@@ -154,7 +152,6 @@ from slife2.libs.store.index import (
     filter_clause,
     fuse_shortlist,
     index_meta,
-    instant_bound,
     meanings_by_cosine,
     page_limit,
     place_vectors,
@@ -163,6 +160,7 @@ from slife2.libs.store.index import (
     set_index_meta,
     storable,
     table_exists,
+    time_window,
     vector_identity,
     where_clause,
 )
@@ -1590,7 +1588,7 @@ class CabinetStore:
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
-        clauses, values = self._window(spec.time, spec.day, since, until)
+        clauses, values = time_window(since, until, axis=spec.time, day=spec.day)
         if category:
             # **Escaped, or the filter is not the query it says it is.**  A
             # category is a folder name and `LIKE` reads two of the characters a
@@ -1628,61 +1626,6 @@ class CabinetStore:
                 choice_row(self._with_excerpt(self._with_path(row))) for row in rows
             ],
         }
-
-    def _window(
-        self, axis: str, day: bool, since: str | None, until: str | None
-    ) -> tuple[list[str], list[Any]]:
-        """A since/until window on **one kind's** time axis.
-
-        `axis` is the column and `day` whether it holds days rather than
-        instants; a browse that names no kind passes the `updated_at` axis the
-        corpus kinds share, so this takes the axis rather than the whole spec —
-        the rest of a spec is not a window's business.
-
-        Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
-        because both of its callers have one; a cabinet's kinds use their own
-        axes.  The bound grammar is
-        the shared one (`slife2.helpers.timeutil`), so a model writes `yesterday` here
-        as it does anywhere else.
-
-        A **day** axis takes the day part of the bound, and its `until` is
-        exclusive because that is the only comparison a column of days has:
-        `2026-10-07` becomes `2026-10-08`, so the day named is the last one in.
-        **A bound that carries a time has to be put past its day here**, because
-        `normalize_bound` only advances a *date-only* `until` — that advance is
-        written for a column holding a moment, where the bound is compared with
-        `<=` and means the instant.  Left unadvanced, `until=2026-10-07T12:00:00`
-        would cut `< '2026-10-07'` and drop the very day it names: the same day
-        written two ways, two different answers, and a window whose two bounds
-        are the same moment returning nothing at all.
-        """
-        clauses: list[str] = []
-        values: list[Any] = []
-        if since:
-            bound = normalize_bound(since, role="since")
-            if day:
-                clauses.append(f"{axis} >= ?")
-                values.append(bound[:10])
-            else:
-                # By instant, not by offset string — see `time_window`.
-                clauses.append(f"julianday({axis}) >= julianday(?)")
-                values.append(instant_bound(bound))
-        if until:
-            bound = normalize_bound(until, role="until")
-            if day:
-                last = date.fromisoformat(bound[:10])
-                bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
-                clauses.append(f"{axis} < ?")
-                values.append(bound)
-            else:
-                # A date-only bound was advanced to the next midnight; like the
-                # day axis above, that instant is the first one *outside* the
-                # day named, so the comparison is exclusive.  A datetime names
-                # an instant and stays inclusive (`time_window` states it too).
-                comparison = "<" if len(bound) == 10 else "<="
-                clauses.append(f"julianday({axis}) {comparison} julianday(?)")
-                values.append(instant_bound(bound))
-        return clauses, values
 
     # ── Searching ───────────────────────────────────────────────────────
 
@@ -1756,7 +1699,7 @@ class CabinetStore:
             axis, day = (
                 (SPECS[kind].time, SPECS[kind].day) if kind else ("updated_at", False)
             )
-            window, bounds = self._window(axis, day, since, until)
+            window, bounds = time_window(since, until, axis=axis, day=day)
             clauses.extend(window)
             values.extend(bounds)
         where = filter_clause(clauses)

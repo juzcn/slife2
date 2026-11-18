@@ -189,6 +189,10 @@ class _TurnBuilder:
     #: this from the display channel would be reading the record out of a stream
     #: that is allowed to drop fragments.
     thinking_parts: list[str] = field(default_factory=list)
+    #: The provider's own reasoning blocks, in the order they completed.  Kept
+    #: verbatim because they are replayed verbatim; the readable text above is
+    #: what a person sees, and it is not a substitute for these.
+    reasoning_parts: list[dict[str, Any]] = field(default_factory=list)
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
@@ -215,17 +219,30 @@ class _TurnBuilder:
             self.text_parts.append(event.text)
         if event.thinking:
             self.thinking_parts.append(event.thinking)
+        if event.reasoning:
+            self.reasoning_parts.extend(event.reasoning)
         for delta in event.tool_call_deltas:
             self.calls.add(delta)
         if event.usage is not None:
             self.usage = self.usage + event.usage
         return event
 
-    def build(self) -> StreamChatResult:
+    def build(self, model: str) -> StreamChatResult:
+        """The complete result, with its reasoning bound to the model that made it.
+
+        The model is stamped here rather than by the adapter because this is the
+        one layer that knows the model id the request was made with, and a
+        replayed signed block is only valid for that model (`Message.reasoning`).
+        """
         return StreamChatResult(
             text="".join(self.text_parts),
             tool_calls=tuple(self.calls.complete()),
             thinking="".join(self.thinking_parts),
+            reasoning=(
+                {"model": model, "blocks": list(self.reasoning_parts)}
+                if self.reasoning_parts
+                else {}
+            ),
             usage=self.usage,
             stop_reason=self.stop_reason,
         )
@@ -298,7 +315,7 @@ async def stream_chat_impl(
         )
     # The result is the tool output; the progress stream is display only.  The
     # result is masked here and again by `MaskingMiddleware`.
-    return masked_obj(builder.build().to_wire())
+    return masked_obj(builder.build(model).to_wire())
 
 
 def read_int(source: Any, attribute: str) -> int:

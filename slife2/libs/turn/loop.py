@@ -24,6 +24,7 @@ from typing import Any
 from slife2.libs.harness.async_tasks import Deliver, schedule, started
 from slife2.libs.harness.dumps import Compress
 from slife2.libs.model.base import Chunk, LLMBackend
+from slife2.libs.plugin.audience import ConversationKey
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
     MessageCutIn,
@@ -199,6 +200,7 @@ class AgentLoop:
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compress: Compress | None = None,
+        background_scope: ConversationKey | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tools
@@ -227,6 +229,12 @@ class AgentLoop:
         #: (`slife2.libs.harness.handover`).  A background call that nobody is behind keeps its
         #: result in the registry instead, for `check_async` to hand over.
         self._deliver = deliver
+        #: The conversation a background call belongs to, as its `(home, agent,
+        #: subagent)` key — `check_async`/`cancel_async` answer only inside it.
+        #: The loop is still pure over the message list: this is an opaque key
+        #: the server bound it with, like `deliver`, and the loop never reads
+        #: it except to stamp a task.
+        self._background_scope = background_scope
         #: How a tool result that does not fit is fitted, or None for one that
         #: goes in as it came.  **Handed in for the third time and the same
         #: reason**: the loop does not know which cabinet holds a
@@ -273,7 +281,7 @@ class AgentLoop:
         *,
         auto: Callable[[], AutoCall | None] | None = None,
         folded: Callable[[], tuple[str, str] | None] | None = None,
-        folded_commit: Callable[[], None] | None = None,
+        folded_commit: Callable[[int], None] | None = None,
         injected: Callable[[], int] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
@@ -325,6 +333,14 @@ class AgentLoop:
         submission's own turn began — one message, two lines, the second below
         the answer.  Both are optional: a loop with no inbox behind it has
         nothing to fold.
+
+        **`folded_commit` marks the first `n` takes delivered**, and takes `n`
+        because a take is a delivery only when its words are in the
+        conversation.  The batch's interruption path completes a call that
+        never answered with `INTERRUPTED`; committing that take would tell its
+        parked sender it had been folded in with no text, and the words would
+        then be in neither the inbox nor the record.  The count is the list's
+        prefix because takes append in arrival order.
 
         **Three arguments the model may add to any call.**  `_timeout`, `_async`
         and `_approve` are read off every call and stripped before dispatch, so
@@ -432,7 +448,7 @@ class AgentLoop:
                     )
                 )
                 if took and folded_commit is not None:
-                    folded_commit()
+                    folded_commit(injected() if injected is not None else 0)
                 # **Said after the pair is written**, so a screen is told about
                 # a message the conversation already holds.  It carries the
                 # tool's own answer, and the receipt the submitting window
@@ -493,6 +509,7 @@ class AgentLoop:
                 # the anthropic and responses servers drop it because they
                 # have nowhere to put it (`Message.thinking`).
                 thinking=result.thinking,
+                reasoning=result.reasoning or None,
                 tool_calls=list(result.tool_calls),
             )
 
@@ -592,20 +609,24 @@ class AgentLoop:
                     # flight, and the next checkpoint would cancel this cleanup
                     # before it was written.
                     returned = answered[0][0] if answered else text
-                    # **A take before the cancellation is a delivery**, because
-                    # the completed batch writes its answer.  Without this the
-                    # entry stayed undelivered and its caller ran its own turn
-                    # with the same prompt: the words appeared once as the
-                    # interrupted call's result and again as a user message.
+                    # **A take is a delivery only when the batch writes its
+                    # words.**  `returned is not None` means the call answered
+                    # before the interruption, so `interrupted_results` writes
+                    # that text (and its channel) as the call's result — the
+                    # take is in the conversation.  `returned is None` writes
+                    # `INTERRUPTED` instead: committing that take would tell its
+                    # parked sender it was folded in with no text, and the
+                    # words would be in neither the inbox nor the record.  It
+                    # stays undelivered, so its caller runs its own turn.
+                    after = injected() if injected is not None else before
+                    took_now = folded is not None and after > before
+                    wrote_take = took_now and returned is not None
                     cut_in_channel = ""
-                    if (
-                        folded is not None
-                        and injected is not None
-                        and injected() > before
-                    ):
+                    if wrote_take and folded is not None:
                         found = folded()
                         if found is not None:
                             cut_in_channel, _receipt = found
+                    if took_now:
                         took_any = True
                     tail = interrupted_results(result.tool_calls[index:], returned)
                     # **The taken message's channel rides its answer here too**,
@@ -619,10 +640,13 @@ class AgentLoop:
                     answers.extend(tail)
                     messages.append(answer)
                     messages.extend(answers)
-                    # The completed batch is a written pair, so the take is a
-                    # delivery even though the turn is ending.
+                    # **The pair is written, so its written takes are
+                    # deliveries — and only those.**  A take the interrupted
+                    # call answered for is in the batch; one whose call wrote
+                    # `INTERRUPTED` is not, and stays undelivered for its own
+                    # turn.
                     if took_any and folded_commit is not None:
-                        folded_commit()
+                        folded_commit(after if wrote_take else before)
                     raise
                 channel = ""
                 receipt = ""
@@ -651,7 +675,7 @@ class AgentLoop:
             # the person's message stayed marked delivered, so its caller was
             # answered as folded with words the conversation never received.
             if took_any and folded_commit is not None:
-                folded_commit()
+                folded_commit(injected() if injected is not None else 0)
             # After the batch is in the conversation, as the auto path's event
             # is after its pair: a screen is told about a message the
             # conversation already holds, and a rebuilt transcript can draw the
@@ -915,6 +939,7 @@ class AgentLoop:
             tool=dispatch.name,
             deliver=self._deliver,
             fit=fit,
+            scope=self._background_scope,
         )
         # The sentence goes under the marker the registry wrote
         # (`slife2.libs.harness.async_tasks.started`): the sentence is what the model acts on,

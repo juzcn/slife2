@@ -28,6 +28,7 @@ import pytest
 from anthropic.types import (
     RawContentBlockDeltaEvent,
     RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
     RawMessageDeltaEvent,
     RawMessageStartEvent,
 )
@@ -54,6 +55,7 @@ from slife2.libs.turn.messages import Message, ToolCall, ToolSpec, Usage
 from slife2.plugins.llm import openai_server
 from slife2.plugins.llm.anthropic_server import (
     DEFAULT_MAX_TOKENS,
+    ThinkingBlocks,
     as_delta,
     normalised_stop,
     to_anthropic_blocks,
@@ -504,6 +506,100 @@ def test_anthropic_forwards_thinking_as_its_own_kind() -> None:
         }
     )
     assert anthropic_translate(event) == [Chunk(thinking="hmm")]
+
+
+def test_anthropic_assembles_a_signed_thinking_block_across_events() -> None:
+    """**The block, not just its text, is what the API requires back.**
+
+    With thinking on, the second call of a tool loop is a 400 unless the
+    previous assistant turn returns its thinking blocks unmodified beside the
+    tool results.  The text streams as deltas and the signature arrives in an
+    event of its own afterwards, so the block is assembled across the stream —
+    which is why the translation carries per-stream state.
+    """
+    state = ThinkingBlocks()
+    start = RawContentBlockStartEvent.model_validate(
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+        }
+    )
+    assert anthropic_translate(start, state) == []
+
+    text = RawContentBlockDeltaEvent.model_validate(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "hmm"},
+        }
+    )
+    assert anthropic_translate(text, state) == [Chunk(thinking="hmm")]
+
+    signature = RawContentBlockDeltaEvent.model_validate(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig-1"},
+        }
+    )
+    assert anthropic_translate(signature, state) == []
+
+    stop = RawContentBlockStopEvent.model_validate(
+        {"type": "content_block_stop", "index": 0}
+    )
+    (block,) = anthropic_translate(stop, state)
+    assert block.reasoning == (
+        {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+    )
+
+
+def test_anthropic_does_not_replay_an_unsigned_thinking_block() -> None:
+    """A gateway that signs nothing has no block this build could replay.
+
+    The readable text still streams; the opaque payload is simply absent, which
+    is the behaviour before the payload existed — and a block invented without
+    its signature would be the 400 this fix exists to prevent.  A redacted
+    block needs no text and is complete when it starts.
+    """
+    state = ThinkingBlocks()
+    anthropic_translate(
+        RawContentBlockStartEvent.model_validate(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            }
+        ),
+        state,
+    )
+    anthropic_translate(
+        RawContentBlockDeltaEvent.model_validate(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "hmm"},
+            }
+        ),
+        state,
+    )
+    stop = RawContentBlockStopEvent.model_validate(
+        {"type": "content_block_stop", "index": 0}
+    )
+    assert anthropic_translate(stop, state) == []
+
+    redacted = anthropic_translate(
+        RawContentBlockStartEvent.model_validate(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "redacted_thinking", "data": "zzz"},
+            }
+        )
+    )
+    assert redacted == [
+        Chunk(reasoning=({"type": "redacted_thinking", "data": "zzz"},))
+    ]
 
 
 def test_openai_forwards_reasoning_content() -> None:
@@ -970,10 +1066,14 @@ def test_responses_fills_in_the_reasoning_that_never_streamed() -> None:
     assert responses_translate(event) == [
         Chunk(text="42"),
         Chunk(thinking="six sevens"),
+        # The replayable item goes back whether or not its summary streamed:
+        # the display channel is not what the next call needs.
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
         Finish(stop_reason="stop"),
     ]
     assert responses_translate(event, streamed={0}) == [
         Chunk(text="42"),
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
         Finish(stop_reason="stop"),
     ]
 
@@ -1002,7 +1102,10 @@ def test_responses_reasoning_that_streamed_is_not_answered_twice() -> None:
     )
     assert responses_translate(
         _completed(output=[_reasoning_item("six sevens")]), streamed=streamed
-    ) == [Finish(stop_reason="stop")]
+    ) == [
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
+        Finish(stop_reason="stop"),
+    ]
 
 
 def test_responses_the_full_reasoning_text_is_read_on_the_same_terms() -> None:
@@ -1025,6 +1128,16 @@ def test_responses_the_full_reasoning_text_is_read_on_the_same_terms() -> None:
     item["content"] = [{"type": "reasoning_text", "text": "the working"}]
     assert responses_translate(_completed(output=[item])) == [
         Chunk(thinking="the working"),
+        Chunk(
+            reasoning=(
+                {
+                    "type": "reasoning",
+                    "id": "r1",
+                    "summary": [{"type": "summary_text", "text": ""}],
+                    "content": [{"type": "reasoning_text", "text": "the working"}],
+                },
+            )
+        ),
         Finish(stop_reason="stop"),
     ]
 
@@ -1671,6 +1784,33 @@ async def test_stream_chat_returns_the_assembled_reasoning() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_binds_reasoning_blocks_to_the_model_that_made_them() -> None:
+    """The opaque payload reaches the result, stamped with its model.
+
+    The stamp is what lets an adapter decide whether a signed block may be
+    replayed after a `model_switch`.  The block is not display: it does not
+    cross the progress wire, and a dropped chunk therefore cannot cost the
+    conversation what it needs for the next call.
+    """
+    block = {"type": "thinking", "thinking": "hmm", "signature": "sig-1"}
+    server = build_llm_server(
+        name="t",
+        streamer=scripted(
+            Chunk(thinking="hmm"),
+            Chunk(reasoning=(block,)),
+            Chunk(text="42"),
+            Finish("stop"),
+        ),
+    )
+    result, chunks = await call_stream_chat(
+        server, messages=[{"role": "user", "content": "hi"}], tools=[], model="qwen"
+    )
+
+    assert result.data["reasoning"] == {"model": "qwen", "blocks": [block]}
+    assert [chunk.reasoning for chunk in chunks] == [(), (), ()]
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_reassembles_a_fragmented_tool_call() -> None:
     """The whole reason tool-call assembly lives in this server.
 
@@ -2185,6 +2325,68 @@ def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
     )
 
 
+def test_anthropic_replays_thinking_blocks_before_the_answer() -> None:
+    """The blocks go back unmodified, in front of the text and the calls.
+
+    That is the order the API emitted them in and the order it requires them
+    back in.  A block signed by another model is not replayed — a conversation
+    moved with `model_switch` must not send model A's signature to model B —
+    and neither is one whose shape this build cannot put on the wire.
+    """
+    payload = {
+        "model": "m",
+        "blocks": [
+            {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "zzz"},
+        ],
+    }
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning=payload,
+        tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+    )
+
+    _, same = to_anthropic_messages([assistant], model="m")
+    assert [block["type"] for block in same[0]["content"]] == [
+        "thinking",
+        "redacted_thinking",
+        "text",
+        "tool_use",
+    ]
+    assert same[0]["content"][0] == payload["blocks"][0]
+
+    _, other = to_anthropic_messages([assistant], model="another")
+    assert [block["type"] for block in other[0]["content"]] == ["text", "tool_use"]
+
+
+def test_anthropic_replays_reasoning_only_when_thinking_was_asked_for() -> None:
+    """A model not asked to think is not sent another model's signed blocks.
+
+    `compat.thinking: omit` is the operator saying this endpoint takes no
+    thinking block while reasoning anyway; replaying blocks there would be a
+    request the operator's own configuration excluded.
+    """
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning={
+            "model": "m",
+            "blocks": [{"type": "thinking", "thinking": "hmm", "signature": "sig-1"}],
+        },
+    )
+    asked = ModelSettings(model="m", reasoning=True, max_tokens=2000)
+    request = anthropic_build_request([assistant], [], asked)
+    assert [block["type"] for block in request["messages"][0]["content"]] == [
+        "thinking",
+        "text",
+    ]
+
+    omitted = ModelSettings(model="m", reasoning=True, thinking="omit", max_tokens=2000)
+    request = anthropic_build_request([assistant], [], omitted)
+    assert [block["type"] for block in request["messages"][0]["content"]] == ["text"]
+
+
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     """A model that spends everything thinking returns nothing.
 
@@ -2237,6 +2439,56 @@ def test_responses_sends_only_what_was_configured() -> None:
     # This API calls the output cap something else, and does not require it —
     # unlike Anthropic, where an absent one has to become a real number.
     assert request["max_output_tokens"] == 100
+
+
+def test_responses_replays_reasoning_items_before_the_answer() -> None:
+    """A reasoning item goes back exactly as it arrived, before what it reasoned about.
+
+    That is the API's own instruction for a tool loop, and with `store: false`
+    it is the only copy the next call can be given.  An item belonging to
+    another model is not replayed, on `Message.reasoning`'s rule.
+    """
+    item = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": "why"}],
+        "encrypted_content": "enc",
+    }
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning={"model": "m", "blocks": [item]},
+        tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+    )
+
+    _, same = to_responses_input([assistant], model="m")
+    assert same[0] == item
+    assert same[1]["role"] == "assistant"
+    assert same[2]["type"] == "function_call"
+
+    _, other = to_responses_input([assistant], model="another")
+    assert all(entry.get("type") != "reasoning" for entry in other)
+
+
+def test_responses_stateless_reasoning_asks_for_its_encrypted_content() -> None:
+    """**`store: false` must be asked for the content it will have to replay.**
+
+    A stateless server keeps nothing, so a reasoning item comes back without
+    `encrypted_content` unless the request includes `reasoning.encrypted_content`
+    — and the next call of a tool loop cannot send back what it never received.
+    Asked for only when reasoning was asked for, so an endpoint with no
+    reasoning is not sent a field it may not implement.
+    """
+    stateless = ModelSettings(model="m", reasoning=True, store=False)
+    assert responses_build_request([], [], stateless)["include"] == [
+        "reasoning.encrypted_content"
+    ]
+
+    stored = ModelSettings(model="m", reasoning=True, store=True)
+    assert "include" not in responses_build_request([], [], stored)
+
+    no_reasoning = ModelSettings(model="m", store=False)
+    assert "include" not in responses_build_request([], [], no_reasoning)
 
 
 def test_the_responses_request_only_names_arguments_the_sdk_has() -> None:

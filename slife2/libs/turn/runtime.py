@@ -51,7 +51,7 @@ from slife2.libs.host.config import (
     for_the_call,
 )
 from slife2.libs.model.base import LLMBackend
-from slife2.libs.plugin.audience import ConversationId
+from slife2.libs.plugin.audience import ConversationId, conversation_key
 from slife2.libs.plugin.protocol import (
     close_server,
     open_server,
@@ -551,6 +551,11 @@ class TurnRuntime:
             approve=approve,
             deliver=deliver,
             compress=compress,
+            # **The conversation, for the two async tools.**  A task id is not
+            # a capability: a model that learns another conversation's id must
+            # not be able to poll or cancel that call (`Task.scope`).  Taken
+            # here, where the identity and the caller's home are both in hand.
+            background_scope=conversation_key(*identity),
         )
 
     async def close(self) -> None:

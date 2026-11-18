@@ -53,8 +53,10 @@ from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
 from slife2.clients.toolclient import ToolCounts
+from slife2.libs.harness import notes
 from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
+from slife2.libs.harness.i18n import t
 from slife2.libs.harness.markers import strip as strip_marker
 
 # Imported, never re-spelled.  The names are `slife2.libs.plugin.vocabulary`'s,
@@ -79,8 +81,6 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.turn import plan
 from slife2.libs.turn.context import context_usage
 from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
-from slife2.tui import notes
-from slife2.tui.i18n import t
 from slife2.tui.theme import GLYPHS, PALETTE
 
 #: Every marker this window knows how to take back off, handed to `strip_marker`
@@ -660,7 +660,7 @@ class ChatView(VerticalScroll):
         passing text that already carried them would be a caller spelling the
         format a second time, and a caller that forgot them would leave a line
         nothing marks as the harness's.  The words inside are
-        `slife2.tui.notes`' (or a plugin's, for a line that arrived over the
+        `slife2.libs.harness.notes`' (or a plugin's, for a line that arrived over the
         wire).
 
         **The turn stays open by default, and that is load-bearing.**  A note

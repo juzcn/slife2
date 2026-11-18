@@ -20,18 +20,23 @@ than a peer.  Both go through the two functions below, so a channel cannot
 announce itself in a vocabulary of its own: what it supplies is the name.
 
 **And the words are the interface's, so they are the language's.**  Every line
-here goes through `t()` (`slife2.tui.i18n`), which is why a Chinese window reads
-`[已恢复 3 轮]` where an English one reads `[restored 3 turns]`.  That the two
-arrival lines are written by *daemons* rather than by the window is a wrinkle
-worth knowing: a plugin composes its note in its own process, so `--lang` — a
-flag on the window's own command line — does not reach it, and a daemon follows
-the OS locale where a window follows the flag (`SDD` §10.4).
+here goes through `t()` (`slife2.libs.harness.i18n`), which is why a Chinese
+window reads `[已恢复 3 轮]` where an English one reads `[restored 3 turns]`.
+That the two arrival lines are written by *daemons* rather than by the window is
+a wrinkle worth knowing: a plugin composes its note in its own process, so
+`--lang` — a flag on the window's own command line — does not reach it, and a
+daemon follows the OS locale where a window follows the flag (`SDD` §10.4).
+
+**This module is a library's rather than the window's**, because a plugin that
+composes one of these lines must not import the terminal package to do it: a
+headless daemon has no display, and a plugin depending on the window inverts the
+layering.  The window imports it like any other reader.
 """
 
 from __future__ import annotations
 
-from slife2.tui.i18n import t
-from slife2.tui.theme import GLYPHS
+from slife2.libs.harness.glyphs import GLYPHS
+from slife2.libs.harness.i18n import t
 
 #: The two glyphs every arrival and departure wears, named here because two
 #: channels write these lines (`slife2.plugins.a2a.mesh`, `slife2.plugins.wechat.server`) and a glyph
@@ -49,7 +54,7 @@ def as_turns(count: int) -> str:
 
     **The choice between the two spellings is made here**, in the one place that
     has the count: the table has no plural machinery and neither should it
-    (`slife2.tui.i18n`), and a language whose noun does not inflect gives both
+    (`slife2.libs.harness.i18n`), and a language whose noun does not inflect gives both
     keys the same value.
     """
     return t("turn_one", n=count) if count == 1 else t("turn_many", n=count)

@@ -26,6 +26,7 @@ from textual.widgets import Static
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
+from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.context import turn_failed_note
 from slife2.libs.turn.events import (
     PREVIEW_CHARS,
@@ -4019,6 +4020,27 @@ async def test_a_pushed_note_is_drawn_and_does_not_wait_for_a_turn() -> None:
     assert "[⚡ jill online]" in text
     assert client.prompts == [], "a note is not a turn"
     assert "PeerAgent(jill)>" not in text
+
+
+async def test_a_pushed_note_is_drawn_by_the_pump_not_by_the_push() -> None:
+    """**The inbox callback is not a widget thread.**
+
+    The push arrives on the MCP client's task, so a note drawn straight from it
+    can jump ahead of a `TextDelta` already queued in Textual's pump: a line
+    about a peer arriving lands above text that streamed before it.  The
+    hand-over is carried in a `Message` and branched in its handler, which is
+    the road every turn event already takes — so the callback itself leaves the
+    transcript alone, and the pump draws the line in queue order.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        app._take(Handover(ticket=1, text="⚡ jill online", channel="", kind=NOTE))
+        assert "jill online" not in shown(app), "the push drew a widget itself"
+
+        await pilot.pause()
+
+        assert "[⚡ jill online]" in shown(app)
 
 
 async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> None:

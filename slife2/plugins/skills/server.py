@@ -46,7 +46,6 @@ from slife2.libs.host.config import (
     ConfigError,
     SkillSettings,
     load_cached,
-    resolve_secret,
 )
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
@@ -137,7 +136,10 @@ def catalogue(entries: Mapping[str, SkillSettings]) -> list[dict[str, object]]:
         # three ways, a skill could be declared enabled with its requirements met
         # while `skill_use` refused it as switched off.
         found = skills.entry_for(skill, entries)
-        supplied = dict(found.env) if found is not None else None
+        # Resolved here, where the value is consumed: the loader keeps the
+        # `${VAR}` reference so a daemon that never reads a playbook never
+        # opens the keyring (`SkillSettings.resolved_env`).
+        supplied = found.resolved_env() if found is not None else None
         note = skills.readiness(skill, supplied)
         # **The guard is around the read, not the check.**  `readiness` opens no
         # file (see `skill_list`), so an `OSError` can only come from `document`
@@ -239,7 +241,10 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
     def supplied_for(name: str) -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""
-        return {one: dict(settings.env) for one, settings in home_entries().items()}
+        return {
+            one: settings.resolved_env()
+            for one, settings in home_entries().items()
+        }
 
     @mcp.tool(name=skills.USE_TOOL, meta=FOR_THE_MODEL)
     async def skill_use(name: str) -> str:
@@ -402,7 +407,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             # and it turned that into a note line (SDD Appendix C).  The guard
             # belongs where the read is, `skills.document` in `catalogue` below.
             note = skills.readiness(
-                skill, dict(settings.env) if settings is not None else None
+                skill,
+                settings.resolved_env() if settings is not None else None,
             )
             if note:
                 row["requirements"] = note
@@ -452,15 +458,11 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         # `rest_api_set`), so this is one contract and not two.
         if not name.strip():
             raise ToolError("a skill needs a name")
-        # **Resolved before anything changes.**  A `${VAR}` that is not set
-        # remains the reference it was written as, and `skill_use` reports it
-        # missing; resolving here is what gives the entry the value the write
-        # will hold.
-        supplied = (
-            {str(key): resolve_secret(value) for key, value in env.items()}
-            if env is not None
-            else None
-        )
+        # **The entry is written as it was given.**  A `${VAR}` stays a
+        # reference in the file and in the mirror, exactly as a reload would
+        # read it; `SkillSettings.resolved_env` resolves it where a playbook is
+        # handed over, and one nothing answers stays a reference that
+        # `skill_use` reports missing.
         # **Replace the installed skill, whichever of its two names was used.**
         # `skill_list` prints the frontmatter name, while a skill may live in a
         # directory called something else (`find` accepts both because both are
@@ -478,7 +480,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         except OSError as exc:
             raise ToolError(f"could not write {name!r}: {exc}") from exc
         if env is not None:
-            _write_env(target, env, supplied or {})
+            _write_env(target, env)
         key = _key_for(target, skills.find(target), home_entries())
         current = home_entries().get(key)
         logger.info("skill_set name=%s dir=%s", name, installed)
@@ -488,9 +490,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             "files": len(files),
         }
 
-    def _write_env(
-        name: str, env: Mapping[str, str], supplied: Mapping[str, str]
-    ) -> None:
+    def _write_env(name: str, env: Mapping[str, str]) -> None:
         """Write the `skills:` entry's `env`, keeping the switch, and mirror it.
 
         **Read-modify-write, not a whole-entry `upsert`**, for `cli_set`'s
@@ -502,9 +502,9 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
         **The mirror is updated from what was written**, not from the argument:
         a concurrent edit may have added a switch, and the value `skill_use`
-        reads next must be the one the file now holds.  `supplied` is the
-        resolved form of `env` — what a reload would have produced — because the
-        mirror is read by `skill_use` and `skill_list` without another load.
+        reads next must be the one the file now holds.  It holds `env` as
+        written — references included — because that is what a reload produces;
+        `resolved_env()` is the reader's job.
         """
         key = _key_for(name, skills.find(name), home_entries())
         written: dict[str, Any] = {}
@@ -530,7 +530,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         mirror = homes.current()
         if written:
             mirror.entries[key] = SkillSettings(
-                env=dict(supplied), enabled=written.get("enabled") is not False
+                env=dict(env), enabled=written.get("enabled") is not False
             )
         else:
             mirror.forgotten(key)

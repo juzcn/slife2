@@ -40,6 +40,7 @@ from textual.screen import Screen
 from textual.widgets import Static
 from textual.worker import Worker
 
+from slife2.libs.harness.i18n import t
 from slife2.libs.turn.events import (
     ContextChosen,
     MessageCutIn,
@@ -61,7 +62,6 @@ from slife2.libs.turn.watch import (
 )
 from slife2.tui.client import WatchClient
 from slife2.tui.draw import draw
-from slife2.tui.i18n import t
 from slife2.tui.restore import restore
 from slife2.tui.widgets import ApprovalPrompt, ChatView, PlanView, task_bubble
 

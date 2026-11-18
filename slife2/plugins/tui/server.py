@@ -15,7 +15,7 @@ is (`slife2.tui.app`), and it is drawn either as its own turn or — when it
 arrives while a turn is running — as a line inside that turn.  The second is a
 *note*: a line the harness has to say and nobody has to answer — a peer came
 online, a turn was cancelled — so it is drawn where every such line is drawn
-(`ChatView.add_note`, `slife2.tui.notes`) and the conversation never learns of
+(`ChatView.add_note`, `slife2.libs.harness.notes`) and the conversation never learns of
 it.  Same stream, same acknowledgement, one branch at the far end.
 
 **This is a plugin, and the window is a client of it.**  It used to be the one
@@ -411,7 +411,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         """Hand an agent's window a line to draw — no turn, no model, no record.
 
         **A note is the harness talking, not a channel.**  It reaches the window
-        as `add_note` does (`slife2.tui.notes`), in the same bracket every other
+        as `add_note` does (`slife2.libs.harness.notes`), in the same bracket every other
         harness line wears, and the conversation never learns of it: nothing is
         queued, nothing runs, and nothing is stored — so a peer coming online
         costs no model call and leaves no trace in the turn log, which is exactly

@@ -355,6 +355,52 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_background_task_is_readable_only_in_its_conversation() -> None:
+    """**A task id is not a capability.**
+
+    The registry is the process's, so one agent's model can name another
+    conversation's id if it learns or guesses it.  The task carries the
+    conversation it was scheduled in, and both tools answer only there — the
+    wrong-conversation refusal is the same sentence as an unknown id, so it
+    cannot confirm that the id exists either.  It must also refuse without
+    touching the work.
+    """
+    released = asyncio.Event()
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await released.wait()
+        return "the answer"
+
+    call = ToolCall(id="call-scope", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    home_scope = ("home", "jack", "")
+    loop = one(call, [a_tool("slow", slow)], background_scope=home_scope)
+    await loop.run_turn(messages, "hi")
+    task_id = marker_fields(tool_message(messages))["task_id"]
+    task = async_tasks._get_task(task_id)
+    assert task is not None
+
+    foreign = ("home", "jill", "")
+    with pytest.raises(ToolFailed):
+        await check_async({"task_id": task_id}, scope=foreign)
+    with pytest.raises(ToolFailed):
+        await cancel_async({"task_id": task_id}, scope=foreign)
+
+    answer = await check_async({"task_id": task_id}, scope=home_scope)
+    assert answer["status"] == RUNNING, "a foreign cancel must not stop the work"
+
+    released.set()
+    for _ in range(50):
+        if task.handle.done():
+            break
+        await asyncio.sleep(0)
+    # A caller that names no conversation — the library's own — still reads it.
+    answer = await check_async({"task_id": task_id})
+    assert answer["status"] == FINISHED
+    assert answer["result"] == "the answer"
+
+
+@pytest.mark.asyncio
 async def test_an_undelivered_result_stays_readable() -> None:
     """A hand-back that could not land is kept, rather than lost with it.
 

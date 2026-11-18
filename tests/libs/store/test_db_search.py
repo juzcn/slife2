@@ -512,7 +512,7 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    nearest = (await store._semantic_lists(["工具"], embedder, 3, [], []))[0]
+    nearest = (await store._semantic_lists(["工具"], embedder, 3, [], [], set()))[0]
 
     # Each question's list is nearest-first: the *order* is what the fusion
     # reads and the value is the similarity a recall gates on, so both halves
@@ -592,16 +592,16 @@ async def test_a_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_recall_widens_by_chunks_not_by_excluded_turns(tmp_path) -> None:
-    """`k` counts chunks, so an excluded turn takes one place per chunk it has.
+async def test_a_recall_looks_past_a_chunked_excluded_turn(tmp_path) -> None:
+    """The keep-list is applied *inside* the KNN, so its chunks take no place.
 
-    A kept turn of three chunks occupies three of the KNN's places while the
-    keep-list names it once.  Widening by the number of excluded *turns* repaid
-    one place for every three the kept context took, so a semantic recall whose
-    nearest chunks were all kept turns came back with nothing — although a turn
-    beyond them matched.  The two kept turns below hold six chunks between
-    them; the old widening (1 + 2 = 3) saw only their chunks, the fix widens by
-    those six and finds the turn past them.
+    A kept turn of three chunks would otherwise occupy three of the KNN's
+    places while the keep-list names it once — and a semantic recall whose
+    nearest chunks were all kept turns came back with nothing, although a turn
+    beyond them matched.  Excluding the kept turns in the KNN's rowid
+    restriction spends the page on turns the caller asked for; the two kept
+    turns below hold six chunks between them and the one-place page still
+    reaches the turn past them.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
     embedder = StubEmbedder()
@@ -627,6 +627,51 @@ async def test_a_recall_widens_by_chunks_not_by_excluded_turns(tmp_path) -> None
     )
 
     assert [turn_id for turn_id, _ in ranked] == [3]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_with_a_large_keep_list_stays_under_the_knn_ceiling(
+    tmp_path,
+) -> None:
+    """**`k` is the page, not the page plus everything already in hand.**
+
+    `sqlite-vec` refuses a `k` above 4096.  A live context of a couple of
+    thousand turns holds more chunks than that, so widening the page by the
+    excluded turns and their chunks asked for a `k` past the ceiling and every
+    semantic recall raised — the rebuild failed, the context never shrank, and
+    every later turn failed until `forget`.  The excluded turn below holds more
+    chunks than the ceiling by itself, written directly because the point is
+    the KNN's arithmetic rather than the chunker's.
+    """
+    import sqlite_vec
+
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    await store.save_turn(
+        messages=[{"role": "user", "content": "工具"}], embedder=embedder
+    )
+    await store.save_turn(
+        messages=[{"role": "user", "content": "trump"}], embedder=embedder
+    )
+    with store._connect() as connection:
+        for index in range(4097):
+            row = connection.execute(
+                "INSERT INTO turn_chunk (turn_id, chunk_index) VALUES (1, ?)",
+                (1000 + index,),
+            )
+            connection.execute(
+                "INSERT INTO turn_vec (rowid, embedding) VALUES (?, ?)",
+                (
+                    row.lastrowid,
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0, 0.0]),
+                ),
+            )
+
+    ranked = await store.recall(
+        sentences=["工具"], embedder=embedder, limit=1, exclude={1}
+    )
+
+    assert [turn_id for turn_id, _ in ranked] == [2]
 
 
 @pytest.mark.asyncio

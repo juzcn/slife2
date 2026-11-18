@@ -263,7 +263,7 @@ def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
 def english_window() -> None:
     """Pin the window's language to English, whatever locale this machine is in.
 
-    `slife2.tui.i18n` resolves the language from the OS at import, and a
+    `slife2.libs.harness.i18n` resolves the language from the OS at import, and a
     contributor's Chinese Windows answers `zh` — which would flip every string
     the TUI draws and turn the suite's English assertions (`"Arguments"`,
     `"restored 3 turns"`, `"running"`, `"Switched to "` …) red for a reason that
@@ -276,7 +276,7 @@ def english_window() -> None:
     switches language (`tests/tui/test_i18n.py`) cannot leak into the next one
     in either direction.
     """
-    from slife2.tui.i18n import set_language
+    from slife2.libs.harness.i18n import set_language
 
     set_language("en")
 

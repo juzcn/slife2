@@ -74,6 +74,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness import notes
 from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host import statefile
 from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
@@ -89,7 +90,6 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat.ilink import Http, IlinkClient
-from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
@@ -439,7 +439,7 @@ def format_link_line(state: str) -> str:
 
     **`Wechat` is the name here**, where a peer's line carries the peer's own —
     a channel coming up is the same news as an agent coming up, so
-    `slife2.tui.notes` spells both and this cannot drift from `⚡ jill online`.
+    `slife2.libs.harness.notes` spells both and this cannot drift from `⚡ jill online`.
     The capital is the bubble's (`slife2.tui.widgets.channel_prefix`), not the
     config key's: `Wechat> ` is what this channel is called on screen, and a
     line about the same channel should call it the same thing.

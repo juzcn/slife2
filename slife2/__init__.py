@@ -45,7 +45,7 @@ command.  `--data-dir` is the one worth knowing about on its own: it decides
 which home everything reads — its config, agents, skills, jobs and databases.
 The runtime directory (records, locks, logs) is machine-wide and not under it.
 
-`--lang` is the window's language, and **the window's only** (`slife2.tui.i18n`):
+`--lang` is the window's language, and **the window's only** (`slife2.libs.harness.i18n`):
 the model never reads a translated string, the logs stay English whatever the
 flag says, and the report this command prints as the servers come up is the
 terminal's rather than the window's.  It overrides the language the OS reports,
@@ -1055,10 +1055,9 @@ def main(argv: list[str] | None = None) -> int:
         # ensured, so that a window is never opened in one language and finished
         # in another.  The import is here rather than at module scope for this
         # module's usual reason: `slife2.libs.host.config` and the servers stay
-        # importable without a UI, and this module is free of Textual only by
-        # accident of where it lives (`slife2/tui/__init__.py` imports nothing,
-        # and `i18n` needs nothing but the stdlib).
-        from slife2.tui.i18n import set_language
+        # importable without a UI: the table lives in the libraries now
+        # (`slife2.libs.harness.i18n`), which needs nothing but the stdlib.
+        from slife2.libs.harness.i18n import set_language
 
         set_language(args.lang)
 

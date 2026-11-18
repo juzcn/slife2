@@ -67,6 +67,8 @@ from textual.worker import Worker
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import ToolCounts
+from slife2.libs.harness import notes
+from slife2.libs.harness.i18n import t
 from slife2.libs.host.config import DEFAULT_AGENT
 from slife2.libs.plugin.vocabulary import NOTE, RUNNING, Handover
 from slife2.libs.turn.events import (
@@ -77,7 +79,6 @@ from slife2.libs.turn.events import (
     TurnFinished,
     UsageReported,
 )
-from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,
     AgentTaskClient,
@@ -91,7 +92,6 @@ from slife2.tui.client import (
     WindowClient,
 )
 from slife2.tui.draw import draw
-from slife2.tui.i18n import t
 from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.watch import WatchScreen
@@ -132,6 +132,21 @@ class EventsFlushed(TextualMessage):
 
     def __init__(self, done: asyncio.Future[None]) -> None:
         self.done = done
+        super().__init__()
+
+
+class InboxMessage(TextualMessage):
+    """One hand-over, carried from the inbox's push into Textual's handling.
+
+    **A note is a widget write, and a widget write outside this pump is out of
+    order.**  The push arrives on the MCP client's task; drawn from there, a note
+    about a peer arriving could land above a `TextDelta` already queued, so the
+    transcript showed text streamed before the line it preceded.  Carrying it in
+    a message is the same road `_on_event` takes for every turn event.
+    """
+
+    def __init__(self, handover: Handover) -> None:
+        self.handover = handover
         super().__init__()
 
 
@@ -423,7 +438,7 @@ class SlifeApp(App[None]):
         #: What the status bar says when there is no connection.  **Resolved in
         #: the interface's language where it is set**, rather than stored as a
         #: state and translated at render time: the language is decided once
-        #: before this window exists (`slife2.tui.i18n`), so the two are the same
+        #: before this window exists (`slife2.libs.harness.i18n`), so the two are the same
         #: answer and the second spelling is one more thing `_refresh_status`
         #: would have to know.
         self._connection_text = t("connection_connecting")
@@ -565,7 +580,8 @@ class SlifeApp(App[None]):
 
         A worker of its own, because the call does not return while the window is
         up: `attach` *is* the session (`slife2.plugins.tui.server`), and what arrives on
-        it goes through `deliver` — the same method the person's own typing goes
+        it is posted into the message pump — where a note is drawn and a message
+        goes through `deliver`, the same method the person's own typing goes
         through, which is the whole of the pass-through.
 
         Retried rather than fatal, for `_connect`'s reason: a plugin that is not
@@ -657,23 +673,17 @@ class SlifeApp(App[None]):
                 return
 
     def _take(self, handover: Handover) -> None:
-        """Take one hand-over, from the plugin's push.
+        """Take one hand-over, from the plugin's push.  Does not touch widgets.
 
         A method of its own rather than `deliver` passed straight through,
         because the two say different things: this is the wire's shape arriving
         (`slife2.plugins.tui.server`), and `deliver` is the window's one way in.
 
-        **And this is where the two kinds part.**  A message becomes a turn and
-        joins the queue, so it is drawn when its turn starts like anything the
-        person typed.  A note is drawn *now*, because that is what it is: a line
-        about the moment it describes — a peer arriving, most of them — and one
-        that waited behind a running turn would be telling the person about a
-        peer who has since left.
+        **The branch happens in the pump** (`on_inbox_message`): a note is a
+        widget write, and this callback runs on the MCP client's task, where a
+        note could jump ahead of deltas already queued for the same screen.
         """
-        if handover.kind == NOTE:
-            self._transcript.add_note(handover.text)
-            return
-        self.deliver(handover.text, handover.channel)
+        self.post_message(InboxMessage(handover))
 
     def deliver(self, text: str, channel: str) -> None:
         """Take a message from another channel, to run as if it were typed.
@@ -1116,6 +1126,24 @@ class SlifeApp(App[None]):
         if not message.done.done():
             message.done.set_result(None)
 
+    def on_inbox_message(self, message: InboxMessage) -> None:
+        """One hand-over, applied inside the pump — the display's ordering seam.
+
+        **The two kinds part here.**  A message becomes a turn and joins the
+        queue, so it is drawn when its turn starts like anything the person
+        typed.  A note is drawn now, because that is what it is: a line about
+        the moment it describes — a peer arriving, most of them — and one that
+        waited behind a running turn would be telling the person about a peer
+        who has since left.  Being drawn *now* is a position in the pump's FIFO
+        queue, not a position on the wire: text streamed before the note was
+        posted is above it.
+        """
+        handover = message.handover
+        if handover.kind == NOTE:
+            self._transcript.add_note(handover.text)
+            return
+        self.deliver(handover.text, handover.channel)
+
     def on_turn_event_message(self, message: TurnEventMessage) -> None:
         # Late fragments of a turn that is over.  Dropping them is what keeps
         # one turn's tail out of the next turn's block — see the module
@@ -1429,7 +1457,7 @@ class SlifeApp(App[None]):
             # **A note, and it is this window's sentence.**  What the server said
             # is the *facts* — which model it is now, which it was, how many
             # conversations moved — and the line a person reads is the window's,
-            # like every other one it draws (`slife2.tui.i18n`); what it draws
+            # like every other one it draws (`slife2.libs.harness.i18n`); what it draws
             # from them is the half only the server knows, which is why `moved`
             # is in the sentence at all.
             self._transcript.add_note(

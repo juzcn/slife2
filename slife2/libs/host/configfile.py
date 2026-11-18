@@ -546,6 +546,33 @@ def _put_first(
     slot[3] = [token] if token is not None else None
 
 
+def _without_inline(block: Any) -> Any:
+    """*block* minus the inline comment of the entry that is going.
+
+    ruamel stores an entry's last-line comment and the block introducing the
+    entry *below* it as one trailing token: a merged value is
+    ``"# inline\\n  # introduces next\\n"``, and a block-only value begins with
+    a newline.  A removal moves the block and drops the inline — the comment
+    describes a line that is about to cease to exist — so the token is split
+    back into the standalone block ruamel would have stored.  A token that was
+    only the inline answers `None`: there is nothing to move.
+
+    **A replacement keeps both** (`_swap_entry`): the entry survives, and its
+    own inline comment still sits on the line it describes.
+    """
+    if block is None:
+        return None
+    value = str(block.value)
+    if value.startswith("\n"):
+        return block
+    remainder = value.partition("\n")[2]
+    if not remainder.strip():
+        return None
+    return CommentToken(
+        "\n" + remainder, block.start_mark, block.end_mark, block.column
+    )
+
+
 def _drop_entry(
     current: CommentedMap, document: CommentedMap, section: str, name: str
 ) -> None:
@@ -570,7 +597,11 @@ def _drop_entry(
     """
     names = list(current)
     index = names.index(name)
-    survivor = _take_intro(current, name)
+    # **The entry's own inline comment dies with it.**  `_take_intro` lifts the
+    # merged token — the inline head and the block introducing the next entry —
+    # and only the block moves; carrying the whole token re-hung the deleted
+    # entry's comment on its predecessor (`_without_inline`).
+    survivor = _without_inline(_take_intro(current, name))
     del current[name]
     if not current:
         _empty_section(document, section)

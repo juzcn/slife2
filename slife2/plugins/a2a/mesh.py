@@ -97,6 +97,7 @@ from a2a_over_mqtt.protocol import (
 from paho.mqtt.subscribeoptions import SubscribeOptions
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness import notes
 from slife2.libs.host.config import A2ASettings
 from slife2.plugins.a2a import groups
 from slife2.plugins.a2a.inbound_store import InboundStore, iso_now
@@ -118,7 +119,6 @@ from slife2.plugins.a2a.states import (
     user_property,
 )
 from slife2.plugins.a2a.task_store import get_store
-from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +247,7 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     a peer *is* on the wire is still in the card and still decides whether this
     is a transition at all (`_handle_discovery`); it is not shown.
 
-    The sentence itself is `slife2.tui.notes`' — the same two functions a
+    The sentence itself is `slife2.libs.harness.notes`' — the same two functions a
     channel's own link line goes through (`slife2.plugins.wechat.server`) — and what this adds
     is the one thing the mesh knows: the peer's name, scrubbed by `safe_name`
     because it came off the wire from somebody else's process.

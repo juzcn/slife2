@@ -1266,9 +1266,16 @@ class AgentCore:
             item = loop.injected[-1]
             return item.channel, item.receipt
 
-        def folded_commit() -> None:
-            """The pair is in the conversation: every take it carries is delivered."""
-            for item in loop.injected:
+        def folded_commit(written: int) -> None:
+            """The first `written` takes are in the conversation: they are delivered.
+
+            **A count, because not every take is a delivery.**  A call
+            interrupted before it answered writes `INTERRUPTED`, not the
+            person's words, and its take must keep `delivered` false so its
+            caller runs the turn it is owed.  The loop commits a prefix
+            because takes append in arrival order.
+            """
+            for item in loop.injected[:written]:
                 item.delivered = True
 
         # The monotonic clock is the duration's, and `started_at` the row's:
@@ -2697,7 +2704,7 @@ class AgentCore:
             or NOTHING_WAITING
         )
 
-    async def check_background_call(self, task_id: str) -> dict[str, Any]:
+    async def check_background_call(self, task_id: str, ctx: Context) -> dict[str, Any]:
         """Where one background call stands.
 
         `status` is `running`, `finished`, `failed` or `cancelled`; `tool` and
@@ -2706,30 +2713,35 @@ class AgentCore:
         when the call ends; this asks where it stands, not what it said.
 
         `task_id` is the id the backgrounded call answered with.  A task that
-        does not exist — or one that was never started here — is refused.
+        does not exist — or one started in another conversation — is refused.
 
         Args:
             task_id: The id the backgrounded call answered with.
         """
         try:
-            return await check_async({"task_id": task_id})
+            return await check_async({"task_id": task_id}, scope=_background_scope(ctx))
         except ToolFailed as exc:
             raise ToolError(str(exc)) from exc
 
-    async def cancel_background_call(self, task_id: str) -> dict[str, Any]:
+    async def cancel_background_call(
+        self, task_id: str, ctx: Context
+    ) -> dict[str, Any]:
         """Abandon a running background call, and answer where it stands.
 
         `status` is `cancelled` when this is what stopped it, and the call's own
         ending when it was already over — in which case its `result` is still
         handed over, not dropped.
 
-        `task_id` is the id the backgrounded call answered with.
+        `task_id` is the id the backgrounded call answered with.  A task
+        started in another conversation is refused, exactly as an unknown id.
 
         Args:
             task_id: The id the backgrounded call answered with.
         """
         try:
-            return await cancel_async({"task_id": task_id})
+            return await cancel_async(
+                {"task_id": task_id}, scope=_background_scope(ctx)
+            )
         except ToolFailed as exc:
             raise ToolError(str(exc)) from exc
 
@@ -2813,6 +2825,16 @@ class AgentCore:
             FunctionTool.from_function(self.reset),
         ):
             mcp.add_tool(tool)
+
+
+def _background_scope(ctx: Context) -> ConversationKey | None:
+    """The conversation a `check_async`/`cancel_async` call is for.
+
+    `None` when the call named none — the registry's own rule (`_may_read`)
+    then decides, rather than this refusing a call that simply did not say.
+    """
+    conversation = request_conversation(ctx)
+    return conversation_key(*conversation) if conversation else None
 
 
 def _reply(

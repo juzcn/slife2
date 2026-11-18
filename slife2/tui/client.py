@@ -126,7 +126,7 @@ class AgentClient(Protocol):
         **The facts are the agent server's**, because it is the only place that
         says what a switch does to a conversation already running: `default`,
         `previous`, and how many conversations moved.  What the *window* draws
-        with them is the window's (`slife2.tui.i18n`), like every other line it
+        with them is the window's (`slife2.libs.harness.i18n`), like every other line it
         shows.  A refusal arrives as a `ToolError` — the server answered, the
         connection is fine, and its sentence is written for a person to read —
         which is what this used to infer from a `[refused]` prefix in the text.

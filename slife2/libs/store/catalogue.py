@@ -71,7 +71,6 @@ from slife2.libs.store.index import (
     storable,
     table_exists,
     vector_identity,
-    where_clause,
 )
 
 logger = logging.getLogger(__name__)
@@ -1766,20 +1765,13 @@ class ToolStore:
         # machine with ~900 chunks of loaded tools filled the page with rows the
         # filter then dropped, and the answer was a confident empty page while
         # matching unloaded tools existed beyond it.
+        # **The page, and no widening.**  The filters are applied inside the
+        # semantic leg's KNN (its rowid restriction, `_nearest`), so a filtered-
+        # out chunk occupies no place and `over` stays a multiple of what the
+        # caller asked for.  Widening by the filtered chunks instead grew with
+        # the corpus without bound and could pass `sqlite-vec`'s 4096-candidate
+        # ceiling, which fails the whole search rather than answering it.
         over = limit * _OVERFETCH
-        # **A filter the KNN cannot apply costs the page places too.**  The
-        # semantic leg is a `vec0` KNN and every filter — a category, a status,
-        # `unloaded_only` — is re-applied to its answer afterwards
-        # (`_rows_in_order`), so a chunk belonging to a filtered-out row still
-        # occupies one of the `k` places and is then dropped.  The page can come
-        # back empty while matching rows exist beyond those chunks — the shape
-        # `tool_search(unloaded_only=true, sentences=[...])` produces on a
-        # machine whose loaded tools are the nearest ones.  The excluded chunks
-        # are counted and the page widened by them, bounded by the same ceiling
-        # the unfiltered page uses.
-        if clauses:
-            excluded = await off_loop(self._excluded_chunks, clauses, values)
-            over += excluded
         expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
         if keywords:
@@ -1789,7 +1781,9 @@ class ToolStore:
 
         # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
         # so the cabinet puts its page together by the same rule this one does.
-        queries, lists = await self._semantic_lists(sentences, embedder, over)
+        queries, lists = await self._semantic_lists(
+            sentences, embedder, over, clauses, values
+        )
         # `fuse_shortlist` scores the shortlist through `_meaning_of`, which
         # opens a connection and computes cosines in Python — blocking work that
         # belongs off the hub's shared loop, like every other DB call here.
@@ -1993,7 +1987,12 @@ class ToolStore:
         return [int(row["rowid"]) for row in rows]
 
     async def _semantic_lists(
-        self, sentences: Sequence[str], embedder: Embedder, k: int
+        self,
+        sentences: Sequence[str],
+        embedder: Embedder,
+        k: int,
+        clauses: list[str],
+        values: list[Any],
     ) -> tuple[list[list[float]], list[list[tuple[int, float]]]]:
         """`(the query vectors, one ranked list each)`, out of **one** `embed`.
 
@@ -2030,45 +2029,39 @@ class ToolStore:
             so="this search cannot say what a tool is about",
         )
         return vectors, [
-            await off_loop(self._nearest, sqlite_vec.serialize_float32(vector), k)
+            await off_loop(
+                self._nearest,
+                sqlite_vec.serialize_float32(vector),
+                k,
+                clauses,
+                values,
+            )
             for vector in vectors
         ]
 
-    def _excluded_chunks(self, clauses: list[str], values: list[Any]) -> int:
-        """How many indexed chunks the search's filters exclude.
-
-        **The unit `k` is counted in.**  The keyword leg filters in SQL, but the
-        semantic leg cannot — a `vec0` KNN has no column to filter on — so its
-        answer is filtered after fusion by `rows_in_order`, and the filtered
-        chunks have already spent their places in `k`.  This is the number the
-        page is widened by so the rows that pass the filter keep the page they
-        asked for.
-        """
-        if not clauses:
-            return 0
-        # **The chunks of the rows the filter rejects**, which is the set that
-        # spends places in `k` and is dropped afterwards.  Written as the
-        # complement of the filtered set rather than as the negation of each
-        # clause, so a NULL in a filtered column cannot turn "does not match"
-        # into "unknown" and count the wrong side.
-        where = where_clause(clauses)
-        with self._connect() as connection:
-            return int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM tool_chunk c"
-                    " JOIN tool t ON t.name = c.name"
-                    " WHERE t.rowid NOT IN"
-                    f" (SELECT rowid FROM tool WHERE 1 = 1 {where})",
-                    values,
-                ).fetchone()[0]
-            )
-
-    def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
-        """The KNN, and the dedup it cannot do itself.
+    def _nearest(
+        self,
+        query_vector: bytes,
+        k: int,
+        clauses: list[str],
+        values: list[Any],
+    ) -> list[tuple[int, float]]:
+        """The KNN, the dedup it cannot do itself, and the filters.
 
         `k` counts *chunks*, and a tool with a long schema has several, so the
         best chunk per tool is what is kept — a KNN in `vec0` refuses the
         `GROUP BY` that would say so.
+
+        **The filters are a `rowid IN (…)` restriction on the KNN**, the form
+        `sqlite-vec` applies before it ranks (a plain `WHERE` on the virtual
+        table is refused).  Filtering its answer afterwards let rejected
+        chunks spend the `k` places and drop out, so a sentences-only search
+        whose nearest chunks all belonged to filtered-out rows answered an
+        empty page while matching rows existed beyond them; widening `k` by
+        the rejected chunks repaid that but grew with the corpus, past the
+        extension's 4096-candidate ceiling.  The name subquery keeps one table
+        in scope, so a clause naming `name` cannot be ambiguous with
+        `tool_chunk`'s.
 
         **Rows from two models cannot be ranked against each other, and this
         does not have to check.**  It used to say it skipped a vector of another
@@ -2086,12 +2079,20 @@ class ToolStore:
             # the same state as an empty meaning leg; so does this.
             if not table_exists(connection, "tool_vec"):
                 return []
+            window = (
+                " AND v.rowid IN ("
+                "SELECT c2.id FROM tool_chunk c2"
+                f" WHERE c2.name IN (SELECT name FROM tool {filter_clause(clauses)}))"
+                if clauses
+                else ""
+            )
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, t.name AS name, v.distance AS distance"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
                 " JOIN tool t ON t.name = c.name"
-                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-                (query_vector, k),
+                f" WHERE v.embedding MATCH ? AND k = ?{window}"
+                " ORDER BY v.distance",
+                (query_vector, k, *values),
             ).fetchall()
         nearest: dict[str, tuple[int, float]] = {}
         for row in rows:

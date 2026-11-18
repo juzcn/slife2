@@ -1339,17 +1339,16 @@ def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
     assert {"ours__waiting", "skill:alpha", "cli:alpha"} <= only_names
 
 
-def test_unloaded_only_widens_the_semantic_page_by_the_filtered_chunks(
-    tmp_path,
-) -> None:
-    """**The filter is applied after the KNN, so the KNN has to look past it.**
+def test_unloaded_only_filters_inside_the_semantic_leg(tmp_path) -> None:
+    """**The filter is part of the KNN, so its chunks take no place.**
 
-    `unloaded_only` is in the keyword leg's SQL and in `rows_in_order`, but a
-    `vec0` KNN cannot filter.  Every chunk of a loaded tool still takes one of
-    the `k` places and is dropped afterwards, so a sentences-only search whose
-    nearest chunks all belong to loaded tools came back with an empty page —
-    a confident "nothing matches" — although unloaded tools existed beyond
-    them.  The page is widened by the filtered chunks.
+    `unloaded_only` is in the keyword leg's SQL and in `rows_in_order`, and a
+    `vec0` KNN cannot filter a column.  Filtering its answer afterwards let
+    every chunk of a loaded tool spend one of the `k` places and drop out, so
+    a sentences-only search whose nearest chunks all belonged to loaded tools
+    came back with an empty page — a confident "nothing matches" — although
+    unloaded tools existed beyond them.  The rowid restriction keeps the
+    chunks of rejected rows out of the ranking entirely.
     """
     store = store_at(tmp_path)
     # Paragraphs, so every chunk of the long document carries the query's word
@@ -1365,6 +1364,47 @@ def test_unloaded_only_widens_the_semantic_page_by_the_filtered_chunks(
     merge(store, "other", "plugin", [tool("ours__free", "trump")])
     store.set_load("ours__held", LOADED)
     store.set_load("ours__held2", LOADED)
+
+    page = asyncio.run(
+        store.search(sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True)
+    )
+
+    assert [row["name"] for row in page["results"]] == ["ours__free"]
+
+
+def test_a_filtered_search_stays_under_the_knn_ceiling(tmp_path) -> None:
+    """**`k` is a multiple of the page, not the page plus the rejected corpus.**
+
+    `sqlite-vec` refuses a `k` above 4096.  Widening the semantic leg by every
+    chunk its filters rejected grew with the corpus, so a filtered sentences
+    search over a large index raised instead of answering.  The rejected
+    chunks are kept out of the KNN's ranking, so `k` stays bounded by the page.
+    """
+    import sqlite_vec
+
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "ours",
+        "plugin",
+        [tool("ours__held", "工具")],
+    )
+    merge(store, "other", "plugin", [tool("ours__free", "trump")])
+    store.set_load("ours__held", LOADED)
+    # More chunks than the extension's ceiling, on the row the filter rejects.
+    with store._connect(write=True) as connection:
+        for index in range(4097):
+            row = connection.execute(
+                "INSERT INTO tool_chunk (name, chunk_index) VALUES ('ours__held', ?)",
+                (100 + index,),
+            )
+            connection.execute(
+                "INSERT INTO tool_vec (rowid, embedding) VALUES (?, ?)",
+                (
+                    row.lastrowid,
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0, 0.0]),
+                ),
+            )
 
     page = asyncio.run(
         store.search(sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True)

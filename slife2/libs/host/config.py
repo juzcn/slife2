@@ -1769,9 +1769,13 @@ class SkillSettings:
     from.
 
     `env` resolves through the same chain as a provider key — shell, then
-    credstore — and that is the whole point of having the section at all.  A
-    daemon started days ago never saw the key somebody exported this morning;
-    an entry here is what turns either into what a skill's script is handed.
+    credstore — **in the process that hands the playbook over, not in every
+    process that loads the file**.  `load()` runs in every server of the stack,
+    and a locked keyring raised inside it outside `load`'s own catch: every
+    config load on the machine died, including `slife2 down`, for a skill that
+    process would never use.  So the loader keeps the `${VAR}` reference and
+    `resolved_env()` is what the skills plugin calls where the value is
+    consumed — the same deferral the gateway and a tool server's `env:` use.
 
     A skill with no entry is not misconfigured: the environment alone is a real
     answer, and a playbook that needs nothing is the common case.
@@ -1792,6 +1796,17 @@ class SkillSettings:
     #: `false` keeps the playbook installed and out of the catalogue.  Read by
     #: the plugin that owns the section, which declares the row `disabled`.
     enabled: bool = True
+
+    def resolved_env(self) -> dict[str, str]:
+        """The entry's environment with its `${VAR}` references resolved.
+
+        **Called where the value is consumed**, never by the loader: a config
+        load happens in every server process, and a credential lookup belongs
+        to the one about to hand a playbook over (`defer_secret`).  A reference
+        neither the environment nor the keyring answers stays verbatim, which
+        is what `slife2.plugins.skills.playbooks.readiness` reports as missing.
+        """
+        return {key: resolve_deferred(value) for key, value in self.env.items()}
 
 
 #: The four things a media provider can be asked for.  A closed set: each one
@@ -3532,25 +3547,15 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
     )
 
 
-def _secrets(raw: Any, where: str) -> dict[str, str]:
-    """A mapping whose values go through the secret chain.
-
-    Only `env` and `headers`, because those are the two places a tool server is
-    handed a credential; a `command` or an `args` list is a program name and is
-    visible in the process table regardless.
-    """
-    return {
-        str(key): resolve_secret(value)
-        for key, value in read_mapping(raw, where).items()
-    }
-
-
 def _deferred_secrets(raw: Any, where: str) -> dict[str, str]:
-    """A tool server's mapping, with ``${VAR}`` kept for the connection.
+    """A section's mapping, with ``${VAR}`` kept for the process that uses it.
 
-    The entries this reads are loaded by every server process but dialled by
-    one (`slife2.clients.gateway.mcp_config`), so resolving at load would make
-    the whole stack pay for credentials only that one uses.
+    The entries this reads are loaded by every server process but consumed by
+    one: a tool server's are dialled by the gateway
+    (`slife2.clients.gateway.mcp_config`), a skill's are handed over by the
+    skills plugin (`SkillSettings.resolved_env`).  Resolving at load would make
+    the whole stack pay for credentials only that one uses — and a keyring that
+    refuses would fail every load on the machine, including `slife2 down`.
     """
     return {
         str(key): defer_secret(value) for key, value in read_mapping(raw, where).items()
@@ -3746,7 +3751,9 @@ def _skills_entry(spec: Any, name: str) -> SkillSettings:
 
 
 _SKILL_FIELDS: tuple[Field, ...] = (
-    Field("env", _secrets),
+    # Deferred, and resolved by `SkillSettings.resolved_env` in the skills
+    # plugin: the section is loaded by every process and used by one.
+    Field("env", _deferred_secrets),
     Field("enabled", read_switch),
 )
 

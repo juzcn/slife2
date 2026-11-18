@@ -1341,10 +1341,9 @@ class TurnStore:
         the sparse leg (`_fuse_questions`).
 
         **`limit` is each leg's page, and the answer is their fusion.**  Each
-        meaning question's leg brings up to `limit + len(excluded) +
-        excluded_chunks` candidates — the excluded turns' *chunks* are what
-        occupy the KNN — the keyword leg as many, and what is returned is their
-        fused union, never cut by this store.
+        meaning question's leg brings up to `limit` candidates, the keyword leg
+        as many, and what is returned is their fused union, never cut by this
+        store.
         The similarity floor, the rerank floor and the token budget are the
         *caller's* — they depend on a model's window and on what the decision
         kept, neither of which this store knows — and the split is deliberate:
@@ -1362,12 +1361,14 @@ class TurnStore:
         live list: the discriminator read every turn in it, so a recall is asked
         for what is missing rather than for what is in hand, and a turn in it
         would spend a candidate slot, a place in the `k` and a share of the
-        token budget on something already there.  The keyword leg and the
-        time-ranked branch filter them in SQL; the semantic leg cannot (a `vec0`
-        KNN takes only the rowid restriction above, not a join against `turn`),
-        so its answer is filtered after fusion, and `over` is widened by **the
-        chunks the excluded turns hold**, which is what they really occupy in a
-        `k` that counts chunks.
+        token budget on something already there.  All three branches filter
+        them in SQL.  The semantic leg's exclusion rides in the KNN's rowid
+        restriction — a temp table, because the live list can name more turns
+        than one statement may bind — so the `k` stays `limit`: widening it by
+        the excluded turns and their chunks instead made a large live context
+        ask for more candidates than `sqlite-vec` allows (4096) and every
+        recall fail, and a bare clamp would have starved the page it widened
+        for.  The Python filter after fusion stays as the backstop.
 
         **The time window is inside every leg**, including the semantic one:
         `since`/`until` restrict the KNN's rowids before it ranks, so a narrow
@@ -1404,24 +1405,13 @@ class TurnStore:
             )
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
-        # **`k` counts chunks, while `exclude` names turns.**  The semantic leg
-        # is a `vec0` KNN and cannot filter the excluded turns out of its
-        # candidates, so they are removed after fusion — which means every chunk
-        # of every excluded turn still occupies a place in the k.  Widening by
-        # `len(excluded)` repays one chunk per excluded turn, not the four an
-        # ordinary turn holds, so a full context can fill the whole page and a
-        # semantic recall comes back holding nothing but turns the caller
-        # already has.  The chunk count is what the excluded turns really took.
-        excluded_chunks = (
-            await off_loop(self._chunks_of, list(excluded)) if excluded else 0
-        )
-        # **Not capped by `MAX_SQL_VARS`.**  That number is how many values one
-        # statement may *bind*; this is a count of candidates for a KNN's `k`
-        # and a SQL `LIMIT`, both plain numbers.  Capping it starved the recall:
-        # a large live context filled all 900 places with turns the caller
-        # already had, the filter below removed them, and a semantic recall came
-        # back empty while a matching turn sat beyond the page.
-        over = limit + len(excluded) + excluded_chunks
+        # **`k` stays `limit`.**  The excluded turns occupy no KNN place: the
+        # semantic leg excludes them inside its rowid restriction
+        # (`_nearest_turns`), so the page is all candidates the caller asked
+        # for.  Widening `k` by every excluded turn and chunk instead grew past
+        # `sqlite-vec`'s 4096-candidate ceiling on a large live context, and
+        # every recall raised rather than answered.
+        over = limit
         keyword: list[int] = []
         if words:
             try:
@@ -1446,7 +1436,7 @@ class TurnStore:
                     [*params, *exclude_params],
                 )
         lists = await self._semantic_lists(
-            meaning or [words], embedder, over, clauses, params
+            meaning or [words], embedder, over, clauses, params, excluded
         )
         nearest: dict[int, float] = {}
         for found in lists:
@@ -1763,6 +1753,7 @@ class TurnStore:
         k: int,
         clauses: list[str],
         params: Sequence[Any],
+        excluded: set[int],
     ) -> list[list[tuple[int, float]]]:
         """One ranked list per question, out of **one** `embed`, nearest first.
 
@@ -1809,34 +1800,10 @@ class TurnStore:
                 k,
                 clauses,
                 params,
+                excluded,
             )
             lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
         return lists
-
-    def _chunks_of(self, turn_ids: Sequence[int]) -> int:
-        """How many indexed chunks those turns hold.
-
-        **The unit `k` is counted in.**  A `vec0` KNN ranks chunks, so an
-        excluded turn takes one place per chunk it owns — and the recall has to
-        widen its page by that many to leave the same number of places for the
-        turns the caller is asking for.  Chunked, because the excluded list can
-        be longer than one statement may bind (`MAX_SQL_VARS`).
-        """
-        wanted = normalise_ids(turn_ids)
-        if not wanted:
-            return 0
-        total = 0
-        with self._connect() as connection:
-            for start in range(0, len(wanted), MAX_SQL_VARS):
-                chunk = wanted[start : start + MAX_SQL_VARS]
-                total += int(
-                    connection.execute(
-                        f"SELECT COUNT(*) FROM turn_chunk"
-                        f" WHERE turn_id IN ({_marks(chunk)})",
-                        chunk,
-                    ).fetchone()[0]
-                )
-        return total
 
     def _nearest_turns(
         self,
@@ -1844,6 +1811,7 @@ class TurnStore:
         k: int,
         clauses: list[str],
         params: Sequence[Any],
+        excluded: set[int],
     ) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.
 
@@ -1860,20 +1828,39 @@ class TurnStore:
         `rowid = ?` and `rowid >= ?` are accepted and answer *nothing* rather
         than raising, so the subquery is the only form used here.
 
+        **The excluded turns ride in that same restriction**, through a temp
+        table filled on this call's connection: the live context can hold more
+        turns than one statement may bind, and excluding them here is what lets
+        `k` stay `limit` instead of widening it past `sqlite-vec`'s 4096-
+        candidate ceiling.  A temp table rather than a bound `NOT IN`: the ids
+        are not values this query's caller wrote; they are a set this call
+        materialises on its connection.
+
         `1 - distance` is a similarity only because the DDL says `cosine` — on an
         L2 table that arithmetic yields numbers that are plausible and wrong
         rather than visibly broken, which is what `vector_ddl` exists to
         prevent.
         """
+        conditions = list(clauses)
+        if excluded:
+            conditions.append("c2.turn_id NOT IN (SELECT id FROM excluded_turn)")
         window = (
             " AND v.rowid IN ("
             "SELECT c2.id FROM turn_chunk c2"
             " JOIN turn t ON t.rowid = c2.turn_id"
-            f" {filter_clause(clauses)})"
-            if clauses
+            f" {filter_clause(conditions)})"
+            if conditions
             else ""
         )
         with self._connect() as connection:
+            if excluded:
+                connection.execute(
+                    "CREATE TEMP TABLE excluded_turn (id INTEGER PRIMARY KEY)"
+                )
+                connection.executemany(
+                    "INSERT INTO excluded_turn (id) VALUES (?)",
+                    [(turn_id,) for turn_id in excluded],
+                )
             rows = connection.execute(
                 "SELECT c.turn_id AS turn_id, v.distance AS distance"
                 " FROM turn_vec v JOIN turn_chunk c ON c.id = v.rowid"

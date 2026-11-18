@@ -1,10 +1,16 @@
-"""The window's two languages: English and Chinese, chosen from the OS.
+"""The interface's two languages: English and Chinese, chosen from the OS.
 
 One translation table and a :func:`t` accessor.  Two languages only, no YAML, no
 catalogs, no dependency — detection is the OS's own answer in a dozen lines of
 stdlib, and the whole user-facing surface is the strings in this one file.
 
-**What is translated is the window, and nothing else.**  The model never reads
+**It lives in the libraries because the lines cross process boundaries.**  The
+window draws most of these, and two of them — a peer or a channel coming online —
+are composed by a *daemon* that must not import the terminal package for the
+vocabulary (`slife2.libs.harness.notes`).  One table, imported by both sides,
+is what keeps `⚡ jill online` from being spelled twice.
+
+**What is translated is the interface, and nothing else.**  The model never reads
 any of this: the system prompt, every tool schema, every job's result strings and
 every log line are English by rule, and a conversation that changed language with
 the terminal's would be a second variable in the one place a difference is
@@ -109,7 +115,7 @@ def set_language(lang: str) -> None:
 
 #: key → {lang: text}.  Every user-facing string of the window lives here.
 #:
-#: **The glyphs are not in these strings.**  `slife2.tui.theme.GLYPHS`' marks
+#: **The glyphs are not in these strings.**  `slife2.libs.harness.glyphs.GLYPHS`' marks
 #: (▸ ▾ ⟐ ↑ ✗ ✓ …) are attached as their own spans at the call site, so a
 #: translation cannot drop one, and no entry carries a symbol that is not a word.
 #: The one thing that *is* inside the text is a trailing or leading space where
@@ -123,7 +129,7 @@ def set_language(lang: str) -> None:
 #: is the only place that knows the count, and a language that inflects
 #: differently from English is a value change rather than a code change.
 _STRINGS: dict[str, dict[str, str]] = {
-    # ── the harness's own lines (`slife2.tui.notes`) ──────────────────────
+    # ── the harness's own lines (`slife2.libs.harness.notes`) ──────────────────────
     # The count of turns, in the two spellings the notes below are written in.
     "turn_one": {
         "en": "{n} turn",

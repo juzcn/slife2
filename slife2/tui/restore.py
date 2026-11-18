@@ -35,14 +35,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slife2.libs.harness import notes
+from slife2.libs.harness.i18n import t
 from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
 from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness
-from slife2.tui import notes
-from slife2.tui.i18n import t
 from slife2.tui.widgets import WINDOW_CHANNEL, ChatView
 
 logger = logging.getLogger(__name__)

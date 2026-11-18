@@ -120,8 +120,51 @@ _WIRE = WireParts(
 )
 
 
+def reasoning_blocks(
+    payload: dict[str, Any] | None, model: str
+) -> list[dict[str, Any]]:
+    """The thinking blocks this wire may replay from a message's opaque payload.
+
+    **Only for the model that produced them.**  A signed thinking block is
+    bound to its model; replaying one to another is a 400, so a conversation
+    moved with `model_switch` keeps its old blocks in the record and sends none
+    of them to the new model.  Empty `model` is the caller saying it does not
+    replay reasoning at all (this model did not ask for thinking).
+
+    Blocks are rebuilt from the fields this wire knows rather than passed
+    through, so an envelope from another build cannot smuggle a key into the
+    request; a block whose shape this build cannot send is named and dropped,
+    because a malformed block is a 400 as surely as a missing one.
+    """
+    if not payload or not model or payload.get("model") != model:
+        return []
+    blocks: list[dict[str, Any]] = []
+    for block in payload.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "thinking":
+            text = block.get("thinking")
+            signature = block.get("signature")
+            if isinstance(text, str) and isinstance(signature, str) and signature:
+                blocks.append(
+                    {"type": "thinking", "thinking": text, "signature": signature}
+                )
+                continue
+        elif kind == "redacted_thinking":
+            data = block.get("data")
+            if isinstance(data, str) and data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+                continue
+        logger.warning(
+            "anthropic: dropping a reasoning block this build cannot replay (%r)",
+            kind,
+        )
+    return blocks
+
+
 def to_anthropic_messages(
-    messages: list[Message],
+    messages: list[Message], *, model: str = ""
 ) -> tuple[str, list[dict[str, Any]]]:
     """Convert neutral messages into `(system, messages)`.
 
@@ -134,6 +177,12 @@ def to_anthropic_messages(
     Same-role turns are merged into one.  That is what makes a batch of tool
     results followed by user text a single `user` turn instead of three, which
     strict endpoints require.
+
+    **`model` is what decides whether a turn's thinking blocks go back.**  The
+    API requires them returned unmodified beside the tool results when thinking
+    is on — without them the second call of every tool loop is a 400 — and it
+    rejects blocks signed by another model, so this replays exactly the blocks
+    of the model being called (`reasoning_blocks`).
     """
     system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -177,7 +226,12 @@ def to_anthropic_messages(
             continue
 
         if message.role == "assistant":
-            blocks = to_anthropic_blocks(message.content)
+            # **Thinking blocks first**, which is the order the API emitted them
+            # in and the order it requires them back in.
+            blocks = [
+                *reasoning_blocks(message.reasoning, model),
+                *to_anthropic_blocks(message.content),
+            ]
             for call in message.tool_calls:
                 blocks.append(
                     {
@@ -290,8 +344,13 @@ def build_request(
     settings: ModelSettings,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for."""
-    system, converted = to_anthropic_messages(messages)
     max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
+    thinking = thinking_parameter(settings, max_tokens)
+    # A model that did not ask for thinking is a model to which a signed block
+    # is not ours to send; the empty model makes `reasoning_blocks` drop them.
+    system, converted = to_anthropic_messages(
+        messages, model=settings.model if thinking is not None else ""
+    )
 
     request: dict[str, Any] = {
         "model": settings.model,
@@ -327,7 +386,6 @@ def build_request(
         if value is not None
     }
 
-    thinking = thinking_parameter(settings, max_tokens)
     if thinking is not None:
         request["thinking"] = thinking
         # A thinking budget must leave room for an answer, and sampling is what
@@ -344,7 +402,50 @@ def build_request(
     return request
 
 
-def translate(event: Any) -> list[ProviderEvent]:
+class ThinkingBlocks:
+    """One stream's thinking blocks, assembled across its events.
+
+    **A thinking block cannot be built from one event.**  Its text arrives as
+    `thinking_delta`s and its signature arrives afterwards, in a
+    `signature_delta`, and the API accepts the block back only whole — text and
+    signature together, unmodified.  So the pieces are kept here, one entry per
+    content-block index, and the block is emitted at `content_block_stop`.
+
+    A block with no signature is not emitted: a gateway that speaks this wire
+    without signing its thinking cannot have its block replayed, and inventing
+    an unsigned one would be a 400 from the endpoints that check.  Those
+    gateways do not require the replay anyway, so dropping it is exactly the
+    old behaviour rather than a new loss.
+    """
+
+    def __init__(self) -> None:
+        self._text: dict[int, list[str]] = {}
+        self._signature: dict[int, list[str]] = {}
+
+    def open(self, index: int, block: Any) -> None:
+        """Start a block that `close` will finish."""
+        self._text[index] = [getattr(block, "thinking", "") or ""]
+        signature = getattr(block, "signature", "") or ""
+        self._signature[index] = [signature] if signature else []
+
+    def add_text(self, index: int, thinking: str) -> None:
+        self._text.setdefault(index, []).append(thinking)
+
+    def add_signature(self, index: int, signature: str) -> None:
+        self._signature.setdefault(index, []).append(signature)
+
+    def close(self, index: int) -> dict[str, Any] | None:
+        """The finished block, or None when this index is not a signed one."""
+        text = "".join(self._text.pop(index, []))
+        signature = "".join(self._signature.pop(index, []))
+        if not signature:
+            return None
+        return {"type": "thinking", "thinking": text, "signature": signature}
+
+
+def translate(
+    event: Any, reasoning: ThinkingBlocks | None = None
+) -> list[ProviderEvent]:
     """Turn one raw Anthropic stream event into provider events.
 
     Usage is split across two events and each contributes only its own half:
@@ -353,13 +454,30 @@ def translate(event: Any) -> list[ProviderEvent]:
     count the output — `message_start` already reports `output_tokens: 1` for
     the message it just opened — so each half is emitted as a partial `Usage`
     and the accumulator adds them correctly.
+
+    `reasoning` is the per-stream state that assembles thinking blocks
+    (`ThinkingBlocks`); without one — a caller translating a single event — the
+    readable `thinking` still streams and no opaque block is built, which is
+    the old behaviour rather than a silent reading of the wrong thing.
     """
     events: list[ProviderEvent] = []
     kind = getattr(event, "type", "")
 
     if kind == "content_block_start":
         block = getattr(event, "content_block", None)
-        if getattr(block, "type", "") == "tool_use":
+        index = int(getattr(event, "index", 0) or 0)
+        block_type = getattr(block, "type", "")
+        if block_type == "thinking" and reasoning is not None:
+            reasoning.open(index, block)
+        elif block_type == "redacted_thinking":
+            # Complete at start: there is no text and no signature, only the
+            # provider's encrypted blob, which goes back exactly as it came.
+            data = getattr(block, "data", "") or ""
+            if data:
+                events.append(
+                    Chunk(reasoning=({"type": "redacted_thinking", "data": data},))
+                )
+        if block_type == "tool_use":
             # The id and name arrive here; the arguments stream afterwards.
             events.append(
                 Chunk(
@@ -386,7 +504,15 @@ def translate(event: Any) -> list[ProviderEvent]:
             # answer — the two are displayed differently and must not mix.
             thinking = getattr(delta, "thinking", "") or ""
             if thinking:
+                if reasoning is not None:
+                    reasoning.add_text(index, thinking)
                 events.append(Chunk(thinking=thinking))
+        elif delta_type == "signature_delta":
+            # The signature that makes the block replayable; it belongs to the
+            # block, not to the display, so it produces no event of its own.
+            signature = getattr(delta, "signature", "") or ""
+            if signature and reasoning is not None:
+                reasoning.add_signature(index, signature)
         elif delta_type == "input_json_delta":
             events.append(
                 Chunk(
@@ -398,6 +524,12 @@ def translate(event: Any) -> list[ProviderEvent]:
                     )
                 )
             )
+
+    elif kind == "content_block_stop":
+        if reasoning is not None:
+            block = reasoning.close(int(getattr(event, "index", 0) or 0))
+            if block is not None:
+                events.append(Chunk(reasoning=(block,)))
 
     elif kind == "message_start":
         message = getattr(event, "message", None)
@@ -496,12 +628,13 @@ def _make_streamer() -> Streamer:
     """
 
     def make_translator() -> Translate:
-        """One stream's translation, carrying its running output total."""
+        """One stream's translation, carrying its output total and its blocks."""
         produced = 0
+        reasoning = ThinkingBlocks()
 
         def one(event: Any) -> Iterable[ProviderEvent]:
             nonlocal produced
-            for out in translate(event):
+            for out in translate(event, reasoning):
                 # `isinstance`, because one raw event produces *both* kinds:
                 # `message_delta` yields a usage chunk and a `Finish`, and the
                 # second has no `usage` at all — reading it on the union is an

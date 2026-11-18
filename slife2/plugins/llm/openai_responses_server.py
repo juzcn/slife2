@@ -107,7 +107,30 @@ def to_responses_content(content: Any) -> Any:
     return content_parts(content, _WIRE) or None
 
 
-def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
+def reasoning_items(payload: dict[str, Any] | None, model: str) -> list[dict[str, Any]]:
+    """The reasoning items this wire may replay from a message's opaque payload.
+
+    **Only for the model that produced them**, on `Message.reasoning`'s rule;
+    empty `model` means this request did not ask the model to reason and must
+    not replay another one's items.
+
+    Items go back **exactly as received** — that is the API's own instruction,
+    and they are opaque to this build.  A `store: false` request asks for
+    `encrypted_content` beside them (`build_request`), because a stateless
+    server has nothing else to resolve the item against.
+    """
+    if not payload or not model or payload.get("model") != model:
+        return []
+    return [
+        item
+        for item in payload.get("blocks") or []
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+
+
+def to_responses_input(
+    messages: list[Message], *, model: str = ""
+) -> tuple[str, list[dict[str, Any]]]:
     """Convert neutral messages into `(instructions, input items)`.
 
     The two halves are separate because this API takes the system prompt as its
@@ -119,6 +142,10 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
     An assistant turn becomes a text item followed by one `function_call` per
     call, in that order — which is the order the API itself emits them in, so a
     history that came from a previous response round-trips unchanged.
+
+    **Its reasoning items go first.**  A reasoning model's second call in a
+    tool loop is a 400 without them when the response was not stored, and the
+    API emitted them before the message and calls it reasons about.
     """
     instructions: list[str] = []
     items: list[dict[str, Any]] = []
@@ -150,6 +177,7 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
             continue
 
         if message.role == "assistant":
+            items.extend(reasoning_items(message.reasoning, model))
             content = to_responses_content(message.content)
             if content is not None:
                 items.append({"role": "assistant", "content": content})
@@ -239,7 +267,13 @@ def build_request(
     settings: ModelSettings,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for."""
-    instructions, items = to_responses_input(messages)
+    reasoning = reasoning_parameter(settings)
+    # A model that did not ask for reasoning is a model to which another one's
+    # items are not ours to send; the empty model makes `reasoning_items` drop
+    # them.
+    instructions, items = to_responses_input(
+        messages, model=settings.model if reasoning is not None else ""
+    )
 
     request: dict[str, Any] = {
         "model": settings.model,
@@ -262,13 +296,21 @@ def build_request(
     if settings.max_tokens is not None:
         request["max_output_tokens"] = settings.max_tokens
 
-    reasoning = reasoning_parameter(settings)
     if reasoning is not None:
         request["reasoning"] = reasoning
 
     store = store_parameter(settings)
     if store is not None:
         request["store"] = store
+    # **A stateless request must ask for the reasoning it will have to replay.**
+    # With `store: false` the server keeps nothing, so a reasoning item comes
+    # back without its `encrypted_content` unless this asks for it — and the
+    # next call of a tool loop cannot send back what it never received.  Only
+    # when reasoning was asked for: an endpoint that has no reasoning has no
+    # use for the field, and a partial gateway may refuse the ones it does not
+    # implement.
+    if reasoning is not None and store is False:
+        request["include"] = ["reasoning.encrypted_content"]
     return request
 
 
@@ -398,6 +440,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
         events.extend(_thinking_that_never_streamed(response, streamed))
+        events.extend(_reasoning_items(response))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_stop_reason(response)))
 
@@ -410,6 +453,7 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
         events.extend(_thinking_that_never_streamed(response, streamed))
+        events.extend(_reasoning_items(response))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_incomplete_reason(response)))
 
@@ -511,6 +555,50 @@ def _thinking_that_never_streamed(
         if text:
             events.append(Chunk(thinking=text))
     return events
+
+
+def _reasoning_items(response: Any) -> list[ProviderEvent]:
+    """The reasoning items of a completed response, exactly as received.
+
+    **The replay half.**  A reasoning model's next call in a tool loop must be
+    sent the items this one produced — that is the API's documented contract
+    for tool use, and with `store: false` the items carry the encrypted content
+    the request asked for (`build_request`).  They are opaque here: serialised
+    by the SDK's own model dump and replayed by `to_responses_input` untouched.
+
+    Emitted regardless of whether their summary streamed: the readable text and
+    the replayable item are different facts, and the display channel dropping a
+    delta must not cost the conversation the item.
+    """
+    items: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", "") != "reasoning":
+            continue
+        wire = _plain(item)
+        if isinstance(wire, dict):
+            items.append(wire)
+    return [Chunk(reasoning=tuple(items))] if items else []
+
+
+def _plain(value: Any) -> Any:
+    """An SDK object as the plain mapping its own encoder would write.
+
+    The SDK's types are Pydantic models and `model_dump` is their wire form;
+    a mapping or a list built by a test is walked the same way.  Anything else
+    is left alone — dropping the item would lose the only replayable copy the
+    conversation will ever have.
+    """
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(exclude_none=True, exclude_unset=True)
+        except TypeError:  # a non-Pydantic double with a same-named method
+            return dump()
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
 
 
 def _arguments_that_never_streamed(

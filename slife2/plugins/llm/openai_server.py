@@ -126,6 +126,9 @@ def to_provider_messages(
     for message in messages:
         wire = message.to_wire()
         thinking = wire.pop("thinking", "")
+        # The chat-completions wire has no name for another wire's reasoning
+        # blocks either; they are replayed by the adapters that wrote them.
+        wire.pop("reasoning", None)
         if thinking:
             wire["reasoning_content"] = thinking
         elif reasoning and message.role == "assistant":

@@ -428,3 +428,44 @@ async def test_a_job_that_exits_when_called_answers_a_failure(
         answer = await ask(client, "job_run", name="bail", arguments={})
 
     assert answer["text"].startswith("SystemExit")
+
+
+@pytest.mark.asyncio
+async def test_a_slow_job_file_does_not_hold_the_event_loop(
+    isolated_runtime: Path,
+) -> None:
+    """**A job's top-level code is arbitrary, and the scan runs on a shared loop.**
+
+    The first ask for a home loads every file in its `jobs/` folder, and a
+    module's top level is model-written code that may block.  Run on the event
+    loop, it stalls every conversation's jobs and the hub's refresh for its
+    duration; hopped, it delays this home's first listing and nothing else.
+    """
+    import asyncio
+
+    config_on_disk(isolated_runtime)
+    jobs = isolated_runtime / "jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    (jobs / "slow.py").write_text(
+        "import time\n"
+        "time.sleep(0.2)\n"  # timeouts: the value this test is built around
+        "\n"
+        "def slow() -> str:\n"
+        '    """Take a moment."""\n'
+        '    return "done"\n',
+        encoding="utf-8",
+    )
+    beat = asyncio.Event()
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.02)  # timeouts: the value this test is built around
+        beat.set()
+
+    async with Client(build_server(load())) as client:
+        ticker = asyncio.create_task(heartbeat())
+        try:
+            await ask(client, "job_list")
+        finally:
+            ticker.cancel()
+
+    assert beat.is_set(), "the shared event loop was held by the job scan"

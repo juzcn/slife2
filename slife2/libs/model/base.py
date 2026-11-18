@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec, Usage
 
@@ -56,6 +56,12 @@ class Chunk:
     #: — reasoning is collapsed by default — and because a caller that does not
     #: want to pay for thinking must be able to ignore it wholesale.
     thinking: str = ""
+    #: Completed provider reasoning blocks/items, opaque to this build and
+    #: carried onward for the adapter that must replay them.  Not a display
+    #: field — `slife2.libs.model.wire` does not encode it — so a dropped chunk
+    #: cannot lose something the conversation needs; the builder keeps them from
+    #: here, and `StreamChatResult.reasoning` is the authoritative copy.
+    reasoning: tuple[dict[str, Any], ...] = ()
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
     usage: Usage | None = None
 
