@@ -708,6 +708,11 @@ for a level below them.
 2. stop the subagent's loop;
 3. delete its directory.
 
+**The claim is the conversation table's, taken before the first step**: a
+message, a `reset` or a second `subagent_create` that names the subagent while
+its directory is being deleted is refused by the table, never raced against
+the delete.
+
 Releasing the place also withdraws every task around the member, in both
 directions. Each open send *to* it is recorded `cancelled`; each task it *sent*
 lives in the receiver's inbound table rather than the member's, so it is settled
@@ -800,7 +805,9 @@ by hand-over.
 A turn is: send the conversation to a model; stream the response; run the tools
 it requested; append the results; repeat until the model answers without
 requesting a tool. `libs/turn/loop.py` implements the algorithm;
-`plugins/agent/server.py` owns the conversations it runs in.
+`plugins/agent/` owns the conversations it runs in — `core.py` the loops table
+and the turn, `state.py` the conversation and its turns, `recording.py` the
+write, `model_tools.py` the model config, and `membership.py` the subagents.
 
 `AgentLoop` is built with a **backend** with one streaming method and a
 **registry** of tools, refreshed by a callback before every model call.
@@ -2771,7 +2778,8 @@ logic that hides the version mismatch instead of reporting it.
 The layering rule is stated in §2.5. Its purpose is that a module's kind is
 visible from its path: a reader who wants the loop opens `libs/turn/loop.py`; a
 reader who wants the process that runs conversations opens
-`plugins/agent/server.py`. The cost is one more directory level.
+`plugins/agent/server.py`, and the conversations it runs are `core.py` beside
+it. The cost is one more directory level.
 
 Every process in the tree is described outside it by one row of `PLUGINS`, which
 holds its name, probe, and port. `pyproject.toml`'s console scripts are the third
@@ -2863,7 +2871,6 @@ silent debt. The order is roughly by severity.
 | **The embeddings server pins its provider at boot** (`plugins/llm/embeddings_server.py`) | An `embeddings:` edit (model/base_url/key) is silently ineffective until restart, and the stores' identity check cannot notice because `describe()` keeps answering the old identity — against invariant 9. | `build_server` captures `active_provider()` once; the chat backends read live via `LiveProviders`. The fix resolves the active provider per call via `load_cached`, as they do. |
 | **Jobs load on the event loop** (`plugins/jobs/server.py`, `registry.py`) | A job file's slow or blocking top-level code (model-authored, arbitrary) stalls the whole jobs plugin — every conversation's jobs and the hub's `list_sources` refresh — for its duration. | `job_set`/`job_list`/`job_run` call `load_job`/`scan_jobs_dir` synchronously inside async tools. The fix hops loading via `asyncio.to_thread`; sandboxing is the separate deferred capability (§14.3). |
 | **A removal re-hangs the last entry's own inline comment** (`libs/host/configfile.py::_drop_entry`) | Removing a section's last entry moves its own inline comment (`command: c  # bee`) onto the predecessor, because `_take_intro` lifts the whole merged token and there is no following entry to introduce. | The predecessor's inline is now preserved (fixed), but the doomed entry's own inline is re-hung rather than deleted. The fix separates the inline head (dies with the entry) from the block remainder (moves) in the drop path; `_swap_entry` keeps both, which is right for a replacement. |
-| **The agent server is one ~3700-line closure** (`plugins/agent/server.py::build_server`) | Four separable subsystems share one closure; the `removing` claim is a rule each tool remembers rather than one owned invariant — the reset/remove races were instances of this. | Decompose into modules taking the narrow core surface (`loops`, `current()`, `this_home()`): the model-config family, the recording machinery, subagent membership. The core keeps the loops table, `conversation`/`reap`, `send_message`, `run_turn_into`, and the watch/transcript/reset reads. |
 | **config.py's hand-written sections drift** (`libs/host/config.py`) | Eight parsers re-implement the same shape with per-section drift; the missing unknown-key refusals (now added) were what drift looks like, and coercion rules differ per reader. | A small section-spec helper — `parse_section(raw, name, base, fields)` with a per-field reader/default/bounds — would make unknown-key refusal and typed coercion uniform and the missing-refusal bug unspellable; the pydantic families already prove the pattern. Splitting the registry from the loader would let the loader's uniformity be tested in one place. |
 | **Content-part/image/system translation is duplicated across two wires** (`anthropic_server.py`, `openai_responses_server.py`) | The same drop-and-name part converter and image-URL splitter are spelled twice with wire-specific names; §6.3 says a provider difference is configuration, not a branch. | Hoist one part converter into `server_common`, parameterized by the wire's text/image part names. |
 | **The cabinet's `_window` reimplements `time_window`'s instant logic** (`plugins/cabinet/store.py`, `libs/store/index.py`) | The non-day branch (julianday comparison, `instant_bound`, exclusive date-only `until`) is one rule stated twice; a change to one can miss the other. | Parameterize `time_window(axis, *, day=False)`; the cabinet keeps only its day-granular advance. |

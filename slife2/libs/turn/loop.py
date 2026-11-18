@@ -246,7 +246,7 @@ class AgentLoop:
         #: Kept on the loop because **a cancellation has no return value to
         #: carry them**: `run_turn` updates these after each model call and
         #: resets them when a turn begins, so the owner of a cancelled turn can
-        #: still say what it spent (`slife2.plugins.agent.server.Outcome.usage`).
+        #: still say what it spent (`slife2.plugins.agent.state.Outcome.usage`).
         #: On the loop rather than in a callback because the loop is the party
         #: that saw the calls, and a second accounting path would be a second
         #: place to forget one.

@@ -1363,7 +1363,7 @@ def build_server(
         # the run is the end.**  Nothing here can check that: the ids and the
         # messages arrive as two shapes and are joined by neither, so a caller
         # whose unbacked messages sat somewhere else would be handed back the
-        # wrong slice and told nothing.  `slife2.plugins.agent.server.rebuild_into`
+        # wrong slice and told nothing.  `slife2.plugins.agent.core.rebuild_into`
         # is the one caller, and `Loop.covered` is where it keeps the run at the
         # end — a turn that follows unbacked messages does not join `turn_ids`,
         # which is what keeps the count honest.

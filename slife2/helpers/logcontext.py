@@ -32,7 +32,7 @@ home.  A log line is read by a person looking at the transcript, and the home is
 where the files are rather than part of who the conversation is
 (`slife2.libs.host.runtime.agent_key` states the same rule for a name).  The
 turn's own stored id is written on the turn lines that know it
-(`slife2.plugins.agent.server`), not in this prefix: the id exists only after
+(`slife2.plugins.agent.core`), not in this prefix: the id exists only after
 the turn has been recorded.
 
 **The turn token is an id, and that is the difference.**  It exists before the
@@ -65,7 +65,7 @@ _turn: contextvars.ContextVar[str] = contextvars.ContextVar(
 def describe(agent: str, subagent: str = "") -> str:
     """The conversation as a log line names it: `jack` or `jack/echo`.
 
-    The same spelling `slife2.plugins.agent.server.describe` uses in its own
+    The same spelling `slife2.plugins.agent.core.describe` uses in its own
     lines, kept here so that a trace and a message cannot disagree about one
     conversation.
     """

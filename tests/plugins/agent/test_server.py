@@ -57,7 +57,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
-from slife2.libs.plugin.audience import TURN, conversation_meta
+from slife2.libs.plugin.audience import TURN, conversation_key, conversation_meta
 from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments, plan
@@ -89,6 +89,7 @@ from slife2.libs.turn.watch import (
 from slife2.libs.turn.watch import (
     decode as decode_watch,
 )
+from slife2.plugins.agent.core import Conversations
 from slife2.plugins.agent.server import (
     ATTACH_IMAGE,
     SUBAGENT_CREATE,
@@ -955,7 +956,7 @@ async def test_a_turn_leaves_one_line_saying_what_it_cost(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
-    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
         await send(server, "what is 6*7?")
 
     lines = [
@@ -990,7 +991,7 @@ async def test_every_turn_has_its_own_token(
         hub_client=hub,
         backend=FakeBackend(text_turn("one"), text_turn("two")),
     )
-    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
         await send(server, "one")
         await send(server, "two")
 
@@ -1830,7 +1831,7 @@ async def test_a_cancelled_turn_records_the_calls_that_completed(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
         interrupted = asyncio.create_task(send(server, "one"))
         # The first call answered and its tool ran; the cut lands in the second
         # call's stream.
@@ -2772,7 +2773,7 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
         return {"refused": [], "not_loaded": [], "text": "the list is fine"}
 
     monkeypatch.setattr(runtime_module, "unload_tools", no_names)
-    caplog.set_level(logging.WARNING, logger="slife2.plugins.agent.server")
+    caplog.set_level(logging.WARNING, logger="slife2.plugins.agent.core")
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=answering("done")
     )
@@ -3812,7 +3813,7 @@ async def test_a_broken_observer_does_not_lose_the_message(
     which is the whole reason that seam exists; the two events the *server* raises
     were the ones not routed through it.
     """
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import core as core_module
 
     class Broken:
         """A context whose progress stream is closed: every report throws."""
@@ -3822,7 +3823,7 @@ async def test_a_broken_observer_does_not_lose_the_message(
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
 
-    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+    monkeypatch.setattr(core_module, "ProgressObserver", Broken)
 
     backend = FakeBackend(text_turn("the answer"))
     server = build_server(
@@ -3850,7 +3851,7 @@ async def test_an_approval_request_that_cannot_be_written_refuses_the_call(
     answer is read now — a request that could not be written, or one not
     answered within `deliver.approval`, refuses the call and the turn runs on.
     """
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import core as core_module
 
     class Broken:
         def __init__(self, _ctx: Any, **_options: Any) -> None: ...
@@ -3858,8 +3859,8 @@ async def test_an_approval_request_that_cannot_be_written_refuses_the_call(
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
 
-    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
-    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent.server")
+    monkeypatch.setattr(core_module, "ProgressObserver", Broken)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent.core")
 
     backend = FakeBackend(
         ScriptedTurn(
@@ -4252,6 +4253,39 @@ async def test_a_name_the_agent_already_uses_is_refused(context, hub) -> None:
     assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
 
 
+def test_a_name_being_removed_cannot_start_or_reset_a_conversation() -> None:
+    """**The removal claim is the loops table's, and every path asks the same object.**
+
+    The old spelling was a set each tool remembered to consult, and the reset /
+    remove races were the tools that did not.  `Conversations` owns the claim
+    now: `start` refuses a claimed name and `refuse_removal` is the one reader a
+    reset asks, so both halves answer from one set — and a second removal is
+    refused by the claim itself rather than by a separate check.
+    """
+    conversations = Conversations()
+    key = conversation_key(DEFAULT_AGENT, "researcher")
+    sentinel = SimpleNamespace()
+
+    with conversations.removal(key, subject=repr("researcher")):
+        with pytest.raises(ToolError) as taken:
+            with conversations.removal(key, subject=repr("researcher")):
+                pass
+        assert "already being removed" in str(taken.value)
+        with pytest.raises(ToolError) as starting:
+            conversations.start(
+                key,
+                subject="jack/researcher",
+                factory=lambda: pytest.fail("a claimed name started a loop"),
+            )
+        assert "being removed" in str(starting.value)
+        with pytest.raises(ToolError):
+            conversations.refuse_removal(key, subject="jack/researcher")
+
+    loop = conversations.start(key, subject="jack/researcher", factory=lambda: sentinel)
+    assert loop is sentinel
+    assert conversations.get(key) is sentinel
+
+
 @pytest.mark.asyncio
 async def test_removing_a_subagent_takes_its_directory_with_it(context, hub) -> None:
     """One directory, one operation — the whole reason the nesting exists.
@@ -4584,7 +4618,7 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     that is still a *subagent* — one a second `subagent_remove` can finish —
     rather than a locked name no tool can own.
     """
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import membership as membership_module
 
     directory = tmp_path / "subagents" / "researcher"
     directory.mkdir(parents=True)
@@ -4602,7 +4636,7 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
         attempts.append(1)
         raise busy_error()
 
-    monkeypatch.setattr(server_module, "_delete_file", always_held)
+    monkeypatch.setattr(membership_module, "_delete_file", always_held)
     monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 0.05)
     with pytest.raises(ToolError) as refused:
         _remove_tree(directory)
@@ -4626,7 +4660,7 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
             raise busy_error()
         path.unlink(missing_ok=True)
 
-    monkeypatch.setattr(server_module, "_delete_file", goes_quiet)
+    monkeypatch.setattr(membership_module, "_delete_file", goes_quiet)
     _remove_tree(directory)
 
     assert len(calls) == 2, "a holder that let go was not waited out"
@@ -4680,6 +4714,68 @@ async def test_removing_a_subagent_tells_the_network_before_it_deletes(
     assert told == [{"agent": DEFAULT_AGENT, "subagent": "researcher"}]
     assert still_there == [True], "the network was told after the files went"
     assert not directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_removal_claim_refuses_messages_resets_and_creates_while_it_runs(
+    context, hub
+) -> None:
+    """**The claim is one invariant, tested at the wire.**
+
+    `subagent_remove` holds it from before its first await until the directory
+    is gone.  A message, a `reset` or a second `subagent_create` that names the
+    subagent in that window is refused by the loops table rather than racing the
+    delete: a turn would save into the directory the removal then deletes, a
+    reset would clear a store on its way out, and a create would rewrite the
+    record — or make the directory again — behind it.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    mcp: FastMCP = FastMCP("mesh")
+
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
+
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=FakeBackend(),
+            mesh_client=mesh,
+        )
+        await create_subagent(server, "researcher")
+        removing = asyncio.create_task(remove_subagent(server, "researcher"))
+        # The first step is the network notification, and it is where the
+        # removal waits — the claim is already held.
+        await entered.wait()
+
+        with pytest.raises(ToolError) as sent:
+            await send(server, "are you there?", subagent="researcher")
+        assert "being removed" in str(sent.value)
+
+        with pytest.raises(ToolError) as resetting:
+            await reset(server, subagent="researcher")
+        assert "being removed" in str(resetting.value)
+
+        # A second create is the third path: without the claim it would rewrite
+        # the record the removal is about to delete, or make the directory again
+        # if the delete had already run.
+        with pytest.raises(ToolError) as made:
+            await create_subagent(server, "researcher")
+        assert "being removed" in str(made.value)
+
+        release.set()
+        assert (await removing).data["removed"] is True
+
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
 
 @pytest.mark.asyncio

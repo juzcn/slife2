@@ -267,7 +267,7 @@ def connection_to(path: Path) -> Iterator[sqlite3.Connection]:
     and leaves the connection *open*.  On Windows an open handle is a file
     nobody else can delete — `subagent_remove` met exactly that, with a
     subagent's own `turns.db` undeletable
-    (`slife2.plugins.agent.server.subagent_remove`) — and a connection per call
+    (`slife2.plugins.agent.membership.subagent_remove`) — and a connection per call
     with none closed is a descriptor leak on every other platform.  The
     caller's `with` gets the commit (`with connection:`); the `finally` is the
     close.

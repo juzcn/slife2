@@ -49,7 +49,7 @@ from slife2.libs.turn.events import encode as encode_event
 class Snapshot:
     """The stored turns a conversation is made of, sent once and first.
 
-    `turns` is the shape `slife2.plugins.agent.server.transcript` returns — the
+    `turns` is the shape `slife2.plugins.agent.core.transcript` returns — the
     same list a window draws when it opens — so a watcher and a restarted
     window cannot show different histories for one conversation.
 

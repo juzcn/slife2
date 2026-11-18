@@ -804,7 +804,7 @@ SUBAGENTS_DIR = "subagents"
 #: The file that makes a directory a subagent's.  Spelt once for the reason
 #: `_SCHEDULE_DB` is: one function writes it and one walk finds them by it.
 #: The file inside a subagent's directory that makes it one.  Public because a
-#: removal deletes the *record* last (`slife2.plugins.agent.server._remove_tree`)
+#: removal deletes the *record* last (`slife2.plugins.agent.membership._remove_tree`)
 #: and must not spell the name a second time.
 SUBAGENT_RECORD = "subagent.yaml"
 _SUBAGENT_YAML = SUBAGENT_RECORD

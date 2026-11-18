@@ -357,7 +357,7 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
         TOOLHUB_SERVER_NAME,
     )
     from slife2.libs.turn import runtime as runtime_module
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import core as core_module
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
@@ -367,7 +367,7 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
     kept: dict[str, str] = {}
     cabinets: list[Client] = []
     closed: list[Client] = []
-    real_close = server_module.close_server
+    real_close = core_module.close_server
 
     async def open_ours(_url, **kwargs):
         """The server's own lazily-opened peers, in memory and by name."""
@@ -400,8 +400,8 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
 
     # The cabinet is still this server's direct peer; the context and hub
     # connections are the turn runtime's, so both modules get the same fakes.
-    monkeypatch.setattr(server_module, "open_server", open_ours)
-    monkeypatch.setattr(server_module, "close_server", close_ours)
+    monkeypatch.setattr(core_module, "open_server", open_ours)
+    monkeypatch.setattr(core_module, "close_server", close_ours)
     monkeypatch.setattr(runtime_module, "open_server", open_ours)
     monkeypatch.setattr(runtime_module, "close_server", close_ours)
     server = build_server(cfg, backend=backend)

@@ -153,7 +153,7 @@ NOT_APPLICABLE = "n/a"
 #: name in this set is injected, callable, and evictable only in the sense that
 #: nothing of ours ever is — see `_injectable_sql` for the argument,
 #: `slife2.plugins.toolhub.server.FUNC_TOOL_UNLOAD` for the trim, and
-#: `slife2.plugins.agent.server.CHECK_NEW_INPUT` for the mid-turn delivery.
+#: `slife2.plugins.agent.core.CHECK_NEW_INPUT` for the mid-turn delivery.
 #:
 #: **This set is the intersection of two different questions**, which is why it
 #: is spelled out rather than derived: `slife2.libs.turn.tools` has the vocabulary, and its

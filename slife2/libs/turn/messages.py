@@ -253,7 +253,7 @@ class Message:
         """The stored shape: the wire's, plus the metadata only a reader needs.
 
         **One method rather than a second writer in the turn log.**  The store
-        is handed messages as dicts (`slife2.plugins.agent.server.record`), and
+        is handed messages as dicts (`slife2.plugins.agent.recording.Recorder.record`), and
         a display field added at that call site would be a second answer to what
         a message is — on the path that has to agree with the live list exactly.
         So the wire stays the model's shape and this adds what the record keeps

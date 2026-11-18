@@ -181,7 +181,7 @@ class AgentClient(Protocol):
 
         **A read that is missing `turns` or `plan` is not that empty.**  A name
         with no history is answered with a real turn list that happens to be
-        empty (`slife2.plugins.agent.server.transcript`, over `restore`'s own
+        empty (`slife2.plugins.agent.core.transcript`, over `restore`'s own
         `{"turns": []}`), and a conversation with no plan with a real empty
         list; a payload whose `turns` or `plan` cannot be read is damage, and
         reading it as empty is a window that shows a blank history or no plan
