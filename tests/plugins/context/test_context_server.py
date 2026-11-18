@@ -2522,9 +2522,9 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     assert "recall_decided keep=keep recall=none" in said
     assert "recall_decided keep=1 recall=none" in said
     assert "recall_decided keep=99 recall=none" in said
-    assert (
-        len([line for line in said if line.startswith("recall_decided")]) == 3
-    ), "one line per decision, and none for the unreadable reply"
+    assert len([line for line in said if line.startswith("recall_decided")]) == 3, (
+        "one line per decision, and none for the unreadable reply"
+    )
     # It stayed [1] throughout: `_in_hand` is the answer that writes nothing.
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
@@ -2571,8 +2571,7 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
     assert recall["sentences"] == ["the code review prompt"]
     assert recall["prompt_as_sentence"] is False
     assert any(
-        line.startswith("recall_discriminator_reply attempt=first ")
-        for line in said
+        line.startswith("recall_discriminator_reply attempt=first ") for line in said
     ), "the raw reply is kept for the shape the parser read"
 
 
