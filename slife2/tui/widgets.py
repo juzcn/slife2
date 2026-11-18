@@ -1548,36 +1548,77 @@ def keep_cursor_visible(picker: Widget, line: int) -> None:
     keep_line_visible(strip, line + picker.styles.margin.top + picker.styles.gutter.top)
 
 
-class ModelPicker(Static):
-    """The models this config defines, asked in the fixed strip above the prompt.
+class _Question[AnswerT](Static):
+    """A row that asks one question and resolves one future once.
 
-    The interaction is fixed: `↑`/`↓` move a cursor, `Enter` picks, `Esc`
-    cancels, and the caller mounts it in the question strip, focuses it and
-    awaits the future it was handed.  **The strip is what keeps the question
-    readable**: a picker in the transcript scrolls away under the loop that is
-    still writing, and the keys keep reaching it while the list stops being
-    visible.  **A choice writes no line of its own**: the switch's outcome is
-    the server's fact and the window's note (`model_switched`), and a cancelled
-    question draws nothing.
+    **Once, because the blur that follows every decided question would
+    otherwise set the same future a second time** — and a resolved future
+    raises rather than shrugs.
 
-    The cursor opens on the model the conversation is already on, so a bare
-    `Enter` is a no-op rather than a surprise.  **A conversation on a model this
-    list does not offer has no such row**, so the cursor starts under nothing,
-    the row says which model is missing, and `Enter` picks nothing — rather than
-    defaulting to the first model and switching the conversation onto it.
+    **And a future that is *gone* is not a decision to report.**  Quitting
+    while the question is open unmounts the widget and cancels the worker
+    parked on this future, which cancels the future itself; the blur that
+    shutdown then delivers arrives with nothing to resolve it into, and
+    `set_result` on a cancelled future raises `InvalidStateError` — out of the
+    message pump, as a traceback at exit instead of a clean quit.
+    """
 
-    **The bindings are `priority`, and that is what makes the keys the picker's.**
-    The priority pass runs before the focused widget, and the widget that would
-    otherwise take them is the prompt — a `TextArea` whose `↑`/`↓` reach back
-    through the draft's history, which is the wrong list to move while a model
-    is being chosen.
+    def __init__(self, future: asyncio.Future[AnswerT]) -> None:
+        super().__init__("")
+        self._future = future
+        self._decided = False
+
+    def _settle(self, answer: AnswerT) -> bool:
+        """Resolve the future once.  True when this call was the decision."""
+        if self._decided:
+            return False
+        self._decided = True
+        if not self._future.done():
+            self._future.set_result(answer)
+        return True
+
+    def _body(self) -> Text:
+        """The row as it stands.
+
+        **Not `_render`**, which is the name this wants and cannot have: Textual
+        has one, it is the hook `get_content_height` calls to measure a widget,
+        and overriding it makes this class return a `Text` where the framework
+        wants a visual — a layout crash at the first resize, nowhere near the
+        line that caused it.
+        """
+        raise NotImplementedError
+
+    def plain_text(self) -> str:
+        """What this row shows, for the transcript's own `plain_text`."""
+        return content_text(self.content)
+
+
+class _Picker[ChoiceT](_Question[ChoiceT | None]):
+    """A question with rows: a cursor, four keys, and one future.
+
+    `↑`/`↓` move a cursor, `Enter` picks the row under it, `Esc` chooses
+    nothing, and the caller mounts the picker in the question strip, focuses it
+    and awaits the future it was handed.
+
+    **The bindings are `priority`, and that is what makes the keys the
+    picker's.**  The priority pass runs before the focused widget, and the
+    widget that would otherwise take them is the prompt — a `TextArea` whose
+    `↑`/`↓` reach back through the draft's history, which is the wrong list to
+    move while a question is being chosen.
 
     **Losing focus without a decision cancels.**  A picker is dismissed by a
     click on the transcript as easily as by `Esc`, and one left undecided is
-    worse than a wasted keystroke: the future would never resolve, so the app's
-    `Ctrl+S` would stay latched and every later press would do nothing.  A
-    decided picker ignores the blur, which is what makes the refocus after a
+    worse than a wasted keystroke: its future would never resolve, so the key
+    that opened it would stay latched and every later press would do nothing.
+    A decided picker ignores the blur, which is what makes the refocus after a
     pick harmless.
+
+    **A choice writes no line of its own and re-renders nothing.**  The app
+    removes the widget; what the choice changed is the server's fact and the
+    window's note, and a cancelled question reports on nothing.
+
+    Subclasses supply `_body` — a title line, then one line per row — and,
+    when the question has an answer already in force, `_opening_cursor`.
     """
 
     can_focus = True
@@ -1591,113 +1632,114 @@ class ModelPicker(Static):
 
     def __init__(
         self,
-        choices: Sequence[ModelChoice],
-        active: str,
-        future: asyncio.Future[ModelChoice | None],
+        choices: Sequence[ChoiceT],
+        future: asyncio.Future[ChoiceT | None],
     ) -> None:
-        super().__init__("")
+        super().__init__(future)
         self._choices = list(choices)
-        self._active = active
-        self._future = future
-        self._decided = False
-        # `-1` when the conversation is on a model this list does not offer —
-        # ordinary after a config edit.  A cursor defaulting to row 0 would make
-        # a bare `Enter`, documented as a no-op, switch to whichever model
-        # happened to be first, so nothing is under the cursor and the row says
-        # why (`_body`); `action_pick` then chooses nothing.
-        self._cursor = next(
-            (i for i, one in enumerate(self._choices) if one.ref == active), -1
-        )
+        self._cursor = self._opening_cursor()
         self.update(self._body())
+
+    def _opening_cursor(self) -> int:
+        """The row the cursor opens on, or `-1` when no row should have it.
+
+        A question with no answer in force opens on its first row, because a
+        person who pressed the key came to choose one of them.  A subclass
+        whose subject already has an answer overrides this (`ModelPicker`).
+        """
+        return 0 if self._choices else -1
 
     # --- the keys ------------------------------------------------------------
 
     def on_mount(self) -> None:
         """Bring the opening cursor into view.
 
-        The cursor opens on the model in use, and a long list puts that row
-        below the strip's cap; a question that opened scrolled to the top would
-        hide the very row a bare `Enter` takes.
+        A long list puts the opening row below the strip's cap; a question that
+        opened scrolled to the top would hide the very row a bare `Enter`
+        takes.  The first call can arrive before the first layout has given the
+        strip a height, and `keep_line_visible` asks again once it has.
         """
         self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
     @property
     def _cursor_line(self) -> int:
-        """The content line the cursor is on, for `keep_cursor_visible`."""
-        # The title, then either the missing-model line (no row under the
-        # cursor) or the row the cursor is on.
-        return 1 if self._cursor < 0 else 1 + self._cursor
+        """The content line the cursor is on, for `keep_cursor_visible`.
+
+        `_body` draws the title first and then one line per row, so row *n* is
+        content line *n + 1*; a cursor under no row sits on the line below the
+        title.
+        """
+        return 1 + max(self._cursor, 0)
 
     def action_cursor_up(self) -> None:
         """Move the cursor up, clamped at the top."""
         if not self._decided and self._cursor > 0:
             self._cursor -= 1
-            self.update(self._body())
-            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+            self._redraw()
 
     def action_cursor_down(self) -> None:
         """Move the cursor down, clamped at the bottom."""
         if not self._decided and self._cursor < len(self._choices) - 1:
             self._cursor += 1
-            self.update(self._body())
-            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+            self._redraw()
 
     def action_pick(self) -> None:
-        """Choose the model under the cursor, or nothing when no row is under it.
-
-        `_cursor` is `-1` for a conversation running a model this list does not
-        offer, and a bare `Enter` there must pick nothing rather than the first
-        row — see `__init__`.
-        """
+        """Choose the row under the cursor, or nothing when no row is under it."""
         if not self._decided and 0 <= self._cursor < len(self._choices):
-            self._decide(self._choices[self._cursor])
+            self._settle(self._choices[self._cursor])
 
     def action_cancel(self) -> None:
         """Choose nothing."""
-        self._decide(None)
+        self._settle(None)
 
     def on_blur(self) -> None:
         """Focus went elsewhere: nothing was chosen.  See the class docstring."""
-        self._decide(None)
+        self._settle(None)
 
-    def _decide(self, choice: ModelChoice | None) -> None:
-        """Resolve the future once.
+    def _redraw(self) -> None:
+        """Draw a cursor move and bring the row under it into view."""
+        self.update(self._body())
+        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
 
-        **Nothing is drawn from this decision here, and no re-render is owed.**
-        The app removes the widget from the strip; what the choice changed is
-        the server's fact and the window's note, and a cancelled question
-        reports on nothing.
 
-        Once, because the blur that follows every decided picker would
-        otherwise set the same future a second time, and a resolved future
-        raises rather than shrugs.
+class ModelPicker(_Picker[ModelChoice]):
+    """The models this config defines, asked in the fixed strip above the prompt.
 
-        **And a future that is *gone* is not a decision to report.**  Quitting
-        while the picker is open unmounts the widget and cancels the worker
-        parked on this future, which cancels the future itself; the blur that
-        shutdown then delivers arrives with nothing to resolve it into, and
-        `set_result` on a cancelled future raises `InvalidStateError` — out of
-        the message pump, as a traceback at exit instead of a clean quit.
-        `ApprovalPrompt._decide` guards this too; the two are the same widget
-        shape, so they are guarded the same way.
+    **The cursor opens on the model the conversation is already on**, so a bare
+    `Enter` is a no-op rather than a surprise.  **A conversation on a model this
+    list does not offer has no such row**, so the cursor starts under nothing,
+    the row says which model is missing, and `Enter` picks nothing — rather than
+    defaulting to the first model and switching the conversation onto it.
+    """
+
+    def __init__(
+        self,
+        choices: Sequence[ModelChoice],
+        active: str,
+        future: asyncio.Future[ModelChoice | None],
+    ) -> None:
+        # Before the base's `__init__`, which renders: the body marks the model
+        # this conversation is on.
+        self._active = active
+        super().__init__(choices, future)
+
+    def _opening_cursor(self) -> int:
+        """The row of the model in use, or `-1` when this list has no such row.
+
+        `-1` is ordinary after a config edit.  A cursor defaulting to row 0
+        would make a bare `Enter`, documented as a no-op, switch the
+        conversation onto whichever model happened to be first — so nothing is
+        under the cursor, the row says why (`_body`), and `Enter` picks nothing.
         """
-        if self._decided:
-            return
-        self._decided = True
-        if not self._future.done():
-            self._future.set_result(choice)
+        return next(
+            (i for i, one in enumerate(self._choices) if one.ref == self._active),
+            -1,
+        )
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        """The list, as it stands.
-
-        **Not `_render`**, which is the name this wants and cannot have: Textual
-        has one, it is the hook `get_content_height` calls to measure a widget,
-        and overriding it makes this class return a `Text` where the framework
-        wants a visual — a layout crash at the first resize, nowhere near the
-        line that caused it.
-        """
+        """The list, as it stands."""
         line = Text()
         line.append(t("picker_title"), f"bold {PALETTE['text']}")
         if self._cursor < 0:
@@ -1747,10 +1789,6 @@ class ModelPicker(Static):
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
-
 
 #: The two kinds of thing the conversation picker can watch.  The kind is also
 #: the server the choice belongs to: a subagent is read from the agent server,
@@ -1771,93 +1809,16 @@ class WatchChoice:
     name: str
 
 
-class ConversationPicker(Static):
+class ConversationPicker(_Picker[WatchChoice]):
     """The conversations this window can watch, asked in the fixed strip.
 
     Its rows are the agent's subagents and its running agent tasks — two
-    servers, one question, so one key.  The model picker's shape, one decision
-    smaller: a cursor, `Enter` picks, `Esc` cancels, a blur cancels (a question
-    abandoned is worse than a wasted keystroke).  **A choice writes no line in
-    the window's transcript**: it opens the watch screen, and that screen's
-    header is what names what is being watched.  The bindings are `priority`
-    for the picker's reason: the focused widget is the prompt, whose
-    `TextArea` would otherwise take `↑`/`↓` for its draft history — the wrong
-    list to move while a conversation is being chosen.
-
-    **No active row and no missing-row case**, unlike the model picker: there is
-    no setting this changes, so there is nothing the list could already be on.
-    The cursor opens on the first name, because a person who pressed the key
-    came to watch one of them.
+    servers, one question, so one key.  **No active row and no missing-row
+    case**, unlike the model picker: there is no setting this changes, so there
+    is nothing the list could already be on.  The cursor opens on the first
+    name, the base's default, because a person who pressed the key came to
+    watch one of them.
     """
-
-    can_focus = True
-
-    BINDINGS = [
-        Binding("up", "cursor_up", "Up", priority=True, show=False),
-        Binding("down", "cursor_down", "Down", priority=True, show=False),
-        Binding("enter", "pick", "Pick", priority=True, show=False),
-        Binding("escape", "cancel", "Cancel", priority=True, show=False),
-    ]
-
-    def __init__(
-        self,
-        choices: Sequence[WatchChoice],
-        future: asyncio.Future[WatchChoice | None],
-    ) -> None:
-        super().__init__("")
-        self._choices = list(choices)
-        self._future = future
-        self._decided = False
-        self._cursor = 0 if self._choices else -1
-        self.update(self._body())
-
-    # --- the keys ------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        """Bring the opening cursor into view.  See `ModelPicker.on_mount`."""
-        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
-
-    @property
-    def _cursor_line(self) -> int:
-        """The content line the cursor is on, for `keep_cursor_visible`."""
-        return 1 + max(self._cursor, 0)
-
-    def action_cursor_up(self) -> None:
-        if not self._decided and self._cursor > 0:
-            self._cursor -= 1
-            self.update(self._body())
-            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
-
-    def action_cursor_down(self) -> None:
-        if not self._decided and self._cursor < len(self._choices) - 1:
-            self._cursor += 1
-            self.update(self._body())
-            self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
-
-    def action_pick(self) -> None:
-        """Choose the row under the cursor, or nothing when none is under it."""
-        if not self._decided and 0 <= self._cursor < len(self._choices):
-            self._decide(self._choices[self._cursor])
-
-    def action_cancel(self) -> None:
-        self._decide(None)
-
-    def on_blur(self) -> None:
-        """Focus went elsewhere: nothing was chosen.  See `ModelPicker`."""
-        self._decide(None)
-
-    def _decide(self, choice: WatchChoice | None) -> None:
-        """Resolve the future once.
-
-        Nothing is drawn from the decision: the app removes the widget, and a
-        choice opens the watch screen whose header names it.  See
-        `ModelPicker._decide` for the once-guard's reason.
-        """
-        if self._decided:
-            return
-        self._decided = True
-        if not self._future.done():
-            self._future.set_result(choice)
 
     # --- the row -------------------------------------------------------------
 
@@ -1882,12 +1843,8 @@ class ConversationPicker(Static):
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
 
-
-class ApprovalPrompt(Static):
+class ApprovalPrompt(_Question[bool]):
     """One tool call, waiting for the person to allow it.
 
     The model asked to be checked before a call ran (`_approve`), the loop is
@@ -1911,7 +1868,7 @@ class ApprovalPrompt(Static):
 
     **Losing focus does not answer, and that is where this parts from the
     picker.**  A picker that loses focus is a question abandoned and resolves
-    itself (see `ModelPicker`), but this row is blurred by the two things that
+    itself (see `_Picker`), but this row is blurred by the two things that
     take focus on purpose: every printable key, which `redirect_printable` lands
     in the prompt, and `Ctrl+S`, which opens the picker over it.  Reading that
     blur as "no" means a person who merely began their next thought — an `a`,
@@ -1935,11 +1892,12 @@ class ApprovalPrompt(Static):
     def __init__(
         self, name: str, arguments: dict, future: asyncio.Future[bool]
     ) -> None:
-        super().__init__("")
+        super().__init__(future)
         self._name = name
         self._arguments = dict(arguments)
-        self._future = future
-        self._decided: bool | None = None
+        # The answer, for the decided line: a denial's `False` is a real
+        # answer, so "decided" is the base's flag and not this value.
+        self._answer = False
         self.update(self._body())
 
     # --- the keys ------------------------------------------------------------
@@ -1959,26 +1917,18 @@ class ApprovalPrompt(Static):
         A decided row keeps the class, so a caller looking for "the approval
         that is blocking the loop" selects on this rather than on the widget.
         """
-        return self._decided is None
+        return not self._decided
 
     def _decide(self, approved: bool) -> None:
-        """Resolve the future once, and re-render as the decision.
-
-        Once, because the blur that follows every decision would otherwise set
-        the same future a second time — and a resolved future raises rather than
-        shrugs (`ModelPicker._decide`'s reason, verbatim).
-        """
-        if self._decided is not None:
-            return
-        self._decided = approved
-        if not self._future.done():
-            self._future.set_result(approved)
-        self.update(self._body())
+        """Resolve the future once, and re-render as the decision."""
+        if self._settle(approved):
+            self._answer = approved
+            self.update(self._body())
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        if self._decided is not None:
+        if self._decided:
             return self._decided_line()
         line = Text()
         line.append(f"{GLYPHS['running']} ", f"bold {PALETTE['amber']}")
@@ -2011,7 +1961,7 @@ class ApprovalPrompt(Static):
 
     def _decided_line(self) -> Text:
         line = Text()
-        if self._decided:
+        if self._answer:
             line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
             line.append(t("approval_approved"), f"bold {PALETTE['green']}")
         else:
@@ -2020,10 +1970,6 @@ class ApprovalPrompt(Static):
         line.append("  ", PALETTE["dim"])
         line.append(self._name, f"bold {PALETTE['text']}")
         return line
-
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
 
 
 def _model_meta(choice: ModelChoice) -> str:
