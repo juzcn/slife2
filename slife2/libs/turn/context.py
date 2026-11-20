@@ -58,6 +58,31 @@ from slife2.libs.turn.tools import INTERRUPTED
 #: are.  Beside `system.j2` so both are found the same way.
 INSTRUCTION_TEMPLATE = "recall.j2"
 
+#: The live compaction selector's instruction — the same kind of template, and
+#: the same entry point, one decision later in a turn.
+LIVE_TEMPLATE = "live.j2"
+
+#: The live selector's reply schema, rendered into its instruction (`RECALL_REPLY`
+#: states why a schema rather than prose).
+LIVE_REPLY: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "compact": {
+            "description": (
+                "The live message ids whose content this turn no longer needs. "
+                "Omit for none. **Drop a tool exchange as a whole**: an "
+                "assistant message that asked for tools goes together with all "
+                "of its results, and a result goes together with the assistant "
+                "message that asked for it — a call without its answer, or an "
+                "answer without its call, is a history no provider accepts."
+            ),
+            "type": "array",
+            "items": {"type": "integer"},
+        }
+    },
+}
+
 #: The reply's schema: the types, the allowed values, and the one rule that
 #: couples the two fields.  Rendered into the instruction rather than described
 #: in prose (SDD §2.3, "Schema over prompt"): a field's wording is what a model
@@ -506,6 +531,80 @@ def instruction(user_input: str) -> str:
         user_input=user_input,
         recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),
     )
+
+
+def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
+    """One message of the live selector's copy, prefixed with its live id.
+
+    **A copy, and the one place a live id is written.**  The list a turn runs on
+    is the record; stamping it would put a number into the row, the index and
+    every later request, and the number means nothing after this call.  A
+    part-list gains a text part rather than having its first part rewritten,
+    for `with_note`'s reason: replacing it would drop an attachment's note.
+    """
+    prefixed = dict(message)
+    prefix = f"[M{index}] "
+    content = prefixed.get("content")
+    if isinstance(content, list):
+        prefixed["content"] = [{"type": "text", "text": prefix}, *content]
+    else:
+        prefixed["content"] = prefix + (content or "")
+    return prefixed
+
+
+def live_instruction(selectable: Sequence[int], usage: str) -> str:
+    """What the live selector is asked, with the ids it may drop.
+
+    The ids are the *candidates* — every message but the fixed ones — and they
+    are the copy's numbering, not the record's: `with_message_id` writes it into
+    the one request, and nothing else ever sees it.  `usage` is the same figure
+    the turn prompt and the status bar show, measured against the view the
+    selector is deciding about — the model needs to know how full the window is
+    to know how much it has to give up.  The legality rule is in the prompt
+    rather than in the harness: a model that keeps calls and results together
+    writes a history every provider accepts, and a system that repaired its
+    answer would be making a decision the model was asked to make.
+    """
+    return render_instruction(
+        LIVE_TEMPLATE,
+        selectable=", ".join(f"M{index}" for index in selectable),
+        usage=usage,
+        live_reply=json.dumps(LIVE_REPLY, indent=2, ensure_ascii=False),
+    )
+
+
+def parse_live(text: str) -> tuple[list[int] | None, str]:
+    """One live selector reply, as the message ids to drop — or why not.
+
+    `[]` is a decision to drop nothing and `None` is no readable decision at
+    all: the first is the model saying the turn needs everything, the second is
+    an answer asked to correct itself.  An empty object and an absent `compact`
+    are both "drop nothing" — the ordinary answer, and the one a model with
+    nothing to drop writes.
+    """
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"the reply is not JSON ({exc})"
+    if not isinstance(raw, dict):
+        return None, "the reply is not a JSON object"
+    unknown = set(raw) - {"compact"}
+    if unknown:
+        names = ", ".join(
+            sorted(json.dumps(name, ensure_ascii=False) for name in unknown)
+        )
+        return None, f'only "compact" is read, and the reply also held {names}'
+    drop = raw.get("compact")
+    if drop is None:
+        return [], ""
+    if not isinstance(drop, list):
+        return None, 'the "compact" field is not a JSON array of message ids'
+    ids: list[int] = []
+    for value in drop:
+        if not _is_id(value):
+            return None, f"the compact list holds {value!r}, which is not a message id"
+        ids.append(int(value))
+    return normalise_ids(ids), ""
 
 
 def union(base: Sequence[int], recalled: Sequence[int]) -> list[int]:

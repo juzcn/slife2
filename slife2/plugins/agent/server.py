@@ -88,7 +88,7 @@ from slife2.libs.host.config import AGENT_SERVER_NAME, Config, load_cached
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.libs.turn.runtime import TurnRuntime
-from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT
+from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT, TURN_COMPACT
 
 from . import membership, model_tools
 from .core import SUBAGENT_CREATE, SUBAGENT_REMOVE, AgentCore, ProgressObserver
@@ -102,6 +102,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ATTACH_IMAGE",
     "CHECK_NEW_INPUT",
+    "TURN_COMPACT",
     "SUBAGENT_CREATE",
     "SUBAGENT_REMOVE",
     "Pending",

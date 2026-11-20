@@ -14,7 +14,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 
-from slife2.libs.turn.loop import TurnResult
+from slife2.libs.turn.loop import AgentLoop, TurnResult
 from slife2.libs.turn.messages import Message, Usage
 
 
@@ -188,6 +188,11 @@ class Loop:
     #: `AgentCore.loop_for` runs on every turn, so taking it from the live config
     #: would let an operator's edit change the terms of a turn already in flight.
     max_iterations: int
+    #: The fraction of the window at which this conversation's turns compact
+    #: themselves, or 0 for manual-only.  Read when the conversation starts —
+    #: the same moment and the same reason as `max_iterations`: an operator's
+    #: edit must not change the terms of a conversation already running.
+    compact_at: float
     messages: list[Message]
     lock: asyncio.Lock
     last_used: float
@@ -207,6 +212,13 @@ class Loop:
     #: is set there), and it is cleared by the same `finally`, so a later turn can
     #: never answer for one this one took.
     injected: list[Pending] = field(default_factory=list)
+    #: The messages this turn's compaction has hidden from its own later model
+    #: calls.  **Turn-scoped, and never part of the record**: the loop's list,
+    #: the saved row and the store's `covered` are the full conversation; this
+    #: is only the projection the model runs on (`slife2.libs.turn.compact`).
+    #: Cleared when a turn starts, so a hidden message cannot outlive the turn
+    #: that hid it.
+    hidden: list[Message] = field(default_factory=list)
     #: Which turns of the log `messages` is made of, in order — the agent's copy
     #: of the live-context list the store persists.  Held here rather than read
     #: per turn because it *is* the in-memory state: `rebuild` is handed it and
@@ -289,6 +301,11 @@ class Loop:
     #: Set under the lock and cleared on the way out by the turn that set it (a
     #: value guard, because a queued turn may have replaced it first).
     turn_token: str = ""
+    #: The loop running this turn, or None when the conversation is idle.  The
+    #: `_turn_compact` handler reads its last measured call — the figure the
+    #: status bar is showing — and the turn that set it clears it on the way out
+    #: under the same value guard `turn_token` uses.
+    live: AgentLoop | None = None
     #: The rest of how this conversation reaches its model, resolved once when it
     #: started and kept beside the reference.  Held rather than re-resolved so a
     #: conversation whose model is later edited out of the config still runs: the

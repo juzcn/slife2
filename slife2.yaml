@@ -95,6 +95,10 @@ default: deepseek/deepseek-flash
 agent:
   # Model calls per turn. 0 or absent means no cap.
   max_iterations: 0
+  # Fraction of the model's window at which a turn drops what it no longer
+  # needs from its own context. 0 disables the automatic pass; the model can
+  # still call `_turn_compact` itself.
+  compact_at: 0.9
   # A Jinja2 template beside this file. `{{ agent_name }}` and `{{ headless }}`
   # are available; omit to use the shipped template.
   # system_prompt: prompts/jack.j2
@@ -171,6 +175,7 @@ tool_load:
     - func_tool_load
     - _func_tool_unload
     - _check_new_input
+    - _turn_compact
     - skill_use
     # The two that can use the task id an `_async` call returns.
     - check_async

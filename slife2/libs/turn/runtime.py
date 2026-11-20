@@ -58,6 +58,7 @@ from slife2.libs.plugin.protocol import (
     tool_payload,
     unreadable,
 )
+from slife2.libs.turn import compact
 from slife2.libs.turn.events import ContextChosen
 from slife2.libs.turn.loop import AgentLoop, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
@@ -113,6 +114,19 @@ class Rebuilt:
     turn_ids: list[int]
     covered: int
     chosen: ContextChosen
+
+
+@dataclass(frozen=True)
+class LiveChoice:
+    """One live selector's answer: the view ids to drop, and why not if none.
+
+    `drop` is empty for both "nothing worth dropping" and "no decision", and
+    `decision` tells the two apart the way `ContextChosen.discriminator` does
+    for the rebuild.
+    """
+
+    drop: list[int]
+    decision: str = ""
 
 
 class TurnRuntime:
@@ -477,6 +491,111 @@ class TurnRuntime:
             ),
         )
 
+    # ── the turn's own compaction ────────────────────────────────────────
+
+    async def select_live(
+        self,
+        identity: ConversationId,
+        messages: list[Message],
+        selectable: list[int],
+        model: str,
+        context_tokens: int = 0,
+        context_window: int = 0,
+    ) -> LiveChoice:
+        """Ask the live selector which of this turn's messages it no longer needs.
+
+        **A harness call, not a model tool**: the model reaches compaction
+        through `_turn_compact`, and this is the other half of that tool's body.
+        The answer is read strictly — a drop that is not a whole id, or a status
+        that is not text, is a build this one cannot read rather than an empty
+        selection (`slife2.libs.plugin.protocol.unreadable`).
+
+        The ids index the *view* the caller sent, which is the list the model
+        will run on: the selector has never seen the record, and an id means
+        nothing outside this call.  `context_tokens` and `context_window` are
+        the figure the status bar shows, carried so the selector's instruction
+        can print the same one.
+        """
+        payload = tool_payload(
+            await (await self.memory()).call_tool(
+                "select_live",
+                {
+                    "agent": identity[0],
+                    "subagent": identity[1],
+                    "messages": [message.to_wire() for message in messages],
+                    "selectable": list(selectable),
+                    "model": model,
+                    "context_tokens": context_tokens,
+                    "context_window": context_window,
+                },
+            )
+        )
+        drop = payload.get("compact")
+        if not isinstance(drop, list):
+            raise unreadable("the context store", "return a live drop list", payload)
+        decision = payload.get("decision")
+        if not isinstance(decision, str):
+            raise unreadable(
+                "the context store", "report the selector's status", payload
+            )
+        ids: list[int] = []
+        for value in drop:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise unreadable(
+                    "the context store", "return whole message ids", payload
+                )
+            ids.append(value)
+        return LiveChoice(drop=ids, decision=decision)
+
+    async def compact_turn(
+        self,
+        identity: ConversationId,
+        messages: list[Message],
+        hidden: list[Message],
+        model: str,
+        context_tokens: int = 0,
+        context_window: int = 0,
+    ) -> compact.Compacted:
+        """Run one live compaction: ask, then hide what the answer names.
+
+        **The answer is applied as it came.**  The prompt asks the model to drop
+        a tool exchange as a whole; the harness does not close a split one,
+        because repairing the answer would be the harness making a decision the
+        model was asked to make.  A model that splits a pair writes a history
+        the next call refuses — one failed turn, with the record intact and the
+        next turn on the full list.
+
+        `hidden` is the turn's own state and is mutated here; the caller's
+        `present` callback reads it, and the turn's saved row never does.
+        """
+        at = compact.opening(messages)
+        if at is None:
+            return compact.Compacted(seen=0, dropped=0)
+        view = compact.view(messages, hidden)
+        candidates = compact.selectable(view, messages[at])
+        if not candidates:
+            return compact.Compacted(seen=len(view), dropped=0)
+        choice = await self.select_live(
+            identity, view, candidates, model, context_tokens, context_window
+        )
+        if choice.decision:
+            return compact.Compacted(
+                seen=len(view), dropped=0, decision=choice.decision
+            )
+        allowed = set(candidates)
+        seen = {id(message) for message in hidden}
+        added: list[Message] = []
+        for index in choice.drop:
+            if index not in allowed:
+                continue
+            message = view[index]
+            if id(message) in seen:
+                continue
+            seen.add(id(message))
+            added.append(message)
+        hidden.extend(added)
+        return compact.Compacted(seen=len(view), dropped=len(added))
+
     # ── the turn boundary ────────────────────────────────────────────────
 
     async def trim(self, messages: list[Message]) -> list[str]:
@@ -525,6 +644,7 @@ class TurnRuntime:
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compress: Compress | None = None,
+        present: Callable[[list[Message]], list[Message]] | None = None,
     ) -> AgentLoop:
         """Build the loop a turn runs in.
 
@@ -551,6 +671,7 @@ class TurnRuntime:
             approve=approve,
             deliver=deliver,
             compress=compress,
+            present=present,
             # **The conversation, for the two async tools.**  A task id is not
             # a capability: a model that learns another conversation's id must
             # not be able to poll or cancel that call (`Task.scope`).  Taken

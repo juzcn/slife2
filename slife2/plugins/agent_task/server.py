@@ -137,10 +137,10 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_MARKER as MARKER_PREFIX,
 )
-from slife2.libs.turn import attachments, plan
+from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import turn_prompt_lead, with_lead
 from slife2.libs.turn.events import TurnEvent, TurnObserver, emit
-from slife2.libs.turn.loop import TurnResult
+from slife2.libs.turn.loop import AgentLoop, TurnResult
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import (
     SUBAGENT_PROMPT,
@@ -152,6 +152,7 @@ from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
     LIVE_CONVERSATION_TOOLS,
+    TURN_COMPACT,
     CatalogueAnswer,
     Tool,
     ToolFailed,
@@ -384,6 +385,18 @@ class TaskTurn:
     #: built: a task's backend is fixed for its one turn, so a `model_switch`
     #: mid-task moves the agent server's loops and not this one.
     accepts_images: bool
+    #: The messages this task's own compaction has hidden from its later model
+    #: calls.  The same turn-scoped projection the agent server keeps: the list
+    #: `run_turn` advances is the task's whole exchange, and only the view the
+    #: model is sent shrinks (`slife2.libs.turn.compact`).
+    hidden: list[Message] = field(default_factory=list)
+    #: The model's window, so the compaction's context figure is the one this
+    #: task's model is measured against.
+    context_window: int = 0
+    #: The loop running this task's one turn, set once it is built; the
+    #: compaction reads its last measured call, the same figure the agent
+    #: server's own tool uses.
+    live: AgentLoop | None = None
 
 
 def unknown_report(name: str) -> dict[str, Any]:
@@ -708,7 +721,41 @@ def build_server(
                 "refused": refusals,
             }
 
-        return {CHECK_NEW_INPUT: nothing_waiting, ATTACH_IMAGE: attach_image}
+        async def turn_compact(_arguments: dict[str, Any]) -> str:
+            """Drop what this task no longer needs from its own model context.
+
+            **The task's own list and the task's own state.**  The agent
+            server's version resolves a loop by the conversation id, which is
+            the maker's — the other live turn on that conversation — so this
+            body exists for the reason `attach_image`'s does: the id alone
+            cannot tell the two loops apart.  A task records nothing, so a
+            compaction here is a projection of `turn.messages` and touches no
+            record at all.
+            """
+            result = await runtime.compact_turn(
+                task.identity,
+                turn.messages,
+                turn.hidden,
+                turn.model,
+                context_tokens=(
+                    turn.live.last_usage.total_tokens if turn.live is not None else 0
+                ),
+                context_window=turn.context_window,
+            )
+            logger.info(
+                "agent task %s: turn_compact seen=%d dropped=%d decision=%s",
+                task.name,
+                result.seen,
+                result.dropped,
+                result.decision or "ok",
+            )
+            return compact.report(result, recorded=False)
+
+        return {
+            CHECK_NEW_INPUT: nothing_waiting,
+            ATTACH_IMAGE: attach_image,
+            TURN_COMPACT: turn_compact,
+        }
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -823,6 +870,7 @@ def build_server(
             messages=rebuilt.messages,
             model=model.reference,
             accepts_images=settings.accepts_images,
+            context_window=settings.context_window,
         )
 
         loop = await runtime.make_loop(
@@ -848,7 +896,15 @@ def build_server(
             # `check_async` is in the list like every other model tool.
             # `agent_task_start` is in the list too — the prompt is what tells
             # the model not to start another task.
+            # **The task's own view.**  A `_turn_compact` call hides messages
+            # from `turn.hidden`; the list `run_turn` advances is the task's
+            # whole exchange, and the answer the task hands back is its own.
+            present=lambda messages: compact.view(messages, turn.hidden),
         )
+        # **The loop, for the one tool that reads its bill.**  The registry was
+        # built above and closes over `turn`, so the body sees this the moment a
+        # `_turn_compact` call arrives.
+        turn.live = loop
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so
         # there is no row to keep the marker out of; it is prompt text for this

@@ -12,7 +12,13 @@ from __future__ import annotations
 import pytest
 
 from slife2.helpers.timeutil import BOUND_GRAMMAR
-from slife2.libs.turn.context import consistent, instruction
+from slife2.libs.turn.context import (
+    consistent,
+    instruction,
+    live_instruction,
+    parse_live,
+    with_message_id,
+)
 from slife2.libs.turn.tools import INTERRUPTED
 
 pytestmark = pytest.mark.unit
@@ -105,3 +111,41 @@ def test_a_damaged_call_entry_is_skipped_rather_than_raised() -> None:
     messages = [{"role": "assistant", "content": "hi", "tool_calls": ["oops"]}]
 
     assert consistent(messages) == messages
+
+
+# --- the live selector's copy and reply --------------------------------------
+
+
+def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
+    """The record keeps the list it had; the id lives in the one request."""
+    original = {"role": "user", "content": "hi"}
+    prefixed = with_message_id(original, 4)
+
+    assert prefixed["content"] == "[M4] hi"
+    assert original["content"] == "hi", "the copy is a copy"
+
+    parts = {"role": "user", "content": [{"type": "text", "text": "look"}]}
+    got = with_message_id(parts, 2)
+
+    assert got["content"][0] == {"type": "text", "text": "[M2] "}
+    assert got["content"][1] == {"type": "text", "text": "look"}
+
+
+def test_the_live_instruction_names_the_candidates() -> None:
+    text = live_instruction([1, 4], usage="12,345 (1.2%)")
+
+    assert "M1, M4" in text
+    assert "12,345 (1.2%)" in text
+    assert '"compact"' in text
+    assert "goes as a whole" in text, "the legality rule is in the prompt"
+
+
+def test_a_live_reply_is_a_drop_list() -> None:
+    """Empty and absent are both "drop nothing"; a bad shape is no decision."""
+    assert parse_live('{"compact": [3, 1, 3]}') == ([3, 1], "")
+    assert parse_live("{}") == ([], "")
+    assert parse_live('{"compact": []}') == ([], "")
+    assert parse_live('{"compact": "all"}')[0] is None
+    assert parse_live("not json")[0] is None
+    assert parse_live('{"drop": [1]}')[0] is None
+    assert parse_live('{"compact": [true]}')[0] is None

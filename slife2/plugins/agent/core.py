@@ -82,7 +82,7 @@ from slife2.libs.plugin.vocabulary import (
     NOTHING_WAITING,
     TRANSCRIPT,
 )
-from slife2.libs.turn import attachments, plan
+from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import (
     turn_failed_note,
     turn_prompt_lead,
@@ -105,6 +105,7 @@ from slife2.libs.turn.runtime import ModelRef, TurnRuntime
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
+    TURN_COMPACT,
     CatalogueAnswer,
     Tool,
     ToolFailed,
@@ -845,6 +846,10 @@ class AgentCore:
             # caller did not ask for one, and a result then goes in as it came —
             # see `AgentLoop._fit`.
             compress=None if compressor is None else compressor(conversation_id),
+            # **The projection and the state are both this loop's.**  A turn's
+            # compaction hides messages from `loop.hidden`; the list the loop
+            # advances, the record and the store never see that view.
+            present=lambda messages: compact.view(messages, loop.hidden),
         )
 
     def reap(self) -> None:
@@ -939,6 +944,10 @@ class AgentCore:
             accepts_images=settings.accepts_images,
             context_window=settings.context_window,
             max_iterations=live.agent.max_iterations,
+            # The compaction threshold is a term of the conversation in the same
+            # sense: an edit reaches the next conversation, not a turn already
+            # running under the old number.
+            compact_at=live.agent.compact_at,
             messages=messages,
             lock=asyncio.Lock(),
             last_used=time.monotonic(),
@@ -1175,6 +1184,33 @@ class AgentCore:
         loop.injected.append(waiting)
         return waiting.prompt
 
+    def _compact_due(self, loop: Loop, agent_loop: AgentLoop | None) -> bool:
+        """Whether this turn should compact its own context at this boundary.
+
+        **The measurement is the last call's own**, and the fraction is
+        `agent.compact_at` of the window the conversation started on.  A turn
+        that began near its ceiling crosses it after one large batch; a window
+        nobody declared (0) has no threshold — the same rule the rebuild's token
+        budget follows.  The just-appended batch is not in the measurement yet;
+        the fraction is below the window by enough to cover one.
+
+        **Once per turn, read off the conversation.**  A compaction writes its
+        own pair, so `already_asked` is the record of having asked; a model that
+        called the tool itself is not asked again by the harness.
+        """
+        if agent_loop is None or loop.context_window <= 0:
+            return False
+        fraction = loop.compact_at
+        if fraction <= 0:
+            return False
+        if agent_loop.last_usage.total_tokens < loop.context_window * fraction:
+            return False
+        at = compact.opening(loop.messages)
+        if at is None or compact.already_asked(loop.messages, at):
+            return False
+        view = compact.view(loop.messages, loop.hidden)
+        return bool(compact.selectable(view, loop.messages[at]))
+
     async def run_turn_into(
         self, loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
     ) -> None:
@@ -1203,6 +1239,12 @@ class AgentCore:
         list the model is still sent.  The `finally` comments say the rest.
         """
 
+        #: The loop opened for this turn, or None until it is.  Declared here
+        #: because the boundary below reads its last call's bill, and assigned
+        #: where the turn opens it; a failure before that is the one ending with
+        #: no loop to read a bill from and no loop to trim for.
+        agent_loop: AgentLoop | None = None
+
         def auto_invoke() -> AutoCall | None:
             """The tool to call at this iteration boundary, or `None` — the cut-in.
 
@@ -1228,17 +1270,22 @@ class AgentCore:
             loses nobody anything.  `take_waiting` refuses the same way, so the
             two agree about what is deliverable — this one without popping, so
             that a boundary which delivers nothing leaves no pair behind.
+
+            **A message and a compaction can both be due, and the message goes
+            first.**  A cut-in is a person waiting; a compaction can wait one
+            iteration, and the message may be what makes the turn grow anyway.
             """
-            if not loop.inbox:
-                return None
-            waiting = loop.inbox[0]
-            if waiting.images:
-                return None
-            return AutoCall(
-                CHECK_NEW_INPUT,
-                channel=waiting.channel,
-                receipt=waiting.receipt,
-            )
+            if loop.inbox:
+                waiting = loop.inbox[0]
+                if not waiting.images:
+                    return AutoCall(
+                        CHECK_NEW_INPUT,
+                        channel=waiting.channel,
+                        receipt=waiting.receipt,
+                    )
+            if self._compact_due(loop, agent_loop):
+                return AutoCall(TURN_COMPACT)
+            return None
 
         def injected_count() -> int:
             """How many messages this turn has taken, for the early cut-in."""
@@ -1283,6 +1330,10 @@ class AgentCore:
         # reading the store's own timestamp format back (see `Outcome.elapsed`).
         started_mono = time.monotonic()
         snapshot = len(loop.messages)
+        # **The turn's view starts whole.**  A compaction is the turn's own: a
+        # message it hid must not outlive it, and the next turn's rebuild is
+        # what decides that turn's context.
+        loop.hidden.clear()
         outcome.started_at = now()
         # **The model is taken here, and that is a turn boundary.**  `loop_for`
         # below resolves the backend once for this turn, so this is what will
@@ -1457,9 +1508,6 @@ class AgentCore:
                 return False
             return True
 
-        # None until the loop is opened, which is the one failure below that has
-        # no loop to read a bill from and no loop to trim for.
-        agent_loop: AgentLoop | None = None
         cancelled = False
         try:
             # **The loop is opened inside the turn's own `try`.**  It is the
@@ -1486,6 +1534,11 @@ class AgentCore:
                 # stream, each time the list is re-read before a model call.
                 observer,
             )
+            # **The running loop, for the one tool that reads its bill.**  A
+            # `_turn_compact` call is answered with the last measured call, which
+            # is the number the status bar is showing; the field is cleared where
+            # `turn_token` is, so an idle conversation never keeps a loop.
+            loop.live = agent_loop
             # The parts, built above and after the rebuild — the rebuild
             # replaces the list wholesale, so a message appended before it would
             # be destroyed, which is why `run_turn` appends this one itself.
@@ -2236,6 +2289,7 @@ class AgentCore:
                 # running.  Only the token this turn put there is taken back.
                 if turn_token and loop.turn_token == turn_token:
                     loop.turn_token = ""
+                    loop.live = None
                 if turn_handle is not None:
                     logcontext.end_turn(turn_handle)
 
@@ -2704,6 +2758,54 @@ class AgentCore:
             or NOTHING_WAITING
         )
 
+    async def turn_compact(self, ctx: Context) -> str:
+        """Drop what this turn no longer needs from its own model context.
+
+        **The tool, not the decision.**  The selector is the context plugin's
+        (`select_live`), and what this side owns is the live loop: the state a
+        compaction hides (`Loop.hidden`), the list it must never touch, and the
+        answer's voice in the transcript.  The harness calls this when a turn's
+        measured context crosses `agent.compact_at`, and the model may call it
+        itself — the call does the same thing either way.
+
+        **The record is untouched.**  Hidden messages stay in `loop.messages`,
+        the turn's saved row and the store's live-context list; only the list
+        the model is sent shrinks (`slife2.libs.turn.compact`).  The next turn
+        starts from the full conversation.
+        """
+        conversation_id = request_conversation(ctx)
+        if not conversation_id:
+            return "No live conversation to compact."
+        loop = self.conversations.get(conversation_key(*conversation_id))
+        caller = turn_of(request_meta(ctx))
+        # **A token that is there has to be this turn's; one that is not is a
+        # direct read.**  The same rule `take_waiting` follows for the cut-in:
+        # the task that stands in for this conversation serves its own body, so
+        # an untokened call cannot be the other live turn's.
+        if loop is None or (caller and caller != loop.turn_token):
+            return "No live turn to compact."
+        at = compact.opening(loop.messages)
+        if at is None:
+            return "This turn has no opening message; nothing to compact."
+        result = await self.runtime.compact_turn(
+            conversation_id,
+            loop.messages,
+            loop.hidden,
+            loop.model,
+            context_tokens=(
+                loop.live.last_usage.total_tokens if loop.live is not None else 0
+            ),
+            context_window=loop.context_window,
+        )
+        logger.info(
+            "turn_compact %s seen=%d dropped=%d decision=%s",
+            describe((loop.agent, loop.subagent)),
+            result.seen,
+            result.dropped,
+            result.decision or "ok",
+        )
+        return compact.report(result)
+
     async def check_background_call(self, task_id: str, ctx: Context) -> dict[str, Any]:
         """Where one background call stands.
 
@@ -2811,6 +2913,9 @@ class AgentCore:
             ),
             FunctionTool.from_function(
                 self.check_new_input, name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL
+            ),
+            FunctionTool.from_function(
+                self.turn_compact, name=TURN_COMPACT, meta=FOR_THE_MODEL
             ),
             FunctionTool.from_function(
                 self.check_background_call, name=CHECK_ASYNC, meta=FOR_THE_MODEL

@@ -200,6 +200,7 @@ class AgentLoop:
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compress: Compress | None = None,
+        present: Callable[[list[Message]], list[Message]] | None = None,
         background_scope: ConversationKey | None = None,
     ) -> None:
         self._backend = backend
@@ -244,6 +245,13 @@ class AgentLoop:
         #: the cost of that answer is a turn that carries whatever the tool
         #: returned, which is a fact about the tool and not about this decision.
         self._compress = compress
+        #: How the list the model is sent is projected from the list the
+        #: conversation holds, or None for the two being one list.  **Handed in
+        #: for the fourth time and the same reason**: the loop is handed a list
+        #: and advances it, and what a *turn* has chosen to hide from its own
+        #: later calls is the server's state (`slife2.libs.turn.compact`).  None
+        #: means nothing was hidden, which is the ordinary turn.
+        self._present = present
         #: Model calls allowed in one turn before it is cut off, or **0 for no
         #: cap at all**.  A cap is something somebody asks for: an absent key is
         #: the same 0 (`config.AgentSettings.max_iterations`), and a turn runs
@@ -470,7 +478,14 @@ class AgentLoop:
             # call.  `specs` is read after this and never cached across
             # iterations.
             await self._retool()
-            stream = self._backend.stream(messages, self._tools.specs)
+            # **The projection is the model's, the list is the record's.**  A
+            # turn that compacted hides messages here and nowhere else; the
+            # list the loop appends to, the turn's saved row and the store's
+            # `covered` are all the same list they were before.
+            stream = self._backend.stream(
+                messages if self._present is None else self._present(messages),
+                self._tools.specs,
+            )
 
             # Phase A: exhaust the stream before doing anything with it.  A tool
             # must not run inside this loop -- that would hold the provider's

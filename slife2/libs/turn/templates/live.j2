@@ -1,0 +1,40 @@
+▸ Turn compaction
+
+Decide which messages this turn's later calls no longer need. The messages you
+name are left out of the model's context for the rest of this turn; keep what
+the work still needs and give up what it does not. Nothing is deleted: the turn
+log keeps every message, and the next turn starts from the full conversation.
+
+This turn is running against a limited context window. Current context:
+{{ usage }}.
+
+Each message above carries its live id ([M0], [M1], …). The ids exist only for
+this call, are not part of the conversation, and are stored nowhere. These are
+the ids you may name:
+
+{{ selectable }}
+
+Every other message is fixed. A tool exchange goes as a whole: an assistant
+message that asked for tools goes together with all of its results, and a tool
+result goes together with the assistant message that asked for it. A call
+without its answer, or an answer without its call, is a history no provider
+accepts.
+
+Reply with ONE JSON object matching this schema, and nothing else. An empty
+object means the turn needs everything:
+
+{{ live_reply }}
+
+Cases:
+
+1. An old tool exchange is spent — its call and all its results go together.
+
+   your answer: {"compact": [3, 4, 5]}
+
+2. A historical exchange no longer bears on the work.
+
+   your answer: {"compact": [1, 2, 3]}
+
+3. Nothing can go yet.
+
+   your answer: {}
