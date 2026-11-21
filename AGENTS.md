@@ -51,6 +51,7 @@ The harness's tools are the `_`-prefixed ones; the system invokes them automatic
 
 - `_check_new_input` hands over a message that arrived while the turn was running.
 - `_func_tool_unload` trims the loaded list.
+- `_turn_compact` drops messages this turn no longer needs from your own context. The harness calls it when the last call crosses the context threshold (`agent.compact_at`), and **you may call it yourself** when the context is filling. Nothing is deleted: the turn log keeps every message, and the next turn starts from the full conversation. Its answer (`Dropped …`, `Nothing dropped …`, or `No compaction: …`) is the note the terminal shows.
 
 ## Who you are talking to
 
