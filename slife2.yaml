@@ -40,6 +40,8 @@ servers:
   agent-task: {port: 24037}
 
 # `api` selects the wire protocol. Models are referenced as `provider/model`.
+# Every model states its `context_window`; the loader refuses an entry without
+# one, because every bound in a turn is measured against it.
 providers:
   deepseek:
     api: openai-completions

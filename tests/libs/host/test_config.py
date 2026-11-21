@@ -44,6 +44,7 @@ providers:
         max_tokens: 4000
         temperature: 0.3
       - model: small
+        context_window: 2000
 embeddings:
   providers:
     local:
@@ -64,6 +65,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: test-model
+        context_window: 1000
 """
 
 A_MINIMAL_EMBEDDINGS = """
@@ -309,7 +311,32 @@ def test_a_model_keeps_only_what_was_configured(tmp_path) -> None:
 
     assert (big.temperature, big.top_p, big.max_tokens) == (0.3, None, 4000)
     assert (small.temperature, small.top_p, small.max_tokens) == (None, None, None)
-    assert small.context_window == 0
+    assert (big.context_window, small.context_window) == (100000, 2000)
+
+
+@pytest.mark.parametrize("line", ["", "context_window: 0", "context_window: null"])
+def test_a_model_without_a_positive_window_is_refused(tmp_path, line: str) -> None:
+    """**The window is the one fact a model entry must state.**
+
+    Every bound in a turn is a fraction of it: the recall's token budget, the
+    compaction threshold, the status bar.  A window nobody stated used to leave
+    the recall bounded by retrieval width alone; now the file is refused where
+    it is written.  Zero and `null` are not a window either.
+    """
+    path = write(
+        tmp_path,
+        f"""
+providers:
+  p:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models:
+      - model: m
+        {line}
+""",
+    )
+    with pytest.raises(ConfigError, match="context_window"):
+        load(path)
 
 
 def test_a_model_name_falls_back_to_its_id(tmp_path) -> None:
@@ -329,7 +356,9 @@ providers:
     models:
       - model: sees
         input: [text, image]
+        context_window: 1000
       - model: blind
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
@@ -355,10 +384,13 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: refused
+        context_window: 1000
         compat: {store: false}
       - model: asked
+        context_window: 1000
         compat: {store: true}
       - model: silent
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
@@ -383,6 +415,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         compat: {store: false}
 """,
     )
@@ -405,8 +438,10 @@ providers:
     base_url: https://example.test
     models:
       - model: cached
+        context_window: 1000
         compat: {cache_control: 1h}
       - model: silent
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
@@ -430,7 +465,7 @@ providers:
   p:
     api: openai-completions
     api_key: sk-live
-    models: [{model: m}]
+    models: [{model: m, context_window: 1000}]
 """,
     )
     with pytest.raises(ConfigError, match="needs `base_url`"):
@@ -648,6 +683,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         {switch}
 """,
             )
@@ -812,7 +848,7 @@ def test_a_file_with_no_embeddings_is_refused(tmp_path) -> None:
 def test_an_unknown_api_is_refused(tmp_path) -> None:
     path = write(
         tmp_path,
-        "providers:\n  p:\n    api: carrier-pigeon\n    models: [{model: m}]\n",
+        "providers:\n  p:\n    api: carrier-pigeon\n    models: [{model: m, context_window: 1000}]\n",
     )
     with pytest.raises(ConfigError, match="carrier-pigeon"):
         load(path)
@@ -845,6 +881,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         {line}
 """,
     )
@@ -883,8 +920,8 @@ providers:
     api: openai-completions
     base_url: https://example.test/v1
     models:
-      - {model: m}
-      - {model: m}
+      - {model: m, context_window: 1000}
+      - {model: m, context_window: 2000}
 """,
     )
     with pytest.raises(ConfigError, match="listed twice"):
@@ -960,6 +997,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: only
+        context_window: 1000
 """,
     )
     assert load(path).default == "p/only"
@@ -1041,7 +1079,7 @@ def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
         "  elsewhere:\n"
         "    api: openai-completions\n"
         "    base_url: https://other.test/v1\n"
-        "    models: [{model: m}]\n"
+        "    models: [{model: m, context_window: 1000}]\n"
         "embeddings:\n"
         "  providers:\n"
         "    local:\n"
@@ -2295,7 +2333,7 @@ def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None
         "  local:\n"
         "    api: openai-completions\n"
         "    base_url: https://example.test/v1\n"
-        "    models: [{model: big}]\n"
+        "    models: [{model: big, context_window: 1000}]\n"
         "embeddings:\n"
         "  providers:\n"
         "    local:\n"

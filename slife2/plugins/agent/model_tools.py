@@ -181,11 +181,11 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
         Returns:
             `models`, one row per model: `ref` (the `provider/model` reference),
             `provider`, `model`, `name`, whether it is the `default`, and
-            whether it reasons or reads images, under `marks`; and
-            `context_window` and `max_tokens`, both `0` when the config does
-            not say.  Plus `total`, how many models there are, and `default`,
-            the reference the system runs on — `null` when the config names
-            none.
+            whether it reasons or reads images, under `marks`; `context_window`,
+            the window its entry declares — `null` for a row the loader would
+            refuse; and `max_tokens`, `0` when the config does not say.  Plus
+            `total`, how many models there are, and `default`, the reference the
+            system runs on — `null` when the config names none.
         """
         try:
             providers = _providers()
@@ -222,7 +222,9 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
                         "model": model,
                         "name": str(spec.get("name") or model),
                         "marks": marks,
-                        "context_window": spec.get("context_window") or 0,
+                        # The file's own value: a model the loader refuses has
+                        # no window, and a zero here would read as one.
+                        "context_window": spec.get("context_window"),
                         "max_tokens": spec.get("max_tokens") or 0,
                     }
                 )

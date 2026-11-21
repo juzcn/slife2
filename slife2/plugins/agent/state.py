@@ -183,6 +183,13 @@ class Loop:
     agent: str
     subagent: str
     model: str
+    #: The model's token window, for the per-turn prompt marker's percentage and
+    #: the automatic compaction's threshold.  Required: a conversation is only
+    #: ever started on a model whose config entry states one.  Held with the rest
+    #: of how this conversation reaches its model (see `accepts_images`): a model
+    #: switch moves it, and a conversation whose model left the config keeps the
+    #: window it started on.
+    context_window: int
     #: **The iteration cap this conversation started on**, read where the model is
     #: read — at the start, from the config as it was then — and not per turn.
     #: `AgentCore.loop_for` runs on every turn, so taking it from the live config
@@ -322,11 +329,6 @@ class Loop:
     api: str = ""
     model_id: str = ""
     accepts_images: bool = True
-    #: The model's token window, for the per-turn prompt marker's percentage.
-    #: Held with the rest of how this conversation reaches its model (see
-    #: `accepts_images`): a model switch moves it, and a conversation whose
-    #: model left the config keeps the window it started on.
-    context_window: int = 0
     #: The last turn's last model call, in tokens — the figure the status bar
     #: shows and the next turn's `[TURN-PROMPT:]` marker reports.  Set from the
     #: restored last turn and after every turn; 0 for a conversation that has

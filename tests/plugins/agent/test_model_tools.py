@@ -56,6 +56,7 @@ providers:
         context_window: 100000
       - model: small
         name: Small
+        context_window: 2000
 embeddings:
   providers:
     local:
@@ -136,7 +137,7 @@ def model_config(
     api_key: str = "${LOCAL_KEY}",
     reasoning: bool = False,
     input: list[str] | None = None,
-    context_window: int = 0,
+    context_window: int = 1000,
     max_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
@@ -652,14 +653,17 @@ providers:
     models:
       - model: big
         name: Big
+        context_window: 1000
       - model: small
         name: Small
+        context_window: 1000
   aside:
     api: openai-completions
     base_url: https://aside.test/v1
     api_key: ${ASIDE_KEY}
     models:
       - model: only
+        context_window: 1000
 embeddings:
   providers:
     local:
@@ -694,6 +698,7 @@ providers:
     api_key: ${LOCAL_KEY}
     models:
       - model: only
+        context_window: 1000
 embeddings:
   providers:
     local:
@@ -949,6 +954,7 @@ providers:
     models:
       - model: big
         name: Big
+        context_window: 1000
 embeddings:
   providers:
     local:

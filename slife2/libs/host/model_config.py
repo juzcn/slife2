@@ -14,9 +14,11 @@ refused at load, at `model_get`, and at `model_set` with the same sentence.
 **Every field is required here, and the loader supplies the defaults.**  The
 file may omit `reasoning`, `input`, `compat` and the rest; `load_model` fills
 the canonical default before validation, so the object a caller sees is always
-complete.  The tools do not fill anything: a `model_set` that leaves a field
-out is a schema error, not a silent reset.  The two behaviours are the same
-object; only the input side differs.
+complete.  `context_window` is the exception: a model entry must state it,
+because every bound in a turn is measured against it, and the loader refuses an
+entry that does not.  The tools do not fill anything: a `model_set` that leaves
+a field out is a schema error, not a silent reset.  The two behaviours are the
+same object; only the input side differs.
 
 **`compat` is nested here although the runtime model flattens it.**  The file
 spells it nested, the model-facing object spells it nested, and
@@ -111,7 +113,10 @@ class ModelConfig(BaseModel):
         description="The model thinks natively, and its reasoning is kept on the turn."
     )
     input: list[Modality] = Field(description="What it reads: `text` and/or `image`.")
-    context_window: int = Field(description="Its context window, in tokens.")
+    context_window: int = Field(
+        gt=0,
+        description="Its context window, in tokens; a model entry must state it.",
+    )
     max_tokens: int | None = Field(
         description="Its output limit, in tokens; null uses the provider's default."
     )
@@ -150,12 +155,12 @@ COMPAT_DEFAULTS: dict[str, Any] = {
 
 #: What a file that omits a model field means.  The loader merges these under
 #: the raw entry; the tool takes the resulting `ModelConfig` whole, so a
-#: `model_set` can never inherit one of these by accident.
+#: `model_set` can never inherit one of these by accident.  `context_window` is
+#: absent: a model entry must state its window, and no default is a window.
 MODEL_DEFAULTS: dict[str, Any] = {
     "name": "",
     "reasoning": False,
     "input": ["text"],
-    "context_window": 0,
     "max_tokens": None,
     "temperature": None,
     "top_p": None,
@@ -184,7 +189,9 @@ API_KEY_REFUSAL = "api_key must be a `${VAR}` reference — not the secret itsel
 #: the loader turns into the canonical default.  `reasoning`, `max_tokens`,
 #: `temperature` and `top_p` are absent here deliberately: a written `null`
 #: there is either refused (the switch) or a real value (the numbers).
-_NULL_IS_ABSENT = ("name", "input", "compat", "context_window")
+#: `context_window` is absent for the other reason: a written `null` is not a
+#: window, and an omitted one is refused by the required field.
+_NULL_IS_ABSENT = ("name", "input", "compat")
 
 
 def load_provider(raw: Any, *, where: str) -> ProviderConfig:
@@ -210,11 +217,13 @@ def load_provider(raw: Any, *, where: str) -> ProviderConfig:
 def load_model(raw: Any, *, where: str) -> ModelConfig:
     """One model entry, validated and completed with the canonical defaults.
 
-    The file may leave out `name`, `input`, `compat`, `context_window` and the
-    numeric fields; this is the one place that turns those absences into the
-    values the rest of the system means.  *This* is why `model_set` can require
-    every field without making an old file invalid: loading and setting are the
-    same object, with the defaults applied on one side only.
+    The file may leave out `name`, `input`, `compat` and the numeric fields;
+    this is the one place that turns those absences into the values the rest of
+    the system means.  `context_window` is not one of them: it is the one fact
+    a model entry must state, and validation refuses the entry that does not.
+    *This* is why `model_set` can require every field without making an old file
+    invalid: loading and setting are the same object, with the defaults applied
+    on one side only.
     """
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: each model must be a mapping")
@@ -257,8 +266,9 @@ def model_entry(model: ModelConfig) -> dict[str, Any]:
         spec["reasoning"] = True
     if list(model.input) != MODEL_DEFAULTS["input"]:
         spec["input"] = list(model.input)
-    if model.context_window:
-        spec["context_window"] = model.context_window
+    # Always written: a model entry must state its window, and the loader
+    # refuses one that does not.
+    spec["context_window"] = model.context_window
     if model.max_tokens is not None:
         spec["max_tokens"] = model.max_tokens
     if model.temperature is not None:

@@ -1191,10 +1191,9 @@ class AgentCore:
 
         **The measurement is the last call's own**, and the fraction is
         `agent.compact_at` of the window the conversation started on.  A turn
-        that began near its ceiling crosses it after one large batch; a window
-        nobody declared (0) has no threshold — the same rule the rebuild's token
-        budget follows.  The just-appended batch is not in the measurement yet;
-        the fraction is below the window by enough to cover one.
+        that began near its ceiling crosses it after one large batch.  The
+        just-appended batch is not in the measurement yet; the fraction is below
+        the window by enough to cover one.
 
         **Re-asked whenever the threshold is crossed again.**  A compaction that
         dropped something leaves the pass live, so a turn that grows back over
@@ -1205,7 +1204,7 @@ class AgentCore:
         pass.  The threshold is a fraction of the conversation's model window;
         the measurement is the last call's own.
         """
-        if agent_loop is None or loop.context_window <= 0:
+        if agent_loop is None:
             return False
         fraction = loop.compact_at
         if fraction <= 0:

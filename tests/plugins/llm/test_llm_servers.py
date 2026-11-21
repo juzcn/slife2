@@ -3008,6 +3008,7 @@ providers:
     api_key: none
     models:
       - model: big
+        context_window: 1000
 embeddings:
   providers:
     local:
@@ -3077,6 +3078,7 @@ providers:
     api_key: none
     models:
       - model: big
+        context_window: 1000
 embeddings:
   providers:
     local:

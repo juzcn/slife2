@@ -186,8 +186,9 @@ the agent loop is a client of the tool hub and of the model backends.
   plugin and the file handling is a library or a private module.
 - Internal state is addressed by a conversation key, not by a session. The MCP
   transport must therefore preserve the conversation identity on every call.
-- The model's context window is a hard bound. Every mechanism that adds text to
-  a request must have a corresponding bound or eviction rule.
+- The model's context window is a hard bound, and every model entry declares
+  it. Every mechanism that adds text to a request must have a corresponding
+  bound or eviction rule.
 
 **Why.** The difference is the error boundary: a missing plugin fails the turn
 with a named peer, while a file that will not open raises where it is used. A
@@ -854,8 +855,7 @@ next boundary. One that kept everything, or one whose selector failed, is a
 decision about the whole context and stops the automated pass for that turn
 (`Loop.compact_hold`); the model may still call the tool itself, and a later
 successful call resumes the pass. The turn's row, `covered` and the store never
-see the view, and the next turn starts from the full list. A window nobody
-declared (`0`) has no threshold; the model's own call is then the only trigger.
+see the view, and the next turn starts from the full list.
 
 **A final model call that answers with no text and no tool call is a failed
 turn.** A provider can legitimately stop without saying anything, but that result
@@ -1390,7 +1390,7 @@ A model entry declares its capabilities in its own configuration row:
 | Field | Meaning |
 |---|---|
 | `input` | Modalities the model accepts; `text` and `image`. |
-| `context_window` | The model's window, used for context fractions and status display. |
+| `context_window` | The model's window, used for context fractions and status display. **Required**: the loader refuses an entry that omits it or states a number that is not positive. |
 | `reasoning` | Whether the model exposes reasoning. |
 | `compat.thinking` | Provider-specific thinking setting. |
 | `compat.store` | Provider-specific persistence setting. |
@@ -3129,9 +3129,7 @@ The four shapes an undeclared fallback takes:
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
 | A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |
-
 | A store's vector table is absent (its file was rebuilt or deleted under a live hub) | The meaning leg answers empty; the keyword leg still answers | The semantic half of that search until the index is rebuilt | A malformed, wrong-width or corrupt vector table, which raises | `sync`/`index_status` reports the incomplete index |
-| A model's `context_window` is undeclared | Recall is bounded by the configured retrieval width, with no token cap | The token budget a declared window would give | A window that cannot be resolved, which fails the turn | The recall runs; the live list grows by retrieval width |
 | The async registry is over `MAX_ASYNC_TASKS` with only finished undelivered tasks left | Drop the oldest finished tasks, their unread results with them | The one copy of a background result nobody read | Running tasks (never dropped); delivered results (text already cleared) | `check_async`/`cancel_async` refuse the id, naming the drop as a cause |
 | `wslinfo --networking-mode` cannot run | Mirrored mode is guessed from `/sys/class/net/loopback0` | Certainty about WSL networking without `wslinfo` | A platform that answers (its answer is used) | The offset decision the guess feeds |
 | A WeChat login save fails at scan confirmation | Keep the in-memory login and start the poll loop; the next cursor write saves it again | The login's on-disk record until that write (a restart before then needs a new scan) | A save that lands (the normal path) | A warning naming the session file |

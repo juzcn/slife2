@@ -385,15 +385,15 @@ class TaskTurn:
     #: built: a task's backend is fixed for its one turn, so a `model_switch`
     #: mid-task moves the agent server's loops and not this one.
     accepts_images: bool
+    #: The model's window, so the compaction's context figure is the one this
+    #: task's model is measured against.  Also the denominator of the automatic
+    #: threshold below.  Required: the config entry states it.
+    context_window: int
     #: The messages this task's own compaction has hidden from its later model
     #: calls.  The same turn-scoped projection the agent server keeps: the list
     #: `run_turn` advances is the task's whole exchange, and only the view the
     #: model is sent shrinks (`slife2.libs.turn.compact`).
     hidden: list[Message] = field(default_factory=list)
-    #: The model's window, so the compaction's context figure is the one this
-    #: task's model is measured against.  Also the denominator of the automatic
-    #: threshold below.
-    context_window: int = 0
     #: The fraction at which this task's own turn compacts itself, read from the
     #: live config when the task starts — the same `agent.compact_at` the agent
     #: server's conversations use.  A task is one turn and records nothing, so a
@@ -933,7 +933,7 @@ def build_server(
             model's window; a keep-all or a failed selector stops the pass; a
             drop leaves it live for the next crossing.
             """
-            if turn.live is None or turn.context_window <= 0 or turn.compact_at <= 0:
+            if turn.live is None or turn.compact_at <= 0:
                 return False
             if turn.live.last_usage.total_tokens < (
                 turn.context_window * turn.compact_at

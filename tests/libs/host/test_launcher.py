@@ -407,10 +407,10 @@ def _config_with_every_protocol(tmp_path) -> Path:
     path.write_text(
         """
 providers:
-  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}
-  b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n}]}
-  c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o}]}
-  d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p}]}
+  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m, context_window: 1000}]}
+  b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n, context_window: 1000}]}
+  c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o, context_window: 1000}]}
+  d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p, context_window: 1000}]}
 embeddings:
   providers:
     local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}
@@ -437,7 +437,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
     """A server for a protocol nobody uses holds nobody's key."""
     path = tmp_path / "one.yaml"
     path.write_text(
-        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}\n"
+        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m, context_window: 1000}]}\n"
         "embeddings:\n  providers:\n    local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}\n",
         encoding="utf-8",
     )

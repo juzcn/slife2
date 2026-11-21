@@ -1211,20 +1211,14 @@ def build_server(
     def _window(model: str) -> int:
         """How many tokens the model this conversation runs on can hold.
 
-        Zero when the config does not say, which is a real answer and not a
-        missing one: the budget is a fraction of a window, and a window nobody
-        declared is a budget nobody can compute.  The caller drops the token cap
-        and the configured pool's width is the only bound left, rather than
-        inventing a number — a guessed window is a context silently sized
-        against a model that is not the one answering.
+        The model entry states it, and the loader refuses an entry that does
+        not, so this is always a positive number — the recall's budget is a
+        fraction of it, and there is no second way to size a recall.
 
-        **A model the config cannot resolve is not that answer.**  A broad
-        `except` would fold a `ConfigError` in with a declared-absent window, and
-        a broken config would silently drop the token cap and let a recall spend
-        by retrieval width instead of by a budget — the overfill a declared
-        window would have stopped.  A window that cannot be *asked for* is a
-        failure, not a zero (SDD Appendix C: a weaker path is not a substitute
-        for a missing capability).
+        **A model the config cannot resolve is a failure, not a zero.**  A
+        window that cannot be *asked for* fails the turn, rather than leaving a
+        recall to spend by retrieval width with no token cap (SDD Appendix C: a
+        weaker path is not a substitute for a missing capability).
         """
         return int(current().resolve(model)[2].context_window)
 
@@ -1434,10 +1428,10 @@ def build_server(
         agent: str,
         messages: list[dict[str, Any]],
         selectable: list[int],
+        context_window: int,
         model: str = "",
         subagent: str = "",
         context_tokens: int = 0,
-        context_window: int = 0,
     ) -> dict[str, Any]:
         """Decide which of a running turn's live messages it no longer needs.
 
@@ -1462,10 +1456,10 @@ def build_server(
             agent: Whose conversation.
             messages: The view the turn is running on, in order.
             selectable: The view positions the model may drop.
+            context_window: The conversation's model window, in tokens.
             model: Which model this conversation runs on, as `provider/model`.
             subagent: Which of that agent's conversations; empty for its own.
             context_tokens: The last call's measured size.
-            context_window: The conversation's model window, or 0 if undeclared.
         """
         usage, _used = decisions.context_usage(context_tokens, context_window)
         drop, decision = await _select_live(
@@ -1834,18 +1828,12 @@ def build_server(
         # ranks candidates, and how much room is left is a fact about a
         # selection the caller made.
         base_cost = sum((await off_loop(_cost_of, store, base)).values())
-        if window:
-            # One budget, the ceiling's: what the kept turns leave below it.
-            # A kept context at the ceiling leaves the recall nothing, and one
-            # already over it is a negative budget — both answered by the
-            # `budget <= 0` exit below rather than by a recall that overfills.
-            budget = int(window * policy.ceiling) - base_cost
-        else:
-            # No declared window: no token cap, so the fused pool's width is
-            # the only bound left.  Better a context bounded by retrieval
-            # width than one sized against a window nobody stated.
-            budget = 0
-        if window and budget <= 0:
+        # One budget, the ceiling's: what the kept turns leave below it.
+        # A kept context at the ceiling leaves the recall nothing, and one
+        # already over it is a negative budget — both answered by the
+        # `budget <= 0` exit below rather than by a recall that overfills.
+        budget = int(window * policy.ceiling) - base_cost
+        if budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
             return [], ""
 
@@ -1893,8 +1881,6 @@ def build_server(
         # list then discards.  A time-ordered pool is bounded the same way, by
         # the budget, from the end its anchor named.
         costs = await off_loop(_cost_of, store, order)
-        if not window:
-            return sorted(order), rerank
         fit = decisions.fit_budget if (query or sentences) else decisions.fit_window
         return fit(order, costs, budget), rerank
 

@@ -3617,7 +3617,7 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
         "  local:\n"
         "    api: openai-completions\n"
         "    base_url: https://example.test/v1\n"
-        "    models: [{model: big}]\n"
+        "    models: [{model: big, context_window: 1000}]\n"
         "embeddings:\n"
         "  providers:\n"
         "    local:\n"

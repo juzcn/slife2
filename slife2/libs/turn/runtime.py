@@ -507,8 +507,8 @@ class TurnRuntime:
         messages: list[Message],
         selectable: list[int],
         model: str,
+        context_window: int,
         context_tokens: int = 0,
-        context_window: int = 0,
     ) -> LiveChoice:
         """Ask the live selector which of this turn's messages it no longer needs.
 
@@ -561,8 +561,8 @@ class TurnRuntime:
         messages: list[Message],
         hidden: list[Message],
         model: str,
+        context_window: int,
         context_tokens: int = 0,
-        context_window: int = 0,
     ) -> compact.Compacted:
         """Run one live compaction: ask, then hide what the answer names.
 
@@ -584,7 +584,12 @@ class TurnRuntime:
         if not candidates:
             return compact.Compacted(seen=len(view), dropped=0)
         choice = await self.select_live(
-            identity, view, candidates, model, context_tokens, context_window
+            identity,
+            view,
+            candidates,
+            model,
+            context_window,
+            context_tokens=context_tokens,
         )
         if choice.decision:
             return compact.Compacted(

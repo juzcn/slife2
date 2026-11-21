@@ -1082,16 +1082,23 @@ def is_loopback_host(host: str) -> bool:
 class ModelSettings:
     """One model a provider serves, and how to call it.
 
-    Every numeric field is optional and `None` means *omit it*, which is not the
-    same as passing a sensible-looking default: several gateways reject a
+    Every generation number is optional and `None` means *omit it*, which is not
+    the same as passing a sensible-looking default: several gateways reject a
     `temperature` they did not ask for, and a model that reasons natively may
     refuse a `thinking` field entirely.  Saying nothing is the safe value, so
-    saying nothing is what an absent field means.
+    saying nothing is what an absent field means.  `context_window` is not a
+    generation number: it is the bound the turn is measured against, and the
+    config entry must state it.
     """
 
     #: The API's model name, and the local id — `"deepseek/deepseek-flash"` in
     #: references is built from the provider name plus this.
     model: str
+    #: The model's context window, in tokens.  The config entry states it and
+    #: `_model_settings` carries it over, so a conversation never runs on a
+    #: model without one; zero is the absent default for a `ModelSettings` built
+    #: directly by a test that never asks the window.
+    context_window: int = 0
     #: What to show a person.  Falls back to `model` when absent.
     name: str = ""
     #: The model thinks natively, so reasoning is worth asking for.
@@ -1110,8 +1117,6 @@ class ModelSettings:
     #: saying the model cannot read it.  The check is `attach_image`'s, in
     #: `slife2.plugins.agent.server`.
     input: tuple[str, ...] = ("text",)
-    #: Token budget, used for the context percentage in the status bar.
-    context_window: int = 0
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

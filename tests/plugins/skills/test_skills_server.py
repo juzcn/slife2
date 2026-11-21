@@ -43,7 +43,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    models: [{model: big}]
+    models: [{model: big, context_window: 1000}]
 embeddings:
   providers:
     local:

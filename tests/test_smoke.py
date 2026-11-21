@@ -24,6 +24,7 @@ from slife2.libs.host.config import (
     AGENT_TASK_SERVER_NAME,
     REMOTE,
     A2ASettings,
+    ConfigError,
     default_config,
     load,
 )
@@ -1178,10 +1179,14 @@ default: p/small
     assert tui_model(config, "p/big")[0] == "p/big", "the wire form"
 
 
-def test_a_model_with_no_window_reports_none(tmp_path) -> None:
-    """Zero, not a guess — and the status bar reads that as "no percentage",
-    the same way it reads `reasoning: false` as "no thinking badge" rather than
-    inferring a capability from the model's name."""
+def test_a_model_with_no_window_is_refused_before_the_window_opens(tmp_path) -> None:
+    """**The bar's percentage needs a declared window, not a guess.**
+
+    A model that named no window used to answer zero, and the bar rendered its
+    token count without a percentage.  The window is now a required field, so
+    the file is refused at load — before the TUI is built — rather than a bar
+    quietly missing its percentage for good.
+    """
     path = tmp_path / "slife2.yaml"
     path.write_text(
         """
@@ -1200,7 +1205,5 @@ default: p/m
 """,
         encoding="utf-8",
     )
-    _, model = tui_model(load(path))
-    assert model.context_window == 0
-    assert not model.reasoning
-    assert not model.accepts_images
+    with pytest.raises(ConfigError, match="context_window"):
+        load(path)
