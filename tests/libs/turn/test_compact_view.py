@@ -13,7 +13,6 @@ import pytest
 
 from slife2.libs.turn.compact import (
     Compacted,
-    already_asked,
     opening,
     report,
     selectable,
@@ -70,28 +69,6 @@ def test_the_system_and_the_opening_are_not_selectable() -> None:
     head, past, now, tool = system(), user("old"), user("now"), result("c1")
 
     assert selectable([head, past, now, tool], now) == [1, 3]
-
-
-def test_a_compaction_is_read_off_the_turn_it_happened_in() -> None:
-    """The pair is the record of having asked; a flag would be a second copy."""
-    at = user("now")
-    compaction = [
-        call("c1"),
-        result("c1"),
-        call("c2", "_turn_compact"),
-        result("c2", "Dropped 2 message(s)"),
-    ]
-
-    assert already_asked([at, *compaction], 0) is True
-    assert already_asked([at], 0) is False
-
-
-def test_a_previous_turns_compaction_does_not_count() -> None:
-    """The scan starts at this turn's opening, so the turn asks for its own."""
-    before = [user("old"), call("c1", "_turn_compact"), result("c1", "done")]
-    now = [user("now"), answer("working")]
-
-    assert already_asked([*before, *now], 3) is False
 
 
 def test_the_report_names_the_record() -> None:

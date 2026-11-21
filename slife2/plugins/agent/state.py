@@ -219,6 +219,13 @@ class Loop:
     #: Cleared when a turn starts, so a hidden message cannot outlive the turn
     #: that hid it.
     hidden: list[Message] = field(default_factory=list)
+    #: Whether this turn's automatic compaction has stopped asking.  Set when
+    #: the selector keeps everything (`dropped == 0`) or fails: that is a
+    #: decision about the whole context, not something to re-ask on every
+    #: iteration.  A later successful call — the model's own — clears it, and so
+    #: does a new turn.  A compaction that drops something leaves it false, so
+    #: the next crossing of `compact_at` asks again.
+    compact_hold: bool = False
     #: Which turns of the log `messages` is made of, in order — the agent's copy
     #: of the live-context list the store persists.  Held here rather than read
     #: per turn because it *is* the in-memory state: `rebuild` is handed it and

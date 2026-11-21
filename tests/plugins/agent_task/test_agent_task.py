@@ -61,8 +61,8 @@ from slife2.libs.plugin.audience import (
 from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.events import ContextChosen, TextDelta, TurnFinished
-from slife2.libs.turn.messages import StreamChatResult, ToolCall
-from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT
+from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT, TURN_COMPACT
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief
 from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.agent_task.server import (
@@ -84,6 +84,9 @@ DESCRIPTION = "Find the retry policy."
 
 def config(**task_overrides: Any) -> Config:
     base = default_config()
+    compact_at = task_overrides.pop("compact_at", None)
+    if compact_at is not None:
+        base = replace(base, agent=replace(base.agent, compact_at=compact_at))
     return replace(base, agent_task=AgentTaskSettings(**task_overrides))
 
 
@@ -107,11 +110,39 @@ class Discriminator:
 
 
 @dataclass
+class Selector:
+    """The context plugin's live selector, scripted — and counted.
+
+    The answer drops everything it is offered, which is what makes a task's
+    automatic pass visible; the existing tests never reach it, and a stub keeps
+    the fixture off a real model server if one ever does.
+    """
+
+    calls: list[str] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        selectable: list[int],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        self.calls.append(usage)
+        return json.dumps({"compact": selectable})
+
+
+@dataclass
 class Store:
-    """The real `slife2-context`, over the in-memory transport, and its call."""
+    """The real `slife2-context`, over the in-memory transport, and its calls."""
 
     client: Client
     ask: Discriminator
+    select: Selector | None = None
 
 
 class UnreadableStore:
@@ -249,10 +280,11 @@ async def store() -> Any:
     from slife2.plugins.context.server import build_server as build_context
 
     ask = Discriminator()
+    select = Selector()
     async with Client(
-        build_context(default_config(), embedder=StubEmbedder(), ask=ask)
+        build_context(default_config(), embedder=StubEmbedder(), ask=ask, select=select)
     ) as client:
-        yield Store(client=client, ask=ask)
+        yield Store(client=client, ask=ask, select=select)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
@@ -1689,10 +1721,15 @@ def a_subagent(*, role: str = "researcher") -> None:
     )
 
 
-def tool_turn(*calls: ToolCall) -> ScriptedTurn:
+def tool_turn(*calls: ToolCall, usage: Usage | None = None) -> ScriptedTurn:
     """One scripted model response that calls tools, then a text turn follows."""
     return ScriptedTurn(
-        result=StreamChatResult(text="", tool_calls=calls, stop_reason="tool_calls"),
+        result=StreamChatResult(
+            text="",
+            tool_calls=calls,
+            stop_reason="tool_calls",
+            usage=usage or Usage(),
+        ),
         chunks=[Chunk(text="")],
     )
 
@@ -1716,6 +1753,11 @@ def declaring_agent(reached: list[str]) -> FastMCP:
     async def attach_image(ctx: Context, sources: list[str]) -> dict[str, Any]:
         reached.append(ATTACH_IMAGE)
         return {"attached": [], "refused": []}
+
+    @mcp.tool(name=TURN_COMPACT, meta=FOR_THE_MODEL)
+    async def turn_compact(ctx: Context) -> str:
+        reached.append(TURN_COMPACT)
+        return "the agent's compaction"
 
     return mcp
 
@@ -1816,6 +1858,50 @@ async def test_a_task_has_no_cut_in_and_takes_nothing_from_the_maker(
     assert reached == [], "the task reached the agent server's cut-in"
     tool = [message for message in built.messages() if message.role == "tool"][0]
     assert tool.content == NOTHING_WAITING
+
+
+async def test_a_task_compacts_itself_at_the_threshold(
+    store: Store, window: Window
+) -> None:
+    """**A task is one turn with no record**, so a turn that overflows has no
+    next turn to recover on.  The same automatic pass the agent server runs
+    keeps it alive: the harness asks, the selector drops, the answer arrives.
+
+    The names the hub declares for `_turn_compact` stay the hub's; the body is
+    the task's own, so the agent server's compaction is never reached.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    high = Usage(prompt_tokens=500, completion_tokens=100)
+    async with hub:
+        built = build(
+            tool_turn(
+                ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}), usage=high
+            ),
+            tool_turn(
+                ToolCall(id="c2", name=CHECK_NEW_INPUT, arguments={}), usage=high
+            ),
+            text_turn("done"),
+            hub=hub,
+            context=store,
+            window=window,
+            compact_at=0.0005,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's compaction"
+    assert store.select is not None and store.select.calls, "the harness asked"
+    calls = [
+        call
+        for message in built.messages()
+        if message.role == "assistant"
+        for call in message.tool_calls
+    ]
+    assert not any(call.id in {"c1", "c2"} for call in calls), (
+        "the dropped exchanges are out of the view the last call ran on"
+    )
+    assert window.handed and "done" in window.handed[-1]["text"]
 
 
 async def test_a_tasks_attach_image_lands_on_its_own_next_call(

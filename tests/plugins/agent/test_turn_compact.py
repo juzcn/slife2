@@ -95,6 +95,18 @@ def answered(text: str) -> ScriptedTurn:
     return ScriptedTurn(result=StreamChatResult(text=text, stop_reason="stop"))
 
 
+def high(text: str, call_id: str) -> ScriptedTurn:
+    """A tool turn whose own call reports a context over a tiny threshold."""
+    base = calling("fake__echo", {"text": text}, call_id)
+    return replace(
+        base,
+        result=replace(
+            base.result,
+            usage=Usage(prompt_tokens=500, completion_tokens=100),
+        ),
+    )
+
+
 def stored_messages() -> list[dict]:
     return json.loads(
         sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
@@ -289,6 +301,94 @@ async def test_the_harness_asks_at_the_measured_threshold(
         if message.get("role") == "tool" and "Dropped" in str(message.get("content"))
     ]
     assert report and report[0].startswith("Dropped 2 message(s)")
+
+
+@pytest.mark.asyncio
+async def test_a_successful_compaction_can_be_asked_again(
+    tmp_path, monkeypatch
+) -> None:
+    """**No once-per-turn cap**: a context that grows back over the fraction is
+    asked about again at the next boundary."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over(compact_at=0.0005)
+    backend = FakeBackend(high(OLD, "c1"), high(OLD, "c2"), answered("done"))
+    usages: list[str] = []
+
+    async def drop_all(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict],
+        selectable: list[int],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        usages.append(usage)
+        return json.dumps({"compact": selectable})
+
+    answer = await run_turn(cfg, backend, drop_all)
+
+    assert answer.data["text"] == "done"
+    assert len(usages) == 2, "the second crossing asked again"
+    rows = stored_messages()
+    pairs = [
+        call
+        for message in rows
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if call["function"]["name"] == "_turn_compact"
+    ]
+    assert len(pairs) == 2, "both asks are in the record"
+
+
+@pytest.mark.asyncio
+async def test_a_keep_all_decision_stops_the_automatic_pass(
+    tmp_path, monkeypatch
+) -> None:
+    """A selector that keeps everything has decided the context is enough.
+
+    The harness must not pay for the same answer at every boundary; the model
+    can still call the tool itself, and a successful call resumes the pass.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over(compact_at=0.0005)
+    backend = FakeBackend(high(OLD, "c1"), high(OLD, "c2"), answered("done"))
+    asked: list[str] = []
+
+    async def keep_all(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict],
+        selectable: list[int],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        asked.append(usage)
+        return "{}"
+
+    answer = await run_turn(cfg, backend, keep_all)
+
+    assert answer.data["text"] == "done"
+    assert len(asked) == 1, "the keep-all stopped the automatic pass"
+    rows = stored_messages()
+    pairs = [
+        call
+        for message in rows
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if call["function"]["name"] == "_turn_compact"
+    ]
+    assert len(pairs) == 1
+    assert any(
+        message.get("role") == "tool"
+        and "Nothing dropped" in str(message.get("content"))
+        for message in rows
+    )
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from slife2.libs.turn.messages import Message
-from slife2.libs.turn.tools import TURN_COMPACT
 
 
 @dataclass(frozen=True)
@@ -71,21 +70,6 @@ def selectable(view: Sequence[Message], opening: Message) -> list[int]:
         for index, message in enumerate(view)
         if message.role != "system" and message is not opening
     ]
-
-
-def already_asked(messages: Sequence[Message], opening: int) -> bool:
-    """Whether this turn has already run a compaction.
-
-    **Read off the conversation, not kept in a flag.**  A compaction writes its
-    own pair, so the pair is the record of having asked; a loop-local flag would
-    be a second copy a cancelled turn could leave behind.
-    """
-    return any(
-        call.name == TURN_COMPACT
-        for message in messages[opening:]
-        if message.role == "assistant"
-        for call in message.tool_calls
-    )
 
 
 def report(result: Compacted, *, recorded: bool = True) -> str:

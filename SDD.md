@@ -845,9 +845,14 @@ loop is handed a `present` callback with the list it advances; the model is sent
 called by the harness when the last call's `total_tokens` crosses
 `agent.compact_at` of the conversation's window — or by the model itself — and
 its selector hides the messages the turn no longer needs from the view for the
-rest of the turn. The turn's row, `covered` and the store never see it, and the
-next turn starts from the full list. A window nobody declared (`0`) has no
-threshold; the model's own call is then the only trigger.
+rest of the turn. A compaction that dropped something leaves the automated pass
+live: a context that grows back over the fraction is asked about again at the
+next boundary. One that kept everything, or one whose selector failed, is a
+decision about the whole context and stops the automated pass for that turn
+(`Loop.compact_hold`); the model may still call the tool itself, and a later
+successful call resumes the pass. The turn's row, `covered` and the store never
+see the view, and the next turn starts from the full list. A window nobody
+declared (`0`) has no threshold; the model's own call is then the only trigger.
 
 **A final model call that answers with no text and no tool call is a failed
 turn.** A provider can legitimately stop without saying anything, but that result
@@ -1171,7 +1176,10 @@ is the model's to drop. The legality of a tool exchange is the *prompt's* rule �
 a call and its results go together — and the harness applies the answer as it
 came: a split pair is a failed next call, one turn, not a repaired answer. A
 selector that fails or cannot be read compacts nothing and the turn continues
-(Appendix C).
+(Appendix C); a selector that keeps everything stops the automated pass for the
+rest of the turn, because that is a decision about the whole context rather than
+something the harness should ask again at every boundary. The model can still
+call `_turn_compact` itself.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
 query fired on 0 of 16 queries; a word-shaped query fired on 10 of 15 and found
@@ -2193,9 +2201,12 @@ their bodies are the task's: `_check_new_input` answers "nothing waiting" (a tas
 has no inbox and no harness cut-in), `attach_image` injects into the task's own
 single user message, the rendered description, so the picture is on the task's
 next model call, and `_turn_compact` compacts the task's own view (its
-`turn.hidden`) and never the agent server's loop. The agent server refuses a
-call that names a turn other than the loop's running one, and the hub forwards
-the caller's turn token so that is decidable.
+`turn.hidden`) and never the agent server's loop. The task also runs the same
+automatic threshold as an agent server turn — its own `compact_due`, against
+`turn.live.last_usage` and the task's window — because a task is one turn and
+records nothing: a turn that overflows has no next turn to recover on. The agent
+server refuses a call that names a turn other than the loop's running one, and
+the hub forwards the caller's turn token so that is decidable.
 
 A task's prompt tells it not to start another task — the same one-turn rule
 that makes `_async` pointless. `agent-task.max_running` bounds concurrency, not

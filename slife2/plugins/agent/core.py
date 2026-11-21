@@ -1194,9 +1194,14 @@ class AgentCore:
         budget follows.  The just-appended batch is not in the measurement yet;
         the fraction is below the window by enough to cover one.
 
-        **Once per turn, read off the conversation.**  A compaction writes its
-        own pair, so `already_asked` is the record of having asked; a model that
-        called the tool itself is not asked again by the harness.
+        **Re-asked whenever the threshold is crossed again.**  A compaction that
+        dropped something leaves the pass live, so a turn that grows back over
+        the fraction is asked again at the next boundary.  A compaction that
+        kept everything, or failed, is a decision about the whole context and
+        stops the automatic pass for the turn (`Loop.compact_hold`); the model
+        can still call the tool itself, and a later successful call resumes the
+        pass.  The threshold is a fraction of the conversation's model window;
+        the measurement is the last call's own.
         """
         if agent_loop is None or loop.context_window <= 0:
             return False
@@ -1205,8 +1210,10 @@ class AgentCore:
             return False
         if agent_loop.last_usage.total_tokens < loop.context_window * fraction:
             return False
+        if loop.compact_hold:
+            return False
         at = compact.opening(loop.messages)
-        if at is None or compact.already_asked(loop.messages, at):
+        if at is None:
             return False
         view = compact.view(loop.messages, loop.hidden)
         return bool(compact.selectable(view, loop.messages[at]))
@@ -1334,6 +1341,7 @@ class AgentCore:
         # message it hid must not outlive it, and the next turn's rebuild is
         # what decides that turn's context.
         loop.hidden.clear()
+        loop.compact_hold = False
         outcome.started_at = now()
         # **The model is taken here, and that is a turn boundary.**  `loop_for`
         # below resolves the backend once for this turn, so this is what will
@@ -2797,12 +2805,17 @@ class AgentCore:
             ),
             context_window=loop.context_window,
         )
+        # **A decision to keep everything stops the automatic pass**, exactly as
+        # a failure does: re-asking the same context every iteration would be
+        # paying for a decision already made.  A drop leaves the pass live.
+        loop.compact_hold = result.dropped == 0 or bool(result.decision)
         logger.info(
-            "turn_compact %s seen=%d dropped=%d decision=%s",
+            "turn_compact %s seen=%d dropped=%d decision=%s hold=%s",
             describe((loop.agent, loop.subagent)),
             result.seen,
             result.dropped,
             result.decision or "ok",
+            loop.compact_hold,
         )
         return compact.report(result)
 
