@@ -90,32 +90,8 @@ providers:
           - image
         context_window: 1000000
         max_tokens: 131072
+
 default: deepseek/deepseek-flash
-
-agent:
-  # Model calls per turn. 0 or absent means no cap.
-  max_iterations: 0
-  # Fraction of the model's window at which a turn drops what it no longer
-  # needs from its own context. 0 disables the automatic pass; the model can
-  # still call `_turn_compact` itself.
-  compact_at: 0.9
-  # A Jinja2 template beside this file. `{{ agent_name }}` and `{{ headless }}`
-  # are available; omit to use the shipped template.
-  # system_prompt: prompts/jack.j2
-
-agent-task:
-  # Agent tasks running at once per agent.
-  max_running: 4
-
-subagent:
-  # Subagents per agent. The tree stops at one level.
-  max_running: 32
-  # The local subagent network: `broker`, plus `org` to group meshes. `unit:`
-  # is not a setting; `peer_agent:` uses this broker when it names none.
-  provider: mosquitto
-  broker:
-    host: localhost
-    port: 1883
 
 # OpenAI-compatible embedding endpoints. The width is discovered; changing
 # the model re-embeds the index on the next start.
@@ -135,6 +111,59 @@ embeddings:
       rerank_model: BAAI/bge-reranker-v2-m3
   # The provider in use, by id. Omit to use the first.
   active_model: siliconflow
+
+# `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
+# (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
+# refused. `defaults` applies when a call names no model; `params` and `voice`
+# are the model's own defaults.
+media:
+  defaults:
+    image: bailian_personal/wan2.7-image
+    video: bailian_personal/happyhorse-1.1-t2v
+  providers:
+    bailian_personal:
+      api: dashscope-aigc
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
+      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+      models:
+        - model: wan2.7-image
+          kind: image
+        - model: wan2.7-image-pro
+          kind: image
+        - model: qwen-image-3.0-pro
+          kind: image
+        - model: happyhorse-1.1-t2v
+          kind: video
+          params:
+            resolution: 720P
+            ratio: 16:9
+            duration: 5
+        - model: happyhorse-1.1-i2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: happyhorse-1.1-r2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: qwen-audio-3.0-tts-plus
+          kind: tts
+          voice: longanhuan_v3.6
+        - model: qwen-audio-3.0-asr-flash
+          kind: asr
+
+agent:
+  # Model calls per turn. 0 or absent means no cap.
+  max_iterations: 0
+  # Fraction of the model's window at which a turn drops what it no longer
+  # needs from its own context. 0 disables the automatic pass; the model can
+  # still call `_turn_compact` itself.
+  compact_at: 0.9
+  # A Jinja2 template beside this file. `{{ agent_name }}` and `{{ headless }}`
+  # are available; omit to use the shipped template.
+  # system_prompt: prompts/jack.j2
 
 context:
   # `ceiling` is the one total the kept turns and the recall share: the kept
@@ -156,6 +185,32 @@ context:
   # Calibrated on this log: the turns a recall needs scored 0.37-1.0, the
   # incidental tail 0.00-0.24, so 0.3 keeps the first and drops the second.
   rerank_min_score: 0.3
+
+agent-task:
+  # Agent tasks running at once per agent.
+  max_running: 4
+
+subagent:
+  # Subagents per agent. The tree stops at one level.
+  max_running: 32
+  # The local subagent network: `broker`, plus `org` to group meshes. `unit:`
+  # is not a setting; `peer_agent:` uses this broker when it names none.
+  provider: mosquitto
+  broker:
+    host: localhost
+    port: 1883
+
+peer_agent:
+  # Presence enables the peer network. `broker` names another machine's broker;
+  # left out, the subagent network's address is used. A local broker is started
+  # when absent and stopped with the stack only if slife2 started it.
+  #
+  # `provider: mosquitto` is the only broker; `org` and `unit` are the topic
+  # namespace that separates groups on one broker.
+  provider: mosquitto
+  # broker: {host: localhost, port: 1883}
+  org: default
+  unit: default
 
 tool_load:
   # Above this many loaded tools, the least recently used are unloaded at a
@@ -406,48 +461,6 @@ skills:
     env:
       BAIDU_API_KEY: ${BAIDU_API_KEY}
 
-# `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
-# (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
-# refused. `defaults` applies when a call names no model; `params` and `voice`
-# are the model's own defaults.
-media:
-  defaults:
-    image: bailian_personal/wan2.7-image
-    video: bailian_personal/happyhorse-1.1-t2v
-  providers:
-    bailian_personal:
-      api: dashscope-aigc
-      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
-      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
-      models:
-        - model: wan2.7-image
-          kind: image
-        - model: wan2.7-image-pro
-          kind: image
-        - model: qwen-image-3.0-pro
-          kind: image
-        - model: happyhorse-1.1-t2v
-          kind: video
-          params:
-            resolution: 720P
-            ratio: 16:9
-            duration: 5
-        - model: happyhorse-1.1-i2v
-          kind: video
-          params:
-            resolution: 720P
-            duration: 5
-        - model: happyhorse-1.1-r2v
-          kind: video
-          params:
-            resolution: 720P
-            duration: 5
-        - model: qwen-audio-3.0-tts-plus
-          kind: tts
-          voice: longanhuan_v3.6
-        - model: qwen-audio-3.0-asr-flash
-          kind: asr
-
 # Exactly one provider is active; the others stay configured and inert.
 # `expose_local_image` serves a local file through the tunnel. An unknown
 # provider name is a config error, refused at load; `tunnel_status` reports
@@ -464,15 +477,3 @@ file-tunnel:
     cloudflare:
       # http2 avoids QUIC failures behind a proxy or TUN adapter.
       protocol: http2
-
-peer_agent:
-  # Presence enables the peer network. `broker` names another machine's broker;
-  # left out, the subagent network's address is used. A local broker is started
-  # when absent and stopped with the stack only if slife2 started it.
-  #
-  # `provider: mosquitto` is the only broker; `org` and `unit` are the topic
-  # namespace that separates groups on one broker.
-  provider: mosquitto
-  # broker: {host: localhost, port: 1883}
-  org: default
-  unit: default
