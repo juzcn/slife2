@@ -581,7 +581,10 @@ those already running. Servers are daemons: a client exiting never stops one,
 but the last client out does — and it stops the *machine's* records, not only
 the exiting config's endpoints, because a backend another configuration started
 is still a daemon with nobody left to stop it. `others_running` counts by
-process liveness, so a killed client cannot keep the stack alive.
+process liveness, so a killed client cannot keep the stack alive. A take-down
+that has begun runs to the end: a repeated `Ctrl+C` — the second half of an
+accidental double press — is swallowed rather than aborting it and leaving the
+stack half stopped.
 
 The lifecycle rules are:
 

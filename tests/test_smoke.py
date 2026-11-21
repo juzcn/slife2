@@ -10,6 +10,7 @@ nothing has started yet and the fix is in the file being named.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -391,6 +392,39 @@ def test_down_exits_nonzero_when_a_server_did_not_stop(
     )
 
     assert slife2._down(config) == 2
+
+
+def test_a_second_ctrl_c_cannot_abort_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The press after a double tap lands during the stop, not in the window.
+
+    A window reads Ctrl+C as a key, so the first press quits it; the terminal
+    belongs to the console again when the second arrives, which makes it a real
+    `SIGINT` — delivered inside the take-down, where the app's
+    `except KeyboardInterrupt` does not reach, and answered with a traceback
+    over an exit already asked for.  The stop must run to its end instead, so
+    what is asserted here is the ignored handler for as long as `stop` runs and
+    the previous one back afterwards — `slife2 down` is a caller that returns
+    and must not leave the process deaf to Ctrl+C.
+    """
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    seen: list[Any] = []
+
+    def stop(_config: Any, **_kwargs: Any) -> Any:
+        seen.append(signal.getsignal(signal.SIGINT))
+        yield launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "stop", stop)
+    before = signal.getsignal(signal.SIGINT)
+
+    assert slife2._down(config) == 0
+
+    assert seen == [signal.SIG_IGN]
+    assert signal.getsignal(signal.SIGINT) is before
 
 
 def test_logs_lists_the_configured_logs(capsys) -> None:
