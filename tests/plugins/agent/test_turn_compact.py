@@ -25,7 +25,9 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
 from slife2.libs.model.base import StreamChatResult
 from slife2.libs.turn.context import context_usage
+from slife2.libs.turn.events import ToolCallFinished, decode
 from slife2.libs.turn.messages import ToolCall, Usage
+from slife2.libs.turn.tools import TURN_COMPACT
 from slife2.plugins.agent.server import build_server
 from slife2.plugins.context.server import build_server as build_context
 from slife2.plugins.toolhub.server import build_server as build_hub
@@ -115,7 +117,9 @@ def stored_messages() -> list[dict]:
     )
 
 
-async def run_turn(cfg: Any, backend: FakeBackend, select: Any) -> Any:
+async def run_turn(
+    cfg: Any, backend: FakeBackend, select: Any, on_progress: Any = None
+) -> Any:
     """One turn over the in-memory transport, with the agent as a hub source.
 
     **The hub has to reach the very agent server under test**, because the
@@ -158,6 +162,7 @@ async def run_turn(cfg: Any, backend: FakeBackend, select: Any) -> Any:
             return await client.call_tool(
                 "send_message",
                 {"agent": DEFAULT_AGENT, "prompt": "look something up"},
+                progress_handler=on_progress,
             )
 
 
@@ -181,6 +186,12 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     )
     seen: list[list[dict]] = []
     usages: list[str] = []
+    events: list[Any] = []
+
+    async def on_progress(progress: Any, total: Any, message: Any) -> None:
+        event = decode(message or "")
+        if event is not None:
+            events.append(event)
 
     async def drop_all(
         agent: str,
@@ -197,12 +208,18 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
         usages.append(usage)
         return json.dumps({"compact": selectable})
 
-    answer = await run_turn(cfg, backend, drop_all)
+    answer = await run_turn(cfg, backend, drop_all, on_progress)
 
     assert answer.data["text"] == "done"
     assert len(backend.calls) == 3, "the model's own calls and no compaction call"
     assert len(seen) == 1, "one selector call"
     assert usages and usages[0], "the selector is told the context figure"
+    finished = [
+        event
+        for event in events
+        if isinstance(event, ToolCallFinished) and event.name == TURN_COMPACT
+    ]
+    assert finished, "the tool's output reaches the turn's stream"
     assert any(str(message.get("content")) == OLD for message in seen[0]), (
         "the selector read the view before the drop"
     )
@@ -231,6 +248,9 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     ]
     assert report and report[0].startswith("Dropped 2 message(s)"), (
         "the assistant call and its result went together"
+    )
+    assert finished[0].result_preview == report[0], (
+        "the note the person sees and the tool's output are one text"
     )
 
 

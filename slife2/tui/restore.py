@@ -42,7 +42,7 @@ from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, TURN_COMPACT, is_harness
 from slife2.tui.widgets import WINDOW_CHANNEL, ChatView
 
 logger = logging.getLogger(__name__)
@@ -229,6 +229,12 @@ def _draw_answer(
             # before that field reads as this window's own, which is the only
             # speaker a missing channel can honestly be.
             chat.add_cut_in(text, channel=channel or WINDOW_CHANNEL)
+        elif call.name == TURN_COMPACT:
+            # **The tool's answer is the note, exactly as the live line is.**
+            # The pair is skipped as a panel for every harness call; this one is
+            # the exception that draws its output, because the output is what
+            # the person watched arrive.
+            chat.add_note(text)
         elif not is_harness(call.name):
             _draw_tool(chat, call, text)
 

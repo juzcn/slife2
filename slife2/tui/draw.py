@@ -44,7 +44,7 @@ from slife2.libs.turn.events import (
     TurnFinished,
     UsageReported,
 )
-from slife2.libs.turn.tools import is_harness
+from slife2.libs.turn.tools import TURN_COMPACT, is_harness
 from slife2.tui.widgets import ChatView
 
 
@@ -56,6 +56,11 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
     decided it does not own any of them, which is exactly what a watcher is.
     """
     match event:
+        case ToolCallFinished(name=name, result_preview=text) if name == TURN_COMPACT:
+            # **The tool's own answer is the person's line.**  A compaction is a
+            # harness move, and the note is exactly what the call answered — one
+            # text, so the transcript and the model's pair cannot disagree.
+            chat.add_note(text)
         case ToolCallStarted(name=name) | ToolCallFinished(name=name) if is_harness(
             name
         ):

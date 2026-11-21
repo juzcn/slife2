@@ -42,6 +42,7 @@ from slife2.libs.turn.events import (
     UsageReported,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
+from slife2.libs.turn.tools import TURN_COMPACT
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
@@ -483,6 +484,33 @@ async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
     assert blocks == ["The answer", " is 42"], (
         "the closed block's prefix was drawn a second time"
     )
+
+
+async def test_a_compaction_note_is_drawn_mid_turn() -> None:
+    """The tool's own output is the person's line: one text, not two spellings."""
+    report = "Dropped 2 message(s) from this turn's model context."
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name=TURN_COMPACT,
+                ok=True,
+                result_preview=report,
+                result_chars=len(report),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert any(report in text for text in notes)
 
 
 async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> None:
@@ -1338,6 +1366,35 @@ async def test_a_restored_failed_turn_reads_as_the_harness_line_not_an_answer() 
     assert "You> one" in text
     assert "turn failed: RuntimeError: the provider answered 500" in text
     assert "jack> [TURN-FAILED" not in text, "the harness's line is not the model's"
+
+
+async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
+    """The rebuilt line is the stored tool message, not a second phrasing.
+
+    The harness pair is skipped as a panel; its answer is the note, which is the
+    same text the model read and the live line showed.
+    """
+    report = "Dropped 2 message(s) from this turn's model context."
+    client = answering_with(
+        stored(
+            Message(role="user", content="one"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name=TURN_COMPACT)],
+            ),
+            Message(role="tool", content=report, tool_call_id="c1"),
+            Message(role="assistant", content="done"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+        panels = list(app.query(ToolCallWidget))
+
+    assert f"[{report}]" in text
+    assert panels == [], "a harness pair is a note, not a tool panel"
 
 
 async def test_a_name_that_has_never_run_shows_nothing() -> None:
