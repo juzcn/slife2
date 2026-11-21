@@ -1074,9 +1074,8 @@ class TurnStore:
             # and written back as a pair, so a second writer's call landing
             # between the SELECT and the UPDATE would be erased by this one
             # writing the values it read before that commit.  The implicit
-            # transaction starts at the first UPDATE, which is too late; this is
-            # the same `BEGIN IMMEDIATE` `set_context_turns` takes for the same
-            # reason.
+            # transaction starts at the first UPDATE, which is too late, so the
+            # write lock is taken up front.
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT messages, summary, tags FROM turn WHERE rowid = ?",
@@ -1177,44 +1176,15 @@ class TurnStore:
         with self._connect() as connection:
             return read_context(connection)
 
-    def set_context_turns(
-        self, turn_ids: Sequence[int], *, expected: Sequence[int] | None = None
-    ) -> list[int] | None:
+    def set_context_turns(self, turn_ids: Sequence[int]) -> list[int]:
         """Replace the live-context list; answers with what was written.
 
         The caller is the party that decided, and `[]` is one of the things it
         may decide — see `write_context` for why this store does not refuse an
         empty list.
-
-        **`expected` is the list the caller read, and it makes the write safe
-        against a conversation that moved while it decided.**  A rebuild is a
-        model call between the `restore` that answered with a list and this
-        write, and the callers are separate processes — the agent server's turn
-        and an agent task of the same agent both rebuild one conversation, and
-        either may save a turn while the other is deciding.  Without the guard
-        the write composed from the older snapshot erased the newer turn: the
-        row stayed in the log and left the context, silently, which is the one
-        failure `append_context` exists to prevent on the save path.
-
-        The write is one `BEGIN IMMEDIATE` transaction, so the read of the
-        current list and the write cannot have a writer between them.  When the
-        list moved at all — a turn saved, a reset, another rebuild — the write
-        is refused and `None` is the answer: a decision taken against an older
-        snapshot may not overwrite a newer conversation, and the caller keeps
-        what it holds.  `None` is the refusal; the store is untouched.
-
-        With no `expected` the write is unconditional, which is `forget`'s
-        shape: a reset is an answer about the conversation and not about a
-        snapshot of it.
         """
         with self._connect() as connection:
-            if expected is None:
-                return write_context(connection, turn_ids)
-            # The read has to be inside the write lock: a deferred transaction
-            # opens at the `INSERT`, so the compare would run outside it and a
-            # save landing in between would be invisible to the guard.
-            connection.execute("BEGIN IMMEDIATE")
-            return write_context(connection, turn_ids, expected=expected)
+            return write_context(connection, turn_ids)
 
     def turns_by_ids(self, turn_ids: Sequence[int]) -> list[TurnRecord]:
         """Those turns, **in the order asked for**, and never re-sliced.
@@ -1932,44 +1902,23 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
 
 
 def write_context(
-    connection: sqlite3.Connection,
-    turn_ids: Sequence[int],
-    *,
-    expected: Sequence[int] | None = None,
-) -> list[int] | None:
+    connection: sqlite3.Connection, turn_ids: Sequence[int]
+) -> list[int]:
     """Replace the live-context list, and answer with what was written.
 
-    **One operation, not four.**  Every editor already holds the whole list it
-    wants next (a rebuild has the selection, a trim has the survivors, a reset
-    has nothing), so the operation they all want is "this is the list now";
-    `set`, `drop`, `clear` and a read-modify-write on the save path would be four
-    spellings of it.  The save's *append* is the one exception, and it lives in
-    `append_context` where the transaction is.
+    **One operation, not four.**  The caller already holds the whole list it
+    wants next (a rebuild has the selection), so the operation is "this is the
+    list now"; `set`, `drop`, `clear` and a read-modify-write on the save path
+    would be four spellings of it.  The save's *append* is the one exception,
+    and it lives in `append_context` where the transaction is.
 
     **An empty list is a legitimate list.**  A guard protecting a *partial*
     selection from being mistaken for a deliberate one has nothing to protect
     against here: the caller has already made the decision — "none of them" is
     one of the three things `context` can say — and a store that second-guessed
     it would turn the one explicit clear into an error.
-
-    **`expected` makes it a compare-and-set**, for the reason
-    `TurnStore.set_context_turns` states: a decision is composed against a
-    snapshot and written later, and a save landing in between must not be
-    erased.  The comparison and the write are the caller's one transaction —
-    this function is called with the write lock already held when `expected` is
-    given.
-
-    `None` means the snapshot no longer describes the conversation: a turn
-    arrived, one left, or another decision was written since the caller read it.
-    The newer list is the one that stands — `rebuild` adopts it for the turn it
-    is about to run — and this store is untouched.  A merge was considered and
-    refused: the choice of list is the caller's to make, and a store that
-    invented one from two decisions would be answering a question it was not
-    asked.
     """
     written = normalise_ids(turn_ids)
-    if expected is not None and read_context(connection) != normalise_ids(expected):
-        return None
     connection.execute(
         "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
         " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",

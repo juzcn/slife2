@@ -4,7 +4,7 @@
 serves: the loops table (one conversation per key, created on first use), the
 lock and inbox that make one turn at a time a fact rather than a rule, and the
 turn machinery around them — `send_message`, `run_turn_into`, and the
-watch/transcript/reset reads.
+watch/transcript reads.
 
 **Three subsystems sit beside it, and they take this module's narrow surface**
 (`loops`, `current()`, `this_home()`) rather than a share of one closure:
@@ -16,7 +16,7 @@ subagent.  SDD §5.1 says what each owns.
 directory is being deleted must not start a conversation — its first turn would
 save into the directory the removal then deletes — so `Conversations` holds the
 claim and refuses it on the path that creates a loop (`start`), and every
-reader of it (`reset` included) asks the same object.
+reader of it asks the same object.
 """
 
 from __future__ import annotations
@@ -352,8 +352,8 @@ class Conversations:
         """Refuse *key* if its directory is being deleted.
 
         One reader for every path that must not touch a name mid-removal: a
-        message starting or resetting a conversation, and a `subagent_create`
-        making it again.  `remake` adds the way back — a removed subagent can
+        message starting a conversation, and a `subagent_create` making it
+        again.  `remake` adds the way back — a removed subagent can
         be made again — which only a caller that is *creating* one has a use
         for.
         """
@@ -998,9 +998,8 @@ class AgentCore:
         """Put a conversation back on the context it had when it last stopped.
 
         Called when a loop is *built* — a process that restarted, a conversation
-        the idle sweep let go — which is why `reset` clears the stored list
-        rather than only dropping the loop: forgetting a conversation and then
-        having it restore itself is not forgetting it.
+        the idle sweep let go — and the stored list is what the conversation had
+        when it stopped.
 
         **The store's answer is the turn runtime's** (`restore`), and adopting
         it is this server's step: a `Loop` is this server's conversation, and a
@@ -1058,18 +1057,6 @@ class AgentCore:
         loop.turn_ids = rebuilt.turn_ids
         loop.covered = rebuilt.covered
         return rebuilt.chosen
-
-    async def forget_context(self, agent: str, subagent: str) -> None:
-        """Clear a conversation's stored live context.
-
-        A store that is gone **fails the reset**, which is this system's rule and
-        not an exception made for tidiness: a reset that quietly did not happen
-        is a conversation that comes back on the next message, which is the one
-        outcome the caller was trying to prevent.
-        """
-        await (await self.runtime.memory()).call_tool(
-            "forget", {"agent": agent, "subagent": subagent}
-        )
 
     async def trim_tools(self, loop: Loop, observer: TurnObserver) -> None:
         """Bring the model's tool list back within its budget — and say so in the
@@ -1857,9 +1844,8 @@ class AgentCore:
                 ignored, because the model, the system prompt and the recorded
                 name are all properties of the conversation, and a caller that
                 could rename the model per message could rename who answered.
-                Change it by resetting the conversation, or for everything at
-                once with `model_switch`, which is the one edit that reaches a
-                conversation already running.
+                Change it with `model_switch`, which is the one edit that
+                reaches a conversation already running.
             images: Images to send with it — a local path, an `http(s)` URL or a
                 `data:` URI, the same three `attach_image` takes.  Refused unless
                 the model's config lists `image` under `input`; silently
@@ -1923,8 +1909,8 @@ class AgentCore:
         if len(loop.inbox) >= MAX_QUEUED:
             raise ToolError(
                 f"{describe((agent, subagent))} already has {len(loop.inbox)} "
-                f"messages waiting, which is the limit.  Wait for them, or reset "
-                f"the conversation."
+                f"messages waiting, which is the limit.  Wait for them, then send "
+                f"this one."
             )
 
         item = Pending(
@@ -2535,117 +2521,6 @@ class AgentCore:
         finally:
             self.watching.unwatch(key, watcher)
 
-    async def reset(self, agent: str, subagent: str = "") -> dict[str, Any]:
-        """Forget a conversation, and its context with it.
-
-        Idempotent, and deliberately not an error when there was nothing there:
-        the caller's intent — that this conversation should not continue — is
-        satisfied either way, and a caller that had nothing to forget is in
-        exactly the state it asked for.
-
-        **The stored live-context list is cleared too**: a key that has just been
-        dropped is a key whose next message *restores*, so dropping the in-memory
-        loop alone would bring the conversation back on the next prompt.
-        Forgetting a conversation and having it come back is not forgetting it.
-
-        Only the *conversation* is forgotten.  The turns it produced are in the
-        log — storage rather than state — and clearing those is a different
-        request with a different blast radius: `turn_list` still finds every one
-        of them, they are simply no longer what this conversation is made of.
-
-        **The plan goes with the conversation.**  It is the conversation's
-        current state rather than part of the log, and a reset that left it
-        would have the next turn resume a plan for a conversation the person
-        ended.
-
-        **A turn in flight is waited for, and the loop is then retired.**  A
-        reset that dropped the loop while a turn still held it would be undone
-        by that turn's own record: the save appends its turn id to the live
-        context list this call just cleared, and the next message restores the
-        conversation the reset was meant to end.  So the lock is taken first
-        (bounded, like `subagent_remove`), the loop is marked removed so a
-        message queued behind this one cannot run on it, and only then is the
-        stored list cleared and the loop dropped.
-
-        Args:
-            agent: Whose conversation.
-            subagent: Which of that agent's conversations; empty for its own.
-
-        Returns:
-            `reset`: whether there was a conversation there to forget.
-        """
-        if subagent and not subagent_file(agent, subagent).is_file():
-            # **A name with no record is not a conversation.**  `forget_context`
-            # opens the conversation's store, and opening one *creates* its
-            # directory — the record-less directory this server refuses
-            # everywhere else because it blocks the name for both subagent
-            # tools.  There is nothing to forget, so this is the idempotent
-            # answer rather than a file.
-            return {"reset": False}
-        key = conversation_key(agent, subagent)
-        # **A name being removed is not a conversation that can be reset.**
-        # The record check above passes for most of a removal (the record
-        # goes last), and `forget_context` *creates* the store it clears —
-        # landing after the delete, it would leave the record-less directory
-        # both subagent tools refuse.  The same claim `conversation()` checks.
-        self.conversations.refuse_removal(key, subject=describe((agent, subagent)))
-        loop = self.conversations.get(key)
-        if loop is None:
-            # **The remote half goes first.**  The plan is local and the context
-            # clear is a hop that can fail; clearing the plan first left a
-            # conversation that had lost its plan but not its context — one half
-            # gone with nothing saying so.  A failed reset is a reset that did
-            # not happen, and a retry is the answer.
-            await self.forget_context(agent, subagent)
-            plan.clear(agent, subagent)
-            # The tap keeps the last turn for a joining watcher's replay; a
-            # conversation that has just been forgotten has no turn to replay.
-            self.watching.drop(key)
-            logger.debug("reset: %s was not running", describe((agent, subagent)))
-            return {"reset": False}
-        try:
-            async with asyncio.timeout(_T.timeouts.grace.turn):
-                await loop.lock.acquire()
-        except TimeoutError:
-            raise ToolError(
-                f"{describe((agent, subagent))} is still running a turn; wait for "
-                f"it, then reset the conversation."
-            ) from None
-        try:
-            if self.conversations.get(key) is not loop:
-                raise ToolError(
-                    f"{describe((agent, subagent))} changed while it was being "
-                    f"reset; try again."
-                )
-            pending = loop.record_pending
-            if pending is not None:
-                # **A cancelled turn's detached write is already on its way to
-                # the context store.**  Clearing the live list before it lands
-                # lets it append the turn back and resurrect the conversation
-                # reset was asked to end — the same hazard `subagent_remove`
-                # drains for.  Wait for it first; a refused write writes nothing.
-                try:
-                    async with asyncio.timeout(_T.timeouts.grace.drain):
-                        await asyncio.shield(pending.written)
-                except TimeoutError:
-                    raise ToolError(
-                        f"{describe((agent, subagent))} is still recording its "
-                        f"last turn; try again in a moment."
-                    ) from None
-                except Exception:  # noqa: BLE001 — a refused write writes nothing
-                    pass
-            # The context first, for the reason the branch above gives; this is
-            # the same two halves under the lock.
-            await self.forget_context(agent, subagent)
-            plan.clear(agent, subagent)
-            loop.removed = True
-            self.conversations.pop(key)
-            self.watching.drop(key)
-        finally:
-            loop.lock.release()
-        logger.debug("reset: %s forgotten", describe((agent, subagent)))
-        return {"reset": True}
-
     async def attach_image(self, ctx: Context, sources: list[str]) -> dict[str, Any]:
         """Add image URLs to the LLM call.
 
@@ -2872,7 +2747,7 @@ class AgentCore:
         """Answer one `_approve` request, and say whether anything was waiting.
 
         **This server's own surface, not a tool** — it sits beside
-        `send_message`, `reset` and `transcript`, and the model never reaches
+        `send_message` and `transcript`, and the model never reaches
         this process at all: a model reads a prompt and writes arguments, and
         the thing that answers a person's question is the person.  Whoever draws
         the prompt is therefore the one caller it has (`slife2.tui.client`).
@@ -2946,7 +2821,6 @@ class AgentCore:
             FunctionTool.from_function(self.send_message),
             FunctionTool.from_function(self.transcript, name=TRANSCRIPT),
             FunctionTool.from_function(self.watch),
-            FunctionTool.from_function(self.reset),
         ):
             mcp.add_tool(tool)
 

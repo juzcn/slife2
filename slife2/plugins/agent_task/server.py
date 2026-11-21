@@ -18,24 +18,25 @@ progress stream: a task has no caller waiting on it.  A behaviour this turn need
 and the loop does not have belongs in `AgentLoop` behind a parameter that
 defaults off, never in a copy of the loop.
 
-**A task runs on the caller's own context, under the caller's own key.**  The
-key every hop carries is `(agent, subagent)`: the agent's own conversation for a
-task the agent started, and the subagent's when a subagent started it.  Its
-single turn is set up exactly as a turn of that conversation's is — `restore`
-when the loop is built, `rebuild` once before the turn, `_func_tool_unload` at
-the turn's end — and the head is that conversation's system prompt, rendered the
-way the agent server renders it.  SDD §5.5's *the context is chosen, not
-accumulated* has no exception for a task: one that ran on whatever happened to be
-in a list would be the one turn in this system whose context nobody decided.
-`restore` and `rebuild` are `slife2-context`'s and the trim is
-`slife2-toolhub`'s; the order they are called in is `slife2.libs.turn.runtime`'s,
-one runtime shared with the agent server.
+**A task runs on a clone of the caller's context, under the caller's own key.**
+The key every hop carries is `(agent, subagent)`: the agent's own conversation
+for a task the agent started, and the subagent's when a subagent started it.
+`restore` reads that conversation's live-context list, and `rebuild` once before
+the turn decides on that snapshot with `publish=False` — the task's context is
+its own, and the conversation's list is not moved.  The head is that
+conversation's system prompt, rendered the way the agent server renders it.
+SDD §5.5's *the context is chosen, not accumulated* has no exception for a
+task: one that ran on whatever happened to be in a list would be the one turn in
+this system whose context nobody decided.  `restore` and `rebuild` are
+`slife2-context`'s and the trim is `slife2-toolhub`'s; the order they are called
+in is `slife2.libs.turn.runtime`'s, one runtime shared with the agent server.
 
 **Nothing is recorded, and that is a decision about tasks.**  A task's result
 reaches the conversation as a message and *that* message is what the agent server
 records, so writing the task's own round trip as well would file the same answer
 twice under a description that is a rendered template rather than anything the person
-said.  A task reads the caller's context and adds nothing to it.
+said.  A task reads a clone of the caller's context and adds nothing to it — no
+turn, and no context decision.
 
 **Two of the model's tools are served here rather than by the agent server.**
 A task is a live turn, but the agent server's live turn is a different one — the
@@ -542,38 +543,6 @@ def build_server(
         source=source,
     )
 
-    #: **One pre-turn read-then-write at a time for one conversation**, keyed by
-    #: `(home, agent, subagent)` — which is what a conversation is.
-    #:
-    #: `restore` reads the conversation's live-context list and `rebuild` writes
-    #: it back (`set_context_turns`), and the two are **one step**: a rebuild's
-    #: target is built from the snapshot its own restore read, so two tasks
-    #: interleaving them write a list decided against a conversation that has
-    #: moved — the task that wrote first runs its turn on a list the store no
-    #: longer has, and the store keeps a decision taken before the other's turn
-    #: was even in it.  The cap allows `max_running` tasks for one agent, so this
-    #: is a state two calls can reach rather than a hypothetical.
-    #:
-    #: **The pair is the full conversation id**, because tasks of one agent may
-    #: be standing in for different conversations — its own and its subagents' —
-    #: and two tasks on different contexts have nothing to serialise.
-    #:
-    #: The agent server holds its own `Loop.lock` across exactly this pair
-    #: (`send_message`, which says why the restore has to be inside it).  This
-    #: process cannot hold *that* lock — the conversation is served by another
-    #: daemon — so what is serialised here is the writers this process has: its
-    #: own tasks, one turn's set-up at a time.
-    conversations: dict[tuple[str, ...], asyncio.Lock] = {}
-
-    def conversation(task: AgentTask) -> asyncio.Lock:
-        """This task's conversation's lock, made on the first ask."""
-        key = (task.home, *task.identity)
-        found = conversations.get(key)
-        if found is None:
-            found = asyncio.Lock()
-            conversations[key] = found
-        return found
-
     def current() -> Config:
         """The config a task is built from, read when it runs.
 
@@ -787,10 +756,11 @@ def build_server(
 
         **The steps are the turn runtime's** (`slife2.libs.turn.runtime`),
         shared with the agent server: the head is the maker's system prompt,
-        `restore` puts back the context this conversation had, `rebuild` decides
-        what the turn runs on, and the loop advances it.  What is a task's own
-        is the store — a local list — the absence of an inbox, and the absence
-        of a record, which is argued below.
+        `restore` reads the context this conversation had, `rebuild` decides
+        what the turn runs on **privately** — `publish=False`, so the
+        conversation's live-context list is not moved — and the loop advances
+        it.  What is a task's own is the store — a local list — the absence of
+        an inbox, and the absence of a record, which is argued below.
 
         **The head and the model are the maker's, not the agent's.**  A task
         stands in for the conversation that asked for it, so an agent's task
@@ -817,9 +787,10 @@ def build_server(
         *that* message is what the agent server records — so storing the task's
         own round trip as well would put the same answer in the transcript
         twice, under a description that is a rendered template rather than anything the
-        person said.  A task reads the maker's context and adds nothing to it:
-        what the conversation gains is the answer, which is the thing it asked
-        for.  There is no switch here because there is nothing to switch.
+        person said.  A task reads a clone of the maker's context and adds
+        nothing to it: what the conversation gains is the answer, which is the
+        thing it asked for.  There is no switch here because there is nothing
+        to switch.
         """
         current = runtime.current()
         # **A subagent that is gone has no conversation to stand in for.**  The
@@ -861,22 +832,23 @@ def build_server(
             OPENING_TEMPLATE, name=task.name, description=task.description
         )
 
-        # **The two calls under the conversation's lock**, which is the rule the
-        # agent server states for the same pair: a rebuild's target is built from
-        # the list its own restore read, so a write that lands after the same
-        # conversation's own write is a decision taken against a snapshot that
-        # has moved.  Held here rather than inside the runtime because they are
-        # one step — the second reads what the first answered.
-        async with conversation(task):
-            restored = await runtime.restore(task.identity, head)
-            rebuilt = await runtime.rebuild(
-                task.identity,
-                restored.messages,
-                restored.turn_ids,
-                restored.covered,
-                opening,
-                model.reference,
-            )
+        # **A clone, not a share.**  `restore` reads the conversation's
+        # live-context list once; `rebuild` decides on that snapshot with
+        # `publish=False`, so the task's turn runs on a context of its own and
+        # the conversation's list is not moved.  A task records nothing, and a
+        # turn that leaves no record must not change what the conversation comes
+        # back to.  No lock is needed: a read and a private decision have no
+        # write to interleave.
+        restored = await runtime.restore(task.identity, head)
+        rebuilt = await runtime.rebuild(
+            task.identity,
+            restored.messages,
+            restored.turn_ids,
+            restored.covered,
+            opening,
+            model.reference,
+            publish=False,
+        )
 
         # **Reported before the turn**, as the agent server reports it: the
         # discriminator is one model call nobody sees, so its two counts are the

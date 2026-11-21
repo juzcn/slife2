@@ -188,11 +188,45 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         "subagent": "",
         "messages": [message.to_wire() for message in messages],
         "turn_ids": [7, 8],
-        "expected": [7, 8],
         "prompt": "what now",
         "model": REF.reference,
         "carried": 2,
+        "publish": True,
     }
+
+
+async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -> None:
+    """An agent task decides on a clone: it publishes nothing.
+
+    `publish=False` is the task's pre-turn work.  It asks the same question and
+    reads the same answer, but the conversation's live-context list is not the
+    task's to move.
+    """
+    store = Store(
+        rebuild={
+            "messages": [{"role": "system", "content": "sys"}],
+            "turn_ids": [],
+            "kept": 0,
+            "recalled": 0,
+            "rerank": "",
+            "discriminator": "",
+        }
+    )
+
+    rebuilt = await wired(store).rebuild(
+        IDENTITY,
+        [Message(role="system", content="sys")],
+        [],
+        0,
+        "q",
+        REF.reference,
+        publish=False,
+    )
+
+    name, arguments = store.calls[0]
+    assert name == "rebuild"
+    assert arguments["publish"] is False
+    assert rebuilt.turn_ids == [], "the task adopts the clone's own decision"
 
 
 @pytest.mark.parametrize(
@@ -249,8 +283,9 @@ async def test_a_malformed_rebuild_leaves_the_callers_list_alone() -> None:
     """Everything is read before anything is adopted.
 
     The store may have replaced its list, but this turn did not take the
-    answer: the list the caller holds is still the list it held.  The next
-    turn's `expected` compare-and-set recovers the store's side.
+    answer: the list the caller holds is still the list it held.  The store's
+    list is what a restart replays; until then, this loop and the store may
+    disagree about a decision this build could not read.
     """
     store = Store(
         rebuild={

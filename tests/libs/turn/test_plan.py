@@ -40,6 +40,21 @@ def test_a_subagents_plan_is_its_own() -> None:
     assert plan.read("jack", "researcher") == ITEMS
 
 
+def test_an_empty_write_removes_the_plan_file() -> None:
+    """The empty plan and the missing file are one state, and one spelling."""
+    plan.write("jack", "", ITEMS)
+    assert plan.plan_path("jack").is_file()
+
+    assert plan.write("jack", "", []) == []
+    assert not plan.plan_path("jack").exists()
+    assert plan.read("jack") == []
+
+    # Clearing a plan that is not there is the same empty plan, and an empty
+    # write does not make the directory a read would find nothing in.
+    assert plan.write("jill", "", []) == []
+    assert not plan.plan_path("jill").exists()
+
+
 def test_the_four_statuses_are_the_vocabulary() -> None:
     for status in plan.STATUSES:
         assert plan.from_wire([{"text": "one", "status": status}]) == [
@@ -94,11 +109,3 @@ def test_an_unreadable_file_is_not_an_empty_plan() -> None:
     path.write_text("other: 1\n", encoding="utf-8")
     with pytest.raises(plan.PlanError, match="no `items`"):
         plan.read("jack")
-
-
-def test_clear_removes_the_plan_and_only_once() -> None:
-    plan.write("jack", "", ITEMS)
-
-    assert plan.clear("jack") is True
-    assert plan.read("jack") == []
-    assert plan.clear("jack") is False

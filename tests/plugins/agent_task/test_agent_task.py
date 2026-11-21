@@ -17,8 +17,8 @@ and nothing
 else.
 
 The properties under test throughout: a task is the agent's own work — its
-identity, its context, its tools — it answers by a message rather than by a
-return value, and it is one turn with exactly one rebuild in it.
+identity, a clone of its context, its tools — it answers by a message rather
+than by a return value, and it is one turn with exactly one rebuild in it.
 """
 
 from __future__ import annotations
@@ -1006,29 +1006,21 @@ async def test_the_cap_counts_only_the_callers_homes_tasks(
 # ── two tasks, one agent ─────────────────────────────────────────────────────
 
 
-async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
+async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     hub: Client, window: Window
 ) -> None:
-    """**`restore` and `rebuild` are one step, and a snapshot is not a decision.**
+    """**A task's rebuild is a clone: it cannot move the agent's live context.**
 
-    A rebuild's target is built from the list its *own* restore read, so a task
-    that interleaves those two calls with another task's writes a list decided
-    against a conversation that has moved — and the writer whose write lands
-    last is the one whose snapshot is older.  What the store then holds is the
-    older decision, and the next `restore` (an idle reap, a restart, a new
-    terminal) rebuilds the conversation from it: a task's work dropped from the
-    context with nothing anywhere saying so.
+    Two tasks of one agent may decide differently about the same conversation —
+    the cap allows `max_running` of them.  Each decision is the task's own: the
+    first keeps one of the two turns, the second clears its clone.  What the
+    store holds afterwards is **unchanged**: the two turns the agent saved, in
+    the order it saved them.  A task records nothing, so a turn that leaves no
+    record must not change what the conversation comes back to.
 
-    The cap allows `max_running` tasks for one agent, so this is a state two
-    calls can reach.  The agent server holds its `Loop.lock` across exactly these
-    two calls; a task is the agent's own work, so this server holds its own lock
-    the same way — one agent's pre-turn work at a time.
-
-    Two turns are in the conversation, and the two tasks decide differently about
-    them: the first keeps one of them, the second clears the context.  What the
-    store holds afterwards is the *second* task's decision — and a build without
-    the lock leaves the first task's, written from a snapshot taken before the
-    second had even read one.
+    The lock this test used to exercise is gone with the write it protected:
+    `restore` is a read and `rebuild` publishes nothing, so the two tasks can
+    interleave their pre-turn work without either seeing the other's decision.
     """
     from slife2.libs.host.paths import agent_dir
     from slife2.libs.store.db import TurnStore
@@ -1043,7 +1035,7 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
     async def discriminating(
         agent: str, subagent: str, model: str, messages: Any, prompt: str
     ) -> str:
-        """The first task parks inside its rebuild; the second clears it."""
+        """The first task parks inside its rebuild; the second clears its own."""
         asked.append(prompt)
         if len(asked) == 1:
             parked.set()
@@ -1072,8 +1064,7 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
                     meta=conversation_meta(AGENT),
                 )
                 ids.append(stored.data["turn_id"])
-        # A keep-list for the first task's own decision: one of the two turns,
-        # which is a *write* against the two that are in hand.
+        # The first task's own decision keeps one of the two turns.
         keep_one = json.dumps({"context": [ids[0]]})
 
         built = build(
@@ -1086,22 +1077,32 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
         await start(built, "one")
         await asyncio.wait_for(parked.wait(), timeout=_T.timeouts.work.hub)
         await start(built, "two")
-        # **The second task's snapshot is taken here, or not at all.**  Its
-        # rebuild is in flight when the discriminator is asked, so its `restore`
-        # has already read the list — and that read is what the first task's
-        # write would have to land before to be an *interleaving* rather than a
-        # sequence.  With the lock this never arrives, because the second task is
-        # waiting on the first: a bounded wait, so the case the fix removes is a
-        # fact instead of a hope, and the assertion below does not depend on it.
+        # The second task's snapshot is taken while the first is parked: with
+        # the write gone there is nothing to serialise, so its own rebuild runs.
         for _ in range(100):
             if second_in.is_set():
                 break
             await asyncio.sleep(0.01)
         gate.set()
         await wait_for_handover(window, 2)
+        assert len(built.backend.calls) == 2, "one model call per task"
 
     turns = TurnStore(agent_dir(AGENT) / "turns.db").context_turns()
-    assert turns == [], "the conversation holds the decision that was made last"
+    assert turns == ids, "a task does not move the conversation's live context"
+
+    # Each task ran on its own decision: the first kept alpha, the second
+    # cleared its clone.  The opening prompt names the task, so the calls are
+    # identified without relying on scheduling order.
+    by_name: dict[str, str] = {}
+    for messages, _tools in built.backend.calls:
+        text = "\n".join(str(message.content) for message in messages)
+        for name in ("one", "two"):
+            if f"Agent task: {name}" in text:
+                by_name[name] = text
+    assert "alpha is here" in by_name["one"]
+    assert "beta is here" not in by_name["one"], "the first task's own keep-list"
+    assert "alpha is here" not in by_name["two"]
+    assert "beta is here" not in by_name["two"], "the second task's own clear"
 
 
 # ── stopping one ─────────────────────────────────────────────────────────────

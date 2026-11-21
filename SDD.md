@@ -721,9 +721,9 @@ for a level below them.
 3. delete its directory.
 
 **The claim is the conversation table's, taken before the first step**: a
-message, a `reset` or a second `subagent_create` that names the subagent while
-its directory is being deleted is refused by the table, never raced against
-the delete.
+message or a second `subagent_create` that names the subagent while its
+directory is being deleted is refused by the table, never raced against the
+delete.
 
 Releasing the place also withdraws every task around the member, in both
 directions. Each open send *to* it is recorded `cancelled`; each task it *sent*
@@ -973,8 +973,8 @@ A conversation has one plan: a list the model writes whole through
 `plan_write`, each item one line of text and one of `pending`, `active`, `done`
 or `blocked`. The last successful write is the plan; an empty list clears it;
 there are no ids and no transition rules. The file is `plan.yaml` in the
-conversation's own directory, written atomically and removed by `reset`. A
-missing file is no plan; an unreadable one fails the turn and names the path.
+conversation's own directory, written atomically; an empty write removes it.
+A missing file is no plan; an unreadable one fails the turn and names the path.
 
 The plan is not a turn and is not in the context store. Before every turn the
 agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
@@ -1158,11 +1158,6 @@ Rules:
   (§14.2).
 - **The live-context list's order is authoritative.** Reads replay it as written
   and never re-sort or re-slice it; a selection is not always contiguous.
-- **A rebuild that writes nothing still reads the live-context list** when the
-  caller supplied its `expected`. A list moved by another process while the
-  decision ran is adopted exactly as a lost compare-and-set is, so the loop
-  never keeps a snapshot the store has left behind and its next `expected`
-  matches again.
 - **`send_message` answers with every key present**, including `refused` where
   nothing could be refused. A turn is an object, not a call, because a message
   can arrive mid-turn and must wait rather than displace the turn in flight.
@@ -2177,9 +2172,10 @@ Properties:
    past `agent-task.max_running`. The name is the agent's handle — its own
    conversation, its subagents and the window all address a task by it — so one
    agent has one task namespace.
-2. **A task's turn is not written to the agent's database.** The task reads the
-   maker's context and adds nothing to it. What the conversation gains is the
-   answer, which the agent server records as a message.
+2. **A task's turn is not written to the agent's database.** The task reads a
+   clone of the maker's context and adds nothing to it — no turn, and no context
+   decision. What the conversation gains is the answer, which the agent server
+   records as a message.
 3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
 4. **Background work and a nested task are the prompt's rule.** A task runs one
@@ -2202,8 +2198,11 @@ not a conversation, and restoring it would recreate the record-less directory
 that blocks the name for both subagent tools.
 
 A task runs one turn, so it makes one rebuild; zero would make it the one turn in
-the system whose context nobody decided. It runs with the maker's system prompt,
-model, tools, and context decision. Its opening message is the shipped
+the system whose context nobody decided. That rebuild is **private**: it chooses
+on the clone `restore` read and publishes nothing, so a task cannot move the
+conversation's live-context list; the list a restart replays is the principal's.
+It runs with the maker's system prompt, model, tools, and its own context
+decision. Its opening message is the shipped
 `agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
 message sent when the task stops is the whole of what comes back, and it tells
 the model not to use `_async` or start another task because there is no later
@@ -3088,7 +3087,6 @@ The four shapes an undeclared fallback takes:
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
 | The live selector fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
-| The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
 | A catalogue hint cannot be asked (the hub's answer is unreadable) | The call keeps its generic "unknown tool" sentence | The catalogue's explanation and next step | A readable answer | An INFO line naming the name |

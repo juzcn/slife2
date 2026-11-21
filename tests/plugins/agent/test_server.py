@@ -240,12 +240,6 @@ async def send(
         )
 
 
-async def reset(server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = ""):
-    """Forget a conversation."""
-    async with Client(server) as client:
-        return await client.call_tool("reset", {"agent": agent, "subagent": subagent})
-
-
 async def attach(
     server: FastMCP, sources: list[str], *, agent: str = DEFAULT_AGENT
 ) -> dict[str, Any]:
@@ -374,8 +368,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
 
     An id a server mints is an id a caller has to keep, and keeping it is where
     every lifetime problem starts.  A conversation is started by the first
-    message that names it, so sending *is* opening — and what is left is one verb
-    and one way to start over.
+    message that names it, so sending *is* opening — and what is left is one
+    verb.
 
     `_check_new_input` is not a verb a caller has any use for: it is the name a
     message that arrives mid-turn is delivered under, and it is declared here
@@ -422,7 +416,6 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "model_set",
         "model_switch",
         "plan_write",
-        "reset",
         "send_message",
         "subagent_create",
         "subagent_remove",
@@ -778,22 +771,6 @@ async def test_a_plan_without_a_conversation_is_refused(context, hub) -> None:
     async with Client(server) as client:
         with pytest.raises(ToolError, match="did not say"):
             await client.call_tool(plan.PLAN_WRITE, {"items": []})
-
-
-@pytest.mark.asyncio
-async def test_reset_forgets_the_plan_with_the_conversation(context, hub) -> None:
-    """The plan is conversation state, not part of the log a reset keeps."""
-    server = build_server(
-        default_config(),
-        context_client=context,
-        hub_client=hub,
-        backend=FakeBackend(),
-    )
-    await write_plan(server, PLAN_ITEMS)
-
-    await reset(server)
-
-    assert plan.read(DEFAULT_AGENT, "") == []
 
 
 @pytest.mark.asyncio
@@ -1165,31 +1142,6 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
 
 
 # --- an unknown loop ---------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_reset_starts_the_conversation_over(context, hub) -> None:
-    """The one lifecycle verb left, and it is the caller's to ask for.
-
-    Idempotent, because a caller that had nothing to forget is already in the
-    state it asked for.
-    """
-    backend = FakeBackend(
-        ScriptedTurn(result=StreamChatResult(text="first")),
-        ScriptedTurn(result=StreamChatResult(text="second")),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    assert (await reset(server)).data["reset"]
-    # Nothing to forget the second time, and not an error.
-    assert not (await reset(server)).data["reset"]
-
-    await send(server, "two")
-    # The new conversation opened with its system prompt and nothing else.
-    assert prompts_seen(backend, 1) == ["user:two"]
 
 
 @pytest.mark.asyncio
@@ -3229,7 +3181,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
         model: str,
         carried: int = 0,
         subagent: str = "",
-        expected: list[int] | None = None,
+        publish: bool = True,
     ) -> dict[str, Any]:
         return {
             "messages": messages,
@@ -4254,14 +4206,13 @@ async def test_a_name_the_agent_already_uses_is_refused(context, hub) -> None:
     assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
 
 
-def test_a_name_being_removed_cannot_start_or_reset_a_conversation() -> None:
+def test_a_name_being_removed_cannot_start_a_conversation() -> None:
     """**The removal claim is the loops table's, and every path asks the same object.**
 
-    The old spelling was a set each tool remembered to consult, and the reset /
-    remove races were the tools that did not.  `Conversations` owns the claim
-    now: `start` refuses a claimed name and `refuse_removal` is the one reader a
-    reset asks, so both halves answer from one set — and a second removal is
-    refused by the claim itself rather than by a separate check.
+    `Conversations` owns the claim: `start` refuses a claimed name, and
+    `refuse_removal` is the one reader every path that would touch the name
+    asks.  A second removal is refused by the claim itself rather than by a
+    separate check.
     """
     conversations = Conversations()
     key = conversation_key(DEFAULT_AGENT, "researcher")
@@ -4291,8 +4242,8 @@ def test_a_name_being_removed_cannot_start_or_reset_a_conversation() -> None:
 async def test_removing_a_subagent_takes_its_directory_with_it(context, hub) -> None:
     """One directory, one operation — the whole reason the nesting exists.
 
-    Idempotent, and `reset`'s answer for the same question: a caller that wanted
-    something gone and finds it gone is in the state it asked for.
+    Idempotent: a caller that wanted something gone and finds it gone is in the
+    state it asked for.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
@@ -4718,17 +4669,16 @@ async def test_removing_a_subagent_tells_the_network_before_it_deletes(
 
 
 @pytest.mark.asyncio
-async def test_a_removal_claim_refuses_messages_resets_and_creates_while_it_runs(
+async def test_a_removal_claim_refuses_messages_and_creates_while_it_runs(
     context, hub
 ) -> None:
     """**The claim is one invariant, tested at the wire.**
 
     `subagent_remove` holds it from before its first await until the directory
-    is gone.  A message, a `reset` or a second `subagent_create` that names the
-    subagent in that window is refused by the loops table rather than racing the
-    delete: a turn would save into the directory the removal then deletes, a
-    reset would clear a store on its way out, and a create would rewrite the
-    record — or make the directory again — behind it.
+    is gone.  A message or a second `subagent_create` that names the subagent in
+    that window is refused by the loops table rather than racing the delete: a
+    turn would save into the directory the removal then deletes, and a create
+    would rewrite the record — or make the directory again — behind it.
     """
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -4762,11 +4712,7 @@ async def test_a_removal_claim_refuses_messages_resets_and_creates_while_it_runs
             await send(server, "are you there?", subagent="researcher")
         assert "being removed" in str(sent.value)
 
-        with pytest.raises(ToolError) as resetting:
-            await reset(server, subagent="researcher")
-        assert "being removed" in str(resetting.value)
-
-        # A second create is the third path: without the claim it would rewrite
+        # A second create is the other path: without the claim it would rewrite
         # the record the removal is about to delete, or make the directory again
         # if the delete had already run.
         with pytest.raises(ToolError) as made:

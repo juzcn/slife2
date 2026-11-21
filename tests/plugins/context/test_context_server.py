@@ -260,7 +260,7 @@ async def test_the_model_tools_name_no_agent() -> None:
         assert "subagent" not in tools[name].input_schema["properties"]
     # And the ones the agent side calls still take it: `remember`, `restore` and
     # `rebuild` are called by code that knows whose conversation it is running.
-    for name in ("remember", "restore", "rebuild", "forget"):
+    for name in ("remember", "restore", "rebuild"):
         assert "agent" in tools[name].input_schema["properties"]
 
 
@@ -279,7 +279,7 @@ async def test_none_of_the_harness_tools_is_the_models() -> None:
 
     for name in ("turn_list", "turn_search", "turn_summarize", "turn_read"):
         assert listed[name].meta.get("slife2/audience") == "assistant"
-    for name in ("remember", "restore", "rebuild", "forget"):
+    for name in ("remember", "restore", "rebuild"):
         assert "slife2/audience" not in (listed[name].meta or {})
 
 
@@ -1704,21 +1704,14 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> None:
-    """**A rebuild is a model call between a read and a write, and the writers
-    are in different processes.**
+async def test_a_private_rebuild_decides_without_moving_the_conversation() -> None:
+    """**An agent task's rebuild is a clone.**
 
-    The agent server's turn and an agent task of the same agent both rebuild one
-    conversation; the turn also saves while the task is deciding.  The decision
-    is composed against the list `restore` answered with, so writing it
-    unconditionally after the save erased the new turn from the live context —
-    the row stayed in the log and the next restore no longer knew it, which is
-    the silent loss `append_context` prevents on the save path.
-
-    `expected` is the snapshot, and the write is a compare-and-set: the newer
-    list stands and the caller keeps what it holds.  What is asserted here is
-    both halves — the decision did not overwrite, and the turn saved while it ran
-    is still in the context.
+    The task records nothing, so its pre-turn decision must not move the
+    conversation it stands in for: `publish=False` returns the selection and
+    writes nothing.  The conversation moving while the decision runs does not
+    change that — the task keeps its own answer and the store keeps the
+    conversation's list.
     """
     parked = asyncio.Event()
     release = asyncio.Event()
@@ -1728,7 +1721,7 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
     ) -> str:
         parked.set()
         await release.wait()
-        return '{"context": [1]}'
+        return '{"context": "clear"}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=deciding)
@@ -1741,24 +1734,17 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
                     "agent": "jack",
                     "messages": [
                         SYSTEM,
-                        {"role": "user", "content": "zero"},
-                        {"role": "assistant", "content": "0"},
-                        {"role": "user", "content": "one"},
-                        {"role": "assistant", "content": "1"},
+                        *_exchange("zero", "0"),
+                        *_exchange("one", "1"),
                     ],
                     "turn_ids": ids,
-                    # What `restore` answered and what the store held when this
-                    # caller took its snapshot; the write matches only while
-                    # the conversation still holds exactly this.
-                    "expected": ids,
-                    "prompt": "and then?",
+                    "prompt": "a private question",
+                    "publish": False,
                 },
             )
         )
         await asyncio.wait_for(parked.wait(), timeout=5)
-        # The other writer: a turn of the agent's own, saved while the
-        # discriminator is deciding.  The store appends it in its own
-        # transaction.
+        # The conversation moves while the decision runs; a clone does not care.
         saved = await client.call_tool(
             "remember",
             {"agent": "jack", "messages": _exchange("two", "2")},
@@ -1766,86 +1752,13 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
         release.set()
         rebuilt = await answer
 
-    assert rebuilt.data["changed"] is True, "the newer store list is what it adopted"
-    assert rebuilt.data["turn_ids"] == [ids[0], ids[1], saved.data["turn_id"]]
-    # The rerank report is part of the answer's shape on every exit, including
-    # this one: the caller reads it strictly, and an absent key would fail the
-    # turn over a race the store handled correctly.
-    assert rebuilt.data["rerank"] == ""
+    assert rebuilt.data["turn_ids"] == [], "the task adopts its own decision"
+    assert rebuilt.data["changed"] is True
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [
         ids[0],
         ids[1],
         saved.data["turn_id"],
-    ], "the turn saved while the decision ran is still the conversation"
-    said = [
-        message["content"]
-        for message in rebuilt.data["messages"]
-        if message["role"] == "user"
-    ]
-    assert said[-1].startswith("two"), "the turn it had not seen is in its context"
-
-
-@pytest.mark.asyncio
-async def test_a_rebuild_repairs_a_context_list_naming_a_row_that_is_gone() -> None:
-    """The repair `restore` makes in memory must reach the persisted list.
-
-    `restore` drops an id whose row is gone and the caller adopts the shorter
-    list, but the store's own list still names the missing row.  A
-    compare-and-set against the caller's snapshot then never matches again, so
-    the next rebuild abandons its decision — and so does every rebuild after it,
-    silently disabling the recall for the life of the file.  The surviving ids
-    are published under the same guard, which is what re-arms the next write.
-    """
-    async with Client(
-        build_server(
-            default_config(),
-            embedder=EMBEDDER,
-            ask=Replies('{"context": "clear"}', '{"context": "clear"}'),
-        )
-    ) as client:
-        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        store = TurnStore(agent_dir("jack") / "turns.db")
-        store.set_context_turns([ids[0], 404])
-        restored = await client.call_tool(
-            "restore", {"agent": "jack", "messages": [SYSTEM]}
-        )
-        assert restored.data["turn_ids"] == [ids[0]], "restore drops the dead id"
-        first = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": [
-                    SYSTEM,
-                    {"role": "user", "content": "one"},
-                    {"role": "assistant", "content": "1"},
-                ],
-                "turn_ids": restored.data["turn_ids"],
-                "expected": restored.data["turn_ids"],
-                "prompt": "and then?",
-            },
-        )
-        assert first.data["turn_ids"] == [ids[0]]
-        assert store.context_turns() == [ids[0]], "the dead id is gone from the list"
-        # And the repair is what re-arms the compare-and-set: this rebuild's
-        # `expected` now matches the store, so its decision is published.
-        second = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": [
-                    SYSTEM,
-                    {"role": "user", "content": "one"},
-                    {"role": "assistant", "content": "1"},
-                ],
-                "turn_ids": first.data["turn_ids"],
-                "expected": first.data["turn_ids"],
-                "prompt": "and then?",
-            },
-        )
-
-    assert second.data["changed"] is True, "the conversation can be rebuilt again"
-    assert second.data["turn_ids"] == []
-    assert store.context_turns() == []
+    ], "the conversation's list is the agent's, not the task's"
 
 
 @pytest.mark.asyncio
@@ -2061,29 +1974,6 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
         )
 
     assert answer.data["messages"] == [SYSTEM, tail]
-
-
-@pytest.mark.asyncio
-async def test_forget_clears_the_context_and_keeps_the_turns() -> None:
-    """A reset must not restore the conversation it just forgot.
-
-    Dropping the in-memory loop is not enough any more, because the next message
-    under that key restores — so the list is cleared and the log is left alone.
-    """
-
-    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
-        await _seed(client, "jack", ("one", "1"))
-        forgotten = await client.call_tool("forget", {"agent": "jack"})
-        restored = await client.call_tool(
-            "restore", {"agent": "jack", "messages": [SYSTEM]}
-        )
-        still_readable = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
-        )
-
-    assert forgotten.data == {"turn_ids": []}
-    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
-    assert still_readable.data["messages"][0]["content"] == "one"
 
 
 # --- startup: the index is brought up to date with the model ------------------
@@ -2533,8 +2423,9 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
 async def test_the_discriminators_fields_are_logged(caplog) -> None:
     """**The outcome cannot say what was decided.**
 
-    `recall_rebuilt turns=0 recalled=0` is the same line for a model that
-    cleared the turns and one that never had any, and a recall's condition —
+    `recall_rebuilt turns=0 recalled=0 published=true` is the same line for a
+    model that cleared the turns and one that never had any, and a recall's
+    condition —
     the sentences, the words, the period — is consumed and dropped.  A live
     rebuild raised exactly that question and no artifact could answer it, so
     the decision is logged before its outcome, in the reply's own vocabulary.
@@ -2573,79 +2464,6 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
     assert any(
         line.startswith("recall_discriminator_reply attempt=first ") for line in said
     ), "the raw reply is kept for the shape the parser read"
-
-
-@pytest.mark.asyncio
-async def test_a_rebuild_that_writes_nothing_still_reads_the_live_context() -> None:
-    """**The exits that keep the context compare with the store too.**
-
-    Another process — a render, a reset, a turn of the same agent — can move
-    the live-context list while a caller holds its snapshot.  The exits that
-    write nothing (here the discriminator deciding nothing) used to answer with
-    the caller's list without looking, so the loop and the store disagreed
-    until the next rebuild and the caller's `expected` could never match
-    again.  A moved list is adopted, exactly as a lost compare-and-set is.
-    """
-    hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # Refused twice: the one repair ran and was refused too, so this is the
-    # "no decision" exit rather than a repaired one.
-    replies = Replies("I could not decide.", "still not an object")
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=replies)
-    ) as client:
-        # Two turns saved by somebody else after this caller's snapshot was
-        # taken: the caller believes the conversation is [1] alone.
-        await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        answer = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": hold,
-                "turn_ids": [1],
-                "expected": [1],
-                "prompt": "hi",
-            },
-        )
-
-    assert answer.data["turn_ids"] == [1, 2], "the store's list is the answer"
-    assert answer.data["changed"] is True, "the caller adopts it"
-    assert answer.data["kept"] == 2
-    assert answer.data["recalled"] == 0, "none of this was a recall"
-    assert "two" in json.dumps(answer.data["messages"]), "the missing turn is back"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_discriminator_still_says_so_when_the_list_moved() -> None:
-    """**Adopting the store's list is not a decision.**  The failure survives it.
-
-    The exit that adopts a moved conversation reported no discriminator status,
-    so the window drew `recalled 0` — the count of a search nobody made, which
-    is the one thing the status exists to prevent.
-    """
-    hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # Refused twice, so the exit that reaches the adopted list is the
-    # no-decision one: the repair ran and was refused too.
-    replies = Replies("I could not decide.", "still not an object")
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=replies)
-    ) as client:
-        # The store holds two turns; the caller's snapshot says one.
-        await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        answer = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": hold,
-                "turn_ids": [1],
-                "expected": [1],
-                "prompt": "hi",
-            },
-        )
-
-    assert answer.data["turn_ids"] == [1, 2], "the store's list is adopted"
-    assert answer.data["recalled"] == 0, "no recall ran for it"
-    assert answer.data["discriminator"] == "unparsed", "and the failure is named"
 
 
 # --- the transport, which the discriminator cannot see from where it sits ------

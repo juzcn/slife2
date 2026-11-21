@@ -146,7 +146,7 @@ class Work:
     #: keeps it >= `hub`.
     catalogue: float = 360.0
     #: One management call from the terminal to the agent server: `model_switch`,
-    #: `reset`, `transcript`.  A question answered from memory or from the store.
+    #: `transcript`.  A question answered from memory or from the store.
     #: **Not the turn** — a turn's length is the answer's own business, and the
     #: person watching has Esc (`slife2.tui.client`).
     management: float = 30.0

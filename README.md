@@ -384,7 +384,7 @@ marker at the start of every turn, so a context rebuild cannot drop it, and the
 strip above the prompt shows it while there is one. The statuses are the model's
 own claims, not the harness's observations: nothing in slife2 derives one from a
 tool call. The plan is stored as `plan.yaml` in the conversation's own directory;
-`reset` removes it.
+an empty write removes it.
 
 ### Model selection
 
@@ -967,9 +967,12 @@ another task, because a result arriving later has nowhere to go.
 | `agent_task_cancel` | Stop a task and report its state after the call. |
 
 A task runs as the conversation that started it: an agent's task uses the agent's
-system prompt, model, tools, and context decision; a subagent's task uses the
-subagent's prompt, role, and model. It does not have the turn that started it, so
-the description must restate the relevant context. Its answer arrives with an
+system prompt, model, tools, and its own context decision; a subagent's task uses
+the subagent's prompt, role, and model. **The context is a clone**: the task
+reads the conversation's context and chooses what its turn runs on, and the
+conversation's stored context is unchanged when the task ends. It does not have
+the turn that started it, so the description must restate the relevant context.
+Its answer arrives with an
 `[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
 `AsyncTask(<name>)>`. A subagent has no window, so a subagent's task answer is
 delivered to its agent's conversation. If no window is showing the agent when it
@@ -1124,8 +1127,8 @@ process, no window, no claim on an agent name, and no external identity. It is
 reached only on the local subagent network and runs when something sends it a
 message. `subagent_create` and `subagent_remove` refuse a subagent caller. A
 subagent is a persistent agent with a memory of its own; for one piece of work
-beside the conversation, use an agent task — it runs on the maker's own context
-and answers with one message.
+beside the conversation, use an agent task — it runs on a clone of the maker's
+context and answers with one message.
 
 A subagent is created with `subagent_create` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations as

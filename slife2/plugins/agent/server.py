@@ -11,7 +11,7 @@ own state by.  `subagent=""` is the agent's own conversation; anything else is
 one of its subagents, an agent it made and owns (`subagent_create`, SDD §3.5).  A
 caller submits a user message under that key and gets
 that turn's answer back.  The management surface a client uses is
-`send_message`, `reset`, `transcript` (what a window that has just opened asks
+`send_message`, `transcript` (what a window that has just opened asks
 for), `subagents` (the list a conversation switcher offers), and `watch` (the
 live read of a conversation the caller is not running).  `_check_new_input` is
 not part of that surface: it is the name a message arriving mid-turn is
@@ -71,7 +71,7 @@ owning the history.  See SDD §14.2 — trimming is not solved here.
 
 **This module is the assembly, and the machinery is beside it.**  `core` owns
 the loops table, the turn (`send_message`, `run_turn_into`) and the
-watch/transcript/reset reads; `recording` writes a turn; `model_tools` edits
+watch/transcript reads; `recording` writes a turn; `model_tools` edits
 the config a conversation resolves from; `membership` makes and unmakes a
 subagent.  SDD §5.1 says what each owns.
 """
@@ -127,8 +127,7 @@ INSTRUCTIONS = (
     "A conversational agent. Call `send_message` with an agent name and what was "
     "said; assistant output arrives as progress notifications on that call, and "
     "the result carries the final answer. The conversation is kept here and is "
-    "addressed by `(agent, subagent)` — send only what is new, and use `reset` to "
-    "start one over."
+    "addressed by `(agent, subagent)` — send only what is new."
 )
 
 

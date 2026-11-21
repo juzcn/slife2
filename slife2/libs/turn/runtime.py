@@ -11,9 +11,9 @@ and not the other; here it is once.
 **A runtime builds a turn; it does not run one.**  The order `restore` →
 `rebuild` → `make_loop` → `run_turn` → `trim` is the caller's, because the
 edges decide it: the agent server holds its conversation lock across the first
-two and records the last; the task holds its own lock and hands the answer
-over.  What this supplies is the I/O every such turn makes, and the strict
-reading of the context store's answers.
+two and records the last; the task runs them as a clone — it publishes no
+rebuild — and hands the answer over.  What this supplies is the I/O every such
+turn makes, and the strict reading of the context store's answers.
 
 **The store is the server's.**  `restore` and `rebuild` take the
 conversation's messages, turn ids and covered count and answer with
@@ -30,6 +30,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from fastmcp import Client
 
@@ -419,6 +420,8 @@ class TurnRuntime:
         covered: int,
         prompt: str,
         model: str,
+        *,
+        publish: bool = True,
     ) -> Rebuilt:
         """Decide what this turn runs on: keep ∪ recall.
 
@@ -434,11 +437,10 @@ class TurnRuntime:
         The store puts those messages back verbatim, so a rebuild replaces the
         *turns* without destroying something that has no turn to be replaced by.
 
-        `expected` is the list this turn's snapshot came from.  A rebuild is
-        usually a model call, and another process may run the same
-        conversation's pre-turn work — an agent task of the same agent does —
-        so a turn saved while the decision ran must not be erased by this
-        write; the store's compare-and-set is what keeps that from happening.
+        **`publish=False` is the clone an agent task runs on.**  The decision is
+        that turn's own and is not written back: a task records nothing, so its
+        context selection must not move the conversation it stands in for.  The
+        store is not asked for its list and nothing is written.
 
         **All of the answer is read before the caller adopts any of it.**  An
         answer that replaced the list but omitted the counts would draw
@@ -448,20 +450,18 @@ class TurnRuntime:
         its words live.
         """
         carried = max(len(messages) - covered, 0)
+        arguments: dict[str, Any] = {
+            "agent": identity[0],
+            "subagent": identity[1],
+            "messages": [message.to_wire() for message in messages],
+            "turn_ids": list(turn_ids),
+            "prompt": prompt,
+            "model": model,
+            "carried": carried,
+            "publish": publish,
+        }
         payload = tool_payload(
-            await (await self.memory()).call_tool(
-                "rebuild",
-                {
-                    "agent": identity[0],
-                    "subagent": identity[1],
-                    "messages": [message.to_wire() for message in messages],
-                    "turn_ids": list(turn_ids),
-                    "expected": list(turn_ids),
-                    "prompt": prompt,
-                    "model": model,
-                    "carried": carried,
-                },
-            )
+            await (await self.memory()).call_tool("rebuild", arguments)
         )
         raw = payload.get("messages")
         if not isinstance(raw, list):

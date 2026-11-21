@@ -163,21 +163,16 @@ def write(agent: str, subagent: str, items: Any) -> list[PlanItem]:
     one exactly as it was — the file is the state, and a failed tool call must
     not change it.  `statefile.write` renames, so a process that dies mid-write
     leaves the old plan or the new one and never half of either.
+
+    **An empty plan is the absence of the file.**  `read` answers `[]` for a
+    missing file and for an empty `items`, so the two spellings are one state;
+    the empty write removes the file rather than leaving a document that says
+    nothing.  A removal that fails is a failed write, and the old plan stands.
     """
     validated = from_wire(items)
-    statefile.write(plan_path(agent, subagent), {"items": validated})
+    path = plan_path(agent, subagent)
+    if validated:
+        statefile.write(path, {"items": validated})
+    else:
+        path.unlink(missing_ok=True)
     return validated
-
-
-def clear(agent: str, subagent: str = "") -> bool:
-    """Remove a conversation's plan; True when there was one.
-
-    **Only "not there" is a no-op.**  A file that exists and cannot be removed
-    raises, because a `reset` that silently left the plan behind would be a
-    reset the next turn could resume.
-    """
-    try:
-        plan_path(agent, subagent).unlink()
-    except FileNotFoundError:
-        return False
-    return True

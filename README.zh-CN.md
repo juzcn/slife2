@@ -345,7 +345,7 @@ subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_s
 `active`、`done` 或 `blocked`——模型用 `plan_write` 写入整份列表。列表随每一轮
 开头的 `[TURN-PROMPT:{…}]` 一起重放，因此上下文重建不会丢掉它；存在计划时，输入框
 上方的条带会显示它。状态是模型自己的声明，不是 harness 的观测：slife2 不会从工具
-调用推导状态。计划存为对话目录中的 `plan.yaml`；`reset` 会删除它。
+调用推导状态。计划存为对话目录中的 `plan.yaml`；写入空列表即删除它。
 
 ### 模型选择
 
@@ -822,11 +822,13 @@ agent task 是发起对话——agent 自己的，或某个 subagent 的——�
 | `agent_task_cancel` | 停止任务，并报告调用后的状态。 |
 
 任务以发起它的对话身份运行：agent 发起的任务使用 agent 的 system prompt、模型、工具
-和上下文决策；subagent 发起的任务使用 subagent 的提示词、角色和模型。它没有启动它的
-那一轮，因此描述必须复述相关上下文。回答带 `[AgentTaskResult:{…}]` marker 从
-`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。subagent 没有窗口，所以
-subagent 的任务回答投递到其 agent 的对话。任务停止时没有窗口显示该 agent，任务以
-`failed` 结束——回答就是产物，不会被保留——日志记录原因。
+和自己的上下文决策；subagent 发起的任务使用 subagent 的提示词、角色和模型。**上下文
+是副本**：任务读取对话的上下文，自行决定本轮要跑什么；任务结束后，对话存储的上下文
+不变。它没有启动它的那一轮，因此描述必须复述相关上下文。回答带
+`[AgentTaskResult:{…}]` marker 从 `agent-task:<name>` channel 到达，显示为
+`AsyncTask(<name>)>`。subagent 没有窗口，所以 subagent 的任务回答投递到其 agent 的
+对话。任务停止时没有窗口显示该 agent，任务以 `failed` 结束——回答就是产物，不会被
+保留——日志记录原因。
 
 ```yaml
 agent-task:
@@ -949,7 +951,7 @@ subagent 是属于另一个 agent 的 agent。它有创建者的工具集、自�
 prompt 和自己的对话，但没有进程、没有窗口、不占用 agent 名字，也没有外部身份。它只在
 本地 subagent 网络上可达，在有消息发给它时运行。`subagent_create` 和 `subagent_remove`
 会拒绝 subagent 调用者。subagent 是常驻的，有自己的记忆；只是在对话旁临时做一件事，
-用 agent task——它跑在创建者自己的上下文上，用一条消息回答。
+用 agent task——它跑在创建者上下文的一个副本上，用一条消息回答。
 
 subagent 用 `subagent_create` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
 与 peer agent 相同的操作、以 `subagent_*` 名字寻址：`subagent_send_message`、

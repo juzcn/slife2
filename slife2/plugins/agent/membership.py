@@ -11,10 +11,9 @@ in each tool that might.
 
 **The removal claim is one invariant, taken here and refused by the table.**
 `Conversations.removal` marks the name synchronously, before the first await;
-`AgentCore.conversation` and `reset` ask the same table.  Every race the old
-spelling had to remember — a message arriving during the network notification,
-a reset landing between the record check and the store clear — is one check in
-one place (`Conversations`).
+`AgentCore.conversation` asks the same table.  Every race the old spelling had
+to remember — a message arriving during the network notification — is one check
+in one place (`Conversations`).
 """
 
 from __future__ import annotations
@@ -371,13 +370,12 @@ def register_tools(
         # this process can interrupt a turn, so the maker had no lever at all
         # (SDD §4.5.4 says this is a forced cleanup, idle or mid-turn).
         #
-        # **And no `forget` against the store, which is the difference from
-        # `reset`.**  What `reset` clears is the *stored* live-context list, and
-        # that list is a table in `turns.db` — the file this is about to delete.
-        # Asking the store first would be asking it to clear a file that is on
-        # its way out, and on Windows the asking is not free: opening a store
-        # that does not exist *creates* it, and the handle that created it can
-        # hold the file against the `rmtree` that follows.
+        # **No store call before the delete.**  The live-context list is a table
+        # in `turns.db` — the file this is about to delete.  Asking the store to
+        # clear it first would be asking it to open a file on its way out, and
+        # on Windows the asking is not free: opening a store that does not exist
+        # *creates* it, and the handle that created it can hold the file against
+        # the `rmtree` that follows.
         #
         # **The loop is marked removed before it is dropped**, so a message
         # already queued behind the lock cannot run and save a turn into the
