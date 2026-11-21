@@ -43,7 +43,11 @@ from slife2.libs.turn.events import (
     UsageReported,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.tools import HARNESS_CALL_PREFIX, TURN_COMPACT
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    HARNESS_CALL_PREFIX,
+    TURN_COMPACT,
+)
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
@@ -546,6 +550,40 @@ async def test_a_model_called_compaction_is_a_panel_not_a_note() -> None:
 
     assert panels == [TURN_COMPACT], "a model's own call is an ordinary panel"
     assert not any(report in text for text in notes)
+
+
+async def test_a_model_called_check_new_input_is_a_panel() -> None:
+    """The call-id rule has no exception for `_check_new_input`.
+
+    The message may come from any channel, and a model's own poll of the inbox
+    is the model's tool call: a panel.  The delivered message's own note is the
+    `MessageCutIn` line, which this turn did not emit.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted(call_id="c1", name=CHECK_NEW_INPUT, arguments={}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name=CHECK_NEW_INPUT,
+                ok=True,
+                result_preview="hello",
+                result_chars=5,
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert panels == [CHECK_NEW_INPUT], "a model's own call is an ordinary panel"
+    assert not any("hello" in text for text in notes)
 
 
 async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> None:
@@ -2227,6 +2265,39 @@ async def test_a_restored_model_called_harness_tool_is_a_panel() -> None:
 
     assert names == [FUNC_TOOL_UNLOAD, "calc"]
     assert "[dropped 3]" not in text, "the model's own call is not a note"
+
+
+async def test_a_restored_model_called_check_new_input_is_a_panel() -> None:
+    """A stored model-called `_check_new_input` pair is a panel, not a note.
+
+    The harness-written pair is the delivery note (`test_a_restored_cut_in_is_a_note_not_a_tool_panel`);
+    a model's own poll keeps its own id and is the ordinary panel.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="start"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={})],
+            ),
+            Message(
+                role="tool",
+                content="and this",
+                tool_call_id="c1",
+                channel="wechat",
+            ),
+            Message(role="assistant", content="both answered"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        text = shown(app)
+
+    assert panels == [CHECK_NEW_INPUT]
+    assert "[and this]" not in text, "the model's own call is not a note"
 
 
 async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:

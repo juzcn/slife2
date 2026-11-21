@@ -215,7 +215,7 @@ class MessageCutIn:
     person typing in a window, a channel handing one over, a peer.  The loop
     emits it when it writes the `_check_new_input` pair, so the words here are
     the tool's own answer rather than something written beside it: the screen
-    can no more invent what a person said than the model can.
+    can no more invent what the sender said than the model can.
 
     `channel` is where the message came in on, unchanged from the `Pending` it
     waited in; the record keeps it, and it is what tells a real delivery from a

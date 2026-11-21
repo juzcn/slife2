@@ -215,30 +215,28 @@ def _draw_answer(
 
     for call in calls:
         text, channel = results.get(call.id, ("", ""))
-        if call.name == CHECK_NEW_INPUT:
+        if call.name == CHECK_NEW_INPUT and is_harness_call(call.id):
             # **A pair that took nothing is not a line somebody sent.**  The
             # loop writes the harness pair even when the queue was empty (or
             # the head carried images), and the tool's answer is the
-            # `NOTHING_WAITING` sentence.  Restore drew it as a cut-in, so a
-            # rebuilt transcript opened with a message the person never sent.
-            # The stored channel is the second half: a real cut-in has one, and
-            # a record from before that field is why the sentence alone is not
-            # trusted when a channel is present.
+            # `NOTHING_WAITING` sentence.  The stored channel is the second
+            # half: a real delivery has one, and a record from before that field
+            # is why the sentence alone is not trusted when a channel is present.
             if text == NOTHING_WAITING and not channel:
                 continue
             # **The cut-in's line is a harness note too.**  The pair is how a
             # message that arrived mid-turn entered the conversation, and the
-            # tool's answer is the message's own words; the unified shape is the
-            # note, not a bubble.  The channel is still read for the skip above
-            # — a real delivery has one.
+            # tool's answer is the delivered words — from any channel.  The
+            # unified shape is the note, not a bubble.  A model's own
+            # `_check_new_input` call keeps its own id and is the ordinary panel
+            # below.
             chat.add_note(text)
         elif is_harness(call.name) and is_harness_call(call.id):
             # **A pair the machinery wrote is a line the person can see.**  The
             # pair is skipped as a panel; the machinery's answer is a note — and
             # the trim's five lists become the names that left.  A model's own
             # call to the same harness tool keeps its own call id and falls to
-            # the ordinary panel below: the call is the model's.  A model's own
-            # `_check_new_input` is the cut-in's note, above.
+            # the ordinary panel below: the call is the model's.
             if text:
                 chat.add_note(
                     notes.unloaded(text) if call.name == FUNC_TOOL_UNLOAD else text

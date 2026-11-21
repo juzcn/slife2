@@ -83,20 +83,20 @@ The middle two do line up with the mark for the tools the harness writes *pairs*
 with — a pair has to name a tool the request declares, so those names are in the
 model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
-tool and is protected the same way; `_check_new_input` is one, and its answer is a
-person's message — the screen draws it as the same harness note (`MessageCutIn`
-live, `slife2.tui.restore` rebuilt) that every machinery-written pair's answer
-wears.
+tool and is protected the same way; `_check_new_input` is one, and its answer is
+the message it delivers — from whatever channel: a person's, a peer's, a
+subagent's.  The screen draws it as the same harness note (`MessageCutIn` live,
+`slife2.tui.restore` rebuilt) that every machinery-written pair's answer wears.
 
 **Every pair the machinery writes is visible to the person.**  The answer is a
 note in the transcript — the compaction's count, the trim's names that left, and
-a cut-in's message, which is a person's words in the note's shape.  A model's
-own call to `_turn_compact` or `_func_tool_unload` keeps its own call id
+a cut-in's message, the delivered words from whatever channel.  A model's own
+call to any harness tool, `_check_new_input` included, keeps its own call id
 (`HARNESS_CALL_PREFIX`) and is an ordinary tool panel: the call is the model's;
-the note is the machinery's.  `_check_new_input` is a person's message and is a
-note whichever call took it, so its call is not a panel.  A harness tool added
-later is visible without a drawing change: the screen reads the id class, not a
-case per name.
+the note is the machinery's.  The one finish that adds no line is the
+machinery's own `_check_new_input`: its answer is the delivered message, whose
+line is `MessageCutIn`.  A harness tool added later is visible without a drawing
+change: the screen reads the id class, not a case per name.
 
 **And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
 are read off every call and stripped before dispatch — the one part of this
@@ -217,7 +217,8 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: **Spelled here for `FUNC_TOOL_UNLOAD`'s reason, and one more reader.**  Three
 #: places hold this string now: the agent server serves it, the loop writes the
 #: pair under it, and the display that rebuilds a transcript recognises it so a
-#: message that cut in is drawn as a person's line rather than as a tool panel.
+#: message that cut in is drawn as the harness note the pair's answer is rather
+#: than as a tool panel.
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 

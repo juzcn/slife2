@@ -1022,13 +1022,13 @@ line again.
 
 **Every pair the machinery writes is visible to the person.**  A harness pair's
 answer is a note in the transcript — the compaction's count, the trim's names
-that left, and a cut-in's message, which is a person's words in the note's
-shape — drawn live and rebuilt from the same text.  The pair's call id
+that left, and a cut-in's message, the delivered words from whatever channel —
+drawn live and rebuilt from the same text.  The pair's call id
 (`HARNESS_CALL_PREFIX`) is what tells a machinery-written call from a model's
-own: the model's own call to `_turn_compact` or `_func_tool_unload` is an
-ordinary tool panel, because the call is the model's; the note is the
-machinery's.  `_check_new_input` is a person's message and is a note whichever
-call took it, so its call is not a panel.  The screen decides by the pair's id
+own: a model's own call to any harness tool, `_check_new_input` included, is an
+ordinary tool panel, because the call is the model's.  The one finish that adds
+no line is the machinery's own `_check_new_input`: its answer is the delivered
+message, whose line is `MessageCutIn`.  The screen decides by the pair's id
 class, not by a case per tool, so a harness tool added later is visible without
 a drawing change.
 
@@ -1656,8 +1656,8 @@ schema.
   The one batch whose entries stand alone — `file_save` — answers each refusal
   in its own part instead, and §8.3 says how.
 - **Two tools answer with text rather than JSON, because the text is the
-  thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
-  hands over the skill's whole `SKILL.md`.
+  thing.** `_check_new_input` hands over a message from this conversation's
+  queue mid-turn; `skill_use` hands over the skill's whole `SKILL.md`.
 - **No answer exceeds `tool_result.bytes`** (default 32 KiB; minimum 2 KiB). A
   listing pages; an output that cannot be bounded is the harness's dump, and
   `dump_read` and `dump_grep` are bounded readers within the same budget.

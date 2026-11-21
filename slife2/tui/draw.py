@@ -62,36 +62,31 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
     """
     match event:
         case ToolCallStarted(call_id=call_id, name=name, arguments=arguments) if (
-            is_harness(name) and (is_harness_call(call_id) or name == CHECK_NEW_INPUT)
+            is_harness(name) and is_harness_call(call_id)
         ):
-            # **The machinery's own pair is the note on its answer**, and a
-            # model's own `_check_new_input` is the cut-in's note; neither is a
-            # panel.  The call id is the discriminator: a model's own call to
-            # another harness tool falls through to the ordinary panel below.
+            # **The machinery's own pair is the note on its answer.**  The call
+            # id is the discriminator: a model's own call to any harness tool —
+            # `_check_new_input` included — falls through to the ordinary panel
+            # below.
             return True
         case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
             is_harness(name) and is_harness_call(call_id)
         ):
             # The machinery's own sentence is a note — the compaction's count,
-            # the trim's five lists as the names that left.  `_check_new_input`'s
-            # answer is the `MessageCutIn` line instead.
+            # the trim's five lists as the names that left.  `_check_new_input`
+            # is the one finish that adds nothing: its answer is the delivered
+            # message, and the `MessageCutIn` note is that message's line.
             if name != CHECK_NEW_INPUT and text:
                 chat.add_note(
                     notes.unloaded(text) if name == FUNC_TOOL_UNLOAD else text
                 )
             return True
-        case ToolCallStarted(name=name) | ToolCallFinished(name=name) if (
-            is_harness(name) and name == CHECK_NEW_INPUT
-        ):
-            # A model's own `_check_new_input`: the message it took, if any, is
-            # the cut-in's note; the call itself is not a panel.
-            return True
         case MessageCutIn(text=text):
             # **A cut-in is a harness note like every other pair's answer.**  The
-            # person's words are the `_check_new_input` tool's own answer, so the
-            # line is the note rather than a bubble; the channel stays in the
-            # record and in the event (the receipt's reader is the window that
-            # submitted it).
+            # delivered words are the `_check_new_input` tool's own answer — from
+            # any channel: a person, a peer, a subagent — so the line is the note
+            # rather than a bubble; the channel stays in the record and in the
+            # event (the receipt's reader is the window that submitted it).
             chat.add_note(text, new_call=True)
         case ContextChosen(
             kept=kept, recalled=recalled, rerank=rerank, discriminator=discriminator
