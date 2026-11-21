@@ -293,6 +293,24 @@ def test_a_corrupted_bundle_falls_back_without_asking_tiktoken(
     assert tokens._failed_at is not None, "the failure is remembered for the cooldown"
 
 
+def _fresh_python(code: str) -> subprocess.CompletedProcess[str]:
+    """Run *code* in a fresh, isolated interpreter — **UTF-8 on both ends**.
+
+    `-X utf8` is the child's half: a piped interpreter on a Chinese Windows
+    encodes stderr in the ANSI code page, so a log line with an em dash arrives
+    as GBK bytes.  `encoding="utf-8"` is the parent's half: without it the
+    reader thread decodes those bytes as UTF-8 and dies, and pytest reports the
+    test as passed with a `PytestUnhandledThreadExceptionWarning` beside it —
+    noise that hides the next real thread failure.
+    """
+    return subprocess.run(
+        [sys.executable, "-I", "-X", "utf8", "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
 def test_a_missing_bundle_never_touches_the_network() -> None:
     """The bundle branch itself, in a fresh process: no cache directory
     configured and no bundled file, so the resolver points tiktoken at the
@@ -327,11 +345,7 @@ assert tokens._openai_encoding() is None, "a missing bundle must fall back"
 assert tokens._failed_at is not None
 assert tokens.estimate_text_tokens("hello") == tokens._by_script("hello")
 """
-    result = subprocess.run(
-        [sys.executable, "-I", "-c", code],
-        capture_output=True,
-        text=True,
-    )
+    result = _fresh_python(code)
     assert result.returncode == 0, result.stderr
 
 
@@ -343,17 +357,10 @@ def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
     a vocabulary parse in the start-up of a process that may never size anything.
     Asserted in a fresh interpreter, because this one has already estimated.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+    result = _fresh_python(
+        "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)"
     )
+    assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "None None"
 
 
@@ -391,9 +398,5 @@ encoding = tokens._openai_encoding()
 assert encoding is not None, "the bundled vocabulary did not load"
 assert tokens.estimate_text_tokens("hello") > 0
 """
-    result = subprocess.run(
-        [sys.executable, "-I", "-c", code],
-        capture_output=True,
-        text=True,
-    )
+    result = _fresh_python(code)
     assert result.returncode == 0, result.stderr
