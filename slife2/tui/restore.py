@@ -42,7 +42,12 @@ from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness, is_harness_call
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    FUNC_TOOL_UNLOAD,
+    is_harness,
+    is_harness_call,
+)
 from slife2.tui.widgets import ChatView
 
 logger = logging.getLogger(__name__)
@@ -227,13 +232,17 @@ def _draw_answer(
             # note, not a bubble.  The channel is still read for the skip above
             # — a real delivery has one.
             chat.add_note(text)
-        elif is_harness(call.name):
+        elif is_harness(call.name) and is_harness_call(call.id):
             # **A pair the machinery wrote is a line the person can see.**  The
-            # pair is skipped as a panel; the machinery's sentence is a note.  A
-            # model's own call to the same tool keeps its own call id and draws
-            # nothing — the answer is the model's.
-            if is_harness_call(call.id) and text:
-                chat.add_note(text)
+            # pair is skipped as a panel; the machinery's answer is a note — and
+            # the trim's five lists become the names that left.  A model's own
+            # call to the same harness tool keeps its own call id and falls to
+            # the ordinary panel below: the call is the model's.  A model's own
+            # `_check_new_input` is the cut-in's note, above.
+            if text:
+                chat.add_note(
+                    notes.unloaded(text) if call.name == FUNC_TOOL_UNLOAD else text
+                )
         else:
             _draw_tool(chat, call, text)
 

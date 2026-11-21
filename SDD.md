@@ -1021,14 +1021,16 @@ emits the same `MessageCutIn`, so the window that submitted it does not draw the
 line again.
 
 **Every pair the machinery writes is visible to the person.**  A harness pair's
-answer is a note in the transcript — the compaction's count, the trim's list of
-what left, and a cut-in's message, which is a person's words in the note's
+answer is a note in the transcript — the compaction's count, the trim's names
+that left, and a cut-in's message, which is a person's words in the note's
 shape — drawn live and rebuilt from the same text.  The pair's call id
 (`HARNESS_CALL_PREFIX`) is what tells a machinery-written call from a model's
-own to `_turn_compact` or `_func_tool_unload`, which draws nothing: the answer
-is the model's.  A cut-in is a person's message and is a note whichever call
-took it.  The screen draws the pair's answer by id class, not by a case per
-tool, so a harness tool added later is visible without a drawing change.
+own: the model's own call to `_turn_compact` or `_func_tool_unload` is an
+ordinary tool panel, because the call is the model's; the note is the
+machinery's.  `_check_new_input` is a person's message and is a note whichever
+call took it, so its call is not a panel.  The screen decides by the pair's id
+class, not by a case per tool, so a harness tool added later is visible without
+a drawing change.
 
 ### 5.4 Channels and delivery
 
@@ -1542,8 +1544,9 @@ Over the limit, the least recently **called** tools are unloaded; the names in
 loaded is ordered by its load time. The trim happens at a turn boundary: the
 harness calls `_func_tool_unload` before saving the turn and writes the pair into
 the conversation, so the model learns that the list shrank from the transcript.
-The pair's sentence is a note on the turn's stream (§5.3), so the person sees
-which tools left rather than reading the call. Nothing is written when nothing was removed. The same list bounds the model's own
+The pair's answer is the names that left, rendered as a note on the turn's
+stream (§5.3), so the person sees which tools left rather than the object.
+Nothing is written when nothing was removed. The same list bounds the model's own
 unloads: `_func_tool_unload` refuses a name in `tool_load.autoload`, so the tools
 that start loaded, the tools the budget may not evict and the tools the model may
 not unload are one list. Editing the list changes only that protection. Recency

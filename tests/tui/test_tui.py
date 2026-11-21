@@ -10,6 +10,7 @@ exits.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 import pytest
@@ -513,12 +514,16 @@ async def test_a_compaction_note_is_drawn_mid_turn() -> None:
     assert any(report in text for text in notes)
 
 
-async def test_a_model_called_compaction_is_not_a_note() -> None:
-    """The model may call `_turn_compact`; that call's answer is the model's,
-    not the machinery's line, so the transcript draws no note for it."""
+async def test_a_model_called_compaction_is_a_panel_not_a_note() -> None:
+    """The model may call `_turn_compact`; that call is the model's tool use.
+
+    A panel is the ordinary shape for a call the model made; the machinery's
+    own call is the note.  The transcript shows the panel and no note.
+    """
     report = "Dropped 2 message(s) from this turn's model context."
 
     def respond(prompt: str, on_event):
+        on_event(ToolCallStarted(call_id="c1", name=TURN_COMPACT, arguments={}))
         on_event(
             ToolCallFinished(
                 call_id="c1",
@@ -537,7 +542,9 @@ async def test_a_model_called_compaction_is_not_a_note() -> None:
         await submit(pilot, "go")
         await settle(pilot, app)
         notes = [str(widget.render()) for widget in app.query(".system-message")]
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
 
+    assert panels == [TURN_COMPACT], "a model's own call is an ordinary panel"
     assert not any(report in text for text in notes)
 
 
@@ -1397,8 +1404,16 @@ async def test_a_restored_failed_turn_reads_as_the_harness_line_not_an_answer() 
 
 
 async def test_an_unload_note_is_drawn_mid_turn() -> None:
-    """The trim is a machinery call too; its sentence is what left the list."""
-    report = "Unloaded 2 tools: tool_search, tool_list."
+    """The trim is a machinery call; its five lists become the names that left."""
+    answer = json.dumps(
+        {
+            "unloaded": ["subagent_group_member_list"],
+            "refused": [],
+            "no_load_state": [],
+            "unknown": [],
+            "not_loaded": [],
+        }
+    )
 
     def respond(prompt: str, on_event):
         on_event(
@@ -1406,8 +1421,8 @@ async def test_an_unload_note_is_drawn_mid_turn() -> None:
                 call_id=f"{HARNESS_CALL_PREFIX}func_tool_unload_test",
                 name=FUNC_TOOL_UNLOAD,
                 ok=True,
-                result_preview=report,
-                result_chars=len(report),
+                result_preview=answer,
+                result_chars=len(answer),
                 elapsed_ms=1,
             )
         )
@@ -1420,15 +1435,15 @@ async def test_an_unload_note_is_drawn_mid_turn() -> None:
         await settle(pilot, app)
         notes = [str(widget.render()) for widget in app.query(".system-message")]
 
-    assert any(report in text for text in notes)
+    assert any("[unloaded: subagent_group_member_list]" in text for text in notes)
 
 
 async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
-    """The rebuilt line is the stored tool message, not a second phrasing.
+    """The machinery's pair is a note; the model's own call is an ordinary panel.
 
-    The machinery's pair is skipped as a panel; its answer is the note, which is
-    the same text the model read and the live line showed.  A model's own call
-    to the same tool keeps its own id and draws nothing.
+    The machinery's answer is the note, the same text the model read and the
+    live line showed.  A model's own call to the same tool keeps its own id and
+    draws a panel — the call is the model's.
     """
     report = "Dropped 2 message(s) from this turn's model context."
     own = "Dropped 1 message(s) from this turn's model context."
@@ -1466,8 +1481,10 @@ async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
         panels = list(app.query(ToolCallWidget))
 
     assert f"[{report}]" in text
-    assert own not in text, "the model's own call is not the machinery's note"
-    assert panels == [], "a harness pair is a note, not a tool panel"
+    assert f"[{own}]" not in text, "the model's own call is not a note"
+    assert [panel.tool_name for panel in panels] == [TURN_COMPACT], (
+        "a model's own call is an ordinary panel"
+    )
 
 
 async def test_a_name_that_has_never_run_shows_nothing() -> None:
@@ -2179,12 +2196,12 @@ async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -
     assert blocks[1].thinking_expanded is True, "the answer should not"
 
 
-async def test_a_restored_model_called_harness_tool_is_not_drawn() -> None:
-    """A model's own call to a harness tool keeps its id and draws nothing.
+async def test_a_restored_model_called_harness_tool_is_a_panel() -> None:
+    """A model's own call to a harness tool keeps its id and is an ordinary panel.
 
     `_func_tool_unload` is in the model's list, so the model may call it; that
-    call's answer is the model's, not the machinery's move, and only a pair the
-    harness wrote (`_harness_…`) is a note.
+    call is the model's tool use, and only a pair the harness wrote (`_harness_…`)
+    is a note.
     """
     client = answering_with(
         stored(
@@ -2208,8 +2225,8 @@ async def test_a_restored_model_called_harness_tool_is_not_drawn() -> None:
         names = [panel.tool_name for panel in app.query(ToolCallWidget)]
         text = shown(app)
 
-    assert names == ["calc"]
-    assert "dropped 3" not in text, "the model's own call is not a note"
+    assert names == [FUNC_TOOL_UNLOAD, "calc"]
+    assert "[dropped 3]" not in text, "the model's own call is not a note"
 
 
 async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:
@@ -2247,13 +2264,22 @@ async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:
                 arguments={},
             )
         )
+        unloaded = json.dumps(
+            {
+                "unloaded": ["subagent_group_member_list"],
+                "refused": [],
+                "no_load_state": [],
+                "unknown": [],
+                "not_loaded": [],
+            }
+        )
         on_event(
             ToolCallFinished(
                 call_id="_harness_func_tool_unload_2",
                 name=FUNC_TOOL_UNLOAD,
                 ok=True,
-                result_preview="dropped 3",
-                result_chars=9,
+                result_preview=unloaded,
+                result_chars=len(unloaded),
                 elapsed_ms=1,
             )
         )
@@ -2277,7 +2303,9 @@ async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:
 
     assert names == [], "the harness's calls are not tool panels"
     assert "[a note]" in text, "the cut-in is the harness note's line"
-    assert "dropped 3" in text, "the unload's answer is a note"
+    assert "unloaded: subagent_group_member_list" in text, (
+        "the trim's five lists become the names that left"
+    )
     assert "_check_new_input" not in text
     assert FUNC_TOOL_UNLOAD not in text
 

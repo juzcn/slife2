@@ -631,12 +631,13 @@ class TurnRuntime:
         interruption cannot leave an assistant message whose call is never
         answered.
 
-        **The pair's own sentence is also a note on the caller's stream.**  It
-        is the tool's answer — the same text the pair carries — drawn as a
-        harness line rather than a panel (`slife2.tui.draw`), so a person sees
-        which tools the model lost without reading the call.  The events are
-        emitted here because this is the one place that knows the pair; a caller
-        with nobody watching passes the default observer, which drops them.
+        **The pair's answer is also a note on the caller's stream.**  It is the
+        tool's answer — the five lists the model reads — drawn as a harness line
+        rather than a panel (`slife2.tui.draw`, which turns them into the names
+        that left), so a person sees which tools the model lost without reading
+        the call.  The events are emitted here because this is the one place
+        that knows the pair; a caller with nobody watching passes the default
+        observer, which drops them.
 
         **A failure is raised, not swallowed.**  The turn is over and has been
         answered, and how to report bookkeeping is each caller's: the agent

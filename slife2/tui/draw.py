@@ -44,7 +44,12 @@ from slife2.libs.turn.events import (
     TurnFinished,
     UsageReported,
 )
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness, is_harness_call
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    FUNC_TOOL_UNLOAD,
+    is_harness,
+    is_harness_call,
+)
 from slife2.tui.widgets import ChatView
 
 
@@ -56,22 +61,30 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
     decided it does not own any of them, which is exactly what a watcher is.
     """
     match event:
-        case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
-            is_harness(name)
+        case ToolCallStarted(call_id=call_id, name=name, arguments=arguments) if (
+            is_harness(name) and (is_harness_call(call_id) or name == CHECK_NEW_INPUT)
         ):
-            # **A pair the machinery wrote is a line the person can see.**  The
-            # machinery's own sentence is a note — the compaction's count, the
-            # trim's list of what left.  A model's own call to the same tool
-            # keeps its own call id and is not a note: the answer is the
-            # model's.  `_check_new_input`'s note is the `MessageCutIn` line —
-            # the message it took — rather than this finish.
-            if is_harness_call(call_id) and name != CHECK_NEW_INPUT and text:
-                chat.add_note(text)
+            # **The machinery's own pair is the note on its answer**, and a
+            # model's own `_check_new_input` is the cut-in's note; neither is a
+            # panel.  The call id is the discriminator: a model's own call to
+            # another harness tool falls through to the ordinary panel below.
             return True
-        case ToolCallStarted(name=name) if is_harness(name):
-            # **The harness's own pairs are not tool panels.**  The answer is
-            # the line (above), and a panel would be a second one for a call the
-            # model did not make.
+        case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
+            is_harness(name) and is_harness_call(call_id)
+        ):
+            # The machinery's own sentence is a note — the compaction's count,
+            # the trim's five lists as the names that left.  `_check_new_input`'s
+            # answer is the `MessageCutIn` line instead.
+            if name != CHECK_NEW_INPUT and text:
+                chat.add_note(
+                    notes.unloaded(text) if name == FUNC_TOOL_UNLOAD else text
+                )
+            return True
+        case ToolCallStarted(name=name) | ToolCallFinished(name=name) if (
+            is_harness(name) and name == CHECK_NEW_INPUT
+        ):
+            # A model's own `_check_new_input`: the message it took, if any, is
+            # the cut-in's note; the call itself is not a panel.
             return True
         case MessageCutIn(text=text):
             # **A cut-in is a harness note like every other pair's answer.**  The

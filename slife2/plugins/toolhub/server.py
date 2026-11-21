@@ -2223,6 +2223,10 @@ def _unload_answer(found: Mapping[str, Any]) -> dict[str, Any]:
     read fails rather than reading as "nothing to unload" — a model that lost
     tools and reads that stops looking (SDD Appendix C, "a failure is not a
     verdict").
+
+    The object is the model's answer; the line a person reads is not this one.
+    `slife2.libs.harness.notes.unloaded` turns the five lists into the names
+    that left.
     """
     return {
         "unloaded": _unload_names(found, "unloaded"),

@@ -89,12 +89,12 @@ live, `slife2.tui.restore` rebuilt) that every machinery-written pair's answer
 wears.
 
 **Every pair the machinery writes is visible to the person.**  The answer is a
-note in the transcript — the compaction's count, the trim's list of what left,
-and a cut-in's message, which is a person's words in the note's shape.  A
-model's own call to `_turn_compact` or `_func_tool_unload` keeps its own call id
-(`HARNESS_CALL_PREFIX`) and draws nothing: the answer is the model's, and the
-screen draws the machinery's move, not every use of its tool.  A cut-in is a
-person's message and is a note whichever call took it.  A harness tool added
+note in the transcript — the compaction's count, the trim's names that left, and
+a cut-in's message, which is a person's words in the note's shape.  A model's
+own call to `_turn_compact` or `_func_tool_unload` keeps its own call id
+(`HARNESS_CALL_PREFIX`) and is an ordinary tool panel: the call is the model's;
+the note is the machinery's.  `_check_new_input` is a person's message and is a
+note whichever call took it, so its call is not a panel.  A harness tool added
 later is visible without a drawing change: the screen reads the id class, not a
 case per name.
 
