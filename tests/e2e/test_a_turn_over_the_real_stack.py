@@ -263,7 +263,7 @@ async def _save_dump(agent: str, call: str, body: str) -> None:
     store = store_of(index_path(agent))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, call, mode=UPSERT, body=body, embedder=embedder)
+    await store.write(DUMP, call, mode=UPSERT, text=body, embedder=embedder)
 
 
 async def _read(

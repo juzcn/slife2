@@ -789,7 +789,7 @@ def build_server(
 
         A note, a day and a report are one copy on disk; the row carries the
         metadata and the address.  A row whose `mirror` is empty has no text to
-        read and answers empty (`body_of`).  **A row whose file is gone is
+        read and answers empty (`text_of`).  **A row whose file is gone is
         refused by name**: the store raises, because a document whose text is
         gone is not an empty one, and the sentence a model reads has to say
         which document and what happened — the same rule `dump_target` and
@@ -797,7 +797,7 @@ def build_server(
         """
         opened = await cabinet(ctx)
         try:
-            return await off_loop(opened.body_of, row)
+            return await off_loop(opened.text_of, row)
         except (OSError, UnicodeError) as exc:
             raise ToolError(
                 f"{row.get('kind') or 'document'} {row.get('key')!r} is recorded "
@@ -852,7 +852,7 @@ def build_server(
         row = await opened.write(
             NOTE,
             subject,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -888,7 +888,7 @@ def build_server(
             NOTE,
             subject,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -985,7 +985,7 @@ def build_server(
         row = await opened.write(
             DIARY,
             day,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -1042,7 +1042,7 @@ def build_server(
             DIARY,
             day,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -1359,7 +1359,7 @@ def build_server(
         row = await opened.write(
             REPORT,
             title,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             period_start=period_start,
             period_end=period_end,
@@ -1426,7 +1426,7 @@ def build_server(
             REPORT,
             title,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             period_start=period_start,
             period_end=period_end,
@@ -1609,7 +1609,7 @@ def build_server(
         A second call under one key replaces, because the key is one call: a
         re-run writes the same output twice rather than two facts.
 
-        **The text is the mirror file; the row holds no body.**  A dump can be
+        **The text is the mirror file; the row holds no copy.**  A dump can be
         a gigabyte of output, and keeping the same bytes in SQLite as well
         would be the duplication this arrangement exists to avoid.
 
@@ -1634,7 +1634,7 @@ def build_server(
             DUMP,
             call,
             mode=UPSERT,
-            body=output,
+            text=output,
             title=tool,
             source=tool,
         )
@@ -2081,7 +2081,7 @@ def _char_window(
     """Fit a character window of *text* starting at *index*, within *budget*.
 
     `base` is the absolute offset of `text[0]` in the text a model addresses:
-    `0` for a whole dump body, and the file offset of a gathered chunk for a
+    `0` for a whole dump, and the file offset of a gathered chunk for a
     saved file.  So `next` is always an address in the original, not in the
     chunk.  **The window is filled against the budget, and no line is
     scanned** — this is the mode for text without useful lines.
@@ -2136,7 +2136,7 @@ def _grep_hits(
     cannot say which occurrence on that line.
 
     **The matching is the same for a dump and a file.**  It reads a line source,
-    not a body: both readers feed lines as they are read from the file.
+    not a whole text: both readers feed lines as they are read from the file.
 
     **A folded index is not an original one.**  `ß` casefolds to `ss`, and `İ`
     to `i` plus a combining dot, so the folded line can be longer than the line
@@ -2638,7 +2638,7 @@ def _document(row: dict[str, Any], *, text: str) -> dict[str, Any]:
     """One document as the payload a model reads: its own fields, and its text.
 
     The text is always the caller's: a note, a day and a report live in their
-    file, and the row holds no body.  One key for every kind, because "the text
+    file, and the row holds no copy.  One key for every kind, because "the text
     of this document" is one question however a kind answers it.
     """
     return {**facts(row), "text": text}

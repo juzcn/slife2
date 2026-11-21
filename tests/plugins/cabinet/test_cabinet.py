@@ -64,7 +64,6 @@ from slife2.plugins.cabinet.store import (
     index_path,
     slug,
     store_of,
-    vector_text,
 )
 from tests.fakes import FailingEmbedder, StubEmbedder
 
@@ -341,7 +340,7 @@ async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
     async def swap() -> None:
         await store.remove(NOTE, "Python")
         await store.write(
-            NOTE, "Python", body=f"{OTHER} interloper", embedder=StubEmbedder()
+            NOTE, "Python", text=f"{OTHER} interloper", embedder=StubEmbedder()
         )
 
     store = CabinetStore(tmp_path / "index.db")
@@ -350,13 +349,13 @@ async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
     # freed *max* rowid to the next insert, so the replaced row has to be the
     # earlier one — otherwise the concurrent create lands on the very id the
     # snapshot held and hides the defect.
-    await store.write(NOTE, "Python", body=f"{WORD} first", embedder=StubEmbedder())
-    await store.write(NOTE, "Other", body="unrelated", embedder=StubEmbedder())
+    await store.write(NOTE, "Python", text=f"{WORD} first", embedder=StubEmbedder())
+    await store.write(NOTE, "Other", text="unrelated", embedder=StubEmbedder())
     await store.write(
         NOTE,
         "Python",
         mode=REPLACE,
-        body=f"{WORD} second",
+        text=f"{WORD} second",
         embedder=Swapping(swap),
     )
 
@@ -1725,22 +1724,29 @@ def test_a_slug_keeps_what_a_person_reads_and_never_collides_silently() -> None:
     assert slug("///").startswith("doc-"), "a name with no word in it is still a name"
 
 
-def test_a_file_has_no_vector_text() -> None:
-    """**A saved file is keyword-only.**  Its identity is not embedded.
+@pytest.mark.asyncio
+async def test_a_file_is_not_vectorized() -> None:
+    """**A saved file is keyword-only.**  Its bytes are never embedded.
 
     A file's size is not the agent's to control, so meaning search over files
-    is deferred until a RAG pass exists; `vector_text` is the agent-written
-    document's body, and a file has no body.
+    is deferred until a RAG pass exists; the rule is the kind's (`Spec`), and a
+    write of a file places no chunk however much text it is handed.
     """
-    row = {
-        "kind": FILE,
-        "title": "spec sheet",
-        "source": "C:/tmp/spec.pdf",
-        "file_path": "documents/spec.pdf",
-        "summary": "",
-    }
-
-    assert vector_text(row) == ""
+    store = store_of(index_path("jack"))
+    await store.sync(StubEmbedder())
+    await store.write(
+        FILE,
+        "documents/spec.txt",
+        text="words the meaning leg must not see",
+        file_path="documents/spec.txt",
+        title="spec sheet",
+        embedder=StubEmbedder(),
+    )
+    with store._connect() as connection:
+        chunks = connection.execute(
+            "SELECT COUNT(*) AS n FROM cabinet_chunk"
+        ).fetchone()["n"]
+    assert int(chunks) == 0, "the meaning leg covers the agent-written kinds only"
 
 
 def test_a_category_says_what_a_file_is_only_when_it_knows() -> None:
@@ -1781,7 +1787,7 @@ async def test_sync_embeds_every_document_and_not_one_batch(
     embedder = StubEmbedder()
     await store.sync(embedder)
     for index in range(3):
-        await store.write(NOTE, f"n{index}", body=f"body {index}", embedder=embedder)
+        await store.write(NOTE, f"n{index}", text=f"body {index}", embedder=embedder)
     with store._connect() as connection:
         # The state a changed embedding model leaves: rows, no vectors.  The
         # rebuild clears all three tables, and the third is the one that says
@@ -1817,7 +1823,7 @@ async def test_sync_ends_with_a_document_that_has_nothing_to_embed(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "empty", body="", embedder=embedder)
+    await store.write(NOTE, "empty", text="", embedder=embedder)
 
     status = await asyncio.wait_for(
         store.sync(embedder),
@@ -1962,8 +1968,8 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "a b", body="first", embedder=embedder)
-    await store.write(NOTE, "a/b", body="second", embedder=embedder)
+    await store.write(NOTE, "a b", text="first", embedder=embedder)
+    await store.write(NOTE, "a/b", text="second", embedder=embedder)
     first = store.get(NOTE, "a b")
     second = store.get(NOTE, "a/b")
     assert first is not None and second is not None
@@ -2000,7 +2006,7 @@ async def test_a_mirror_the_filesystem_refuses_rolls_the_create_back(
 
     monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
     with pytest.raises(PermissionError):
-        await store.write(NOTE, "locked", body="first", embedder=embedder)
+        await store.write(NOTE, "locked", text="first", embedder=embedder)
 
     assert store.get(NOTE, "locked") is None, "the row went back with the file"
     with store._connect() as connection:
@@ -2009,7 +2015,7 @@ async def test_a_mirror_the_filesystem_refuses_rolls_the_create_back(
             assert int(count["n"]) == 0, f"no {table} row survived the refused mirror"
 
     monkeypatch.setattr(cabinet_store, "_write_mirror", real)
-    written = await store.write(NOTE, "locked", body="second", embedder=embedder)
+    written = await store.write(NOTE, "locked", text="second", embedder=embedder)
     assert written is not None, "the create is not lost to a retry"
     assert (bag() / str(written["mirror"])).read_text(encoding="utf-8") == "second"
 
@@ -2029,7 +2035,7 @@ async def test_a_mirror_the_filesystem_refuses_keeps_the_update_whole(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    first = await store.write(NOTE, "mutable", body="first", embedder=embedder)
+    first = await store.write(NOTE, "mutable", text="first", embedder=embedder)
     assert first is not None
 
     def held_open(root: Path, relative: str, text: str) -> None:
@@ -2038,12 +2044,12 @@ async def test_a_mirror_the_filesystem_refuses_keeps_the_update_whole(
     monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
     with pytest.raises(PermissionError):
         await store.write(
-            NOTE, "mutable", mode=REPLACE, body="second", embedder=embedder
+            NOTE, "mutable", mode=REPLACE, text="second", embedder=embedder
         )
 
     kept = store.get(NOTE, "mutable")
     assert kept is not None
-    assert store.body_of(kept) == "first", "the old text is still the document"
+    assert store.text_of(kept) == "first", "the old text is still the document"
     with store._connect() as connection:
         indexed = connection.execute(
             "SELECT search FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
@@ -2067,7 +2073,7 @@ async def test_a_refused_unlink_refuses_the_remove_and_keeps_the_document(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    written = await store.write(NOTE, "held", body="body", embedder=embedder)
+    written = await store.write(NOTE, "held", text="body", embedder=embedder)
     assert written is not None
     mirror = bag() / str(written["mirror"])
     assert mirror.is_file()
@@ -2082,7 +2088,7 @@ async def test_a_refused_unlink_refuses_the_remove_and_keeps_the_document(
     kept = store.get(NOTE, "held")
     assert kept is not None, "the row went back with the refused unlink"
     assert mirror.is_file(), "the file was never unlinked"
-    assert store.body_of(kept) == "body"
+    assert store.text_of(kept) == "body"
     with store._connect() as connection:
         indexed = connection.execute(
             "SELECT COUNT(*) AS n FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
@@ -2103,7 +2109,7 @@ async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
     await store.write(
         FILE,
         "documents/spec.txt",
-        body="",
+        text="",
         file_path="documents/spec.txt",
         title="spec sheet",
         embedder=StubEmbedder(),
@@ -2134,11 +2140,11 @@ async def test_annotate_reads_and_writes_under_one_write_lock(
     """
     store = store_of(index_path("jack"))
     await store.sync(StubEmbedder())
-    await store.write(NOTE, "locked", body="first", embedder=StubEmbedder())
+    await store.write(NOTE, "locked", text="first", embedder=StubEmbedder())
 
     read_done = threading.Event()
     resume = threading.Event()
-    real = cabinet_store.CabinetStore._with_body
+    real = cabinet_store.CabinetStore._index_text
 
     def paused(self, row):
         found = real(self, row)
@@ -2146,7 +2152,7 @@ async def test_annotate_reads_and_writes_under_one_write_lock(
         resume.wait(timeout=5.0)  # timeouts: a hang guard, not a budget
         return found
 
-    monkeypatch.setattr(cabinet_store.CabinetStore, "_with_body", paused)
+    monkeypatch.setattr(cabinet_store.CabinetStore, "_index_text", paused)
     result: dict[str, Any] = {}
 
     def run() -> None:
@@ -2187,7 +2193,7 @@ async def test_sync_reports_a_document_the_index_has_no_vector_for() -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "hole", body="something to embed", embedder=embedder)
+    await store.write(NOTE, "hole", text="something to embed", embedder=embedder)
     with store._connect() as connection:
         # The state a failed placement leaves: tried, and nothing in the index.
         connection.execute("DELETE FROM cabinet_chunk")
@@ -2222,7 +2228,7 @@ async def test_a_failed_index_rebuild_leaves_the_vectors_table(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "one", body="some text", embedder=embedder)
+    await store.write(NOTE, "one", text="some text", embedder=embedder)
     monkeypatch.setattr("slife2.libs.store.index.vector_ddl", explode)
 
     with pytest.raises(RuntimeError, match="no DDL for you"):
@@ -2251,8 +2257,8 @@ async def test_two_writes_of_one_key_make_one_document() -> None:
     day = "2026-10-11"
 
     first, second = await asyncio.gather(
-        store.write(DIARY, day, body="morning", embedder=embedder),
-        store.write(DIARY, day, body="evening", embedder=embedder),
+        store.write(DIARY, day, text="morning", embedder=embedder),
+        store.write(DIARY, day, text="evening", embedder=embedder),
     )
 
     assert (first is None) != (second is None), "exactly one create won"
@@ -2301,7 +2307,7 @@ async def test_a_search_does_not_cap_the_shortlist_it_hands_to_sql(
     embedder = StubEmbedder()
     await store.sync(embedder)
     for index in range(5):
-        await store.write(NOTE, f"n{index}", body=WORD, embedder=embedder)
+        await store.write(NOTE, f"n{index}", text=WORD, embedder=embedder)
 
     answer = await store.search(keywords=[WORD], embedder=embedder)
 
@@ -2338,7 +2344,7 @@ async def save_dump(call: str, body: str) -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, call, mode=UPSERT, body=body, embedder=embedder)
+    await store.write(DUMP, call, mode=UPSERT, text=body, embedder=embedder)
 
 
 @pytest.mark.asyncio
@@ -2936,7 +2942,7 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
     embedder = StubEmbedder()
     await store.sync(embedder)
     await store.write(
-        DUMP, "call", mode=UPSERT, body=f"{WORD} in a tool output", embedder=embedder
+        DUMP, "call", mode=UPSERT, text=f"{WORD} in a tool output", embedder=embedder
     )
     await store.write(
         IMAGE,
@@ -2946,7 +2952,7 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
         mime="image/png",
         embedder=embedder,
     )
-    await store.write(NOTE, "readable", body=f"a note about {WORD}", embedder=embedder)
+    await store.write(NOTE, "readable", text=f"a note about {WORD}", embedder=embedder)
 
     attachments = "SELECT id FROM cabinet_doc WHERE kind IN (?, ?)"
     kinds = (DUMP, IMAGE)
