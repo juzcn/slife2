@@ -225,11 +225,12 @@ class Message:
     #: Where the message came in on, for the turns the harness wrote rather than
     #: the model.
     #:
-    #: **Display metadata, and the one field here that a provider never sees.**
-    #: A message that cut into a running turn is written as a tool pair, and the
-    #: tool result carries the words but not the channel they arrived on; the
-    #: line a rebuilt transcript draws for that pair needs the channel to wear
-    #: the right bubble, so it rides the message.  `to_wire` deliberately omits
+    #: **Display metadata and the record, and the one field here a provider
+    #: never sees.**  A message that cut into a running turn is written as a
+    #: tool pair, and the channel is how a screen tells a real delivery from a
+    #: `_check_new_input` pair that took nothing; the pair's answer is drawn as
+    #: the harness note, so this rides the message for the record and that check
+    #: rather than for a bubble.  `to_wire` deliberately omits
     #: it — the model's request has no such field — and `to_record` is what
     #: keeps it in the turn log.  Empty for every message that did not cut in,
     #: which is every message a model or a person wrote.

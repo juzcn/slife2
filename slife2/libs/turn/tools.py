@@ -83,10 +83,20 @@ The middle two do line up with the mark for the tools the harness writes *pairs*
 with — a pair has to name a tool the request declares, so those names are in the
 model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
-tool and is protected the same way; `_check_new_input` is one, and it is the
-harness tool a screen *does* draw — as the message somebody sent, live
-(`MessageCutIn`) and rebuilt (`slife2.tui.restore`), because what the pair carries is a
-person's words rather than the machinery's.
+tool and is protected the same way; `_check_new_input` is one, and its answer is a
+person's message — the screen draws it as the same harness note (`MessageCutIn`
+live, `slife2.tui.restore` rebuilt) that every machinery-written pair's answer
+wears.
+
+**Every pair the machinery writes is visible to the person.**  The answer is a
+note in the transcript — the compaction's count, the trim's list of what left,
+and a cut-in's message, which is a person's words in the note's shape.  A
+model's own call to `_turn_compact` or `_func_tool_unload` keeps its own call id
+(`HARNESS_CALL_PREFIX`) and draws nothing: the answer is the model's, and the
+screen draws the machinery's move, not every use of its tool.  A cut-in is a
+person's message and is a note whichever call took it.  A harness tool added
+later is visible without a drawing change: the screen reads the id class, not a
+case per name.
 
 **And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
 are read off every call and stripped before dispatch — the one part of this
@@ -259,6 +269,22 @@ def is_harness(name: str) -> bool:
     rebuilt message, and the loop mints one for a pair.
     """
     return name.startswith(HARNESS_PREFIX)
+
+
+#: The prefix of a call id the harness minted.
+#:
+#: **The id is what tells a machinery-written pair from a model's own call to
+#: the same tool**, because the tool name cannot: the model may call any
+#: declared harness tool, and its call carries its own provider id.  One
+#: spelling because two ends read it — the loop mints it (`harness_call`) and
+#: the transcript uses it to decide whether a harness tool's answer is a line
+#: the person sees (`slife2.tui.draw`, `slife2.tui.restore`).
+HARNESS_CALL_PREFIX = "_harness_"
+
+
+def is_harness_call(call_id: str) -> bool:
+    """Whether a tool call is one the harness wrote rather than the model."""
+    return call_id.startswith(HARNESS_CALL_PREFIX)
 
 
 # ── The three per-call meta-parameters ────────────────────────────────────────

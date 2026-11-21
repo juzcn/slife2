@@ -44,7 +44,7 @@ from slife2.libs.turn.events import (
     TurnFinished,
     UsageReported,
 )
-from slife2.libs.turn.tools import TURN_COMPACT, is_harness
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness, is_harness_call
 from slife2.tui.widgets import ChatView
 
 
@@ -56,25 +56,30 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
     decided it does not own any of them, which is exactly what a watcher is.
     """
     match event:
-        case ToolCallFinished(name=name, result_preview=text) if name == TURN_COMPACT:
-            # **The tool's own answer is the person's line.**  A compaction is a
-            # harness move, and the note is exactly what the call answered — one
-            # text, so the transcript and the model's pair cannot disagree.
-            chat.add_note(text)
-        case ToolCallStarted(name=name) | ToolCallFinished(name=name) if is_harness(
-            name
+        case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
+            is_harness(name)
         ):
-            # **The harness's own pairs are not tool panels.**  `_check_new_input`
-            # is drawn as the cut-in its `MessageCutIn` event carries, and
-            # `_func_tool_unload` is the budget talking to itself; a panel for
-            # either would be a second line for a call the model did not make.
-            # A rebuilt transcript has always skipped them (`restore._draw_answer`);
-            # this is the live half of the same rule.
+            # **A pair the machinery wrote is a line the person can see.**  The
+            # machinery's own sentence is a note — the compaction's count, the
+            # trim's list of what left.  A model's own call to the same tool
+            # keeps its own call id and is not a note: the answer is the
+            # model's.  `_check_new_input`'s note is the `MessageCutIn` line —
+            # the message it took — rather than this finish.
+            if is_harness_call(call_id) and name != CHECK_NEW_INPUT and text:
+                chat.add_note(text)
             return True
-        case MessageCutIn(text=text, channel=channel):
-            # A message that jumped the queue, drawn inside the turn that took
-            # it: the line belongs here and the turn stays open.
-            chat.add_cut_in(text, channel=channel)
+        case ToolCallStarted(name=name) if is_harness(name):
+            # **The harness's own pairs are not tool panels.**  The answer is
+            # the line (above), and a panel would be a second one for a call the
+            # model did not make.
+            return True
+        case MessageCutIn(text=text):
+            # **A cut-in is a harness note like every other pair's answer.**  The
+            # person's words are the `_check_new_input` tool's own answer, so the
+            # line is the note rather than a bubble; the channel stays in the
+            # record and in the event (the receipt's reader is the window that
+            # submitted it).
+            chat.add_note(text, new_call=True)
         case ContextChosen(
             kept=kept, recalled=recalled, rerank=rerank, discriminator=discriminator
         ):

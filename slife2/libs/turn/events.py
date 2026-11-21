@@ -218,7 +218,9 @@ class MessageCutIn:
     can no more invent what a person said than the model can.
 
     `channel` is where the message came in on, unchanged from the `Pending` it
-    waited in, so the line wears the same bubble a turn of its own would.
+    waited in; the record keeps it, and it is what tells a real delivery from a
+    `_check_new_input` pair that took nothing.  The display draws the words as
+    the harness note every machinery-written pair's answer wears, not a bubble.
 
     `receipt` is the submission's own opaque id, echoed back by the server for
     the one reader that has to match a delivery to the request it answered: the

@@ -42,7 +42,7 @@ from slife2.libs.turn.events import (
     UsageReported,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.tools import TURN_COMPACT
+from slife2.libs.turn.tools import HARNESS_CALL_PREFIX, TURN_COMPACT
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
@@ -487,7 +487,35 @@ async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
 
 
 async def test_a_compaction_note_is_drawn_mid_turn() -> None:
-    """The tool's own output is the person's line: one text, not two spellings."""
+    """The machinery's own call is a note; its answer is the line's text."""
+    report = "Dropped 2 message(s) from this turn's model context."
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallFinished(
+                call_id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+                name=TURN_COMPACT,
+                ok=True,
+                result_preview=report,
+                result_chars=len(report),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert any(report in text for text in notes)
+
+
+async def test_a_model_called_compaction_is_not_a_note() -> None:
+    """The model may call `_turn_compact`; that call's answer is the model's,
+    not the machinery's line, so the transcript draws no note for it."""
     report = "Dropped 2 message(s) from this turn's model context."
 
     def respond(prompt: str, on_event):
@@ -510,7 +538,7 @@ async def test_a_compaction_note_is_drawn_mid_turn() -> None:
         await settle(pilot, app)
         notes = [str(widget.render()) for widget in app.query(".system-message")]
 
-    assert any(report in text for text in notes)
+    assert not any(report in text for text in notes)
 
 
 async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> None:
@@ -554,10 +582,10 @@ async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> Non
 async def test_a_cut_in_does_not_trim_the_final_answer() -> None:
     """A cut-in closes an iteration the same way a tool panel does.
 
-    The message is taken at a tool boundary — the harness pair draws no panel
-    of its own — and the answer still coming is the next call's text.  What
-    streamed before the cut-in line is not a prefix of it, so the drawn-prefix
-    account starts over there too.
+    The message is taken at a tool boundary — the cut-in's note closes the block
+    it arrived in — and the answer still coming is the next call's text.  What
+    streamed before the note is not a prefix of it, so the drawn-prefix account
+    starts over there too.
     """
 
     def respond(prompt: str, on_event):
@@ -1368,22 +1396,66 @@ async def test_a_restored_failed_turn_reads_as_the_harness_line_not_an_answer() 
     assert "jack> [TURN-FAILED" not in text, "the harness's line is not the model's"
 
 
+async def test_an_unload_note_is_drawn_mid_turn() -> None:
+    """The trim is a machinery call too; its sentence is what left the list."""
+    report = "Unloaded 2 tools: tool_search, tool_list."
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallFinished(
+                call_id=f"{HARNESS_CALL_PREFIX}func_tool_unload_test",
+                name=FUNC_TOOL_UNLOAD,
+                ok=True,
+                result_preview=report,
+                result_chars=len(report),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert any(report in text for text in notes)
+
+
 async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
     """The rebuilt line is the stored tool message, not a second phrasing.
 
-    The harness pair is skipped as a panel; its answer is the note, which is the
-    same text the model read and the live line showed.
+    The machinery's pair is skipped as a panel; its answer is the note, which is
+    the same text the model read and the live line showed.  A model's own call
+    to the same tool keeps its own id and draws nothing.
     """
     report = "Dropped 2 message(s) from this turn's model context."
+    own = "Dropped 1 message(s) from this turn's model context."
     client = answering_with(
         stored(
             Message(role="user", content="one"),
             Message(
                 role="assistant",
                 content=None,
+                tool_calls=[
+                    ToolCall(
+                        id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+                        name=TURN_COMPACT,
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content=report,
+                tool_call_id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+            ),
+            Message(
+                role="assistant",
+                content=None,
                 tool_calls=[ToolCall(id="c1", name=TURN_COMPACT)],
             ),
-            Message(role="tool", content=report, tool_call_id="c1"),
+            Message(role="tool", content=own, tool_call_id="c1"),
             Message(role="assistant", content="done"),
         )
     )
@@ -1394,6 +1466,7 @@ async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
         panels = list(app.query(ToolCallWidget))
 
     assert f"[{report}]" in text
+    assert own not in text, "the model's own call is not the machinery's note"
     assert panels == [], "a harness pair is a note, not a tool panel"
 
 
@@ -1949,14 +2022,12 @@ async def test_a_restored_tool_panel_opens_and_shows_what_it_returned() -> None:
     assert "e = 6*7" in expanded
 
 
-async def test_a_restored_cut_in_is_a_message_not_a_tool_panel() -> None:
-    """A message that jumped the queue is a person's line, live and rebuilt.
+async def test_a_restored_cut_in_is_a_note_not_a_tool_panel() -> None:
+    """A message that jumped the queue is a harness note, live and rebuilt.
 
     The pair is in the turn log because that is how a mid-turn message enters
-    the conversation, but what it carries is something somebody said.  The
-    record keeps the channel on the tool message (`Message.to_record`), so the
-    rebuilt line wears the bubble the live one wore — and the harness call itself
-    is not drawn as a tool, which it never was.
+    the conversation, but what it carries is something somebody said; the
+    unified line is the note, and the harness call itself is not a tool panel.
     """
     client = answering_with(
         stored(
@@ -1987,11 +2058,11 @@ async def test_a_restored_cut_in_is_a_message_not_a_tool_panel() -> None:
         text = shown(app)
         panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
 
-    assert "Wechat> and this" in text
+    assert "[and this]" in text
     assert "_check_new_input" not in text, "the harness call is not a tool panel"
     assert panels == []
-    assert text.index("You> start") < text.index("Wechat> and this")
-    assert text.index("Wechat> and this") < text.index("both answered")
+    assert text.index("You> start") < text.index("[and this]")
+    assert text.index("[and this]") < text.index("both answered")
 
 
 async def test_a_restored_result_reads_like_a_live_one() -> None:
@@ -2108,11 +2179,12 @@ async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -
     assert blocks[1].thinking_expanded is True, "the answer should not"
 
 
-async def test_a_harness_tool_call_is_not_drawn() -> None:
-    """`_func_tool_unload` is the harness talking to itself, and always was.
+async def test_a_restored_model_called_harness_tool_is_not_drawn() -> None:
+    """A model's own call to a harness tool keeps its id and draws nothing.
 
-    It is in the record because the model's tool list carries it, and the live
-    transcript does not show it either.
+    `_func_tool_unload` is in the model's list, so the model may call it; that
+    call's answer is the model's, not the machinery's move, and only a pair the
+    harness wrote (`_harness_…`) is a note.
     """
     client = answering_with(
         stored(
@@ -2134,17 +2206,19 @@ async def test_a_harness_tool_call_is_not_drawn() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         names = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        text = shown(app)
 
     assert names == ["calc"]
+    assert "dropped 3" not in text, "the model's own call is not a note"
 
 
-async def test_a_live_harness_tool_call_is_not_drawn() -> None:
+async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:
     """The live half of the same rule: a harness pair is not a tool panel.
 
     `_check_new_input` reaches the screen as the `MessageCutIn` line, and
-    `_func_tool_unload` reaches it as nothing at all.  Drawing a tool panel for
-    either is how a cut-in came to appear twice — once as the message it was,
-    and once as the machinery's call that carried it.
+    `_func_tool_unload` as its answer's note.  Drawing a tool panel for either
+    is how a cut-in came to appear twice — once as the message it was, and once
+    as the machinery's call that carried it.
     """
 
     def respond(prompt: str, on_event):
@@ -2202,7 +2276,8 @@ async def test_a_live_harness_tool_call_is_not_drawn() -> None:
         text = shown(app)
 
     assert names == [], "the harness's calls are not tool panels"
-    assert "Wechat> a note" in text, "the cut-in is the message's own line"
+    assert "[a note]" in text, "the cut-in is the harness note's line"
+    assert "dropped 3" in text, "the unload's answer is a note"
     assert "_check_new_input" not in text
     assert FUNC_TOOL_UNLOAD not in text
 
@@ -3835,8 +3910,8 @@ async def test_a_cut_in_is_drawn_inside_the_running_turn_and_answered_once() -> 
         await settle(pilot, app)
 
         text = shown(app)
-        assert text.index("You> alpha") < text.index("You> beta")
-        assert text.index("You> beta") < text.index("answer to both")
+        assert text.index("You> alpha") < text.index("[beta]")
+        assert text.index("[beta]") < text.index("answer to both")
         assert text.count("answer to both") == 1, "one turn answered both messages"
         assert "beta" not in status(app), "a folded message is not still queued"
 
@@ -3847,7 +3922,7 @@ async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
     The window's own input and a channel hand-over take the same `_submit` and
     the same receipt, so the cut-in rule has one implementation.  This is the
     half the typed-prompt test cannot prove: its channel is `tui`, and the
-    receipt and bubble of a hand-over are the ones that have to reach the
+    receipt and note line of a hand-over are the ones that have to reach the
     transcript.
     """
     started = asyncio.Event()
@@ -3879,9 +3954,9 @@ async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
         await settle(pilot, app)
 
         text = shown(app)
-        assert "Subagent(gamma)> beta" in text
-        assert text.index("You> alpha") < text.index("Subagent(gamma)> beta")
-        assert text.index("Subagent(gamma)> beta") < text.index("answer to both")
+        assert "[beta]" in text
+        assert text.index("You> alpha") < text.index("[beta]")
+        assert text.index("[beta]") < text.index("answer to both")
         assert text.count("answer to both") == 1, "one turn answered both messages"
         assert "beta" not in status(app), "a folded message is not still queued"
 

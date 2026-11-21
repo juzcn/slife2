@@ -972,17 +972,19 @@ def build_server(
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the
         # model had just loaded and was about to use.
-        await trim_tools(task, turn.messages)
+        await trim_tools(task, turn.messages, observer)
         return result
 
-    async def trim_tools(task: AgentTask, messages: list[Message]) -> None:
+    async def trim_tools(
+        task: AgentTask, messages: list[Message], observer: TurnObserver
+    ) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
 
         **The write is the turn runtime's** (`slife2.libs.turn.runtime.trim`):
         the pair naming what left, with no await between its halves, is one
-        mechanism for both servers.  What is a task's own is how a skip is
-        reported.
+        mechanism for both servers, and so is the note it reports on this
+        task's stream.  What is a task's own is how a skip is reported.
 
         **A skip is a failure, and it is said at `error`.**  A task runs one
         turn and has no next request for a dead hub to make itself heard on, so
@@ -1000,7 +1002,7 @@ def build_server(
         *failure goes* to the log as an error naming the task.
         """
         try:
-            unloaded = await runtime.trim(messages)
+            unloaded = await runtime.trim(messages, observer)
         except Exception as exc:  # noqa: BLE001 - bookkeeping does not fail a turn
             logger.error(
                 "agent task %s: the tool list was not trimmed (%s); the loaded "

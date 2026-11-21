@@ -42,8 +42,8 @@ from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, TURN_COMPACT, is_harness
-from slife2.tui.widgets import WINDOW_CHANNEL, ChatView
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness, is_harness_call
+from slife2.tui.widgets import ChatView
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,8 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # asked for them — a tool panel is opened by an assistant message and
     # completed by a tool message further down — so one walk cannot both open a
     # panel and know what to put in it.  Each result carries its message's
-    # channel because a cut-in's line wears the bubble the message arrived on.
+    # channel because a real cut-in's delivery has one, and that is what tells
+    # it from a `_check_new_input` pair that took nothing.
     results: dict[str, tuple[str, str]] = {}
     for message in messages:
         if message.get("role") == "tool" and message.get("tool_call_id"):
@@ -220,22 +221,20 @@ def _draw_answer(
             # trusted when a channel is present.
             if text == NOTHING_WAITING and not channel:
                 continue
-            # **The one harness call a rebuild draws.**  The pair is how a
+            # **The cut-in's line is a harness note too.**  The pair is how a
             # message that arrived mid-turn entered the conversation, and the
-            # tool's answer is the message's own words.  `add_cut_in` keeps the
-            # turn open, exactly as the live event does, so the answer that
-            # follows this pair streams under the line rather than replacing it.
-            # The channel is the one `Message.to_record` kept: a record from
-            # before that field reads as this window's own, which is the only
-            # speaker a missing channel can honestly be.
-            chat.add_cut_in(text, channel=channel or WINDOW_CHANNEL)
-        elif call.name == TURN_COMPACT:
-            # **The tool's answer is the note, exactly as the live line is.**
-            # The pair is skipped as a panel for every harness call; this one is
-            # the exception that draws its output, because the output is what
-            # the person watched arrive.
+            # tool's answer is the message's own words; the unified shape is the
+            # note, not a bubble.  The channel is still read for the skip above
+            # — a real delivery has one.
             chat.add_note(text)
-        elif not is_harness(call.name):
+        elif is_harness(call.name):
+            # **A pair the machinery wrote is a line the person can see.**  The
+            # pair is skipped as a panel; the machinery's sentence is a note.  A
+            # model's own call to the same tool keeps its own call id and draws
+            # nothing — the answer is the model's.
+            if is_harness_call(call.id) and text:
+                chat.add_note(text)
+        else:
             _draw_tool(chat, call, text)
 
 

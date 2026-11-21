@@ -1066,7 +1066,7 @@ class AgentCore:
             "forget", {"agent": agent, "subagent": subagent}
         )
 
-    async def trim_tools(self, loop: Loop) -> None:
+    async def trim_tools(self, loop: Loop, observer: TurnObserver) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
 
@@ -1083,7 +1083,9 @@ class AgentCore:
         **What went is written into the conversation by the turn runtime**
         (`slife2.libs.turn.runtime.trim`): the pair — `_func_tool_unload` called
         with no names — is one mechanism for both servers, and its two appends
-        have no await between them.  What is this server's is when to ask and
+        have no await between them.  The pair's own sentence is reported on this
+        turn's stream by the same call, so the person sees it as a note rather
+        than as a panel.  What is this server's is when to ask and
         how to report a skip: a turn boundary, because the list goes out with
         every model call, and a warning rather than a failed turn, because the
         turn is over and its next tool-list read is what surfaces a dead hub.
@@ -1104,7 +1106,7 @@ class AgentCore:
         warning naming the conversation.
         """
         try:
-            unloaded = await self.runtime.trim(loop.messages)
+            unloaded = await self.runtime.trim(loop.messages, observer)
         except Exception as exc:  # noqa: BLE001 — bookkeeping does not fail a turn
             logger.warning(
                 "%s: the tool list was not trimmed: %s",
@@ -1611,7 +1613,7 @@ class AgentCore:
             # not answer above is the one the trim would ask.
             try:
                 if not cancelled and agent_loop is not None:
-                    await self.trim_tools(loop)
+                    await self.trim_tools(loop, observer)
             finally:
                 # **What a folded message is owed, settled where the turn
                 # ends.**  A turn that produced a result has answered for

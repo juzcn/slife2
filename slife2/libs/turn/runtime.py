@@ -59,7 +59,15 @@ from slife2.libs.plugin.protocol import (
     unreadable,
 )
 from slife2.libs.turn import compact
-from slife2.libs.turn.events import ContextChosen
+from slife2.libs.turn.events import (
+    NULL_OBSERVER,
+    ContextChosen,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnObserver,
+    emit,
+    preview,
+)
 from slife2.libs.turn.loop import AgentLoop, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.tools import ToolRegistry
@@ -598,7 +606,11 @@ class TurnRuntime:
 
     # ── the turn boundary ────────────────────────────────────────────────
 
-    async def trim(self, messages: list[Message]) -> list[str]:
+    async def trim(
+        self,
+        messages: list[Message],
+        observer: TurnObserver = NULL_OBSERVER,
+    ) -> list[str]:
         """Bring the model's tool list back within its budget — and say so in
         the turn, rather than doing it behind the model's back.
 
@@ -619,6 +631,13 @@ class TurnRuntime:
         interruption cannot leave an assistant message whose call is never
         answered.
 
+        **The pair's own sentence is also a note on the caller's stream.**  It
+        is the tool's answer — the same text the pair carries — drawn as a
+        harness line rather than a panel (`slife2.tui.draw`), so a person sees
+        which tools the model lost without reading the call.  The events are
+        emitted here because this is the one place that knows the pair; a caller
+        with nobody watching passes the default observer, which drops them.
+
         **A failure is raised, not swallowed.**  The turn is over and has been
         answered, and how to report bookkeeping is each caller's: the agent
         server warns and trusts its next tool-list read to surface a dead hub;
@@ -631,6 +650,19 @@ class TurnRuntime:
         call = harness_call(FUNC_TOOL_UNLOAD)
         messages.append(Message(role="assistant", content=None, tool_calls=[call]))
         messages.append(Message(role="tool", content=text, tool_call_id=call.id))
+        await emit(observer, ToolCallStarted(call.id, call.name, call.arguments))
+        await emit(
+            observer,
+            ToolCallFinished(
+                call_id=call.id,
+                name=call.name,
+                ok=True,
+                result_preview=preview(text),
+                result_chars=len(text),
+                # Nobody measured it: zero is the display's "nobody said".
+                elapsed_ms=0,
+            ),
+        )
         return unloaded
 
     async def make_loop(

@@ -1020,6 +1020,16 @@ one. The channel the message arrived on rides its tool message, and the loop
 emits the same `MessageCutIn`, so the window that submitted it does not draw the
 line again.
 
+**Every pair the machinery writes is visible to the person.**  A harness pair's
+answer is a note in the transcript — the compaction's count, the trim's list of
+what left, and a cut-in's message, which is a person's words in the note's
+shape — drawn live and rebuilt from the same text.  The pair's call id
+(`HARNESS_CALL_PREFIX`) is what tells a machinery-written call from a model's
+own to `_turn_compact` or `_func_tool_unload`, which draws nothing: the answer
+is the model's.  A cut-in is a person's message and is a note whichever call
+took it.  The screen draws the pair's answer by id class, not by a case per
+tool, so a harness tool added later is visible without a drawing change.
+
 ### 5.4 Channels and delivery
 
 A message that arrives from anywhere other than this terminal becomes a turn, and
@@ -1052,8 +1062,9 @@ prompt. A channel that cannot reach a conversation says so and stops; it does no
 try a second route. An injected message can jump the queue: what the person
 types, what another channel hands to that window, and what a headless window's
 input carries are all submitted to the conversation the moment the words arrive.
-The window draws the message inside the running turn, in its own bubble, without
-closing the answer still being streamed. There is one queue: the agent server's
+The window draws the message inside the running turn as the harness note the
+pair's answer is — the unified shape, not a bubble — without closing the turn
+the answer is still being streamed in. There is one queue: the agent server's
 inbox.
 
 **A message folded into a turn is delivered by it once its words are written.**
@@ -1531,7 +1542,8 @@ Over the limit, the least recently **called** tools are unloaded; the names in
 loaded is ordered by its load time. The trim happens at a turn boundary: the
 harness calls `_func_tool_unload` before saving the turn and writes the pair into
 the conversation, so the model learns that the list shrank from the transcript.
-Nothing is written when nothing was removed. The same list bounds the model's own
+The pair's sentence is a note on the turn's stream (§5.3), so the person sees
+which tools left rather than reading the call. Nothing is written when nothing was removed. The same list bounds the model's own
 unloads: `_func_tool_unload` refuses a name in `tool_load.autoload`, so the tools
 that start loaded, the tools the budget may not evict and the tools the model may
 not unload are one list. Editing the list changes only that protection. Recency

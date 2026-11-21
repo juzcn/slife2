@@ -40,6 +40,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
+    HARNESS_CALL_PREFIX,
     HARNESS_PREFIX,
     INTERRUPTED,
     Meta,
@@ -82,9 +83,10 @@ def harness_call(name: str) -> ToolCall:
     boundary; two id formats would be two conventions for one thing, and two
     `time_ns`-suffixed ids built in two places are two chances to collide.
 
-    The `_harness_` prefix with the tool's own mark stripped is what makes the
-    pair recognisable as the machinery's rather than the model's —
-    `slife2/tui/restore.py` reads it, and so does anyone reading a transcript.
+    The `HARNESS_CALL_PREFIX` with the tool's own mark stripped is what makes
+    the pair recognisable as the machinery's rather than the model's — the
+    transcript reads it (`slife2.tui.draw`, `slife2.tui.restore`), and so does
+    anyone reading a record: a model calling the same tool keeps its own id.
 
     **And the shape is a wire constraint rather than only a label.**  A pair is
     written once and every later request carries it, so a provider that refuses
@@ -97,7 +99,7 @@ def harness_call(name: str) -> ToolCall:
     make unnecessary.  `SDD` §5.3 carries the measurement.
     """
     return ToolCall(
-        id=f"_harness_{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
+        id=f"{HARNESS_CALL_PREFIX}{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
         name=name,
         arguments={},
     )
