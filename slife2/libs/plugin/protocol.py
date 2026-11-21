@@ -801,8 +801,14 @@ def tool_payload(result: Any) -> dict[str, Any]:
     Reads the structured payload the SDK has already deserialized, and falls
     back to the text block — which is the same JSON, since a structured result
     is also sent as text.  A server reached over a transport that kept only the
-    text is still readable, and one that answered with neither is a caller that
-    gets an empty mapping and says so itself.
+    text is still readable.
+
+    **An answer that is not a mapping is refused.**  A tool that answered in
+    prose, a scalar, or a body that will not parse is not a tool that answered
+    with `{}`: reading it as empty makes a build mismatch or a damaged payload
+    indistinguishable from an honest empty answer — the confident negative SDD
+    Appendix C forbids — and every caller would have to remember to check.  The
+    refusal is `unreadable`, so it quotes the answer and names the remedy.
 
     **The text block is `result.content`, and it has to be read there.**  A
     result that carried no structured content — any tool whose return the SDK
@@ -810,9 +816,7 @@ def tool_payload(result: Any) -> dict[str, Any]:
     block, because `fastmcp.client` fills `data` from `structured_content` alone
     (`_parse_call_tool_result`).  A tool returning a scalar is wrapped by
     FastMCP, so its JSON arrives in `data` itself, which is why the loop below
-    reads both.  Only the JSON matters, so a text block that is not a mapping —
-    a refusal's message, a tool that answered in prose — is still `{}`, which
-    is the caller's cue to say the shape is wrong.
+    reads both.
 
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
@@ -827,15 +831,33 @@ def tool_payload(result: Any) -> dict[str, Any]:
     # than in the block, and the two spellings are the same value either way.
     blocks = getattr(result, "content", None) or []
     found = [getattr(block, "text", None) for block in blocks]
+    seen: Any = None
     for text in (*found, data):
         if not isinstance(text, str) or not text.strip():
             continue
+        seen = text
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError:
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
-    return {}
+            raise unreadable("the far end", "answer with a mapping", text) from None
+        if not isinstance(decoded, dict):
+            raise unreadable("the far end", "answer with a mapping", decoded)
+        return decoded
+    raise unreadable("the far end", "answer with a mapping", seen)
+
+
+def tool_payload_or_empty(result: Any) -> dict[str, Any]:
+    """`tool_payload`, except that an answer that is not a mapping reads as `{}`.
+
+    **The job runtime's reader.**  A job's direct `call` may reach any server's
+    tool, and a tool that answers in prose (`skill_use` is the shape) is an
+    answer rather than a build mismatch: `data` is empty and the caller reads
+    the text blocks.  Every other hop uses `tool_payload`, which refuses.
+    """
+    try:
+        return tool_payload(result)
+    except UnreadableAnswer:
+        return {}
 
 
 class UnreadableAnswer(ConnectionError):

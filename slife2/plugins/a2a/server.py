@@ -106,6 +106,7 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     close_server,
     conversation_reader,
     describe,
@@ -653,16 +654,27 @@ async def run_turn(
             # `Exception` — and the cancellation still propagates once the close
             # has finished, so the caller's turn is cancelled as it expected.
             await asyncio.shield(close_server(peer))
-    payload = tool_payload(answer)
-    said = payload.get("text")
-    if not isinstance(said, str):
+    try:
+        payload = tool_payload(answer)
+    except UnreadableAnswer as exc:
         # **A turn nobody can read is said rather than counted as nothing.**
         # The answer is not relayed (see above), but it is the evidence that the
         # turn happened at all — so an unreadable shape is a build mismatch worth
         # a warning, and it must not read as a member that answered with silence.
+        # It is *not* raised: the call reached the conversation and the turn ran,
+        # so failing the delivery would make the caller retry a message that
+        # already landed.
         logger.warning(
             "a2a_turn_unreadable agent=%s — the turn's answer was not a shape "
             "this build can read: %s",
+            describe((agent, subagent)),
+            exc,
+        )
+        return ""
+    said = payload.get("text")
+    if not isinstance(said, str):
+        logger.warning(
+            "a2a_turn_unreadable agent=%s — the turn's answer carried no text: %s",
             describe((agent, subagent)),
             payload,
         )

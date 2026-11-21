@@ -127,7 +127,7 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     """Bookkeeping must never block a start.
 
     This is the registered tolerance of `_read_json_dataclass` (`SDD
-    SDD Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
+    Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
     is why `live_clients` does not delete a damaged record while its pid is
     alive — there the cost is a live client nobody counts.
     """
@@ -135,6 +135,28 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
     assert runtime.read_record(url) is None
+
+
+def test_a_damaged_record_is_absent_and_named(caplog) -> None:
+    """**Damage is read as absence, and is not silent.**
+
+    A file that exists and cannot be read is damage — a crash-truncated write,
+    or a record from another build — where a missing file is the ordinary first
+    start.  Both may read as absent, because neither may block a start; only the
+    damage is logged, so the reader is not left guessing which happened.
+    """
+    url = "http://127.0.0.1:24000/mcp"
+    path = runtime.record_path(url)
+    path.write_text("{ not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
+        assert runtime.read_record(url) is None
+    assert "could not be read as a record" in caplog.text
+    assert str(path) in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
+        assert runtime.read_record("http://127.0.0.1:9999/mcp") is None
+    assert caplog.text == "", "a missing record is not damage"
 
 
 def test_a_record_that_is_not_a_record_reads_as_absent() -> None:

@@ -36,7 +36,7 @@ from slife2.libs.store.catalogue import (
     UNLOADED,
     ToolStore,
 )
-from slife2.libs.store.index import connect_to, fuse_ranked
+from slife2.libs.store.index import connect_to, connection_to, fuse_ranked
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -1301,6 +1301,33 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     # one store returning a distance is one store whose numbers mean the other
     # thing.
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
+
+
+def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path) -> None:
+    """**A recorded index and a recorded identity are one fact.**
+
+    The table and its identity are written in one transaction, so a store that
+    records an index and has no table lost it outside a rebuild.  Answering that
+    search keyword-only is a failure read as a verdict; an *unrecorded* index is
+    the honest empty meaning leg, and this test pins the difference.
+    """
+    store = store_at(tmp_path)
+    merge(store, "browser", "mcp", [tool("browser__open", "open a page")])
+    with connection_to(store.path) as connection:
+        connection.execute("DROP TABLE tool_vec")
+
+    with pytest.raises(RuntimeError, match="records a vector index"):
+        asyncio.run(store.search(sentences=["open"], embedder=EMBEDDER))
+
+    # With the identity gone the same absence is a corpus nobody has indexed,
+    # and the search answers instead of failing — the keyword leg still answers,
+    # and `_meaning_of` has no table to read and contributes nothing.
+    with connection_to(store.path) as connection:
+        connection.execute("DELETE FROM meta WHERE key = 'vector_identity'")
+    answer = asyncio.run(
+        store.search(keywords=["open"], sentences=["open"], embedder=EMBEDDER)
+    )
+    assert [row["name"] for row in answer["results"]] == ["browser__open"]
 
 
 def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(

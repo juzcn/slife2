@@ -336,6 +336,32 @@ def _table_ddl(connection: sqlite3.Connection, table: str) -> str | None:
     return None if row is None else str(row["sql"] or "")
 
 
+def vector_table_gone(
+    connection: sqlite3.Connection,
+    *,
+    vec_table: str,
+    meta_table: str = "index_meta",
+) -> bool:
+    """Whether a store that *recorded* a vector index no longer has its table.
+
+    **Untouched is not the same as damaged.**  A corpus nobody has embedded
+    under this model has no vector table and no recorded identity, and an empty
+    meaning leg is then the honest answer: there is nothing to search by
+    meaning.  A store whose identity says the index was built, and whose table
+    is nevertheless absent, lost the table outside a rebuild — and answering
+    that search keyword-only is a failure read as a verdict (SDD Appendix C).
+
+    The two callers with this shape are the catalogue and the cabinet.  The turn
+    store asks the same question by querying `turn_vec` directly, so a missing
+    table raises there already.
+    """
+    if table_exists(connection, vec_table):
+        return False
+    if not table_exists(connection, meta_table):
+        return False
+    return bool(index_meta(connection, meta_table).get("vector_identity", ""))
+
+
 # --- small SQL ----------------------------------------------------------------
 
 

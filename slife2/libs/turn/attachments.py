@@ -254,7 +254,18 @@ async def from_keys(
     for source, refusal in keys:
         try:
             url = await fetch(source)
-        except Exception:  # noqa: BLE001 - one source's refusal, not the batch's
+        except Exception as exc:  # noqa: BLE001 - one source's refusal, not the batch's
+            # **A harness failure is not a source that is not there.**  The
+            # cabinet answering with a shape this build cannot read is the same
+            # damage `tool_payload` refuses; reading it as "the cabinet does not
+            # hold it" would turn a build mismatch into a confident miss.  Import
+            # the type lazily for `slife2.libs.turn.tools`'s reason: attaching a
+            # picture must not pull the plugin protocol — and FastMCP — into the
+            # loop's import graph.
+            from slife2.libs.plugin.protocol import UnreadableAnswer
+
+            if isinstance(exc, UnreadableAnswer):
+                raise
             refusals.append(refusal)
             continue
         if not isinstance(url, str) or not url:

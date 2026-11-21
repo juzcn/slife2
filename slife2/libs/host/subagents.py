@@ -55,7 +55,7 @@ class SubagentSpec:
     role: str = DEFAULT_ROLE
 
 
-def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
+def subagent_spec(agent: str, subagent: str, *, strict: bool = False) -> SubagentSpec:
     """One conversation's own settings, or the defaults for the maker's own.
 
     The maker's own conversation has no such file and is not supposed to: what
@@ -64,31 +64,46 @@ def subagent_spec(agent: str, subagent: str) -> SubagentSpec:
     answers the defaults rather than being looked up, which keeps
     `agent_dir(agent, "")` — the agent's own directory — out of a question about
     a file that lives under the subagent's own directory.
+
+    **`strict` is for the two callers that are about to run a conversation on
+    this answer.**  A record that cannot be read is not the default model and the
+    default role: running on them would silently move the subagent to the
+    maker's model and give it the plain role, with the warning below as the only
+    trace.  The run path therefore raises, naming the record, and the turn ends
+    as a harness failure.  A read — a list, a transcript — keeps the defaults,
+    because it is showing a directory that exists and has nothing to refuse.
     """
     if not subagent:
         return SubagentSpec()
-    record = read_subagent(agent, subagent)
+    record = read_subagent(agent, subagent, strict=strict)
     return SubagentSpec(
         model=str(record.get("model") or ""),
         role=str(record.get("role") or DEFAULT_ROLE),
     )
 
 
-def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
+def read_subagent(agent: str, subagent: str, *, strict: bool = False) -> dict[str, Any]:
     """What a subagent was made with, or `{}` when there is none to read.
 
-    **A record that cannot be read is read as absent, and that is a decision
-    rather than a shrug.**  What makes a directory a subagent's is that this file
-    *exists*, so a torn write cannot widen what `subagent_remove` deletes — the
-    property that matters is carried by the file's existence, not by its
-    contents.  What the contents add is the model and when it was made, and
-    losing a `created_at` to a half-written file is a smaller harm than a removal
-    that refuses to happen; the log line is what says a file wants looking at.
+    **A record that cannot be read is read as absent on the read path, and that
+    is a decision rather than a shrug.**  What makes a directory a subagent's is
+    that this file *exists*, so a torn write cannot widen what `subagent_remove`
+    deletes — the property that matters is carried by the file's existence, not
+    by its contents.  What the contents add is the model and the role, and a
+    removal or a list that refused to happen over a half-written file would be
+    worse than the values being lost; the log line is what says a file wants
+    looking at.
+
+    **`strict` refuses the same damage where it would change what runs.**  A
+    conversation started from this answer must not silently use the maker's
+    model and `DEFAULT_ROLE` because a file was truncated; that is a configured
+    subagent running as a different one, which is the deformation Appendix C
+    forbids.  The caller's turn fails with the record named instead.
 
     So the shape is the one `slife2.plugins.wechat.server` keeps for its login and
     for its reason: a per-agent file whose absence is a normal state, whose
     damage is reported where a person can read it, and which never turns into a
-    refusal of the thing the caller actually asked for.
+    refusal of the thing the reader actually asked for.
     """
     path = subagent_file(agent, subagent)
     if not path.is_file():
@@ -96,9 +111,13 @@ def read_subagent(agent: str, subagent: str) -> dict[str, Any]:
     try:
         loaded = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, YAMLError) as exc:
+        if strict:
+            raise ValueError(f"the record of {path} could not be read: {exc}") from exc
         logger.warning("the record of %s could not be read: %s", path, exc)
         return {}
     if not isinstance(loaded, dict):
+        if strict:
+            raise ValueError(f"the record of {path} is not a mapping")
         logger.warning("the record of %s is not a mapping", path)
         return {}
     return loaded

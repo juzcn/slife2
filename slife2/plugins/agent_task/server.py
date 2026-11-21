@@ -118,6 +118,7 @@ from slife2.libs.plugin.protocol import (
     house_server,
     serve_plugin,
     tool_payload,
+    unreadable,
 )
 from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_CANCEL,
@@ -705,7 +706,12 @@ def build_server(
                         meta=conversation_meta(*task.identity, home=task.home),
                         timeout=_T.timeouts.work.hub,
                     )
-                    url = tool_payload(answer).get("url")
+                    payload = tool_payload(answer)
+                    if "url" not in payload:
+                        raise unreadable(
+                            "the cabinet", "return an image source", payload
+                        )
+                    url = payload.get("url")
                     return url if isinstance(url, str) and url else None
 
                 return await attachments.from_keys(keys, fetch)
@@ -833,8 +839,10 @@ def build_server(
         # **The maker's own record**: the defaults for the agent's own
         # conversation, and the role and model a subagent was made with.  A task
         # of a subagent without this would run the agent's prompt on the agent's
-        # model under the subagent's key — a stand-in for somebody else.
-        spec = subagent_spec(task.agent, task.subagent)
+        # model under the subagent's key — a stand-in for somebody else.  A
+        # record that cannot be read is that same mistake, so this read is
+        # strict and the task fails naming the record.
+        spec = subagent_spec(task.agent, task.subagent, strict=True)
         name, provider, settings = current.resolve(spec.model)
         model = ModelRef(f"{name}/{settings.model}", name, provider.api, settings.model)
         if task.subagent:

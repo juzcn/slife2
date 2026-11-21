@@ -35,6 +35,7 @@ from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     close_server,
     house_server,
     identifies,
@@ -333,10 +334,43 @@ async def test_a_result_with_no_structured_content_is_read_from_its_text() -> No
 
     assert result.data is None, "the premise: nothing but the text block has it"
     assert tool_payload(result) == {"tools": []}
-    # The fallback reads *JSON* and does not invent a payload: prose is not one,
-    # and the empty mapping is how a caller is told the shape is wrong.
+    # The reader reads *JSON* and does not invent a payload: prose is not one,
+    # and the refusal is how a caller is told the shape is wrong.
     prose = SimpleNamespace(data=None, content=[SimpleNamespace(text="all fine")])
-    assert tool_payload(prose) == {}
+    with pytest.raises(UnreadableAnswer, match="answer with a mapping"):
+        tool_payload(prose)
+
+
+def test_an_answer_that_is_not_a_mapping_is_refused() -> None:
+    """**The empty mapping is not a stand-in for a shape this build cannot read.**
+
+    Prose, a scalar, a truncated object and nothing at all are different
+    failures, and each is the same fact to the reader: it has no mapping to
+    hand on.  Reading any of them as `{}` would make a build mismatch look like
+    an honest empty answer, the confident negative SDD Appendix C forbids.
+    """
+    broken = SimpleNamespace(data=None, content=[SimpleNamespace(text='{"tools": [')])
+    listed = SimpleNamespace(data=None, content=[SimpleNamespace(text='["a"]')])
+    scalar = SimpleNamespace(data="just words", content=[])
+    empty = SimpleNamespace(data=None, content=[])
+
+    for result in (broken, listed, scalar, empty):
+        with pytest.raises(UnreadableAnswer, match="answer with a mapping"):
+            tool_payload(result)
+
+
+def test_the_job_reader_keeps_prose_as_an_empty_mapping() -> None:
+    """The one lenient reader, for the job runtime's direct `call`.
+
+    A job may reach a tool that answers in prose (`skill_use` is the shape), so
+    its reader asks for the empty mapping and reads the text blocks itself.
+    Every other hop uses `tool_payload`, which refuses.
+    """
+    prose = SimpleNamespace(data=None, content=[SimpleNamespace(text="all fine")])
+    assert protocol_module.tool_payload_or_empty(prose) == {}
+    assert protocol_module.tool_payload_or_empty(
+        SimpleNamespace(data={"text": "done"}, content=[])
+    ) == {"text": "done"}
 
 
 # --- connecting: the rule every client follows -------------------------------

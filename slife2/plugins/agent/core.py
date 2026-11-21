@@ -653,7 +653,10 @@ class AgentCore:
                     meta=conversation_meta(*conversation_id),
                     timeout=_T.timeouts.work.hub,
                 )
-                url = tool_payload(answer).get("url")
+                payload = tool_payload(answer)
+                if "url" not in payload:
+                    raise unreadable("the cabinet", "return an image source", payload)
+                url = payload.get("url")
                 return url if isinstance(url, str) and url else None
 
             return await attachments.from_keys(keys, fetch)
@@ -930,8 +933,10 @@ class AgentCore:
         # — read *here*, when its conversation starts, which is what makes a
         # `model_switch` in between reach it the way it reaches the maker's
         # own next turn.  An agent's own conversation has no such file and is
-        # the defaults.
-        spec = subagent_spec(agent, subagent)
+        # the defaults.  **Strictly**: a record this build cannot read must fail
+        # the turn rather than silently run the subagent on the maker's model
+        # and the plain role.
+        spec = subagent_spec(agent, subagent, strict=True)
         name, provider, settings = live.resolve(model or spec.model)
         messages = opening_messages(agent, subagent, live, spec)
         loop = Loop(

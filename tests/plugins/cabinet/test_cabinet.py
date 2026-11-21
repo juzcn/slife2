@@ -41,7 +41,7 @@ from slife2.libs.host.config import ToolResultSettings, load
 from slife2.libs.host.paths import agent_dir, data_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.store import index as store_index
-from slife2.libs.store.index import connect_to, table_exists
+from slife2.libs.store.index import connect_to, connection_to, table_exists
 from slife2.plugins.cabinet import server as cabinet_server
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
@@ -367,6 +367,34 @@ async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
     # live row outranked the document the caller had just replaced.
     assert by_words["results"][0]["key"] == "Python", "the keyword leg lost it"
     assert by_meaning["results"][0]["key"] == "Python", "the meaning leg lost it"
+
+
+def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path: Path) -> None:
+    """The cabinet's half of the catalogue's rule.
+
+    A corpus nobody has indexed has no table and no recorded identity, and the
+    keyword leg still answers.  A recorded identity whose table is gone is
+    damage, and the search refuses rather than answering keyword-only.
+    """
+
+    async def go() -> None:
+        store = CabinetStore(tmp_path / "index.db")
+        await store.sync(StubEmbedder())
+        await store.write(NOTE, "one", text="some text", embedder=StubEmbedder())
+        with connection_to(store.path) as connection:
+            connection.execute("DROP TABLE cabinet_vec")
+
+        with pytest.raises(RuntimeError, match="records a vector index"):
+            await store.search(sentences=["some"], embedder=StubEmbedder())
+
+        with connection_to(store.path) as connection:
+            connection.execute("DELETE FROM index_meta WHERE key = 'vector_identity'")
+        answer = await store.search(
+            keywords=["some"], sentences=["some"], embedder=StubEmbedder()
+        )
+        assert [row["key"] for row in answer["results"]] == ["one"]
+
+    asyncio.run(go())
 
 
 def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None:

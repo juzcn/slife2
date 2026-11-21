@@ -61,7 +61,12 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
+from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
+    close_server,
+    open_server,
+    tool_payload,
+)
 from slife2.libs.plugin.vocabulary import ATTACHED, NOTE, SUBMIT, refused
 
 logger = logging.getLogger(__name__)
@@ -263,14 +268,25 @@ async def window_attached(
                 except Exception as exc:  # noqa: BLE001 - the third answer
                     logger.debug("the window for %s could not be asked: %s", agent, exc)
                     return _classify(exc)
-                value = tool_payload(answer).get("attached")
-                if value is True:
-                    return True
-                if value is not False:
+                try:
+                    value = tool_payload(answer).get("attached")
+                except UnreadableAnswer as exc:
                     # A shape this build cannot read is not an answer; saying
                     # "no window" would turn a broken peer into a missed run.
                     logger.warning(
-                        "the window for %s answered an unreadable shape", agent
+                        "the window for %s answered an unreadable shape: %s",
+                        agent,
+                        exc,
+                    )
+                    return None
+                if value is True:
+                    return True
+                if value is not False:
+                    # A parsed answer without a boolean is the same "cannot
+                    # tell"; `None` and a missing key are not a claim about a
+                    # window this build did not ask.
+                    logger.warning(
+                        "the window for %s answered without `attached`", agent
                     )
                     return None
                 if attempt < _T.timeouts.stream.handover:

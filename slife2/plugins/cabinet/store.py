@@ -162,6 +162,7 @@ from slife2.libs.store.index import (
     table_exists,
     time_window,
     vector_identity,
+    vector_table_gone,
     where_clause,
 )
 
@@ -1855,6 +1856,16 @@ class CabinetStore:
         # width this build cannot read, a corrupt file all coming back as
         # "nothing matched by meaning", and the page then answering keyword-only
         # without saying so.
+        #
+        # **A recorded index whose table is gone is the same confident negative,
+        # and it is damage.**  The identity and the table are written together,
+        # so the pair disagreeing means the table went outside a rebuild; the
+        # search refuses rather than answering keyword-only.
+        if vector_table_gone(connection, vec_table="cabinet_vec"):
+            raise RuntimeError(
+                f"{self.path}: the cabinet records a vector index but its table "
+                "is gone; restart to rebuild the index"
+            )
         if not table_exists(connection, "cabinet_vec"):
             return []
         rows = connection.execute(
@@ -1895,7 +1906,14 @@ class CabinetStore:
         with self._connect() as connection:
             # The table is absent on a cabinet nobody has written to under this
             # embedder, which is an empty answer rather than a failure — the
-            # same question `_nearest` asks and for the reason it gives.
+            # same question `_nearest` asks and for the reason it gives.  A
+            # recorded index whose table is gone is the damage `_nearest`
+            # refuses, and this read must not smooth it over.
+            if vector_table_gone(connection, vec_table="cabinet_vec"):
+                raise RuntimeError(
+                    f"{self.path}: the cabinet records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
             if not table_exists(connection, "cabinet_vec"):
                 return {}
             rows = connection.execute(

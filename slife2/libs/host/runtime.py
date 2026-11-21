@@ -230,9 +230,14 @@ def _read_json_dataclass[RecordT](
     `slife2 down` then has no pid to stop.  *Gives up:* the pid a damaged record
     held.  *Does not cover:* nothing — this is the floor, and a caller that
     knows the file must exist (`read_claim`, `read_record`) still only learns
-    that it does not.  *Failure goes:* nowhere, which is why the process that
-    wrote the file is the one to read the warning `_write_json_atomic` logs
-    (SDD Appendix C).
+    that it does not.  *Failure goes:* a warning naming the path, because a file
+    that exists and cannot be read is damage — the writer's warning is not
+    enough when a crash or another build left the file (SDD Appendix C).
+
+    **A missing file and a damaged one are told apart where the answer is
+    produced.**  Both read as absent, which is what lets a crash-truncated file
+    block nothing; only the damaged one is logged, so the reader is not the
+    third party left guessing which happened.
 
     The broad `except` is the point rather than a shortcut, and each arm is a
     different way the file fails to be one: `read_text` raises `OSError` when it
@@ -242,7 +247,15 @@ def _read_json_dataclass[RecordT](
     """
     try:
         return factory(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, KeyError, TypeError):
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if path.exists():
+            logger.warning(
+                "%s could not be read as a record (%s); reading it as absent",
+                path,
+                exc,
+            )
         return None
 
 

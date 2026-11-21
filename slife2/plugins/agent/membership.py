@@ -146,9 +146,11 @@ def register_tools(
         `subagent_list` is the model's roster, it connects and wakes members to
         answer, and a screen that merely offers names must not do either.
 
-        A damaged record reads as the defaults, exactly as it does everywhere
-        else that reads one (`read_subagent`): losing a role to a half-written
-        file is smaller than refusing to list the conversation that exists.
+        A damaged record reads as the defaults, as it does for every read path
+        (`read_subagent`): losing a role to a half-written file is smaller than
+        refusing to list the conversation that exists.  A conversation that
+        would run on the answer is the other case and is strict — it refuses
+        rather than silently running the subagent as the maker's.
 
         Args:
             agent: Whose subagents.

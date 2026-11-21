@@ -71,6 +71,7 @@ from slife2.libs.store.index import (
     storable,
     table_exists,
     vector_identity,
+    vector_table_gone,
 )
 
 logger = logging.getLogger(__name__)
@@ -1944,10 +1945,22 @@ class ToolStore:
         is where that is argued.  The query is the store's own: a `tool_vec` row
         is a chunk, so which tool it belongs to is one join away, and the max
         over a tool's chunks is what stands for the tool.
+
+        **A corpus that was never indexed has no table to read, and that is an
+        empty answer.**  This is the second half of the rule `_nearest` states:
+        the meaning leg answers empty and the keyword leg still answers.  A
+        recorded index whose table is gone is damage, not that state, and raises.
         """
         if not rowids or not queries:
             return {}
         with self._connect() as connection:
+            if vector_table_gone(connection, vec_table="tool_vec", meta_table="meta"):
+                raise RuntimeError(
+                    f"{self.path}: the catalogue records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
+            if not table_exists(connection, "tool_vec"):
+                return {}
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, v.embedding AS embedding"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
@@ -2074,11 +2087,23 @@ class ToolStore:
         first one cannot reach.
         """
         with self._connect() as connection:
-            # **A store whose file was rebuilt or deleted has no vector table.**
-            # `_ensure_file` recreates the schema without one (its width needs
-            # the embedder), so a live hub whose `tools.db` was deleted answered
-            # `tool_search` with `no such table: tool_vec`.  The cabinet treats
-            # the same state as an empty meaning leg; so does this.
+            # **A store nobody has indexed has no vector table, and that is an
+            # empty meaning leg.**  `_ensure_file` recreates the schema without
+            # one (its width needs the embedder), and a corpus that has never
+            # been embedded has nothing to answer by meaning.
+            #
+            # **A store that *recorded* an index and lost its table is not that
+            # state.**  The identity is written in the same transaction as the
+            # table, so the pair disagreeing means the table went outside a
+            # rebuild — a failed migration, a hand edit, a file swapped under a
+            # live hub.  Answering keyword-only would turn that damage into
+            # "nothing matched by meaning", so it raises and `sync`/`index_status`
+            # can be asked what happened.
+            if vector_table_gone(connection, vec_table="tool_vec", meta_table="meta"):
+                raise RuntimeError(
+                    f"{self.path}: the catalogue records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
             if not table_exists(connection, "tool_vec"):
                 return []
             window = (

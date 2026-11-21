@@ -87,6 +87,7 @@ from slife2.libs.host.paths import home_key, in_home, schedule_dbs
 from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     agent_reader,
     close_server,
     house_server,
@@ -584,7 +585,21 @@ async def dispatch(
     finally:
         if owned and client is not None:
             await close_server(client)
-    payload = tool_payload(answer)
+    try:
+        payload = tool_payload(answer)
+    except UnreadableAnswer as exc:
+        # **An answer that cannot be read is a task whose ending cannot be
+        # followed**, the same state the missing-id arm below settles.  Letting
+        # the raise escape would leave the run `pending` with no way to ask
+        # about it, so it is closed with the reason and the asking turn is told.
+        reason = (
+            "the agent task was started, but its answer could not be read, so "
+            f"its ending cannot be followed ({exc})"
+        )
+        store.settle(task.name, due_at, FAILED, error=reason)
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at} could not be followed: {reason}"
+        ) from exc
     started = str(payload.get("task_id") or "")
     if not started:
         # **A task whose id cannot be read is a run the ledger cannot follow.**
