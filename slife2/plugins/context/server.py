@@ -181,6 +181,29 @@ class Discriminator(Protocol):
     ) -> Awaitable[str]: ...
 
 
+class Selector(Protocol):
+    """The live compaction selector, as a seam: the view and its candidates in,
+    whatever the model said out.
+
+    The same two-reply life as `Discriminator` — `previous` and `repair` carry
+    a reply that could not be read — and a test that varies the answer injects
+    one instead of reaching a model server.
+    """
+
+    def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        selectable: list[int],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> Awaitable[str]: ...
+
+
 async def _ask_model(
     config: Config,
     clients: dict[str, Client],
@@ -229,15 +252,6 @@ async def _ask_model(
     hop, and this is the same check with the same sentence, because the cause is
     the same: a daemon from another build.
     """
-    name, provider, settings = config.resolve(model)
-    url = config.server(provider.api).url
-    async with opening:
-        if url not in clients:
-            clients[url] = await open_server(
-                url,
-                name=API_SERVER_NAMES[provider.api],
-                fallback_tool="stream_chat",
-            )
     asked = [
         *messages,
         {"role": "user", "content": decisions.instruction(user_input)},
@@ -249,6 +263,114 @@ async def _ask_model(
         if previous:
             asked.append({"role": "assistant", "content": previous})
         asked.append({"role": "user", "content": decisions.repair_note(repair)})
+    return await _stream_chat(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        asked,
+        kind="discriminator",
+    )
+
+
+async def _ask_selector(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    selectable: list[int],
+    *,
+    usage: str = "",
+    previous: str = "",
+    repair: str = "",
+) -> str:
+    """The live selector's model call, built from the numbered copy.
+
+    **The ids are written here and nowhere else.**  `with_message_id` prefixes
+    each message of this request; the record, the turn's saved row and every
+    ordinary call keep the list they had.  The instruction names the candidates,
+    the legality rule and the context figure the caller measured — the same
+    figure the status bar and the turn prompt show.  The transport's rules are
+    `_stream_chat`'s.
+    """
+    numbered = [
+        decisions.with_message_id(message, index)
+        for index, message in enumerate(messages)
+    ]
+    asked = [
+        *numbered,
+        {"role": "user", "content": decisions.live_instruction(selectable, usage)},
+    ]
+    if repair:
+        if previous:
+            asked.append({"role": "assistant", "content": previous})
+        asked.append({"role": "user", "content": decisions.repair_note(repair)})
+    return await _stream_chat(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        asked,
+        kind="compactor",
+    )
+
+
+async def _stream_chat(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    asked: list[dict[str, Any]],
+    *,
+    kind: str,
+) -> str:
+    """One silent `stream_chat` call: the transport both decisions share.
+
+    **No progress handler**, which is what makes the call silent: the server
+    reports progress only to a caller that asked for a token, so a decision
+    reaches no transcript and no observer by construction rather than by a
+    filter somebody has to remember.
+
+    The client is opened once per *model server* and kept for the process — the
+    agent server's arrangement, for the agent server's reason: a handshake per
+    call is a handshake per call.  Keyed by URL because a server speaks one wire
+    format for every provider that uses it.
+
+    **No timeout of its own.**  This is a model call like the turn's own, so it
+    is bounded where every model call is — the provider's own limits inside the
+    model server — and a slow answer only makes the turn late.  A second, shorter
+    clock here was a knob with no job: it turned a working-but-slow provider
+    into a refused decision, and the refusal looked exactly like a broken one.
+
+    **An answer this build cannot read is refused, not read as a silent one.**
+    FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
+    structured content, and `StreamChatResult.from_wire(None)` builds an empty
+    result — so a model server from another build would arrive here as "the model
+    answered with nothing": the caller logs an unparsed reply and keeps the
+    context, and every later decision does the same, with the log pointing at
+    the model's output rather than at the transport.  `slife2.clients.model`
+    raises for exactly this on the loop's own hop, and this is the same check
+    with the same sentence, because the cause is the same: a daemon from another
+    build.
+    """
+    name, provider, settings = config.resolve(model)
+    url = config.server(provider.api).url
+    async with opening:
+        if url not in clients:
+            clients[url] = await open_server(
+                url,
+                name=API_SERVER_NAMES[provider.api],
+                fallback_tool="stream_chat",
+            )
     result = await clients[url].call_tool(
         "stream_chat",
         {
@@ -257,9 +379,9 @@ async def _ask_model(
             "agent": agent,
             "subagent": subagent,
             # The model server's usage line says whose call it served and what
-            # kind: this one is the recall decision, and reading it apart from
-            # the turn's own calls is the whole reason the word travels.
-            "kind": "discriminator",
+            # kind: reading the decision apart from the turn's own calls is the
+            # whole reason the word travels.
+            "kind": kind,
             "tools": [],
             "messages": asked,
         },
@@ -280,6 +402,7 @@ def build_server(
     source: Callable[[], Config] | None = None,
     embedder: Embedder | None = None,
     ask: Discriminator | None = None,
+    select: Selector | None = None,
 ) -> FastMCP:
     """Build the context server.
 
@@ -1205,6 +1328,80 @@ def build_server(
         )
     )
 
+    #: The live selector: a test's, or the same client arrangement one call
+    #: further, with its own instruction and its own `kind`.
+    selector_injected = select
+    select_model: Selector = selector_injected or (
+        lambda agent, subagent, model, messages, selectable, *, usage="", previous="", repair="": (
+            _ask_selector(
+                current(),
+                model_clients,
+                opening,
+                agent,
+                subagent,
+                model,
+                messages,
+                selectable,
+                usage=usage,
+                previous=previous,
+                repair=repair,
+            )
+        )
+    )
+
+    async def _select_live(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        selectable: list[int],
+        usage: str = "",
+    ) -> tuple[list[int] | None, str]:
+        """One selector call — or two, when the first answer could not be read.
+
+        **Never raises, and the one retry is a repair**, the rule `_discriminate`
+        states: a provider failure has no answer to correct and is `failed`; an
+        answer in hand this build cannot read is asked to correct itself once,
+        with the refusal naming the field.  A second refusal is `unparsed`, and
+        the caller compacts nothing — the turn continues and its next call is
+        the judge of whether that was enough.
+        """
+        try:
+            text = await select_model(
+                agent, subagent, model, messages, selectable, usage=usage
+            )
+        except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
+            logger.info("live_selector_failed reason=%s", type(exc).__name__)
+            logger.debug("the selector call raised", exc_info=True)
+            return None, "failed"
+        logger.debug("live_selector_reply attempt=first %r", text)
+        drop, refusal = decisions.parse_live(text)
+        if drop is not None:
+            return drop, ""
+        logger.info("live_selector_unparsed reason=%s", refusal)
+        try:
+            corrected = await select_model(
+                agent,
+                subagent,
+                model,
+                messages,
+                selectable,
+                usage=usage,
+                previous=text,
+                repair=refusal,
+            )
+        except Exception as exc:  # noqa: BLE001 — the same fallback as above
+            logger.info("live_selector_repair_failed reason=%s", type(exc).__name__)
+            logger.debug("the repair call raised", exc_info=True)
+            return None, "failed"
+        logger.debug("live_selector_reply attempt=repair %r", corrected)
+        drop, refusal = decisions.parse_live(corrected)
+        if drop is not None:
+            logger.info("live_selector_repaired")
+            return drop, ""
+        logger.info("live_selector_unparsed reason=%s attempt=repair", refusal)
+        return None, "unparsed"
+
     @mcp.tool
     async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
         """Clear a conversation's live context, and keep every turn of it.
@@ -1231,6 +1428,50 @@ def build_server(
         written = await off_loop(store.set_context_turns, [])
         logger.info("forgot the context of %s", describe((agent, subagent)))
         return {"turn_ids": written}
+
+    @mcp.tool
+    async def select_live(
+        agent: str,
+        messages: list[dict[str, Any]],
+        selectable: list[int],
+        model: str = "",
+        subagent: str = "",
+        context_tokens: int = 0,
+        context_window: int = 0,
+    ) -> dict[str, Any]:
+        """Decide which of a running turn's live messages it no longer needs.
+
+        Called by the agent server's `_turn_compact`, **not by a model**: the
+        ids are the caller's view numbering, they mean nothing outside that
+        call, and nothing is stored with them.  `messages` is the view — the
+        list the model will run on, not the turn's record — and `selectable`
+        names the view positions that are candidates.
+
+        `context_tokens` is the conversation's last measured call and
+        `context_window` its model's window: the same pair the status bar and
+        the turn prompt show, rendered by the same `context_usage`, so the
+        selector and the person read one figure.
+
+        The answer is `compact` (the positions to drop, as the model named them)
+        and `decision` (`""` for an answer, otherwise `failed` or `unparsed`).
+        The caller applies the positions as they came: the legality of a tool
+        exchange is a prompt rule, and a harness that repaired a split one would
+        be making a decision the model was asked to make.
+
+        Args:
+            agent: Whose conversation.
+            messages: The view the turn is running on, in order.
+            selectable: The view positions the model may drop.
+            model: Which model this conversation runs on, as `provider/model`.
+            subagent: Which of that agent's conversations; empty for its own.
+            context_tokens: The last call's measured size.
+            context_window: The conversation's model window, or 0 if undeclared.
+        """
+        usage, _used = decisions.context_usage(context_tokens, context_window)
+        drop, decision = await _select_live(
+            agent, subagent, model, messages, selectable, usage
+        )
+        return {"compact": drop or [], "decision": decision}
 
     @mcp.tool
     async def rebuild(

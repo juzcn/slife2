@@ -290,7 +290,10 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     Returns:
         The hub's payload: `unloaded` (the names that moved), `refused`,
         `no_load_state`, `unknown` and `not_loaded` — the four that did not
-        move — and `text`, the same thing in a sentence.  **An answer this
+        move — and `text`, the answer as the hub rendered it (the object, as
+        text).  The sentence a person reads is
+        `slife2.libs.harness.notes.unloaded`, which turns the five lists into
+        the names that left.  **An answer this
         build cannot read comes back as the empty mapping**, not as one of
         these: the caller reads it with `trim_answer`, which is where the
         refusal belongs.
@@ -474,14 +477,14 @@ def arguments_fit(
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
-    """Read a trim's answer — the names it unloaded and its sentence — or refuse it.
+    """Read a trim's answer — the names it unloaded and the rendered answer — or refuse it.
 
     **An answer the harness cannot read is not a trim that unloaded nothing.**
     `found.get("unloaded") or []` reads a missing or null key as the same
     "nothing to unload" an honest no-op produces, so no pair is written and the
     caller goes on believing it still holds the tools that have gone;
     `found.get("text") or ""` does the same one key over, writing an empty
-    sentence where the hub's own belongs.  Both halves are one answer and are
+    answer where the hub's own belongs.  Both halves are one answer and are
     read as strictly as `remote_tools` reads a listing: only a *readable* empty
     answer is a verdict, and a missing key is damage (SDD Appendix C — a
     failure is not a verdict).  Reading both before either half is used also
@@ -500,7 +503,7 @@ def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
         raise unreadable("the toolhub", "return the names it unloaded", found)
     text = found.get("text")
     if not isinstance(text, str):
-        raise unreadable("the toolhub", "return the trim's sentence", found)
+        raise unreadable("the toolhub", "return the trim's rendered answer", found)
     return [str(name) for name in names], text
 
 

@@ -581,7 +581,10 @@ those already running. Servers are daemons: a client exiting never stops one,
 but the last client out does — and it stops the *machine's* records, not only
 the exiting config's endpoints, because a backend another configuration started
 is still a daemon with nobody left to stop it. `others_running` counts by
-process liveness, so a killed client cannot keep the stack alive.
+process liveness, so a killed client cannot keep the stack alive. A take-down
+that has begun runs to the end: a repeated `Ctrl+C` — the second half of an
+accidental double press — is swallowed rather than aborting it and leaving the
+stack half stopped.
 
 The lifecycle rules are:
 
@@ -825,11 +828,12 @@ coalesce display events without affecting the conversation, and optionally the
 harness's `auto` callback, which names a tool the harness wants called mid-turn.
 
 The loop is a pure function over a message list. It owns no conversation,
-socket, or clock. The iteration cap is `agent.max_iterations`, read when the
-conversation starts — the same moment its model and system prompt are read — so
-an edit reaches the next conversation, not the one already capped by the old
-value. `0` or an absent key means no cap: a number nobody wrote is a bound
-nobody chose. A turn that reaches a stated cap ends normally with
+socket, or clock. The iteration cap is `agent.max_iterations` and the compaction
+threshold `agent.compact_at`, both read when the conversation starts — the same
+moment its model and system prompt are read — so an edit reaches the next
+conversation, not the one already capped by the old value. `max_iterations: 0`
+or an absent key means no cap: a number nobody wrote is a bound nobody chose. A
+turn that reaches a stated cap ends normally with
 `stop_reason: "max_iterations"`, not with an exception.
 
 A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
@@ -837,6 +841,21 @@ A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
 threw all come back as `ok=False` with text the model can act on. What ends the
 turn is a failure outside that contract — a tool list that cannot be refreshed
 before a model call, or a model call that failed.
+
+**A turn can compact its own live context, and the compaction is a view.** The
+loop is handed a `present` callback with the list it advances; the model is sent
+`present(messages)` and the record is `messages`. `_turn_compact` (§5.3) is
+called by the harness when the last call's `total_tokens` crosses
+`agent.compact_at` of the conversation's window — or by the model itself — and
+its selector hides the messages the turn no longer needs from the view for the
+rest of the turn. A compaction that dropped something leaves the automated pass
+live: a context that grows back over the fraction is asked about again at the
+next boundary. One that kept everything, or one whose selector failed, is a
+decision about the whole context and stops the automated pass for that turn
+(`Loop.compact_hold`); the model may still call the tool itself, and a later
+successful call resumes the pass. The turn's row, `covered` and the store never
+see the view, and the next turn starts from the full list. A window nobody
+declared (`0`) has no threshold; the model's own call is then the only trigger.
 
 **A final model call that answers with no text and no tool call is a failed
 turn.** A provider can legitimately stop without saying anything, but that result
@@ -972,9 +991,15 @@ claim. The window's strip is §10.2's; a watcher receives the plan in its
 ### 5.3 Harness tool pairs
 
 Some things the harness must say as the model, because a provider accepts them
-only as tool calls: `_func_tool_unload` after a trim, and `_check_new_input` when
-a message is waiting. Both are ordinary declared tools whose calls the harness
-writes into the conversation.
+only as tool calls: `_func_tool_unload` after a trim, `_check_new_input` when
+a message is waiting, and `_turn_compact` when a turn gives up part of its own
+context. All three are ordinary declared tools whose calls the harness writes
+into the conversation. `_turn_compact` is the one whose model call is *wanted*
+as well as harmless: the harness calls it at the measured threshold, the model
+may call it itself, and both calls hide messages from the rest of the turn's
+view without touching the record (§5.5). It is also **the only tool whose body
+calls a model** — the selector — so a call costs a second `stream_chat`, logged
+under `kind=compactor` and not added to the turn's own bill.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -997,6 +1022,18 @@ A model's own `_check_new_input` call is the same cut-in, not a second account o
 one. The channel the message arrived on rides its tool message, and the loop
 emits the same `MessageCutIn`, so the window that submitted it does not draw the
 line again.
+
+**Every pair the machinery writes is visible to the person.**  A harness pair's
+answer is a note in the transcript — the compaction's count, the trim's names
+that left, and a cut-in's message, the delivered words from whatever channel —
+drawn live and rebuilt from the same text.  The pair's call id
+(`HARNESS_CALL_PREFIX`) is what tells a machinery-written call from a model's
+own: a model's own call to any harness tool, `_check_new_input` included, is an
+ordinary tool panel, because the call is the model's.  The one finish that adds
+no line is the machinery's own `_check_new_input`: its answer is the delivered
+message, whose line is `MessageCutIn`.  The screen decides by the pair's id
+class, not by a case per tool, so a harness tool added later is visible without
+a drawing change.
 
 ### 5.4 Channels and delivery
 
@@ -1030,8 +1067,9 @@ prompt. A channel that cannot reach a conversation says so and stops; it does no
 try a second route. An injected message can jump the queue: what the person
 types, what another channel hands to that window, and what a headless window's
 input carries are all submitted to the conversation the moment the words arrive.
-The window draws the message inside the running turn, in its own bubble, without
-closing the answer still being streamed. There is one queue: the agent server's
+The window draws the message inside the running turn as the harness note the
+pair's answer is — the unified shape, not a bubble — without closing the turn
+the answer is still being streamed in. There is one queue: the agent server's
 inbox.
 
 **A message folded into a turn is delivered by it once its words are written.**
@@ -1139,6 +1177,25 @@ Rules:
   can grow. The agent, its subagents and an agent task all carry it.
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
+
+**The turn's own compaction is a view, not an edit.** `_turn_compact` asks the
+live selector — one silent model call over the view, numbered `[M…]` in its own
+copy and nowhere else — which messages this turn no longer needs, and hides
+them from the list the rest of the turn is sent (`libs/turn/compact.py`). The
+selector is shown the last measured call and the conversation's window, through
+the same `context_usage` the status bar and the turn prompt use, so the model and
+the person read one figure. **Nothing is removed**: the live list, the turn's
+row, `covered` and the store's live-context list are the conversation, and the
+next turn starts from the full list. The system message and the turn's opening
+message are the only fixed messages; every other message, historical or current,
+is the model's to drop. The legality of a tool exchange is the *prompt's* rule —
+a call and its results go together — and the harness applies the answer as it
+came: a split pair is a failed next call, one turn, not a repaired answer. A
+selector that fails or cannot be read compacts nothing and the turn continues
+(Appendix C); a selector that keeps everything stops the automated pass for the
+rest of the turn, because that is a decision about the whole context rather than
+something the harness should ask again at every boundary. The model can still
+call `_turn_compact` itself.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
 query fired on 0 of 16 queries; a word-shaped query fired on 10 of 15 and found
@@ -1490,6 +1547,8 @@ Over the limit, the least recently **called** tools are unloaded; the names in
 loaded is ordered by its load time. The trim happens at a turn boundary: the
 harness calls `_func_tool_unload` before saving the turn and writes the pair into
 the conversation, so the model learns that the list shrank from the transcript.
+The pair's answer is the names that left, rendered as a note on the turn's
+stream (§5.3), so the person sees which tools left rather than the object.
 Nothing is written when nothing was removed. The same list bounds the model's own
 unloads: `_func_tool_unload` refuses a name in `tool_load.autoload`, so the tools
 that start loaded, the tools the budget may not evict and the tools the model may
@@ -1600,8 +1659,8 @@ schema.
   The one batch whose entries stand alone — `file_save` — answers each refusal
   in its own part instead, and §8.3 says how.
 - **Two tools answer with text rather than JSON, because the text is the
-  thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
-  hands over the skill's whole `SKILL.md`.
+  thing.** `_check_new_input` hands over a message from this conversation's
+  queue mid-turn; `skill_use` hands over the skill's whole `SKILL.md`.
 - **No answer exceeds `tool_result.bytes`** (default 32 KiB; minimum 2 KiB). A
   listing pages; an output that cannot be bounded is the harness's dump, and
   `dump_read` and `dump_grep` are bounded readers within the same budget.
@@ -2152,16 +2211,20 @@ turn to receive the result. It does not have the turn that started it, because
 `restore` reads the stored turn list and a turn is written only when it ends;
 the description must restate the last exchange.
 
-**The two live-conversation tools are the task's own.** `_check_new_input` and
-`attach_image` act on a live turn's message list — and a task is a live turn, but
-not the one in the agent server: the same conversation id, a different list, in a
-different process. So their declarations stay the hub's and their bodies are the
-task's: `_check_new_input` answers "nothing waiting" (a task has no inbox and no
-harness cut-in), and `attach_image` injects into the task's own single user
-message, the rendered description, so the picture is on the task's next model
-call. The agent server refuses either tool to a call that names a turn other than
-the loop's running one, and the hub forwards the caller's turn token so that is
-decidable.
+**The three live-conversation tools are the task's own.** `_check_new_input`,
+`attach_image` and `_turn_compact` act on a live turn's message list — and a task
+is a live turn, but not the one in the agent server: the same conversation id, a
+different list, in a different process. So their declarations stay the hub's and
+their bodies are the task's: `_check_new_input` answers "nothing waiting" (a task
+has no inbox and no harness cut-in), `attach_image` injects into the task's own
+single user message, the rendered description, so the picture is on the task's
+next model call, and `_turn_compact` compacts the task's own view (its
+`turn.hidden`) and never the agent server's loop. The task also runs the same
+automatic threshold as an agent server turn — its own `compact_due`, against
+`turn.live.last_usage` and the task's window — because a task is one turn and
+records nothing: a turn that overflows has no next turn to recover on. The agent
+server refuses a call that names a turn other than the loop's running one, and
+the hub forwards the caller's turn token so that is decidable.
 
 A task's prompt tells it not to start another task — the same one-turn rule
 that makes `_async` pointless. `agent-task.max_running` bounds concurrency, not
@@ -2943,7 +3006,6 @@ The order is a suggested priority.
 | A spend budget | A `budget:` section (per turn, day or conversation), a usage ledger, and a hard stop. | Usage is measured per turn and logged, but nothing bounds it. On a paid model an unbounded loop is a bill. |
 | Scheduled catch-up | A per-task policy for fires missed while no instance ran, instead of a manual `schedule_run_now`. | Cron users expect anacron-like backfill; a laptop asleep at the due moment currently loses the run. |
 | Store-and-forward on the mesh | A durable per-member inbox and read cursor — MQTT persistent sessions with QoS-1 events, or an application-level store under the member's directory — so direct messages and group fan-out are held while a member is away, replayed when it returns, and acked so a replay is not answered twice. | An agent is absent whenever no window is showing it, which is ordinary rather than exceptional. Today a group message to an absent member is lost with no trace, and a `peer_agent_send_message` call ends as `unreachable` after the retry ladder, so the sender cannot tell "not heard" from "heard and not answered". WeChat holds messages for an absent recipient; the group's casual contract is the design question this raises, because a backlog needs a rule for what a returning member answers. |
-| Compact inside a turn | Rebuild or trim at an iteration boundary when the live context approaches the ceiling. | The context decision runs only before a turn, so one long tool loop can exceed the window before the next decision that could shorten it. Bounded context is the core discipline of a long-running agent. |
 | Retrieval over files and dumps | Chunk and embed saved files and dumps so a search reaches their contents. | §8.3 leaves this out on purpose; documents are the largest corpus an agent saves and the one it cannot search by meaning. |
 | Sandboxed jobs | Run `jobs/` code in a child process with declared filesystem and network limits. | Jobs are arbitrary code with the caller's identity. Least privilege is the standard answer, and the plugin boundary already exists to carry it. |
 | Tool progress and cancellation | A long tool reports progress down its call; the window draws it and can cancel that call without ending the turn. | A long media or shell call is a spinner today, and the only lever is `Esc`, which ends the whole turn. |
@@ -3025,6 +3087,7 @@ The four shapes an undeclared fallback takes:
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
+| The live selector fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
 | The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |

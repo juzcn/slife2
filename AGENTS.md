@@ -51,6 +51,7 @@ The harness's tools are the `_`-prefixed ones; the system invokes them automatic
 
 - `_check_new_input` hands over a message that arrived while the turn was running.
 - `_func_tool_unload` trims the loaded list.
+- `_turn_compact` trims your own context mid-turn, automatically at `agent.compact_at` or by your call; the turn log keeps every message.
 
 ## Who you are talking to
 

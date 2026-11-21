@@ -29,8 +29,11 @@ that varies about it, which is who calls it:
   machinery calls it on the model's behalf, at a moment the machinery decides,
   and it would be called whether or not the model ever chose it.  *LLM-visible*
   is why there are so few: the call is written into the conversation as a pair,
-  and a pair has to name a tool the request declares.  **There are two**,
-  `_func_tool_unload` and `_check_new_input`, and that is the whole class.
+  and a pair has to name a tool the request declares.  **There are three**,
+  `_func_tool_unload`, `_check_new_input` and `_turn_compact`, and that is the
+  whole class.  The third is the one whose model call is *wanted* as well as
+  harmless: a turn that sees its own context filling may ask for the same
+  compaction the harness would have asked for at the next threshold.
 
 **And the guard has to be there, because there is nowhere else for it to be.**  A
 pair has to name a declared tool, so a harness tool is in the model's list, where
@@ -40,16 +43,20 @@ class is not protected by forbidding the call, and cannot be.
 **A harness tool has to be harmless when the model calls it, or it cannot be
 one.**
 
-That is a condition, not an invitation.  Each of the two is the *machinery's*
-move, made at a moment the machinery knows is the right one, and a call from the
-model is not wanted — the boundary is how a message is meant to arrive.  What the
-design guarantees is only that the unwanted call is not a damaging one:
+That is a condition, not an invitation.  Each of the first two is the
+*machinery's* move, made at a moment the machinery knows is the right one, and a
+call from the model is not wanted — the boundary is how a message is meant to
+arrive.  What the design guarantees is only that the unwanted call is not a
+damaging one:
 `_func_tool_unload` refuses the names in `tool_load.autoload` and can otherwise
 only shorten the model's own list, and `_check_new_input` hands over a message
 the next boundary would have handed over anyway, so a call from the model is
-the same thing sooner rather than something new.  A tool that *would* do damage there is not
-protected from being one; it is simply not one — it stays undeclared, which is
-what the audience gate is for.
+the same thing sooner rather than something new.  `_turn_compact` is the third
+case and the one where the model's call is the point: there is no boundary the
+harness alone knows better, and the call only hides messages from the rest of
+the turn while the record keeps them.  A tool that *would* do damage there is
+not protected from being one; it is simply not one — it stays undeclared, which
+is what the audience gate is for.
 
 A leading `_` is the mark on those two names (:data:`HARNESS_PREFIX`) and, more
 widely, on any name that is the machinery's rather than the model's — it is a
@@ -76,10 +83,20 @@ The middle two do line up with the mark for the tools the harness writes *pairs*
 with — a pair has to name a tool the request declares, so those names are in the
 model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
-tool and is protected the same way; `_check_new_input` is one, and it is the
-harness tool a screen *does* draw — as the message somebody sent, live
-(`MessageCutIn`) and rebuilt (`slife2.tui.restore`), because what the pair carries is a
-person's words rather than the machinery's.
+tool and is protected the same way; `_check_new_input` is one, and its answer is
+the message it delivers — from whatever channel: a person's, a peer's, a
+subagent's.  The screen draws it as the same harness note (`MessageCutIn` live,
+`slife2.tui.restore` rebuilt) that every machinery-written pair's answer wears.
+
+**Every pair the machinery writes is visible to the person.**  The answer is a
+note in the transcript — the compaction's count, the trim's names that left, and
+a cut-in's message, the delivered words from whatever channel.  A model's own
+call to any harness tool, `_check_new_input` included, keeps its own call id
+(`HARNESS_CALL_PREFIX`) and is an ordinary tool panel: the call is the model's;
+the note is the machinery's.  The one finish that adds no line is the
+machinery's own `_check_new_input`: its answer is the delivered message, whose
+line is `MessageCutIn`.  A harness tool added later is visible without a drawing
+change: the screen reads the id class, not a case per name.
 
 **And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
 are read off every call and stripped before dispatch — the one part of this
@@ -200,21 +217,40 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: **Spelled here for `FUNC_TOOL_UNLOAD`'s reason, and one more reader.**  Three
 #: places hold this string now: the agent server serves it, the loop writes the
 #: pair under it, and the display that rebuilds a transcript recognises it so a
-#: message that cut in is drawn as a person's line rather than as a tool panel.
+#: message that cut in is drawn as the harness note the pair's answer is rather
+#: than as a tool panel.
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 
 #: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT` so the
-#: two names that act on a live conversation are spelled in one place.
+#: names that act on a live conversation are spelled in one place.
 ATTACH_IMAGE = "attach_image"
 
-#: **The tools that act on a live turn's own message list.**  They are the two
-#: the agent server serves against its loop: the cut-in takes a queued message
-#: and the attachment injects a part into the turn's last user message.  A
+#: The turn's own compaction, by name.
+#:
+#: **The one harness tool whose model call is a second trigger rather than an
+#: accident.**  The agent server calls it when a turn's measured context crosses
+#: `agent.compact_at`, and the model may call it itself: the tool is declared, a
+#: provider can hand us the call, and the call does exactly what the harness's
+#: would have done.  Spelled once for `CHECK_NEW_INPUT`'s reason — the agent
+#: server serves it, the task serves its own body, and the loop writes the pair
+#: under it.
+#:
+#: **And the only tool whose body calls a model.**  `_turn_compact` runs the
+#: context plugin's selector — one silent, tool-less `stream_chat` over the
+#: numbered view — so a call costs a second model call.  Its tokens are logged
+#: by the model server under `kind=compactor` and are not added to the turn's
+#: own bill, the same arrangement the pre-turn discriminator has.
+TURN_COMPACT = "_turn_compact"
+
+#: **The tools that act on a live turn's own message list.**  They are the three
+#: the agent server serves against its loop: the cut-in takes a queued message,
+#: the attachment injects a part into the turn's last user message, and the
+#: compaction hides messages from the view the rest of the turn runs on.  A
 #: server that runs a turn of its own on the same conversation id — an agent task
 #: — must serve them against *its* list instead, because the id alone cannot
 #: tell the two loops apart (`slife2.plugins.agent_task.server`).
-LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
+LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE, TURN_COMPACT})
 
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut
@@ -234,6 +270,22 @@ def is_harness(name: str) -> bool:
     rebuilt message, and the loop mints one for a pair.
     """
     return name.startswith(HARNESS_PREFIX)
+
+
+#: The prefix of a call id the harness minted.
+#:
+#: **The id is what tells a machinery-written pair from a model's own call to
+#: the same tool**, because the tool name cannot: the model may call any
+#: declared harness tool, and its call carries its own provider id.  One
+#: spelling because two ends read it — the loop mints it (`harness_call`) and
+#: the transcript uses it to decide whether a harness tool's answer is a line
+#: the person sees (`slife2.tui.draw`, `slife2.tui.restore`).
+HARNESS_CALL_PREFIX = "_harness_"
+
+
+def is_harness_call(call_id: str) -> bool:
+    """Whether a tool call is one the harness wrote rather than the model."""
+    return call_id.startswith(HARNESS_CALL_PREFIX)
 
 
 # ── The three per-call meta-parameters ────────────────────────────────────────

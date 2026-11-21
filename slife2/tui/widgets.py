@@ -387,8 +387,8 @@ class ChatView(VerticalScroll):
         #: — writing it whole drew the prefix a second time.  **Bounded to the
         #: model call in flight**: the answer is the *last* call's text
         #: (`slife2.libs.turn.loop.TurnResult`), so what an earlier iteration
-        #: streamed is not a prefix of it — `add_tool_start` and `add_cut_in`
-        #: close an iteration and start this account over.
+        #: streamed is not a prefix of it — `add_tool_start` and a note that
+        #: marks a new call close an iteration and start this account over.
         self._turn_drawn = ""
         #: What this turn's bill turned out to be, held until there is a block to
         #: print it under.  `set_usage` is called by `TurnFinished`, which arrives
@@ -571,39 +571,6 @@ class ChatView(VerticalScroll):
         self._tools.clear()
         self._user_line(text, moment, footnote, channel)
 
-    def add_cut_in(
-        self,
-        text: str,
-        moment: datetime | str | None = None,
-        channel: str = WINDOW_CHANNEL,
-    ) -> None:
-        """A message that arrived mid-turn, drawn inside the turn that took it.
-
-        **It is a user line and it does not close the turn.**  `add_user` is the
-        only other writer of this shape, and it ends the turn (`_turn_open =
-        False`) and forgets the open panels (`_tools.clear()`), because it opens
-        a new one.  A cut-in belongs to the turn already running: the answer
-        still arriving has to land in the block below this line, and the tool
-        panels that turn opened are still addressable.  So this closes the
-        current *block* — the text run that ended when the message arrived — and
-        nothing else.
-
-        **Why this exists at all.**  A cut-in is written into the conversation as
-        a harness tool pair, so a display with no vocabulary for it could draw
-        only a tool panel (which it is not) or nothing (SDD §14.2).  The words
-        are already in the record; this is the line that says so while they
-        arrive.
-
-        **And it closes an iteration, so the drawn-prefix account starts over.**
-        The message is taken at a tool boundary and the answer still coming is
-        the next model call's text; what streamed before this line belongs to
-        the call that took the message, and is not a prefix of the answer
-        (`_turn_drawn`).
-        """
-        self._close_block()
-        self._turn_drawn = ""
-        self._user_line(text, moment, "", channel)
-
     def _user_line(
         self,
         text: str,
@@ -613,10 +580,8 @@ class ChatView(VerticalScroll):
     ) -> None:
         """The one rendering of a message somebody sent.
 
-        `add_user` and `add_cut_in` differ only in what they do to the turn
-        around this line; the line itself is one function so the bubble, the
-        marker strip and the timestamp cannot come to two answers about the same
-        channel.
+        `add_user` is the only writer of this shape now; the mid-turn message is
+        a harness note (`add_note`, `new_call=True`) rather than a user line.
         """
         if not is_own_channel(channel):
             text = strip_marker(text, *MARKERS)
@@ -650,7 +615,9 @@ class ChatView(VerticalScroll):
         if status:
             self.add_note(notes.rerank(status))
 
-    def add_note(self, text: str, *, ends_turn: bool = False) -> None:
+    def add_note(
+        self, text: str, *, ends_turn: bool = False, new_call: bool = False
+    ) -> None:
         """A line from the harness rather than from anyone in the conversation.
 
         **The brackets are applied here, and every harness line wears them.**
@@ -661,7 +628,8 @@ class ChatView(VerticalScroll):
         format a second time, and a caller that forgot them would leave a line
         nothing marks as the harness's.  The words inside are
         `slife2.libs.harness.notes`' (or a plugin's, for a line that arrived over the
-        wire).
+        wire); a pair's own answer — a compaction's sentence, a cut-in's message
+        — is the tool's and is passed through as it came.
 
         **The turn stays open by default, and that is load-bearing.**  A note
         lands *inside* a turn that is still going: the discriminator's `[kept …]`
@@ -675,9 +643,16 @@ class ChatView(VerticalScroll):
         open would let a delta already in the pump for it be drawn under this
         line as though the turn had gone on — the trigger the module docstring
         names for the finish boundary, arriving from the other side.
+
+        `new_call` is for a note that *is* a model-call boundary: a message that
+        cut in was taken at a tool boundary, and the answer after it is the next
+        call's text rather than a suffix of what streamed before — so the
+        drawn-prefix account starts over instead of accumulating.
         """
         if ends_turn:
             self._turn_open = False
+        elif new_call:
+            self._turn_drawn = ""
         elif self._turn_open:
             # The note lands inside the answer; remember what the block it
             # closes already holds so the final text is not drawn twice.

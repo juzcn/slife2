@@ -137,10 +137,10 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_MARKER as MARKER_PREFIX,
 )
-from slife2.libs.turn import attachments, plan
+from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import turn_prompt_lead, with_lead
 from slife2.libs.turn.events import TurnEvent, TurnObserver, emit
-from slife2.libs.turn.loop import TurnResult
+from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import (
     SUBAGENT_PROMPT,
@@ -152,6 +152,7 @@ from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
     LIVE_CONVERSATION_TOOLS,
+    TURN_COMPACT,
     CatalogueAnswer,
     Tool,
     ToolFailed,
@@ -384,6 +385,29 @@ class TaskTurn:
     #: built: a task's backend is fixed for its one turn, so a `model_switch`
     #: mid-task moves the agent server's loops and not this one.
     accepts_images: bool
+    #: The messages this task's own compaction has hidden from its later model
+    #: calls.  The same turn-scoped projection the agent server keeps: the list
+    #: `run_turn` advances is the task's whole exchange, and only the view the
+    #: model is sent shrinks (`slife2.libs.turn.compact`).
+    hidden: list[Message] = field(default_factory=list)
+    #: The model's window, so the compaction's context figure is the one this
+    #: task's model is measured against.  Also the denominator of the automatic
+    #: threshold below.
+    context_window: int = 0
+    #: The fraction at which this task's own turn compacts itself, read from the
+    #: live config when the task starts — the same `agent.compact_at` the agent
+    #: server's conversations use.  A task is one turn and records nothing, so a
+    #: turn that overflows has no next turn to recover on: this is the bound
+    #: that keeps it alive.
+    compact_at: float = 0.0
+    #: Whether the automatic pass has stopped asking: a selector that kept
+    #: everything or failed has made a decision about the whole context.  A
+    #: later successful call — the model's own — resumes the pass.
+    compact_hold: bool = False
+    #: The loop running this task's one turn, set once it is built; the
+    #: compaction reads its last measured call, the same figure the agent
+    #: server's own tool uses.
+    live: AgentLoop | None = None
 
 
 def unknown_report(name: str) -> dict[str, Any]:
@@ -708,7 +732,46 @@ def build_server(
                 "refused": refusals,
             }
 
-        return {CHECK_NEW_INPUT: nothing_waiting, ATTACH_IMAGE: attach_image}
+        async def turn_compact(_arguments: dict[str, Any]) -> str:
+            """Drop what this task no longer needs from its own model context.
+
+            **The task's own list and the task's own state.**  The agent
+            server's version resolves a loop by the conversation id, which is
+            the maker's — the other live turn on that conversation — so this
+            body exists for the reason `attach_image`'s does: the id alone
+            cannot tell the two loops apart.  A task records nothing, so a
+            compaction here is a projection of `turn.messages` and touches no
+            record at all.
+            """
+            result = await runtime.compact_turn(
+                task.identity,
+                turn.messages,
+                turn.hidden,
+                turn.model,
+                context_tokens=(
+                    turn.live.last_usage.total_tokens if turn.live is not None else 0
+                ),
+                context_window=turn.context_window,
+            )
+            # **The same rule as the agent server's**: a decision to keep
+            # everything, or a failed selector, stops the automatic pass; a
+            # drop leaves it live for the next crossing.
+            turn.compact_hold = result.dropped == 0 or bool(result.decision)
+            logger.info(
+                "agent task %s: turn_compact seen=%d dropped=%d decision=%s hold=%s",
+                task.name,
+                result.seen,
+                result.dropped,
+                result.decision or "ok",
+                turn.compact_hold,
+            )
+            return compact.report(result, recorded=False)
+
+        return {
+            CHECK_NEW_INPUT: nothing_waiting,
+            ATTACH_IMAGE: attach_image,
+            TURN_COMPACT: turn_compact,
+        }
 
     # ── the loop ─────────────────────────────────────────────────────────
 
@@ -823,6 +886,8 @@ def build_server(
             messages=rebuilt.messages,
             model=model.reference,
             accepts_images=settings.accepts_images,
+            context_window=settings.context_window,
+            compact_at=current.agent.compact_at,
         )
 
         loop = await runtime.make_loop(
@@ -848,7 +913,44 @@ def build_server(
             # `check_async` is in the list like every other model tool.
             # `agent_task_start` is in the list too — the prompt is what tells
             # the model not to start another task.
+            # **The task's own view.**  A `_turn_compact` call hides messages
+            # from `turn.hidden`; the list `run_turn` advances is the task's
+            # whole exchange, and the answer the task hands back is its own.
+            present=lambda messages: compact.view(messages, turn.hidden),
         )
+        # **The loop, for the one tool that reads its bill.**  The registry was
+        # built above and closes over `turn`, so the body sees this the moment a
+        # `_turn_compact` call arrives.
+        turn.live = loop
+
+        def compact_due() -> bool:
+            """Whether this task's one turn should compact itself now.
+
+            **A task is one turn and records nothing**, so a turn that overflows
+            has no next turn to recover on: this is the bound that keeps it
+            alive.  The rules are the agent server's (`AgentCore._compact_due`):
+            the last call's measured total against `agent.compact_at` of the
+            model's window; a keep-all or a failed selector stops the pass; a
+            drop leaves it live for the next crossing.
+            """
+            if turn.live is None or turn.context_window <= 0 or turn.compact_at <= 0:
+                return False
+            if turn.live.last_usage.total_tokens < (
+                turn.context_window * turn.compact_at
+            ):
+                return False
+            if turn.compact_hold:
+                return False
+            at = compact.opening(turn.messages)
+            if at is None:
+                return False
+            view = compact.view(turn.messages, turn.hidden)
+            return bool(compact.selectable(view, turn.messages[at]))
+
+        def auto_invoke() -> AutoCall | None:
+            """The harness's own move at an iteration boundary: the compaction."""
+            return AutoCall(TURN_COMPACT) if compact_due() else None
+
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so
         # there is no row to keep the marker out of; it is prompt text for this
@@ -866,21 +968,23 @@ def build_server(
                 plan.read(*task.identity),
             ),
         )
-        result = await loop.run_turn(turn.messages, opening, observer)
+        result = await loop.run_turn(turn.messages, opening, observer, auto=auto_invoke)
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the
         # model had just loaded and was about to use.
-        await trim_tools(task, turn.messages)
+        await trim_tools(task, turn.messages, observer)
         return result
 
-    async def trim_tools(task: AgentTask, messages: list[Message]) -> None:
+    async def trim_tools(
+        task: AgentTask, messages: list[Message], observer: TurnObserver
+    ) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
 
         **The write is the turn runtime's** (`slife2.libs.turn.runtime.trim`):
         the pair naming what left, with no await between its halves, is one
-        mechanism for both servers.  What is a task's own is how a skip is
-        reported.
+        mechanism for both servers, and so is the note it reports on this
+        task's stream.  What is a task's own is how a skip is reported.
 
         **A skip is a failure, and it is said at `error`.**  A task runs one
         turn and has no next request for a dead hub to make itself heard on, so
@@ -898,7 +1002,7 @@ def build_server(
         *failure goes* to the log as an error naming the task.
         """
         try:
-            unloaded = await runtime.trim(messages)
+            unloaded = await runtime.trim(messages, observer)
         except Exception as exc:  # noqa: BLE001 - bookkeeping does not fail a turn
             logger.error(
                 "agent task %s: the tool list was not trimmed (%s); the loaded "

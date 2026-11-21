@@ -264,6 +264,24 @@ def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     assert CHECK_NEW_INPUT in MODEL_VISIBLE_HARNESS_TOOLS
 
 
+def test_turn_compact_is_held_together_across_the_same_boundaries() -> None:
+    """`_turn_compact` is written into a conversation, so the same four agree.
+
+    It is the third harness pair: the server declares it and writes the call,
+    the autoload keeps it in the model's list, the store's gate lets the
+    `_`-prefixed name through, and every request that follows the pair declares
+    it.  A rename or a missing gate is a 400 one turn later, with nothing naming
+    the tool.
+    """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
+    from slife2.libs.store.catalogue import MODEL_VISIBLE_HARNESS_TOOLS
+    from slife2.plugins.agent.server import TURN_COMPACT
+
+    assert TURN_COMPACT == "_turn_compact"
+    assert TURN_COMPACT in REQUIRED_AUTOLOAD
+    assert TURN_COMPACT in MODEL_VISIBLE_HARNESS_TOOLS
+
+
 # --- providers and models ----------------------------------------------------
 
 

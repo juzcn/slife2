@@ -411,6 +411,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # business — this is about which names it serves, and what they are.
     assert sorted(t.name for t in tools) == [
         "_check_new_input",
+        "_turn_compact",
         "answer_approval",
         "attach_image",
         "cancel_async",

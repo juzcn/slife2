@@ -66,8 +66,11 @@ __version__ = "0.5.0"
 
 import argparse
 import json
+import signal
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -776,8 +779,39 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     return 0
 
 
+@contextmanager
+def _uninterruptible() -> Iterator[None]:
+    """Hold off Ctrl+C while a stop that has been asked for runs to its end.
+
+    **The window's Ctrl+C is a key; the second half of a double press is the
+    same request arriving again.**  `SlifeApp.action_interrupt` quits on the
+    first press, Textual hands the terminal back to the console a moment later,
+    and the following press is a real `SIGINT` by then — delivered while this
+    process is stopping the shared servers, inside the `finally` the app's
+    `except KeyboardInterrupt` does not cover.  Unhandled it prints a traceback
+    over an exit somebody asked for and abandons the stop halfway.
+
+    **Swallowed rather than obeyed**, because the stop is what that press was
+    asking for: there is nothing left to cancel, only work to finish, and every
+    process it stops has its own grace period (`launcher.terminate`) rather
+    than an unbounded wait.  The previous handler is restored afterwards, so a
+    caller that comes back — `slife2 down` is one — leaves the process as it
+    found it.
+    """
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+@_uninterruptible()
 def _down(config: Config, *, force: bool = False, everything: bool = False) -> int:
     """Stop the servers this config names, and the broker.
+
+    **A stop that has begun is not cancelled.**  `main` guards its own exit;
+    this guards the same act for `slife2 down`, where an interrupted stop would
+    leave the stack half stopped.  `_uninterruptible` states why.
 
     **A stop is not a broadcast.**  The servers are shared, so another live
     client is another conversation with a turn in flight; `down` refuses while
@@ -1210,10 +1244,17 @@ def main(argv: list[str] | None = None) -> int:
         # one: otherwise an ordinary exit leaves the servers running until the
         # next reboot.  `others_running` counts by pid liveness, so a client
         # that was killed — and so never deregistered — cannot keep them alive.
-        if claimed and not args.keep_servers and not others_running():
-            print("  last instance out; stopping the shared servers")
-            # **`everything` is what "the shared servers" means.**  This is the
-            # machine's last client, not this config's: a backend another
-            # config started is still a daemon with nobody left to stop it.
-            _down(config, everything=True)
+        #
+        # **The exit is uninterruptible from here.**  The window is already
+        # gone; the Ctrl+C a double press sends a moment later is this exit
+        # being asked for again, and it must not abort the client check or the
+        # stop — see `_uninterruptible`.
+        with _uninterruptible():
+            if claimed and not args.keep_servers and not others_running():
+                print("  last instance out; stopping the shared servers")
+                # **`everything` is what "the shared servers" means.**  This is
+                # the machine's last client, not this config's: a backend
+                # another config started is still a daemon with nobody left to
+                # stop it.
+                _down(config, everything=True)
     return code

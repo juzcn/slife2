@@ -1294,6 +1294,14 @@ class AgentSettings:
     #: bound nobody chose.  `AgentLoop` reads the same rule off the number it is
     #: handed, so "is there a cap" is decided in exactly one place.
     max_iterations: int = 0
+    #: The fraction of the conversation's model window at which a turn compacts
+    #: its own live context, or **0 for a manual-only `_turn_compact`**.  Read by
+    #: the agent server when the conversation starts — the same moment as
+    #: `max_iterations` — which is why it is here rather than in `context:`: the
+    #: section a key lives in is the plugin that reads it, and `context:`'s
+    #: numbers are the context plugin's.  The window is the conversation's own,
+    #: resolved when it started, so a `model_switch` moves both together.
+    compact_at: float = 0.9
     #: A Jinja2 template for the system prompt — an absolute path by the time
     #: this is built, or "" for the one the distribution ships.  A template
     #: rather than a string because the prompt has a hole in it where the agent
@@ -1621,6 +1629,7 @@ REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "func_tool_load",
     "_func_tool_unload",
     "_check_new_input",
+    "_turn_compact",
     "skill_use",
     "check_async",
     "cancel_async",
@@ -2789,7 +2798,7 @@ def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
 
 
 def _agent_fields(config_dir: Path | None) -> tuple[Field, ...]:
-    """The `agent:` section's two keys.
+    """The `agent:` section's three keys.
 
     A function rather than a tuple because `system_prompt` is a path resolved
     against the file that named it.  `server` is not a key here: it comes from
@@ -2803,6 +2812,14 @@ def _agent_fields(config_dir: Path | None) -> tuple[Field, ...]:
                 lambda count: count >= 0,
                 "{value} is not an iteration count — leave the key out or "
                 "write 0 for no cap",
+            ),
+        ),
+        Field(
+            "compact_at",
+            read_number,
+            check=bound(
+                lambda fraction: 0 <= fraction <= 1,
+                "{value} is not a window fraction (0 <= compact_at <= 1)",
             ),
         ),
         Field(

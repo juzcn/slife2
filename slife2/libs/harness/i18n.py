@@ -157,6 +157,32 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "kept {turns}, recall failed",
         "zh": "保留 {turns}，召回 失败",
     },
+    # The trim's five lists, as the one sentence the transcript shows.  The
+    # verdict a name carries is its list's, so each label is that verdict.
+    "trim_unloaded": {
+        "en": "unloaded: {names}",
+        "zh": "已卸载：{names}",
+    },
+    "trim_refused": {
+        "en": "refused (the system needs them): {names}",
+        "zh": "拒绝（系统需要）：{names}",
+    },
+    "trim_no_load_state": {
+        "en": "no load state: {names}",
+        "zh": "无加载状态：{names}",
+    },
+    "trim_unknown": {
+        "en": "unknown: {names}",
+        "zh": "未知：{names}",
+    },
+    "trim_not_loaded": {
+        "en": "not loaded: {names}",
+        "zh": "未加载：{names}",
+    },
+    "trim_nothing": {
+        "en": "nothing to unload",
+        "zh": "没有可卸载的",
+    },
     # A recall that could not use its cross-encoder.  The status is the context
     # server's (`"unavailable"`, `"failed"`, `"empty"`); the sentence is the
     # window's, and it says what the person actually lost — the fused order

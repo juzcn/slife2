@@ -35,6 +35,8 @@ layering.  The window imports it like any other reader.
 
 from __future__ import annotations
 
+import json
+
 from slife2.libs.harness.glyphs import GLYPHS
 from slife2.libs.harness.i18n import t
 
@@ -77,6 +79,42 @@ def kept(kept: int, recalled: int, *, failed: bool = False) -> str:
     if failed:
         return t("kept_failed", turns=as_turns(kept))
     return t("kept", turns=as_turns(kept), recalled=recalled)
+
+
+def unloaded(answer: str) -> str:
+    """The trim's answer as a person's line: what left the model's list.
+
+    **The tool answers the model with five lists, one verdict per name**, and
+    that object is what its pair carries (`slife2.clients.toolclient`).  A
+    person reading a transcript needs the names, not the keys — so the five
+    lists become one sentence here, the one place the object is for a reader
+    rather than for a model.  The names keep their lists' order and verdict.
+
+    **An answer this does not recognise is shown as it came.**  A partial or
+    foreign object is not "nothing moved"; that reading is the failure Appendix
+    C names.  Every list is required before anything is said.
+    """
+    try:
+        found = json.loads(answer)
+    except (json.JSONDecodeError, TypeError):
+        return answer
+    if not isinstance(found, dict):
+        return answer
+    labels = (
+        ("unloaded", "trim_unloaded"),
+        ("refused", "trim_refused"),
+        ("no_load_state", "trim_no_load_state"),
+        ("unknown", "trim_unknown"),
+        ("not_loaded", "trim_not_loaded"),
+    )
+    parts: list[str] = []
+    for key, label in labels:
+        names = found.get(key)
+        if not isinstance(names, list):
+            return answer
+        if names:
+            parts.append(t(label, names=", ".join(str(name) for name in names)))
+    return "; ".join(parts) if parts else t("trim_nothing")
 
 
 #: The context server's rerank statuses and the sentence each one owes the
