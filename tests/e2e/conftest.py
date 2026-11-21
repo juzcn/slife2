@@ -42,7 +42,7 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host import launcher, statefile
-from slife2.libs.host.config import LOCAL_SERVERS, load
+from slife2.libs.host.config import LOCAL_SERVERS, REQUIRED_AUTOLOAD, load
 from slife2.libs.host.paths import DATA_ENV_VAR
 from tests.e2e.edges import (
     MODEL,
@@ -148,6 +148,11 @@ def _free_ports(names: Iterable[str]) -> dict[str, int]:
 
 def _config_text(provider_url: str, ports: dict[str, int], broker_port: int) -> str:
     servers = "\n".join(f"  {name}: {{port: {port}}}" for name, port in ports.items())
+    # **The names the system works by are read from their one spelling.**  A
+    # copy here is a copy that falls behind (it did when `_turn_compact`
+    # arrived), and the e2e lane is outside the fast run that would have said
+    # so — its first sign is every scenario failing to load this file.
+    required = "\n".join(f"    - {name}" for name in REQUIRED_AUTOLOAD)
     return f"""\
 # Written by the e2e test: no sections a turn does not need, and every address
 # on a port this process picked.
@@ -163,22 +168,14 @@ tool_result:
 
 # `note_write` is the tool the turn test asks the model for, so it is in the
 # list the model is offered.  Every other cabinet tool is on demand, which is
-# what a plugin's tools are now; the first eight are what the system works by.
-# `plan_write` is the agent server's own model tool: listing it is what proves
-# the plan's audience and route across the hub.  The last three are the
-# unattended channels' own send tools: a channel scenario is a model
-# *answering* on that channel, and a model can only choose a tool it was
-# offered.
+# what a plugin's tools are now.  `plan_write` is the agent server's own model
+# tool: listing it is what proves the plan's audience and route across the hub.
+# The last three are the unattended channels' own send tools: a channel
+# scenario is a model *answering* on that channel, and a model can only choose
+# a tool it was offered.
 tool_load:
   autoload:
-    - tool_search
-    - tool_list
-    - func_tool_load
-    - _func_tool_unload
-    - _check_new_input
-    - skill_use
-    - check_async
-    - cancel_async
+{required}
     - note_write
     # The agent server's own model tool, so the plan's audience and route are
     # proven across the hub rather than only by calling its handler directly.
