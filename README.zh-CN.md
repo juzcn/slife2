@@ -482,8 +482,8 @@ context:
 tool_load:
   threshold: 100             # 超出后逐出最久未使用的已加载工具
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, check_async, cancel_async,
-             turn_read]                                # 且永不被逐出
+             _check_new_input, _turn_compact, skill_use, check_async,
+             cancel_async, turn_read]                # 且永不被逐出
 
 tool_result:
   bytes: 32768               # 每个结果的预算；最小 2048

@@ -542,8 +542,8 @@ context:
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, check_async, cancel_async,
-             turn_read]                                # and never evicted
+             _check_new_input, _turn_compact, skill_use, check_async,
+             cancel_async, turn_read]                # and never evicted
 
 tool_result:
   bytes: 32768               # per-result budget; minimum 2048
