@@ -789,11 +789,12 @@ def build_server(
             turn.hidden.clear()
             turn.compact_hold = False
             logger.info(
-                "agent task %s: context_rebuild changed=%s kept=%d recalled=%d "
-                "rerank=%s decision=%s",
+                "agent task %s: context_rebuild changed=%s kept=%d in_hand=%d "
+                "recalled=%d rerank=%s decision=%s",
                 task.name,
                 rebuilt.changed,
                 rebuilt.kept,
+                rebuilt.in_hand,
                 rebuilt.recalled,
                 rebuilt.rerank or "-",
                 rebuilt.decision or "-",
@@ -807,6 +808,7 @@ def build_server(
             return rebuild_report(
                 changed=rebuilt.changed,
                 kept=rebuilt.kept,
+                in_hand=rebuilt.in_hand,
                 recalled=rebuilt.recalled,
                 rerank=rebuilt.rerank,
                 decision=rebuilt.decision,

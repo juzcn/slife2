@@ -2620,8 +2620,9 @@ class AgentCore:
         of them and recall others from the turn log. **The turn running is never
         touched** — it has no turn id yet, so it is carried verbatim while the
         history around it is rebuilt. The decision is made from the live
-        context, including the turn's own message; the answer carries an
-        estimate of the context this turn runs on from here.
+        context, including the turn's own message; the answer reports how many
+        of the turns in hand it kept, how many it recalled, and an estimate of
+        the context this turn runs on from here.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:
@@ -2655,10 +2656,12 @@ class AgentCore:
         loop.hidden.clear()
         loop.compact_hold = False
         logger.info(
-            "context_rebuilt %s changed=%s kept=%d recalled=%d rerank=%s decision=%s",
+            "context_rebuilt %s changed=%s kept=%d in_hand=%d recalled=%d "
+            "rerank=%s decision=%s",
             describe((loop.agent, loop.subagent)),
             rebuilt.changed,
             rebuilt.kept,
+            rebuilt.in_hand,
             rebuilt.recalled,
             rebuilt.rerank or "-",
             rebuilt.decision or "-",
@@ -2670,6 +2673,7 @@ class AgentCore:
         return rebuild_report(
             changed=rebuilt.changed,
             kept=rebuilt.kept,
+            in_hand=rebuilt.in_hand,
             recalled=rebuilt.recalled,
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,
@@ -2677,7 +2681,7 @@ class AgentCore:
         )
 
     async def turn_compact(self, ctx: Context) -> str:
-        """Drop what this turn no longer needs from its own model context.
+        """Drop what this turn no longer needs from the view it is running on.
 
         **The tool, not the decision.**  The selector is the context plugin's
         (`select_live`), and what this side owns is the live loop: the state a
@@ -2686,10 +2690,14 @@ class AgentCore:
         measured context crosses `agent.compact_at`, and the model may call it
         itself — the call does the same thing either way.
 
-        **The record is untouched.**  Hidden messages stay in `loop.messages`,
-        the turn's saved row and the store's live-context list; only the list
-        the model is sent shrinks (`slife2.libs.turn.compact`).  The next turn
-        starts from the full conversation.
+        **The record is untouched, and the view is the whole list.**  Every
+        message the turn is sent is a candidate except the system prompt and the
+        turn's opening message; a historical turn's messages are hidden the same
+        transient way a spent tool result is.  Hidden messages stay in
+        `loop.messages`, the turn's saved row and the store's live-context list;
+        only the list the model is sent shrinks (`slife2.libs.turn.compact`).
+        The next turn starts from the full conversation; `_context_rebuild` is
+        the tool that changes the durable live-context list.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:

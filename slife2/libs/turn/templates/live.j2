@@ -15,8 +15,9 @@ what it does not.
 
 Nothing is deleted: every message stays in the conversation, and the next turn
 — where there is one — starts from the full list. This is the turn's view, not
-the conversation's shape: the historical turns are `_context_rebuild`'s to
-edit, and a rebuild starts this view over.
+the conversation's shape: any numbered message may be hidden here, historical
+or current, and a rebuild starts this view over. `_context_rebuild` is what
+changes the conversation's durable shape.
 
 Each message above carries its live id ([MESSAGE:{"id": n}]). The ids exist
 only for this call, are not part of the conversation, and are stored nowhere.

@@ -252,10 +252,11 @@ TURN_COMPACT = "_turn_compact"
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the
 #: **historical turns** the conversation is made of.  `_turn_compact` hides
-#: messages from the current turn's view and forgets them at the turn's end;
-#: this drops and recalls turns in the live context itself, and the selection is
-#: what the conversation comes back to.  The turn running is never touched — it
-#: has no id yet — so it is carried verbatim while the history is rebuilt.
+#: messages from the turn's view — historical or current — and forgets them at
+#: the turn's end; this drops and recalls turns in the live context itself, and
+#: the selection is what the conversation comes back to.  The turn running is
+#: never touched — it has no id yet — so it is carried verbatim while the
+#: history is rebuilt.
 CONTEXT_REBUILD = "_context_rebuild"
 
 #: **The tools that act on a live turn's own message list.**  They are the four

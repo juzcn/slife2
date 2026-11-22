@@ -174,6 +174,7 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
     report = rebuild_report(
         changed=False,
         kept=2,
+        in_hand=2,
         recalled=0,
         rerank="failed",
         decision="",
@@ -183,3 +184,23 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
     assert report == (
         "No rebuild: the context is unchanged (rerank failed); context ~1,000 (10.0%)."
     )
+
+
+def test_the_changed_report_names_the_turns_it_kept_out_of() -> None:
+    """`kept 0 turn(s)` alone reads as a history that was never there.
+
+    The caller held five turns and the decision cleared them; the report says
+    "of 5", so a clear cannot be read as the empty no-op.  The no-op has its
+    own sentence (`No rebuild: the context is unchanged`).
+    """
+    report = rebuild_report(
+        changed=True,
+        kept=0,
+        in_hand=5,
+        recalled=0,
+        rerank="",
+        decision="",
+        tokens="1,653 (0.2%)",
+    )
+
+    assert report == "kept 0 of 5 turn(s), recalled 0; context ~1,653 (0.2%)."

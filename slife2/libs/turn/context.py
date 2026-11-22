@@ -91,12 +91,14 @@ LIVE_REPLY: dict[str, Any] = {
     "properties": {
         "compact": {
             "description": (
-                "The live message ids whose content this turn no longer needs. "
-                "Omit for none. **Drop a tool exchange as a whole**: an "
-                "assistant message that asked for tools goes together with all "
-                "of its results, and a result goes together with the assistant "
-                "message that asked for it — a call without its answer, or an "
-                "answer without its call, is a history no provider accepts."
+                "The live message ids whose content this turn no longer needs "
+                "— any numbered message except the system prompt and the "
+                "turn's opening message, historical or current. Omit for none. "
+                "**Drop a tool exchange as a whole**: an assistant message "
+                "that asked for tools goes together with all of its results, "
+                "and a result goes together with the assistant message that "
+                "asked for it — a call without its answer, or an answer "
+                "without its call, is a history no provider accepts."
             ),
             "type": "array",
             "items": {"type": "integer"},
@@ -832,6 +834,7 @@ def rebuild_report(
     *,
     changed: bool,
     kept: int,
+    in_hand: int,
     recalled: int,
     rerank: str,
     decision: str,
@@ -843,6 +846,12 @@ def rebuild_report(
     context figure since the turn prompt stopped carrying one.  `tokens` is
     `context_usage`'s text for the rebuilt list — an estimate of the messages,
     not the provider's measured count; the caller prefixes the `~` that says so.
+
+    **`in_hand` is in the changed sentence because `kept` alone can read as
+    nothing.**  "kept 0 turn(s), recalled 0" is the same string for a history
+    that was empty and for one the decision cleared; "kept 0 of 5" says which.
+    The no-op and failed branches already have their own sentences, so they do
+    not need the figure.
 
     `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
@@ -861,7 +870,10 @@ def rebuild_report(
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
-    return f"kept {kept} turn(s), recalled {recalled}{tail}; context ~{tokens}."
+    return (
+        f"kept {kept} of {in_hand} turn(s), recalled {recalled}{tail}; "
+        f"context ~{tokens}."
+    )
 
 
 def turn_note(

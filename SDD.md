@@ -1262,8 +1262,9 @@ which to recall from the turn log. The turn running has no id yet and is carried
 verbatim, so the selection is the history alone. It is a harness tool under
 §5.3's contract: the harness calls it at the first boundary, the model may call
 it when the work has moved, and its pair is the visibility — the answer reports
-kept/recalled and an estimate of the context the turn runs on from there
-(`estimate_turn_tokens` plus `context_usage`), never a provider measurement.
+kept of the turns in hand, recalled, and an estimate of the context the turn
+runs on from there (`estimate_turn_tokens` plus `context_usage`), never a
+provider measurement.
 The turn log keeps every turn; a dropped one can be recalled by a later
 rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts

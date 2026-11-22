@@ -1169,7 +1169,9 @@ def build_server(
         `kept` is what the caller has in hand, `recalled` none of it — and the
         two together are what `rebuild` always reports, so a reader of the
         answer never has to know which of the four ways it was reached to read
-        the counts.
+        the counts.  `in_hand` is the number before the decision, which on these
+        exits is `kept` itself: every answer carries the figure the changed
+        answer's "of N" is read from.
 
         `rerank` is the stage's report when a recall *did* run and the
         selection still equals what is in hand.  The exits that never asked
@@ -1186,6 +1188,7 @@ def build_server(
             "turn_ids": list(turn_ids),
             "changed": False,
             "kept": len(turn_ids),
+            "in_hand": len(turn_ids),
             "recalled": 0,
             "rerank": rerank,
             "decision": decision,
@@ -1457,15 +1460,16 @@ def build_server(
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
-            built from), `changed` (whether anything moved), `recalled` (how
-            many of the selected turns came from the turn log rather than from
-            in hand), `rerank` — `""` when the cross-encoder ran or no
-            question was asked, otherwise `"unavailable"`, `"failed"` or
-            `"empty"`: the recall kept its fused order and the caller shows
-            that rather than swallowing it — and `decision`, `""` when
-            there was a decision, otherwise `"failed"` or `"unparsed"`: the
-            recall never ran, and `recalled: 0` would otherwise read as one
-            that found nothing.
+            built from), `changed` (whether anything moved), `kept` (how many
+            of the turns in hand survived the decision), `in_hand` (how many
+            the caller held before it), `recalled` (how many of the selected
+            turns came from the turn log rather than from in hand), `rerank` —
+            `""` when the cross-encoder ran or no question was asked, otherwise
+            `"unavailable"`, `"failed"` or `"empty"`: the recall kept its fused
+            order and the caller shows that rather than swallowing it — and
+            `decision`, `""` when there was a decision, otherwise `"failed"` or
+            `"unparsed"`: the recall never ran, and `recalled: 0` would
+            otherwise read as one that found nothing.
         """
         store = await store_of(agent, subagent)
         # **The conversation is the input.**  The rebuild runs at the first
@@ -1602,9 +1606,12 @@ def build_server(
             # reaching this point means the list this turn runs on is not the one
             # the conversation had — which is the whole of what this reports.
             "changed": True,
-            # What survived the decision, and what came back from the log.  The
-            # two add to `len(target)`, which is what the turn runs on.
+            # What survived the decision, what came back from the log, and what
+            # the caller held before it.  `kept` and `in_hand` together let the
+            # report say "kept 0 of 5": a clear must not read as an empty
+            # history.
             "kept": len(base),
+            "in_hand": len(turn_ids),
             "recalled": len(set(recalled) - set(base)),
             # The precision stage's report — empty when it ran or no question
             # was asked.  A recall that kept the fused order is a fact the

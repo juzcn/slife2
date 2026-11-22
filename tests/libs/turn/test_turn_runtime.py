@@ -195,6 +195,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
             "turn_ids": [7, 8],
             "changed": True,
             "kept": 2,
+            "in_hand": 2,
             "recalled": 1,
             "rerank": "unavailable",
             "decision": "",
@@ -211,7 +212,12 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
 
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
     assert rebuilt.turn_ids == [7, 8]
-    assert (rebuilt.changed, rebuilt.kept, rebuilt.recalled) == (True, 2, 1)
+    assert (rebuilt.changed, rebuilt.kept, rebuilt.in_hand, rebuilt.recalled) == (
+        True,
+        2,
+        2,
+        1,
+    )
     assert (rebuilt.rerank, rebuilt.decision) == ("unavailable", "")
     name, arguments = store.calls[0]
     assert name == "rebuild"
@@ -239,6 +245,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
             "turn_ids": [],
             "changed": True,
             "kept": 0,
+            "in_hand": 0,
             "recalled": 0,
             "rerank": "",
             "decision": "",
@@ -268,6 +275,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "turn_ids": [],
                 "changed": True,
                 "kept": 0,
+                "in_hand": 0,
                 "recalled": 0,
                 "rerank": "",
                 "decision": "",
@@ -279,6 +287,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "messages": [],
                 "changed": True,
                 "kept": 0,
+                "in_hand": 0,
                 "recalled": 0,
                 "rerank": "",
                 "decision": "",
@@ -296,6 +305,19 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "changed": True,
                 "kept": 0,
                 "recalled": 0,
+                "rerank": "",
+                "decision": "",
+            },
+            "counts",
+        ),
+        (
+            {
+                "messages": [],
+                "turn_ids": [],
+                "changed": True,
+                "kept": 0,
+                "in_hand": 0,
+                "recalled": 0,
             },
             "rerank status",
         ),
@@ -305,6 +327,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "turn_ids": [],
                 "changed": True,
                 "kept": 0,
+                "in_hand": 0,
                 "recalled": 0,
                 "rerank": "",
             },
@@ -330,6 +353,7 @@ async def test_rebuild_refuses_a_turn_id_that_is_not_one(
         "turn_ids": turn_ids,
         "changed": True,
         "kept": 0,
+        "in_hand": 0,
         "recalled": 0,
         "rerank": "",
         "decision": "",
@@ -353,6 +377,7 @@ async def test_rebuild_refuses_counts_that_are_not_ints(
         "turn_ids": [],
         "changed": True,
         "kept": kept,
+        "in_hand": 0,
         "recalled": recalled,
         "rerank": "",
         "decision": "",

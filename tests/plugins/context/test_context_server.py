@@ -1414,6 +1414,7 @@ async def test_a_decision_that_decided_nothing_says_the_recall_failed(
     assert answer.data["messages"] == hold, "the fallback still keeps the context"
     assert answer.data["changed"] is False
     assert answer.data["kept"] == 1
+    assert answer.data["in_hand"] == 1
     assert answer.data["recalled"] == 0
     assert answer.data["decision"] == status
 
@@ -1445,6 +1446,8 @@ async def test_a_clear_empties_the_context_and_is_published() -> None:
     assert answer.data["messages"] == [SYSTEM]
     assert answer.data["turn_ids"] == []
     assert answer.data["changed"] is True
+    assert answer.data["kept"] == 0, "the clear dropped the only turn in hand"
+    assert answer.data["in_hand"] == 1, "and the report says what it was kept out of"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == []
 
 

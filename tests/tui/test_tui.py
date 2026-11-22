@@ -1791,7 +1791,7 @@ async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
     about: the context the answer was written from, not a comment on how it
     went.  The counts and the estimate are the tool's own report.
     """
-    report = "kept 12 turn(s), recalled 3; context ~48,000 (4.8%)."
+    report = "kept 12 of 20 turn(s), recalled 3; context ~48,000 (4.8%)."
     app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")

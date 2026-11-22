@@ -123,7 +123,11 @@ class Rebuilt:
     turn_ids: list[int]
     covered: int
     changed: bool
+    #: How many of the caller's turns the decision kept, and how many the
+    #: caller held before it.  The pair is the report's "kept 0 of 5": `kept`
+    #: alone cannot tell a clear from a history that was empty.
     kept: int
+    in_hand: int
     recalled: int
     rerank: str
     decision: str
@@ -495,10 +499,10 @@ class TurnRuntime:
 
         **All of the answer is read before the caller adopts any of it.**  An
         answer that replaced the list but omitted the counts would report
-        `kept 0, recalled 0` — a decision nobody made; a rerank status and the
-        reason no decision was made are part of the same shape, and an
-        unrecognised one still reaches the window, which is where its words
-        live.
+        `kept 0 of 0 turn(s), recalled 0` — a decision nobody made; a rerank
+        status and the reason no decision was made are part of the same shape,
+        and an unrecognised one still reaches the window, which is where its
+        words live.
         """
         carried = max(len(messages) - covered, 0)
         arguments: dict[str, Any] = {
@@ -520,7 +524,9 @@ class TurnRuntime:
             raise unreadable(
                 "the context store", "report whether the context changed", payload
             )
-        kept, recalled = _count(payload, "kept"), _count(payload, "recalled")
+        kept = _count(payload, "kept")
+        in_hand = _count(payload, "in_hand")
+        recalled = _count(payload, "recalled")
         rerank = payload.get("rerank")
         if not isinstance(rerank, str):
             raise unreadable(
@@ -539,6 +545,7 @@ class TurnRuntime:
             covered=len(rebuilt) - carried,
             changed=changed,
             kept=kept,
+            in_hand=in_hand,
             recalled=recalled,
             rerank=rerank,
             decision=decision,

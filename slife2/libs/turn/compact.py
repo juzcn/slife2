@@ -65,7 +65,9 @@ def selectable(view: Sequence[Message], opening: Message) -> list[int]:
     The system prompt and the turn's opening message are not candidates.  The
     first is the conversation's instructions rather than its history; the second
     is what the turn *is* — hiding it would leave the model answering nothing.
-    Every other message, historical or current, is the model's to drop.
+    Every other message, historical or current, is the model's to drop.  A
+    historical one hidden here is a view edit for this turn only; the
+    conversation's durable shape is `_context_rebuild`'s.
     """
     return [
         index
