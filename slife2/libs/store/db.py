@@ -1942,9 +1942,7 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     return normalise_ids(parsed)
 
 
-def write_context(
-    connection: sqlite3.Connection, turn_ids: Sequence[int]
-) -> list[int]:
+def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:
     """Replace the live-context list, and answer with what was written.
 
     **One operation, not four.**  The caller already holds the whole list it
