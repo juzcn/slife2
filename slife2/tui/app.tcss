@@ -243,6 +243,13 @@ PlanView {
     scrollbar-background: $slife-panel;
 }
 
+/* The plan itself, inside the scrolling strip: the same rule the tool panel's
+   body keeps, so a long item wraps at the strip's width rather than widening
+   the child past the viewport. */
+.plan-body {
+    width: 100%;
+}
+
 /* ── The status row ─────────────────────────────────────────────────────── */
 
 StatusBar {

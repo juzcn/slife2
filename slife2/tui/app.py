@@ -995,7 +995,18 @@ class SlifeApp(App[None]):
                     # the same reason: a turn that is over must not mount
                     # anything later, and the ticket is retired before the line
                     # below so no event can arrive under it.
+                    #
+                    # **A prompt whose turn died is settled first.**  This is
+                    # the third ending that owes an approval an answer, beside
+                    # `TurnFinished` and the cancel path: a transport that
+                    # drops while the turn is parked arrives here and never as
+                    # a finish, and a row left `pending` keeps y/n writing to a
+                    # turn that is gone and keeps Ctrl+O refused.  `_turn_over`
+                    # is set before the deny so a request still in the flush
+                    # below cannot mount a replacement.
                     self._turn_over = True
+                    if self._approval is not None and self._approval.pending:
+                        self._approval.action_deny()
                     await self._flush_events()
                     self._finish_entry(ticket)
                     self._transcript.add_error(str(exc))

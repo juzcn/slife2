@@ -616,7 +616,12 @@ class ChatView(VerticalScroll):
             self.add_note(notes.rerank(status))
 
     def add_note(
-        self, text: str, *, ends_turn: bool = False, new_call: bool = False
+        self,
+        text: str,
+        *,
+        ends_turn: bool = False,
+        new_call: bool = False,
+        channel: str | None = None,
     ) -> None:
         """A line from the harness rather than from anyone in the conversation.
 
@@ -630,6 +635,15 @@ class ChatView(VerticalScroll):
         `slife2.libs.harness.notes`' (or a plugin's, for a line that arrived over the
         wire); a pair's own answer — a compaction's sentence, a cut-in's message
         — is the tool's and is passed through as it came.
+
+        **`channel` is for a note that carries delivered words.**  A channel
+        prefixes its hand-over with the marker its model reader needs
+        (`slife2.libs.harness.markers`), and that envelope is not what the
+        person was sent: the bubble strips it (`ChatView.add_user`) and a note
+        drawn from the same message does the same.  The strip is conditioned on
+        the channel being somebody else's, because text a person typed that
+        merely begins like a marker is their own words.  `None` — the default —
+        is a pure harness note, which never carries one.
 
         **The turn stays open by default, and that is load-bearing.**  A note
         lands *inside* a turn that is still going: the discriminator's `[kept …]`
@@ -649,6 +663,8 @@ class ChatView(VerticalScroll):
         call's text rather than a suffix of what streamed before — so the
         drawn-prefix account starts over instead of accumulating.
         """
+        if channel is not None and not is_own_channel(channel):
+            text = strip_marker(text, *MARKERS)
         if ends_turn:
             self._turn_open = False
         elif new_call:
@@ -2094,7 +2110,7 @@ PLAN_MARKS: dict[str, tuple[str, str]] = {
 }
 
 
-class PlanView(Static):
+class PlanView(VerticalScroll):
     """The model's plan, as the model last wrote it: a strip above the prompt.
 
     **A claim, not a measurement.**  The four statuses are the model's own
@@ -2112,6 +2128,14 @@ class PlanView(Static):
 
     The strip is hidden when the plan is empty, and its text is model output —
     `Text`, never markup.
+
+    **The strip scrolls, because its cap is a window rather than a clip.**  A
+    plan may hold 24 items and the stylesheet shows eight rows; a `Static`
+    capped in height measures only the cap, so the rows below it are outside
+    its virtual size and nothing can bring them into view — the state
+    `QuestionStrip` states for its own container.  The body is therefore a
+    child inside this `VerticalScroll`, the `ToolCallWidget` arrangement, and
+    the model's active step is reachable however far down the list it is.
     """
 
     def __init__(self) -> None:
@@ -2123,7 +2147,14 @@ class PlanView(Static):
         #: flight**: :meth:`settle` clears it wherever a turn ends, so a write
         #: the turn never finished cannot leak into the next one.
         self._started: dict[str, Any] = {}
+        #: The drawn plan.  A child rather than this widget's own content,
+        #: because a scroll container measures its children and has no content
+        #: of its own (`QuestionStrip` says the same in as many words).
+        self._body = Static(classes="plan-body")
         self.display = False
+
+    def compose(self):
+        yield self._body
 
     def set_plan(self, items: Any) -> None:
         """Draw this plan, or hide the strip when it is empty.
@@ -2168,7 +2199,7 @@ class PlanView(Static):
     def _refresh(self) -> None:
         if not self._items:
             self._items = []
-            self.update("")
+            self._body.update("")
             self.display = False
             return
         self.display = True
@@ -2188,11 +2219,11 @@ class PlanView(Static):
                 if item["status"] in (plan.ACTIVE, plan.BLOCKED)
                 else PALETTE["muted"],
             )
-        self.update(line)
+        self._body.update(line)
 
     def plain_text(self) -> str:
         """What the strip shows, for a test that reads the screen."""
-        return content_text(self.content)
+        return content_text(self._body.content)
 
 
 class QuestionStrip(VerticalScroll):

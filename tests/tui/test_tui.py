@@ -653,6 +653,53 @@ async def test_a_cut_in_does_not_trim_the_final_answer() -> None:
     )
 
 
+async def test_a_cut_in_note_strips_the_channel_marker() -> None:
+    """The delivered words, not the address the model needs.
+
+    A channel hands its message over with the marker its reader strips: wechat
+    prefixes the peer's two ids, a peer agent its own envelope.  The marker is
+    content in the conversation — the model replies through it — and the window
+    takes it back off everywhere it draws somebody's words (`ChatView.add_user`
+    does, and SDD §10.2 states the rule).  The cut-in note is the other place a
+    channel's words are drawn, so it must strip the same vocabulary rather than
+    put `peer_wechat_id` on somebody's screen.
+    """
+    marked = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+
+    def respond(prompt: str, on_event):
+        on_event(MessageCutIn(text=marked, channel="wechat"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "start")
+        text = shown(app)
+
+    assert "[hello]" in text
+    assert "peer_wechat_id" not in text, "the marker is the model's, not the person's"
+
+
+async def test_a_cut_in_from_this_window_keeps_words_that_look_like_a_marker() -> None:
+    """A marker-shaped word is only stripped where it is the sender's envelope.
+
+    The person's own messages carry no marker, so text they typed that merely
+    begins like one is their words and stays as typed — the same rule the user
+    line keeps (`is_own_channel`).
+    """
+    typed = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+
+    def respond(prompt: str, on_event):
+        on_event(MessageCutIn(text=typed, channel="tui"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "start")
+        text = shown(app)
+
+    assert "peer_wechat_id" in text, "a person's own words are not rewritten"
+
+
 async def test_model_output_is_not_parsed_as_markup() -> None:
     """`[bold]` from a model is text, not an instruction to the renderer.
 
@@ -1606,6 +1653,32 @@ async def test_a_successful_plan_write_updates_the_strip_live() -> None:
     assert "run the tests" in text
 
 
+async def test_a_long_plan_is_reachable_by_scrolling() -> None:
+    """The strip's cap is a window, not a clip.
+
+    A plan may hold 24 items (`plan.MAX_ITEMS`) and the stylesheet caps the
+    strip at eight rows, so a longer plan is readable only if the strip
+    scrolls.  A `Static` capped in height measures the cap and keeps the rows
+    below it out of its virtual size — `QuestionStrip`'s own docstring states
+    the rule — so the active step (the one the person is watching for) can be
+    unreachable no matter what key or wheel is used.
+    """
+    items = [
+        {"text": f"step {index}", "status": "active" if index == 15 else "pending"}
+        for index in range(20)
+    ]
+    app = make_app(plan_turn(items))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        view = app.query_one(PlanView)
+        assert view.display
+        assert view.max_scroll_y > 0, "the rows under the cap are not reachable"
+        view.scroll_end(animate=False)
+        assert await settled(pilot, lambda: view.scroll_y > 0)
+        assert view.scroll_y == view.max_scroll_y
+        assert "step 15" in "\n".join(visible_lines(app))
+
+
 async def test_a_refused_plan_write_is_not_drawn() -> None:
     """A refused write is a plan the server never stored, so the strip keeps
     the plan it had — the tool panel shows the refusal, not the strip."""
@@ -2118,6 +2191,46 @@ async def test_a_restored_cut_in_is_a_note_not_a_tool_panel() -> None:
     assert panels == []
     assert text.index("You> start") < text.index("[and this]")
     assert text.index("[and this]") < text.index("both answered")
+
+
+async def test_a_restored_cut_in_strips_the_channel_marker() -> None:
+    """The rebuilt line is the live one, marker taken back off.
+
+    The stored tool message is what the model read — the marker included — and
+    the rebuild draws it through the same note the live turn used.  A rebuild
+    that passed the envelope through would make the same message read two ways
+    depending on whether the window was open when it arrived.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="start"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="_harness_check_new_input_1",
+                        name="_check_new_input",
+                        arguments={},
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content='[Wechat:{"peer_wechat_id": "peer-1"}] hello',
+                tool_call_id="_harness_check_new_input_1",
+                channel="wechat",
+            ),
+            Message(role="assistant", content="both answered"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert "[hello]" in text
+    assert "peer_wechat_id" not in text
 
 
 async def test_a_restored_result_reads_like_a_live_one() -> None:
@@ -3331,6 +3444,43 @@ async def test_a_keystroke_while_a_call_awaits_an_answer_does_not_refuse_it() ->
 
     assert client.answers == [], "an answer was sent for a call nobody decided"
     assert typed == "a", "the keystroke went to the draft, which is where it was aimed"
+
+
+async def test_a_turn_that_fails_under_an_approval_settles_the_question() -> None:
+    """A prompt whose turn died is a question nobody is waiting on.
+
+    The server refuses an unanswered request after its own bound, but a
+    transport that drops while the turn is parked reaches the window as a
+    failed turn and never as a `TurnFinished`.  The row otherwise stays
+    `pending`: `y`/`n` answer a dead turn and `Ctrl+O` refuses to open while it
+    is up — the state both `TurnFinished` and the cancel path settle, and the
+    third ending was missing it.
+    """
+    client = FakeAgentClient(answering("unused"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async def dies_parked(
+        prompt: str, on_event, *, channel: str = "tui", images=None, receipt: str = ""
+    ):
+        on_event(ToolApprovalRequested("call-1", "sensitive", {"path": "/tmp/x"}))
+        # The row has to be mounted before the failure, or `_turn_over` drops
+        # the request and there is no pending question to settle.  The pump
+        # runs while this task yields, so this is a matter of turns rather than
+        # of wall time; the bound only keeps a broken app from hanging.
+        for _ in range(500):
+            if app._approval is not None:
+                break
+            await asyncio.sleep(0.01)
+        raise ConnectionError("the stream went away while the turn was parked")
+
+    client.run_turn = dies_parked  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "do it")
+        assert await settled(pilot, lambda: app._approval is None)
+        assert await settled(pilot, lambda: bool(client.answers))
+        assert client.answers == [("call-1", False)]
+        assert "requests approval" not in shown(app)
 
 
 # --- the model switch ---------------------------------------------------------

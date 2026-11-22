@@ -229,8 +229,10 @@ def _draw_answer(
             # tool's answer is the delivered words — from any channel.  The
             # unified shape is the note, not a bubble.  A model's own
             # `_check_new_input` call keeps its own id and is the ordinary panel
-            # below.
-            chat.add_note(text)
+            # below.  The channel rides along for the same reason the live
+            # event carries it: it is what strips a marker the sender's channel
+            # put in front of the words.
+            chat.add_note(text, channel=channel)
         elif is_harness(call.name) and is_harness_call(call.id):
             # **A pair the machinery wrote is a line the person can see.**  The
             # pair is skipped as a panel; the machinery's answer is a note — and

@@ -81,13 +81,16 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
                     notes.unloaded(text) if name == FUNC_TOOL_UNLOAD else text
                 )
             return True
-        case MessageCutIn(text=text):
+        case MessageCutIn(text=text, channel=channel):
             # **A cut-in is a harness note like every other pair's answer.**  The
             # delivered words are the `_check_new_input` tool's own answer — from
             # any channel: a person, a peer, a subagent — so the line is the note
             # rather than a bubble; the channel stays in the record and in the
-            # event (the receipt's reader is the window that submitted it).
-            chat.add_note(text, new_call=True)
+            # event (the receipt's reader is the window that submitted it).  It
+            # rides the note so a channel's marker — the model's address, not
+            # the person's words — is taken off exactly where the bubble takes
+            # it off.
+            chat.add_note(text, new_call=True, channel=channel)
         case ContextChosen(
             kept=kept, recalled=recalled, rerank=rerank, discriminator=discriminator
         ):
