@@ -2621,8 +2621,8 @@ class AgentCore:
         touched** — it has no turn id yet, so it is carried verbatim while the
         history around it is rebuilt. The decision is made from the live
         context, including the turn's own message; the answer reports how many
-        of the turns in hand it kept, how many it recalled, and an estimate of
-        the context this turn runs on from here.
+        of the turns in hand it kept, how many turns outside the context it
+        recalled, and an estimate of the context this turn runs on from here.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:
@@ -2656,12 +2656,13 @@ class AgentCore:
         loop.hidden.clear()
         loop.compact_hold = False
         logger.info(
-            "context_rebuilt %s changed=%s kept=%d in_hand=%d recalled=%d "
-            "rerank=%s decision=%s",
+            "context_rebuilt %s changed=%s kept=%d in_hand=%d outside=%d "
+            "recalled=%d rerank=%s decision=%s",
             describe((loop.agent, loop.subagent)),
             rebuilt.changed,
             rebuilt.kept,
             rebuilt.in_hand,
+            rebuilt.outside,
             rebuilt.recalled,
             rebuilt.rerank or "-",
             rebuilt.decision or "-",
@@ -2674,6 +2675,7 @@ class AgentCore:
             changed=rebuilt.changed,
             kept=rebuilt.kept,
             in_hand=rebuilt.in_hand,
+            outside=rebuilt.outside,
             recalled=rebuilt.recalled,
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,

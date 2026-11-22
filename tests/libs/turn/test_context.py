@@ -175,6 +175,7 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
         changed=False,
         kept=2,
         in_hand=2,
+        outside=10,
         recalled=0,
         rerank="failed",
         decision="",
@@ -186,21 +187,27 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
     )
 
 
-def test_the_changed_report_names_the_turns_it_kept_out_of() -> None:
-    """`kept 0 turn(s)` alone reads as a history that was never there.
+def test_the_changed_report_names_what_it_kept_of_and_recalled_from() -> None:
+    """`kept 0` alone reads as a history that was never there.
 
     The caller held five turns and the decision cleared them; the report says
-    "of 5", so a clear cannot be read as the empty no-op.  The no-op has its
-    own sentence (`No rebuild: the context is unchanged`).
+    "of 5", so a clear cannot be read as the empty no-op.  The recall's
+    denominator is the rest of the log — the whole set a recall condition
+    filters — so "recalled 0 of 90 outside" says the search had 90 turns to
+    draw from.
     """
     report = rebuild_report(
         changed=True,
         kept=0,
         in_hand=5,
+        outside=90,
         recalled=0,
         rerank="",
         decision="",
         tokens="1,653 (0.2%)",
     )
 
-    assert report == "kept 0 of 5 turn(s), recalled 0; context ~1,653 (0.2%)."
+    assert report == (
+        "kept 0 of 5 turn(s) in hand, recalled 0 of 90 outside; "
+        "context ~1,653 (0.2%)."
+    )

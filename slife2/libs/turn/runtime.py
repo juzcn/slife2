@@ -124,10 +124,14 @@ class Rebuilt:
     covered: int
     changed: bool
     #: How many of the caller's turns the decision kept, and how many the
-    #: caller held before it.  The pair is the report's "kept 0 of 5": `kept`
-    #: alone cannot tell a clear from a history that was empty.
+    #: caller held before it.  The pair is the report's "kept 0 of 5 turn(s) in
+    #: hand": `kept` alone cannot tell a clear from a history that was empty.
     kept: int
     in_hand: int
+    #: The turns in the log beyond the context — the whole set a recall
+    #: condition filters.  The changed report's "recalled 0 of 90 outside" is
+    #: read from this figure.
+    outside: int
     recalled: int
     rerank: str
     decision: str
@@ -499,10 +503,10 @@ class TurnRuntime:
 
         **All of the answer is read before the caller adopts any of it.**  An
         answer that replaced the list but omitted the counts would report
-        `kept 0 of 0 turn(s), recalled 0` — a decision nobody made; a rerank
-        status and the reason no decision was made are part of the same shape,
-        and an unrecognised one still reaches the window, which is where its
-        words live.
+        `kept 0 of 0 turn(s) in hand, recalled 0 of 0 outside` — a decision
+        nobody made; a rerank status and the reason no decision was made are
+        part of the same shape, and an unrecognised one still reaches the
+        window, which is where its words live.
         """
         carried = max(len(messages) - covered, 0)
         arguments: dict[str, Any] = {
@@ -526,6 +530,7 @@ class TurnRuntime:
             )
         kept = _count(payload, "kept")
         in_hand = _count(payload, "in_hand")
+        outside = _count(payload, "outside")
         recalled = _count(payload, "recalled")
         rerank = payload.get("rerank")
         if not isinstance(rerank, str):
@@ -546,6 +551,7 @@ class TurnRuntime:
             changed=changed,
             kept=kept,
             in_hand=in_hand,
+            outside=outside,
             recalled=recalled,
             rerank=rerank,
             decision=decision,

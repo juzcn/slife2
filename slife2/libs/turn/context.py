@@ -835,6 +835,7 @@ def rebuild_report(
     changed: bool,
     kept: int,
     in_hand: int,
+    outside: int,
     recalled: int,
     rerank: str,
     decision: str,
@@ -847,11 +848,12 @@ def rebuild_report(
     `context_usage`'s text for the rebuilt list — an estimate of the messages,
     not the provider's measured count; the caller prefixes the `~` that says so.
 
-    **`in_hand` is in the changed sentence because `kept` alone can read as
-    nothing.**  "kept 0 turn(s), recalled 0" is the same string for a history
-    that was empty and for one the decision cleared; "kept 0 of 5" says which.
-    The no-op and failed branches already have their own sentences, so they do
-    not need the figure.
+    **The two "of N" figures answer the two sides of the decision.**  `in_hand`
+    is what the caller held; `kept 0 of 5 turn(s) in hand` says a clear, where
+    `kept 0` alone reads as an empty history.  `outside` is the whole log beyond
+    the context — the set a recall condition filters — and `recalled 0 of 90
+    outside` says the search had 90 turns to draw from.  The no-op and failed
+    branches already have their own sentences, so they do not need the figures.
 
     `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
@@ -871,8 +873,8 @@ def rebuild_report(
     if not changed:
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
     return (
-        f"kept {kept} of {in_hand} turn(s), recalled {recalled}{tail}; "
-        f"context ~{tokens}."
+        f"kept {kept} of {in_hand} turn(s) in hand, "
+        f"recalled {recalled} of {outside} outside{tail}; context ~{tokens}."
     )
 
 

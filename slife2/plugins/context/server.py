@@ -1147,6 +1147,7 @@ def build_server(
     def _in_hand(
         messages: Sequence[dict[str, Any]],
         turn_ids: Sequence[int],
+        outside: int,
         rerank: str = "",
         decision: str = "",
     ) -> dict[str, Any]:
@@ -1170,8 +1171,8 @@ def build_server(
         two together are what `rebuild` always reports, so a reader of the
         answer never has to know which of the four ways it was reached to read
         the counts.  `in_hand` is the number before the decision, which on these
-        exits is `kept` itself: every answer carries the figure the changed
-        answer's "of N" is read from.
+        exits is `kept` itself; `outside` is the log beyond it, which the
+        changed answer's recalled "of N" is read from.
 
         `rerank` is the stage's report when a recall *did* run and the
         selection still equals what is in hand.  The exits that never asked
@@ -1189,6 +1190,7 @@ def build_server(
             "changed": False,
             "kept": len(turn_ids),
             "in_hand": len(turn_ids),
+            "outside": outside,
             "recalled": 0,
             "rerank": rerank,
             "decision": decision,
@@ -1462,8 +1464,10 @@ def build_server(
             `messages` (what the turn should run on), `turn_ids` (what it was
             built from), `changed` (whether anything moved), `kept` (how many
             of the turns in hand survived the decision), `in_hand` (how many
-            the caller held before it), `recalled` (how many of the selected
-            turns came from the turn log rather than from in hand), `rerank` —
+            the caller held before it), `outside` (how many turns the log holds
+            beyond the context — the recall's domain), `recalled` (how many of
+            the selected turns came from the turn log rather than from in
+            hand), `rerank` —
             `""` when the cross-encoder ran or no question was asked, otherwise
             `"unavailable"`, `"failed"` or `"empty"`: the recall kept its fused
             order and the caller shows that rather than swallowing it — and
@@ -1472,6 +1476,13 @@ def build_server(
             otherwise read as one that found nothing.
         """
         store = await store_of(agent, subagent)
+        # **The recall's domain is the whole log outside the context.**  Every
+        # turn not in hand is a candidate the recall condition filters; the
+        # retrieval legs page that set, but the denominator the report counts
+        # against is the set itself.  One COUNT, read here rather than per
+        # answer, because the same figure is what the model's "recalled 0 of N"
+        # is read from.
+        outside = max(await off_loop(store.count) - len(turn_ids), 0)
         # **The conversation is the input.**  The rebuild runs at the first
         # boundary, after the turn's message was appended (or mid-turn, after a
         # cut-in); there is no separate prompt to pass.
@@ -1487,7 +1498,7 @@ def build_server(
         # word; no decision at all is the transport's.
         if decision is None:
             logger.info("recall_not_needed reason=no_decision")
-            return _in_hand(messages, turn_ids, decision=status)
+            return _in_hand(messages, turn_ids, outside, decision=status)
         # **What was decided, before what it led to.**  Every line below reports
         # an outcome — `recall_not_needed`, `recall_abandoned`, `recall_rebuilt`
         # — and none of them carries the two fields that chose it.  A live
@@ -1502,7 +1513,7 @@ def build_server(
             # what the caller is holding, which is why it is read once before
             # this answer counts.
             logger.info("recall_not_needed reason=context_sufficient")
-            return _in_hand(messages, turn_ids)
+            return _in_hand(messages, turn_ids, outside)
 
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
@@ -1531,7 +1542,7 @@ def build_server(
             # that cannot be acted on keeps the context the turn had
             # (SDD §5.5, Appendix C).
             logger.info("recall_kept_nothing_known ids=%s", decision.keep)
-            return _in_hand(messages, turn_ids)
+            return _in_hand(messages, turn_ids, outside)
 
         recalled: list[int] = []
         rerank = ""
@@ -1546,7 +1557,7 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return _in_hand(messages, turn_ids, outside, rerank=rerank)
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
@@ -1555,7 +1566,7 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return _in_hand(messages, turn_ids, outside, rerank=rerank)
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -1608,10 +1619,12 @@ def build_server(
             "changed": True,
             # What survived the decision, what came back from the log, and what
             # the caller held before it.  `kept` and `in_hand` together let the
-            # report say "kept 0 of 5": a clear must not read as an empty
-            # history.
+            # report say "kept 0 of 5 turn(s) in hand": a clear must not read as
+            # an empty history.  `outside` is the rest of the log, which the recall
+            # condition filters — the "of 90" in "recalled 0 of 90 outside".
             "kept": len(base),
             "in_hand": len(turn_ids),
+            "outside": outside,
             "recalled": len(set(recalled) - set(base)),
             # The precision stage's report — empty when it ran or no question
             # was asked.  A recall that kept the fused order is a fact the

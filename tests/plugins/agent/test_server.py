@@ -3176,6 +3176,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
             "changed": False,
             "kept": len(turn_ids),
             "in_hand": len(turn_ids),
+            "outside": 0,
             "recalled": 0,
             "rerank": "",
             "decision": "",
