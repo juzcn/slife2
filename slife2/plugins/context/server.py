@@ -206,6 +206,93 @@ class Selector(Protocol):
     ) -> Awaitable[str]: ...
 
 
+def _repair_exchange(
+    tool_name: str, previous: str, reason: str
+) -> list[dict[str, Any]]:
+    """The model's refused call and the reason, as one repair exchange.
+
+    **The tool result is the correct channel for a refusal.**  A user turn here
+    would sit beside the turn's own opening message and read as one request.
+    The refused text rides the result as well because not every wire can replay
+    a malformed call — Anthropic's `tool_use.input` is an object — and a result
+    is text on all three.
+    """
+    call_id = f"_harness_{tool_name}_{uuid.uuid4().hex}"
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": previous},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": decisions.repair_note(reason, previous),
+            "tool_call_id": call_id,
+        },
+    ]
+
+
+async def _ask_tool(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    tool_text: str,
+    parameters: dict[str, Any],
+    instruction: str,
+    kind: str,
+    previous: str = "",
+    repair: str = "",
+) -> str:
+    """One forced tool call, and nothing listening to it.
+
+    **The call is structured.**  The one tool advertised is the caller's, forced
+    by `tool_choice`, with the reply schema as its `parameters`; the instruction
+    travels as a system message.  A model left free in a tool-heavy conversation
+    continues the conversation's own calls instead of deciding; a forced tool
+    has nowhere else to put the answer.
+
+    **Thinking is off for this call.**  A thinking endpoint rejects a forced
+    `tool_choice` (DeepSeek answers 400), and the structured call is what makes
+    the answer readable; the turn's own calls keep the configured thinking.
+
+    **A repair ask is the same call with `_repair_exchange` appended.**  None of
+    it is stored — the repair is how a bad answer is corrected, not a turn.
+
+    The transport's rules — the kept client, the silence, the absence of a
+    timeout and the refusal of an unreadable answer — are `_stream_chat`'s.
+    """
+    tool = ToolSpec(name=tool_name, description=tool_text, parameters=parameters)
+    asked = [*messages, {"role": "system", "content": instruction}]
+    if repair:
+        asked.extend(_repair_exchange(tool_name, previous, repair))
+    result = await _stream_chat(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        asked,
+        tools=[tool.to_wire()],
+        tool_choice=tool_name,
+        thinking="disabled",
+        kind=kind,
+    )
+    return decision_arguments(result, tool_name)
+
+
 async def _ask_model(
     config: Config,
     clients: dict[str, Client],
@@ -218,109 +305,28 @@ async def _ask_model(
     previous: str = "",
     repair: str = "",
 ) -> str:
-    """One forced decision-tool call, and nothing listening to it.
+    """The historical-turn decision, as `decide_context`'s arguments.
 
-    **The decision is a tool call, and the conversation is its input.**  The
-    live messages go out exactly as the turn runs on them, followed by the
-    decision instruction as a system message; the one tool advertised is
-    `decide_context`, forced by `tool_choice`, with the reply schema as its
-    `parameters`.  A model left free in a tool-heavy conversation continues the
-    conversation's own calls instead of deciding (a turn that had been testing
-    the harness tools did exactly that); a forced tool has nowhere else to put
-    the answer.
-
-    **Thinking is off for this call.**  A thinking endpoint rejects a forced
-    `tool_choice` (DeepSeek answers 400), and the structured call is what makes
-    the decision readable; the turn's own calls keep the configured thinking.
-
-    **A repair ask is the same call with the refused answer as the model's own
-    tool call, and the reason and the refused text as its result**
-    (`decisions.repair_note`).  The text rides the result as well because not
-    every wire can replay a malformed call — Anthropic's `tool_use.input` is an
-    object — and a result is text on all three.  All of it is a prompt for one
-    call and none of it is stored — the repair is how a bad answer is
-    corrected, not a turn.
-
-    **No progress handler**, which is what makes the call silent: the server
-    reports progress only to a caller that asked for a token, so a decision
-    turn reaches no transcript and no observer by construction rather than by a
-    filter somebody has to remember.
-
-    The client is opened once per *model server* and kept for the process — the
-    agent server's arrangement, for the agent server's reason: a handshake per
-    call is a handshake per call.  Keyed by URL because a server speaks one wire
-    format for every provider that uses it.
-
-    **No timeout of its own.**  This is a model call like the turn's own, so it
-    is bounded where every model call is — the provider's own limits inside the
-    model server — and a slow answer only makes the turn late.  A second, shorter
-    clock here was a knob with no job: it turned a working-but-slow provider
-    into a refused recall, and the refusal looked exactly like a broken one.
-
-    **An answer this build cannot read is refused, not read as a silent one.**
-    FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
-    structured content, and `StreamChatResult.from_wire(None)` builds an empty
-    result — so a model server from another build would arrive here as "the model
-    answered with nothing": `decision_arguments` raises, `_decide` logs the
-    call as failed and keeps the context, with the log pointing at the model's
-    output rather than at the transport.  `slife2.clients.model` raises for
-    exactly this on the loop's own hop, and this is the same check with the same
-    sentence, because the cause is the same: a daemon from another build.
+    The conversation is the input, followed by the decision instruction as a
+    system message; the tool's schema is `decisions.RECALL_REPLY`.  The call and
+    repair rules are `_ask_tool`'s.
     """
-    tool = ToolSpec(
-        name=decisions.DECISION_TOOL,
-        description=decisions.DECISION_TOOL_TEXT,
-        parameters=decisions.RECALL_REPLY,
-    )
-    asked = [
-        *messages,
-        {"role": "system", "content": decisions.instruction()},
-    ]
-    if repair:
-        # The model's own refused call, then what was wrong with it.  The tool
-        # result is the correct channel for a refusal: a user turn here would
-        # sit beside the turn's own opening message and read as one request.
-        call_id = f"_harness_{decisions.DECISION_TOOL}_{uuid.uuid4().hex}"
-        asked.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": decisions.DECISION_TOOL,
-                            "arguments": previous,
-                        },
-                    }
-                ],
-            }
-        )
-        asked.append(
-            {
-                "role": "tool",
-                # The refused text rides the result too: a wire that cannot
-                # replay a malformed call (Anthropic's `input` is an object)
-                # would otherwise show the model `{}` instead of its reply.
-                "content": decisions.repair_note(repair, previous),
-                "tool_call_id": call_id,
-            }
-        )
-    result = await _stream_chat(
+    return await _ask_tool(
         config,
         clients,
         opening,
         agent,
         subagent,
         model,
-        asked,
-        tools=[tool.to_wire()],
-        tool_choice=decisions.DECISION_TOOL,
-        thinking="disabled",
+        messages,
+        tool_name=decisions.DECISION_TOOL,
+        tool_text=decisions.DECISION_TOOL_TEXT,
+        parameters=decisions.RECALL_REPLY,
+        instruction=decisions.instruction(),
         kind="decision",
+        previous=previous,
+        repair=repair,
     )
-    return decision_arguments(result, decisions.DECISION_TOOL)
 
 
 async def _ask_selector(
@@ -343,63 +349,29 @@ async def _ask_selector(
     each message of this request; the record, the turn's saved row and every
     ordinary call keep the list they had.  The system message names the
     candidates, the legality rule and the context figure the caller measured —
-    the same figure the status bar and the turn prompt show.  The call is forced
-    and thinking is off for `_ask_model`'s reason: the view already ends with
-    the turn's own exchange, and a model left free continues it.  The
-    transport's rules are `_stream_chat`'s.
+    the same figure the status bar and the turn prompt show.  The call and
+    repair rules are `_ask_tool`'s.
     """
     numbered = [
         decisions.with_message_id(message, index)
         for index, message in enumerate(messages)
     ]
-    tool = ToolSpec(
-        name=decisions.SELECTION_TOOL,
-        description=decisions.SELECTION_TOOL_TEXT,
-        parameters=decisions.LIVE_REPLY,
-    )
-    asked = [
-        *numbered,
-        {"role": "system", "content": decisions.live_instruction(selectable, usage)},
-    ]
-    if repair:
-        call_id = f"_harness_{decisions.SELECTION_TOOL}_{uuid.uuid4().hex}"
-        asked.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": decisions.SELECTION_TOOL,
-                            "arguments": previous,
-                        },
-                    }
-                ],
-            }
-        )
-        asked.append(
-            {
-                "role": "tool",
-                "content": decisions.repair_note(repair, previous),
-                "tool_call_id": call_id,
-            }
-        )
-    result = await _stream_chat(
+    return await _ask_tool(
         config,
         clients,
         opening,
         agent,
         subagent,
         model,
-        asked,
-        tools=[tool.to_wire()],
-        tool_choice=decisions.SELECTION_TOOL,
-        thinking="disabled",
+        numbered,
+        tool_name=decisions.SELECTION_TOOL,
+        tool_text=decisions.SELECTION_TOOL_TEXT,
+        parameters=decisions.LIVE_REPLY,
+        instruction=decisions.live_instruction(selectable, usage),
         kind="compactor",
+        previous=previous,
+        repair=repair,
     )
-    return decision_arguments(result, decisions.SELECTION_TOOL)
 
 
 async def _stream_chat(
@@ -507,6 +479,69 @@ def decision_arguments(result: StreamChatResult, expected: str) -> str:
     if call.raw_arguments is not None:
         return call.raw_arguments
     return json.dumps(call.arguments, ensure_ascii=False)
+
+
+async def _ask_with_repair[T](
+    ask: Callable[..., Awaitable[str]],
+    parse: Callable[[str], tuple[T | None, str]],
+    *,
+    label: str,
+    subject: str,
+) -> tuple[T | None, str]:
+    """One call — or two, when the first answer could not be read.
+
+    **Never raises, and the one retry is a repair.**  A provider failure and a
+    reply that is not the requested shape both return `None`, and the caller's
+    fallback is perfectly good.  A provider failure is *not* asked again: there
+    is no answer to correct.  An unreadable reply is different — the provider
+    answered, the answer is in hand, and the refusal names the field — so the
+    model is asked once more with its own reply and that reason.  A second
+    refusal ends it; the repair is one round, not a loop.
+
+    **No clock of its own.**  The waits are the model service's, exactly as for
+    the turn's own calls: a slow provider makes the turn late, which the design
+    accepts, rather than making the decision fail for a reason that says
+    nothing about the answer.
+
+    `label` is the log prefix (`recall_decision`, `live_selector`): the lines
+    stay telling whose call it was.  `subject` is the prose those lines use
+    when they point at the raised exception.
+    """
+    try:
+        text = await ask()
+    except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
+        logger.info("%s_failed reason=%s", label, type(exc).__name__)
+        logger.debug("the %s call raised", subject, exc_info=True)
+        return None, "failed"
+    # **The raw arguments, for the one question the parsed answer cannot
+    # answer**: *why* a model that filled the tool a certain way did so.
+    # DEBUG because it is the model's text and this line is for whoever is
+    # already looking at the protocol; the parsed fields are the INFO line
+    # the caller writes.
+    logger.debug("%s_reply attempt=first %r", label, text)
+    value, refusal = parse(text)
+    if value is not None:
+        return value, ""
+    logger.info("%s_unparsed reason=%s", label, refusal)
+    # **The one retry, and it is not the same bet as asking again.**  The model
+    # has already answered, so the provider works and the round trip is priced;
+    # what failed is the shape, and the shape is what the refusal names.  Asking
+    # once more with the answer and the reason is a correction, not a blind
+    # retry — and a model that cannot write the object twice falls back exactly
+    # as before.
+    try:
+        corrected = await ask(previous=text, repair=refusal)
+    except Exception as exc:  # noqa: BLE001 — the same fallback as above
+        logger.info("%s_repair_failed reason=%s", label, type(exc).__name__)
+        logger.debug("the repair call raised", exc_info=True)
+        return None, "failed"
+    logger.debug("%s_reply attempt=repair %r", label, corrected)
+    value, refusal = parse(corrected)
+    if value is not None:
+        logger.info("%s_repaired", label)
+        return value, ""
+    logger.info("%s_unparsed reason=%s attempt=repair", label, refusal)
+    return None, "unparsed"
 
 
 def build_server(
@@ -1219,75 +1254,20 @@ def build_server(
         model: str,
         messages: list[dict[str, Any]],
     ) -> tuple[Decision | None, str]:
-        """One model call — or two, when the first answer could not be read.
-
-        **Never raises, and the one retry is a repair.**  A provider failure and
-        a reply that is not the requested object both return `None`, and the
-        caller's fallback — keep the context — is perfectly good.  A provider
-        failure is *not* asked again: there is no answer to correct.  An
-        unreadable reply is different — the provider answered, the answer is in
-        hand, and the refusal names the field — so the model is asked once more
-        with its own reply and that reason (`repair_note`).  A second refusal
-        ends it; the repair is one round, not a loop.
-
-        **No clock of its own.**  The waits are the model service's, exactly as
-        for the turn's own calls: a slow provider makes the turn late, which the
-        design accepts, rather than making the recall fail for a reason that
-        says nothing about the answer.
+        """The historical-turn decision, parsed and logged as this caller sees it.
 
         The second half is *why* there is no decision — `""` when the model
         answered, otherwise `"failed"` or `"unparsed"`.  It rides the rebuild's
         answer because `recalled: 0` is the same number for a recall that found
         nothing and one nobody asked, and the person watching is owed the
-        difference.
-
-        The instruction is the decision tool's description, and the call is that
-        tool forced: the live messages go out exactly as they run, which is what
-        lets a follow-up be recognised from the conversation.  There is no
-        separate input — the conversation is the input.
+        difference.  The one-retry rule and the clock are `_ask_with_repair`'s.
         """
-        try:
-            text = await ask_model(agent, subagent, model, messages)
-        except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-            logger.info("recall_decision_failed reason=%s", type(exc).__name__)
-            logger.debug("the decision call raised", exc_info=True)
-            return None, "failed"
-        # **The raw arguments, for the one question the parsed answer cannot
-        # answer**: *why* a model that filled the tool a certain way did so.
-        # DEBUG because it is the model's text and this line is for whoever is
-        # already looking at the protocol; the parsed fields are the INFO line
-        # `rebuild` writes.
-        logger.debug("recall_decision_reply attempt=first %r", text)
-        decision, refusal = decisions.parse_with_reason(text)
-        if decision is not None:
-            return decision, ""
-        logger.info("recall_decision_unparsed reason=%s", refusal)
-        # **The one retry, and it is not the same bet as asking again.**  The
-        # model has already answered, so the provider works and the round trip
-        # is priced; what failed is the shape, and the shape is what the refusal
-        # names.  Asking once more with the answer and the reason is a
-        # correction, not a blind retry — and a model that cannot write the
-        # object twice falls back exactly as before.
-        try:
-            corrected = await ask_model(
-                agent,
-                subagent,
-                model,
-                messages,
-                previous=text,
-                repair=refusal,
-            )
-        except Exception as exc:  # noqa: BLE001 — the same fallback as above
-            logger.info("recall_decision_repair_failed reason=%s", type(exc).__name__)
-            logger.debug("the repair call raised", exc_info=True)
-            return None, "failed"
-        logger.debug("recall_decision_reply attempt=repair %r", corrected)
-        decision, refusal = decisions.parse_with_reason(corrected)
-        if decision is not None:
-            logger.info("recall_decision_repaired")
-            return decision, ""
-        logger.info("recall_decision_unparsed reason=%s attempt=repair", refusal)
-        return None, "unparsed"
+        return await _ask_with_repair(
+            lambda **kw: ask_model(agent, subagent, model, messages, **kw),
+            decisions.parse_with_reason,
+            label="recall_decision",
+            subject="decision",
+        )
 
     #: The decision-model call: a test's, or one client per model server kept for
     #: the process.
@@ -1336,50 +1316,20 @@ def build_server(
         selectable: list[int],
         usage: str = "",
     ) -> tuple[list[int] | None, str]:
-        """One selector call — or two, when the first answer could not be read.
+        """The live selection, parsed and logged as the compactor sees it.
 
-        **Never raises, and the one retry is a repair**, the rule `_decide`
-        states: a provider failure has no answer to correct and is `failed`; an
-        answer in hand this build cannot read is asked to correct itself once,
-        with the refusal naming the field.  A second refusal is `unparsed`, and
-        the caller compacts nothing — the turn continues and its next call is
-        the judge of whether that was enough.
+        A `None` means the caller compacts nothing: the turn continues and its
+        next call is the judge of whether that was enough.  The one-retry rule
+        and the clock are `_ask_with_repair`'s.
         """
-        try:
-            text = await select_model(
-                agent, subagent, model, messages, selectable, usage=usage
-            )
-        except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-            logger.info("live_selector_failed reason=%s", type(exc).__name__)
-            logger.debug("the selector call raised", exc_info=True)
-            return None, "failed"
-        logger.debug("live_selector_reply attempt=first %r", text)
-        drop, refusal = decisions.parse_live(text)
-        if drop is not None:
-            return drop, ""
-        logger.info("live_selector_unparsed reason=%s", refusal)
-        try:
-            corrected = await select_model(
-                agent,
-                subagent,
-                model,
-                messages,
-                selectable,
-                usage=usage,
-                previous=text,
-                repair=refusal,
-            )
-        except Exception as exc:  # noqa: BLE001 — the same fallback as above
-            logger.info("live_selector_repair_failed reason=%s", type(exc).__name__)
-            logger.debug("the repair call raised", exc_info=True)
-            return None, "failed"
-        logger.debug("live_selector_reply attempt=repair %r", corrected)
-        drop, refusal = decisions.parse_live(corrected)
-        if drop is not None:
-            logger.info("live_selector_repaired")
-            return drop, ""
-        logger.info("live_selector_unparsed reason=%s attempt=repair", refusal)
-        return None, "unparsed"
+        return await _ask_with_repair(
+            lambda **kw: select_model(
+                agent, subagent, model, messages, selectable, usage=usage, **kw
+            ),
+            decisions.parse_live,
+            label="live_selector",
+            subject="selector",
+        )
 
     @mcp.tool
     async def select_live(

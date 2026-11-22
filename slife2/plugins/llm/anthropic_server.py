@@ -37,6 +37,7 @@ from slife2.plugins.llm.server_common import (
     WireParts,
     build_backend_server,
     content_parts,
+    forced_tool,
     read_int,
     render_tool_result,
     sdk_client_factory,
@@ -356,16 +357,12 @@ def build_request(
     """The request body, containing only what the config asked for.
 
     `tool_choice` names the one tool the call must use and `thinking` overrides
-    the model's configured value for this call — `openai_server.build_request`
-    states the same two options, and a forced choice with no tool list is
-    refused here for the same reason.
+    the model's configured value for this call; the forced-choice guard is
+    `server_common.forced_tool`.
     """
     if thinking and settings.reasoning:
         settings = replace(settings, thinking=thinking)
-    if tool_choice and not tools:
-        raise ValueError(
-            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
-        )
+    forced_tool(tools, tool_choice)
     max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
     thinking_block = thinking_parameter(settings, max_tokens)
     # A model that did not ask for thinking is a model to which a signed block

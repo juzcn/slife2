@@ -248,6 +248,34 @@ class _TurnBuilder:
         )
 
 
+def call_options(tool_choice: str, thinking: str) -> dict[str, str]:
+    """The per-call options a streamer or request builder receives, when set.
+
+    Empty is the wire's ordinary behaviour, and a scripted streamer in a test
+    keeps its four-argument call: two always-present keywords would break every
+    one of them for an option none of those tests set.
+    """
+    options: dict[str, str] = {}
+    if tool_choice:
+        options["tool_choice"] = tool_choice
+    if thinking:
+        options["thinking"] = thinking
+    return options
+
+
+def forced_tool(tools: list[ToolSpec], tool_choice: str) -> None:
+    """Refuse a forced choice that names a tool the call does not send.
+
+    A forced choice with nothing to choose is a caller's bug this build refuses
+    rather than sends; every wire adapter calls this before writing
+    `tool_choice`.
+    """
+    if tool_choice and not tools:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
+        )
+
+
 async def stream_chat_impl(
     streamer: Streamer,
     provider: str,
@@ -290,21 +318,12 @@ async def stream_chat_impl(
     deterministically instead: the SDK stream is closed and the lease released
     on the way out, whichever way out it is.
 
-    **The two per-call options are forwarded only when set.**  `tool_choice`
-    forces the one tool the decision calls must use, and `thinking` overrides
-    the model's configured value for this call; empty is the wire's ordinary
-    behaviour, and a scripted streamer in a test keeps its four-argument call.
+    **The two per-call options are forwarded only when set** (`call_options`):
+    `tool_choice` forces the one tool the decision calls must use, and
+    `thinking` overrides the model's configured value for this call.
     """
     builder = _TurnBuilder()
     reported = 0
-    # **Passed only when asked for.**  A scripted streamer in a test speaks the
-    # four-argument call; adding two always-present keywords would break every
-    # one of them for an option none of those tests set.
-    options: dict[str, str] = {}
-    if tool_choice:
-        options["tool_choice"] = tool_choice
-    if thinking:
-        options["thinking"] = thinking
 
     async with contextlib.aclosing(
         streamer(
@@ -312,7 +331,7 @@ async def stream_chat_impl(
             [Message.from_wire(m) for m in messages],
             [ToolSpec.from_wire(t) for t in tools],
             model,
-            **options,
+            **call_options(tool_choice, thinking),
         )
     ) as events:
         async for event in events:
@@ -799,12 +818,9 @@ def sdk_streamer(
         # (`LiveProviders.lease`).
         async with pool.lease() as clients:
             settings = clients.provider(provider).model(model)
-            options: dict[str, str] = {}
-            if tool_choice:
-                options["tool_choice"] = tool_choice
-            if thinking:
-                options["thinking"] = thinking
-            request = build_request(messages, tools, settings, **options)
+            request = build_request(
+                messages, tools, settings, **call_options(tool_choice, thinking)
+            )
             response = await start(clients.client(provider), request)
             translate = translator()
             # **The response is closed on every way out of the loop.**  An

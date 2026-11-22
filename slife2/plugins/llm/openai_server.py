@@ -34,6 +34,7 @@ from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
     THINKING_BUDGET_SHARE,
     build_backend_server,
+    forced_tool,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
@@ -152,10 +153,9 @@ def build_request(
     without a network: which fields are present matters as much as their values,
     and "absent" is a real choice here rather than an oversight.
 
-    `tool_choice` names the one tool the call must use; it is written only when
-    a tool list is present, because a forced choice with nothing to choose is a
-    caller's bug this build refuses rather than sends.  `thinking` overrides the
-    model's configured `compat.thinking` for this call alone — the decision
+    `tool_choice` names the one tool the call must use; a forced choice with no
+    tool list is refused by `server_common.forced_tool`.  `thinking` overrides
+    the model's configured `compat.thinking` for this call alone — the decision
     calls disable it — and leaves the config's value on every ordinary turn.
 
     **The override applies when the model reasons natively or asks for thinking
@@ -178,10 +178,7 @@ def build_request(
         and (settings.reasoning or settings.thinking == "enabled")
     ):
         settings = replace(settings, thinking=thinking)
-    if tool_choice and not tools:
-        raise ValueError(
-            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
-        )
+    forced_tool(tools, tool_choice)
     request: dict[str, Any] = {
         "model": settings.model,
         "messages": to_provider_messages(messages, reasoning=settings.reasoning),
