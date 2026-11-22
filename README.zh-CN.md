@@ -460,6 +460,7 @@ agent 目录下。文件柜、调度器和终端收件箱由各自的 server 及
 ```yaml
 agent:
   max_iterations: 0          # 0 或缺省表示不设上限
+  compact_at: 0.9            # 占模型窗口的比例；0 关闭自动压缩
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -545,6 +546,9 @@ schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有�
 哪些轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的结果上按时间顺序运行。如果
 召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的上下文；轮次存储
 缺失则使该轮失败。
+
+一轮的内容超过模型窗口的 `agent.compact_at`（默认 0.9）时，该轮还会从自己的模型
+上下文中丢掉不再需要的消息。轮次日志保留每一条消息，下一轮仍从完整对话开始。
 
 模型用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用 `turn_read`
 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list` 按最新优先，每轮一行；

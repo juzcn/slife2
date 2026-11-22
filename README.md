@@ -520,6 +520,7 @@ policy decides: some servers run keyless, others refuse in their own words.
 ```yaml
 agent:
   max_iterations: 0          # 0 or absent means no cap
+  compact_at: 0.9            # of the model's window; 0 disables the automatic pass
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -611,6 +612,10 @@ A conversation does not accumulate an unbounded context. Before each turn,
 to recall from the turn log; the turn runs on the two selections in time order.
 If a recall matches more than fits, only what fits is returned. A failed decision
 keeps the context in hand; a missing turn store fails the turn.
+
+A turn that grows past `agent.compact_at` of the model's window (default 0.9)
+also drops what it no longer needs from its own model context. The turn log keeps
+every message, and the next turn starts from the full conversation.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary
