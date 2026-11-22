@@ -361,7 +361,7 @@ def test_a_moment_the_local_zone_cannot_write_is_a_refusal(
     `can_place` with it.
 
     The predicate is the one that must not raise: `slife2.libs.turn.context`
-    asks it about a discriminator's `since`/`until` while a bad bound is still
+    asks it about a decision model's `since`/`until` while a bad bound is still
     something it can drop, and an `OSError` out of there failed the turn the
     refusal exists to keep.  `at` is replaced here so the claim is the same on
     every runner; the platform's own spelling is what the fix reads.

@@ -111,7 +111,7 @@ class Restored:
 
 @dataclass(frozen=True)
 class Rebuilt:
-    """What a turn runs on after the discriminator chose.
+    """What a turn runs on after the decision was made.
 
     `covered` counts the rebuilt turns; what follows them is the caller's
     carried tail, which the store re-appended verbatim.  The decision's own
@@ -126,7 +126,7 @@ class Rebuilt:
     kept: int
     recalled: int
     rerank: str
-    discriminator: str
+    decision: str
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ class LiveChoice:
     """One live selector's answer: the view ids to drop, and why not if none.
 
     `drop` is empty for both "nothing worth dropping" and "no decision", and
-    `decision` tells the two apart the way `Rebuilt.discriminator` does for
+    `decision` tells the two apart the way `Rebuilt.decision` does for
     the rebuild.
     """
 
@@ -526,11 +526,11 @@ class TurnRuntime:
             raise unreadable(
                 "the context store", "report the recall's rerank status", payload
             )
-        discriminator = payload.get("discriminator")
-        if not isinstance(discriminator, str):
+        decision = payload.get("decision")
+        if not isinstance(decision, str):
             raise unreadable(
                 "the context store",
-                "report the discriminator's status",
+                "report the decision's status",
                 payload,
             )
         return Rebuilt(
@@ -541,7 +541,7 @@ class TurnRuntime:
             kept=kept,
             recalled=recalled,
             rerank=rerank,
-            discriminator=discriminator,
+            decision=decision,
         )
 
     # ── the turn's own compaction ────────────────────────────────────────

@@ -1436,7 +1436,7 @@ class A2AMesh:
 
         # A direct Message reply is a valid answer to a SendMessage in core
         # A2A.  `classify_reply` reports it as REPLY_TEXT, the same word a
-        # working status update gets, so the raw shape is the discriminator.
+        # working status update gets, so the raw shape is what tells them apart.
         result_obj = data.get("result") if isinstance(data, dict) else None
         if isinstance(result_obj, dict) and isinstance(result_obj.get("message"), dict):
             self._settle_direct_message(send, task_id, str(content), route)

@@ -12,8 +12,9 @@ one is load-bearing:
 
 **The context is chosen, not accumulated.**  Before every turn the agent says
 what to keep of the turns in hand and what to *recall* from the turn log, and the
-turn runs on the two together.  One model call decides it — the *discriminator* —
-and it is the single most expensive thing here, which is why a failure ends in
+turn runs on the two together.  One model call decides it — the *decision
+model* — and it is the single most expensive thing here, which is why a failure
+ends in
 "keep the context" rather than in a retry.  The exception is an answer this build
 cannot read: the refusal names the field (`parse_with_reason`) and the model is
 asked once more with that reason, because correcting an answer already in hand is
@@ -53,7 +54,7 @@ from slife2.libs.harness.markers import wrap
 from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import INTERRUPTED
 
-#: The discriminator's instruction, shipped as a template for the reason the
+#: The decision model's instruction, shipped as a template for the reason the
 #: system prompt is: it is text with holes in it, and a template says where they
 #: are.  Beside `system.j2` so both are found the same way.
 INSTRUCTION_TEMPLATE = "recall.j2"
@@ -76,7 +77,7 @@ SELECTION_TOOL_TEXT = (
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
-#: states the same for the discriminator).
+#: states the same for the decision model).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -96,7 +97,7 @@ LIVE_REPLY: dict[str, Any] = {
     },
 }
 
-#: The discriminator's tool schema: the types, the allowed values, and the one
+#: The decision model's tool schema: the types, the allowed values, and the one
 #: rule that couples the two fields.  The decision call is a forced tool call
 #: (SDD §2.3, "Schema over prompt"): the schema is the tool's `parameters`, so
 #: the field's wording is what the model fills, not a sentence it copies.
@@ -253,7 +254,7 @@ class _Refused:
     the other is the ordinary case.
 
     `reason` names the field and the shape it takes, because its reader is the
-    discriminator: `parse_with_reason` hands it back for the one repair round,
+    decision model: `parse_with_reason` hands it back for the one repair round,
     and a reason the model cannot act on would be a retry with no point.
     """
 
@@ -262,7 +263,7 @@ class _Refused:
 
 @dataclass(frozen=True)
 class Decision:
-    """What one discriminator reply decided.
+    """What one decision reply decided.
 
     `keep` is `None` for all the turns in hand, a list of ids for some of them,
     and an empty list for none.  `recall` is `None` for nothing to add, or a
@@ -357,7 +358,7 @@ def _keep(raw: Any) -> list[int] | _Refused | None:
     names — made *every* id resolve to a refusal, so the parse answered no
     decision and dropped the other half of the reply with it.  A valid `recall` beside the
     keep-list was thrown away and the model's instruction was ignored, with only
-    `recall_discriminator_unparsed` in the log to say so.
+    `recall_decision_unparsed` in the log to say so.
     """
     if raw is None:
         return None
@@ -384,7 +385,7 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     cannot cost a turn an earlier one found), while `query` is the words the
     keyword leg asks for — names, paths, exact strings — and the meaning
     fallback when there is no sentence, which is why a recalled turn may not
-    carry them.  There is no separate input: the discriminator reads the
+    carry them.  There is no separate input: the decision model reads the
     conversation the instruction is appended to.
 
     A key this build does not know is dropped rather than refused: the reply
@@ -427,7 +428,7 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     # because the two are different questions: `2026-13-99` is the right type
     # and in no grammar this build speaks.  Left to the store it would raise
     # `InvalidTimeBound` from inside a query, and the exception would fail the
-    # whole turn — the discriminator's answer is not a caller the harness can
+    # whole turn — the decision model's answer is not a caller the harness can
     # hand a refusal back to.  `slife2.helpers.timeutil.can_place` is the store's own
     # question asked while the answer is still "drop this reply".
     for key in ("since", "until"):
@@ -448,7 +449,7 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
 
 
 def parse_with_reason(text: str) -> tuple[Decision | None, str]:
-    """The decision in a discriminator's reply, and why there is none if there isn't.
+    """The decision in the model's reply, and why there is none if there isn't.
 
     **The reason is for the model, not the log.**  A refusal names the field and
     the shape it takes (`_Refused`), which is what the caller hands back with the
@@ -505,7 +506,7 @@ def repair_note(reason: str) -> str:
 
 
 def instruction() -> str:
-    """What the discriminator's tool says: the task, the cases, one guard.
+    """What the decision model is told: the task, the cases, one guard.
 
     **No input is passed beside the messages.**  The rebuild runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
@@ -814,7 +815,7 @@ def rebuild_report(
     kept: int,
     recalled: int,
     rerank: str,
-    discriminator: str,
+    decision: str,
     tokens: str,
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
@@ -824,15 +825,15 @@ def rebuild_report(
     `context_usage`'s text for the rebuilt list — an estimate of the messages,
     not the provider's measured count; the caller prefixes the `~` that says so.
 
-    `discriminator` non-empty means no decision was made at all: the turn keeps
+    `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
     made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
     the fused order stands and the report says so.  `changed` false is the
     ordinary no-op: the decision asked for exactly what was in hand.
     """
-    if discriminator:
+    if decision:
         return (
-            f"No rebuild: the decision model did not answer ({discriminator}); "
+            f"No rebuild: the decision model did not answer ({decision}); "
             f"the turn continues on the context it had; context ~{tokens}."
         )
     if not changed:

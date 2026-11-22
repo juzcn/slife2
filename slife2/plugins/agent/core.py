@@ -1365,13 +1365,13 @@ class AgentCore:
         )
         # **The turn's prompt.**  The context decision is the first boundary's
         # `_context_rebuild`, which runs after this marker is on the message and
-        # strips it for the discriminator's own prompt; the marker is removed in
+        # strips it for the decision model's own prompt; the marker is removed in
         # the `finally` below so the row, the next turn's rebuild and the
         # `[TURN:]` footnote never see it.  It is a prompt for this turn, not a
         # record of it.
         #
         # **The plan is read here because a rebuild cannot carry it.**  It is
-        # the conversation's own file, not a turn the discriminator chose
+        # the conversation's own file, not a turn the decision chose
         # between: this is the half of the prompt that survives whatever a
         # rebuild decides.  The context figure is not in the marker — it would
         # be the previous call's and the rebuild can change the list; the
@@ -2209,7 +2209,7 @@ class AgentCore:
                         # carried into this turn.
                         loop.covered += len(loop.messages) - loop.turn_opening
                         # ...and it is addressable now, which is what the next
-                        # turn's discriminator needs: a turn it cannot name is
+                        # turn's decision needs: a turn it cannot name is
                         # one a keep-list cannot keep.
                         self.recorder.address_turn(loop, outcome, item, turn_id)
         finally:
@@ -2652,14 +2652,13 @@ class AgentCore:
         loop.hidden.clear()
         loop.compact_hold = False
         logger.info(
-            "context_rebuilt %s changed=%s kept=%d recalled=%d rerank=%s "
-            "discriminator=%s",
+            "context_rebuilt %s changed=%s kept=%d recalled=%d rerank=%s decision=%s",
             describe((loop.agent, loop.subagent)),
             rebuilt.changed,
             rebuilt.kept,
             rebuilt.recalled,
             rebuilt.rerank or "-",
-            rebuilt.discriminator or "-",
+            rebuilt.decision or "-",
         )
         tokens = context_usage(
             estimate_turn_tokens([message.to_record() for message in loop.messages]),
@@ -2670,7 +2669,7 @@ class AgentCore:
             kept=rebuilt.kept,
             recalled=rebuilt.recalled,
             rerank=rebuilt.rerank,
-            discriminator=rebuilt.discriminator,
+            decision=rebuilt.decision,
             tokens=tokens,
         )
 

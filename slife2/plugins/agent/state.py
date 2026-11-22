@@ -308,7 +308,7 @@ class Loop:
     #: A loop is a *turn's* working state, not a property of the conversation's
     #: id.  One id can have two live turns in two processes — the agent server's
     #: own and an agent task standing in for the same conversation — and the
-    #: token is the discriminator every live-conversation tool needs: it is
+    #: token is the distinguishing value every live-conversation tool needs: it is
     #: minted where the turn starts, carried on every hop, and compared against
     #: this field before a tool touches the list or the inbox.
     #:

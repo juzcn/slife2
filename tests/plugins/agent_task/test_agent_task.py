@@ -100,7 +100,7 @@ def config(**task_overrides: Any) -> Config:
 
 
 @dataclass
-class Discriminator:
+class DecisionModel:
     """The context plugin's one model call, scripted — and counted.
 
     `{}` is SDD §5.5's common answer: what is in hand is the answer, so nothing is
@@ -150,7 +150,7 @@ class Store:
     """The real `slife2-context`, over the in-memory transport, and its calls."""
 
     client: Client
-    ask: Discriminator
+    ask: DecisionModel
     select: Selector | None = None
 
 
@@ -285,10 +285,10 @@ async def dead_window() -> AsyncIterator[Window]:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def store() -> Any:
-    """The real context store, and the discriminator it will ask."""
+    """The real context store, and the decision model it will ask."""
     from slife2.plugins.context.server import build_server as build_context
 
-    ask = Discriminator()
+    ask = DecisionModel()
     select = Selector()
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=ask, select=select)
@@ -669,7 +669,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
         hub=hub,
         context=Store(
             client=UnreadableStore(restore={"messages": [], "turns": []}),
-            ask=Discriminator(),
+            ask=DecisionModel(),
         ),
     )
     await start(built)
@@ -1089,7 +1089,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=discriminating)
     ) as context_client:
-        store = Store(client=context_client, ask=Discriminator())
+        store = Store(client=context_client, ask=DecisionModel())
         async with Client(context_client.transport) as writer:
             ids = []
             for word in ("alpha", "beta"):

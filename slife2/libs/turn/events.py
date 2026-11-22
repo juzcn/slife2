@@ -452,7 +452,7 @@ def decode(message: str) -> TurnEvent | None:
     # Every key `encode` always writes is required here: a hole is a line this
     # build did not write, not a value it may invent.  The keys `encode` omits
     # when they are empty (`args`, the iteration pair, a cut-in's receipt, a
-    # context's rerank and discriminator statuses) are the only ones absent may
+    # context's rerank and decision statuses) are the only ones absent may
     # stand for.
     match payload.get("t"):
         case "tools" if _counts_ok(payload, "n", "l"):

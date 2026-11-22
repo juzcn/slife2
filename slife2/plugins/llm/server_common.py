@@ -887,7 +887,7 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
             subagent: Which of that agent's conversations, empty for its own.
             kind: What sort of call this is — `turn` for the loop's own model
                 calls (a compaction call included: it is the turn's own work),
-                `discriminator` for the recall decision, the one call that
+                `decision` for the recall decision, the one call that
                 reaches this server outside the loop's backend.  Nothing is
                 keyed on it; it is the word the usage line is read by, because
                 the two are separate prompt lineages and a cache-hit ratio that

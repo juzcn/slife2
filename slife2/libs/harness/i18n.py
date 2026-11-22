@@ -144,7 +144,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "restored {turns}",
         "zh": "已恢复 {turns}",
     },
-    # What one turn's discriminator decided to run on.  Two counts that are not
+    # What one turn's context decision chose to run on.  Two counts that are not
     # the same number: what it kept of the conversation in hand, and how many
     # earlier turns it went to the log for.
     # The trim's five lists, as the one sentence the transcript shows.  The

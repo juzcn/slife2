@@ -35,7 +35,7 @@ plugin's API and not the model's either — but it is reached through
 `_context_rebuild`, a *harness tool*: LLM-visible, auto-invoked at the first
 boundary, and written into the conversation as a pair whose answer reports what
 was kept and recalled (`slife2.libs.turn.tools` tells the two words apart).  The
-model has `turn_list`, `turn_read` and `_context_rebuild`; the discriminator
+model has `turn_list`, `turn_read` and `_context_rebuild`; the decision model
 still decides the selection, and the footnote it reads on each turn is how it
 says what it wants kept without calling anything
 (`slife2.libs.turn.context`).
@@ -163,14 +163,14 @@ INSTRUCTIONS = (
 )
 
 
-#: The discriminator call, as a seam: the conversation in, the decision tool's
+#: The decision-model call, as a seam: the conversation in, the decision tool's
 #: arguments out.  A test injects one; production uses the model server named by
 #: the conversation's model.
 #:
 #: `previous` and `repair` are the second half of one call's life — the argument
 #: text that could not be read, and why — and are empty on the first ask.  A test
 #: that varies the decision can ignore them unless it is about the repair.
-class Discriminator(Protocol):
+class DecisionModel(Protocol):
     def __call__(
         self,
         agent: str,
@@ -187,7 +187,7 @@ class Selector(Protocol):
     """The live compaction selector, as a seam: the view and its candidates in,
     the selection tool's arguments out.
 
-    The same two-reply life as `Discriminator` — `previous` and `repair` carry
+    The same two-reply life as `DecisionModel` — `previous` and `repair` carry
     argument text that could not be read — and a test that varies the answer
     injects one instead of reaching a model server.
     """
@@ -239,7 +239,7 @@ async def _ask_model(
     bad answer is corrected, not a turn.
 
     **No progress handler**, which is what makes the call silent: the server
-    reports progress only to a caller that asked for a token, so a discriminator
+    reports progress only to a caller that asked for a token, so a decision
     turn reaches no transcript and no observer by construction rather than by a
     filter somebody has to remember.
 
@@ -258,7 +258,7 @@ async def _ask_model(
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
     result — so a model server from another build would arrive here as "the model
-    answered with nothing": `decision_arguments` raises, `_discriminate` logs the
+    answered with nothing": `decision_arguments` raises, `_decide` logs the
     call as failed and keeps the context, with the log pointing at the model's
     output rather than at the transport.  `slife2.clients.model` raises for
     exactly this on the loop's own hop, and this is the same check with the same
@@ -482,7 +482,7 @@ def decision_arguments(result: StreamChatResult) -> str:
 
     **A call is the decision.**  A response with no call is a provider that
     ignored a forced `tool_choice`; it has no answer to correct, so it is raised
-    and `_discriminate`'s or `_select_live`'s handler logs it as a failed call.
+    and `_decide`'s or `_select_live`'s handler logs it as a failed call.
     A damaged call keeps the model's own argument text (`raw_arguments`) so the
     parser can name what was wrong with it.
     """
@@ -499,7 +499,7 @@ def build_server(
     *,
     source: Callable[[], Config] | None = None,
     embedder: Embedder | None = None,
-    ask: Discriminator | None = None,
+    ask: DecisionModel | None = None,
     select: Selector | None = None,
 ) -> FastMCP:
     """Build the context server.
@@ -1083,11 +1083,11 @@ def build_server(
         messages: Sequence[dict[str, Any]],
         turn_ids: Sequence[int],
         rerank: str = "",
-        discriminator: str = "",
+        decision: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
-        **Four of `rebuild`'s exits are this one outcome** — a discriminator
+        **Four of `rebuild`'s exits are this one outcome** — a decision model
         that decided nothing, a decision that asks for nothing, a decision that
         equals what is held, and a selection that cannot be fetched — and they
         are one dict because they are one thing: nothing was fetched, nothing
@@ -1096,7 +1096,7 @@ def build_server(
         key to.
 
         There is no other exit named "the switch is off": `ContextSettings` has
-        no switch, and nothing here reads one.  The discriminator that answers
+        no switch, and nothing here reads one.  The decision model that answers
         nothing is the fourth, and `rebuild` logs it as its own reason
         (`no_decision`, not `context_sufficient`) because it is not a decision
         the model made.
@@ -1111,7 +1111,7 @@ def build_server(
         for a recall leave it empty; they did not lose a reranker, they never
         needed one.
 
-        `discriminator` is why no decision was made — the one exit above that is
+        `decision` is why no decision was made — the one exit above that is
         a failure rather than an answer.  It is what the caller reads to say the
         recall *failed* rather than found nothing; the four exits are still one
         answer, and only this one has something to report.
@@ -1123,7 +1123,7 @@ def build_server(
             "kept": len(turn_ids),
             "recalled": 0,
             "rerank": rerank,
-            "discriminator": discriminator,
+            "decision": decision,
         }
 
     @mcp.tool
@@ -1196,7 +1196,7 @@ def build_server(
         """
         return int(current().resolve(model)[2].context_window)
 
-    async def _discriminate(
+    async def _decide(
         agent: str,
         subagent: str,
         model: str,
@@ -1232,19 +1232,19 @@ def build_server(
         try:
             text = await ask_model(agent, subagent, model, messages)
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-            logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
-            logger.debug("the discriminator call raised", exc_info=True)
+            logger.info("recall_decision_failed reason=%s", type(exc).__name__)
+            logger.debug("the decision call raised", exc_info=True)
             return None, "failed"
         # **The raw arguments, for the one question the parsed answer cannot
         # answer**: *why* a model that filled the tool a certain way did so.
         # DEBUG because it is the model's text and this line is for whoever is
         # already looking at the protocol; the parsed fields are the INFO line
         # `rebuild` writes.
-        logger.debug("recall_discriminator_reply attempt=first %r", text)
+        logger.debug("recall_decision_reply attempt=first %r", text)
         decision, refusal = decisions.parse_with_reason(text)
         if decision is not None:
             return decision, ""
-        logger.info("recall_discriminator_unparsed reason=%s", refusal)
+        logger.info("recall_decision_unparsed reason=%s", refusal)
         # **The one retry, and it is not the same bet as asking again.**  The
         # model has already answered, so the provider works and the round trip
         # is priced; what failed is the shape, and the shape is what the refusal
@@ -1261,24 +1261,22 @@ def build_server(
                 repair=refusal,
             )
         except Exception as exc:  # noqa: BLE001 — the same fallback as above
-            logger.info(
-                "recall_discriminator_repair_failed reason=%s", type(exc).__name__
-            )
+            logger.info("recall_decision_repair_failed reason=%s", type(exc).__name__)
             logger.debug("the repair call raised", exc_info=True)
             return None, "failed"
-        logger.debug("recall_discriminator_reply attempt=repair %r", corrected)
+        logger.debug("recall_decision_reply attempt=repair %r", corrected)
         decision, refusal = decisions.parse_with_reason(corrected)
         if decision is not None:
-            logger.info("recall_discriminator_repaired")
+            logger.info("recall_decision_repaired")
             return decision, ""
-        logger.info("recall_discriminator_unparsed reason=%s attempt=repair", refusal)
+        logger.info("recall_decision_unparsed reason=%s attempt=repair", refusal)
         return None, "unparsed"
 
-    #: The discriminator call: a test's, or one client per model server kept for
+    #: The decision-model call: a test's, or one client per model server kept for
     #: the process.
     model_clients: dict[str, Client] = {}
     opening = asyncio.Lock()
-    ask_model: Discriminator = injected or (
+    ask_model: DecisionModel = injected or (
         lambda agent, subagent, model, messages, *, previous="", repair="": _ask_model(
             current(),
             model_clients,
@@ -1323,7 +1321,7 @@ def build_server(
     ) -> tuple[list[int] | None, str]:
         """One selector call — or two, when the first answer could not be read.
 
-        **Never raises, and the one retry is a repair**, the rule `_discriminate`
+        **Never raises, and the one retry is a repair**, the rule `_decide`
         states: a provider failure has no answer to correct and is `failed`; an
         answer in hand this build cannot read is asked to correct itself once,
         with the refusal naming the field.  A second refusal is `unparsed`, and
@@ -1431,7 +1429,7 @@ def build_server(
         recall from the turn log.  The two are joined by id and never reconciled,
         so an empty recall is harmless and only an explicit `"clear"` empties the
         context (`slife2.libs.turn.context` is where that is argued).  Every
-        turn in hand is excluded from the recall: the discriminator read all of
+        turn in hand is excluded from the recall: the decision model read all of
         them, so a turn it dropped from the keep-list was dropped deliberately,
         and a turn in both would spend retrieval depth and budget on something
         the union would collapse anyway.  The conversation is the input; there is
@@ -1451,7 +1449,7 @@ def build_server(
         Args:
             agent: Whose conversation.
             messages: The conversation as the caller holds it.  This is what the
-                discriminator reads — not a re-render of the stored turns, which
+                decision model reads — not a re-render of the stored turns, which
                 would be a second opinion about what is in hand.
             turn_ids: The turns those messages came from, in order.  The
                 keep-list is read as an intersection with this, so an id that has
@@ -1482,7 +1480,7 @@ def build_server(
             in hand), `rerank` — `""` when the cross-encoder ran or no
             question was asked, otherwise `"unavailable"`, `"failed"` or
             `"empty"`: the recall kept its fused order and the caller shows
-            that rather than swallowing it — and `discriminator`, `""` when
+            that rather than swallowing it — and `decision`, `""` when
             there was a decision, otherwise `"failed"` or `"unparsed"`: the
             recall never ran, and `recalled: 0` would otherwise read as one
             that found nothing.
@@ -1491,11 +1489,11 @@ def build_server(
         # **The conversation is the input.**  The rebuild runs at the first
         # boundary, after the turn's message was appended (or mid-turn, after a
         # cut-in); there is no separate prompt to pass.
-        decision, discriminator = await _discriminate(agent, subagent, model, messages)
+        decision, status = await _decide(agent, subagent, model, messages)
         # **Two ways to have no decision, and the log keeps them apart.**  Both
         # fall back to the turns in hand, and neither may be reported as the
-        # other: this line is the only sight anybody gets of the discriminator
-        # (`recall_discriminator_failed` and `_unparsed` are written a moment
+        # other: this line is the only sight anybody gets of the decision model
+        # (`recall_decision_failed` and `_unparsed` are written a moment
         # above and say *why* there was none), and a single `context_sufficient`
         # for both would make counting "the model decided the context was enough"
         # count every failed call and every unreadable reply as a decision the
@@ -1503,7 +1501,7 @@ def build_server(
         # word; no decision at all is the transport's.
         if decision is None:
             logger.info("recall_not_needed reason=no_decision")
-            return _in_hand(messages, turn_ids, discriminator=discriminator)
+            return _in_hand(messages, turn_ids, decision=status)
         # **What was decided, before what it led to.**  Every line below reports
         # an outcome — `recall_not_needed`, `recall_abandoned`, `recall_rebuilt`
         # — and none of them carries the two fields that chose it.  A live
@@ -1619,7 +1617,7 @@ def build_server(
             "rerank": rerank,
             # There *was* a decision — this path is only reached past the
             # `None` branch — so no failure is owed to the caller.
-            "discriminator": "",
+            "decision": "",
         }
 
     async def _recall_into(
@@ -1667,7 +1665,7 @@ def build_server(
         nothing, so the two halves cannot overfill the window by construction.
 
         **Every turn in hand is excluded from what is recalled.**  The
-        discriminator read the whole conversation, so a turn it left out of the
+        decision model read the whole conversation, so a turn it left out of the
         keep-list was left out deliberately; a recall that answered a query with
         it would overturn that, and spend retrieval depth and a share of the
         budget on a turn the caller already holds.  The exclusion is handed to
@@ -1675,7 +1673,7 @@ def build_server(
         filtering a short answer here.
 
         **The decision's sentences are the questions.**  There is no separate
-        input to append: the discriminator read the conversation, and a
+        input to append: the decision model read the conversation, and a
         sentence it wrote is the subject it chose to ask the log for.  A
         keyword-only recall keeps its query as the one meaning question, and a
         period recall has no question at all.
@@ -1755,7 +1753,7 @@ def build_server(
             until=until,
             anchor=anchor,
             limit=policy.recall_page_limit,
-            # **What is in hand, not only what was kept.**  The discriminator
+            # **What is in hand, not only what was kept.**  The decision model
             # read every turn in the conversation, so a turn it dropped was
             # dropped deliberately; and a turn in both would spend retrieval
             # depth or budget on something already held.  The exclusion is what
@@ -1804,7 +1802,7 @@ def build_server(
         **An unavailable or failing reranker is not a failed recall.**  The
         provider may serve no cross-encoder (`rerank_model` empty), the call may
         time out, or the answer may be malformed; all three keep the fused
-        order and log why, in the same spirit as a discriminator that could not
+        order and log why, in the same spirit as a decision that could not
         answer.  A *short* answer is malformed too: it is refused at both hops
         (`slife2.clients.embedder.RemoteEmbedder`, `slife2.plugins.llm.embeddings_server`)
         rather than read as "the missing candidates scored nothing".  What is

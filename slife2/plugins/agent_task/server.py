@@ -792,13 +792,13 @@ def build_server(
             turn.compact_hold = False
             logger.info(
                 "agent task %s: context_rebuild changed=%s kept=%d recalled=%d "
-                "rerank=%s discriminator=%s",
+                "rerank=%s decision=%s",
                 task.name,
                 rebuilt.changed,
                 rebuilt.kept,
                 rebuilt.recalled,
                 rebuilt.rerank or "-",
-                rebuilt.discriminator or "-",
+                rebuilt.decision or "-",
             )
             tokens = context_usage(
                 estimate_turn_tokens(
@@ -811,7 +811,7 @@ def build_server(
                 kept=rebuilt.kept,
                 recalled=rebuilt.recalled,
                 rerank=rebuilt.rerank,
-                discriminator=rebuilt.discriminator,
+                decision=rebuilt.decision,
                 tokens=tokens,
             )
 

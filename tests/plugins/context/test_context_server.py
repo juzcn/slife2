@@ -117,7 +117,7 @@ def _exchange(question: str, answer: str) -> list[dict]:
 
 
 class Replies:
-    """A discriminator that answers with whatever it was told to.
+    """A decision model that answers with whatever it was told to.
 
     The seam is the *decision*, not the transport, so what a test varies is what
     the model said — which is the only thing a rebuild does with the answer.
@@ -989,7 +989,7 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 ) -> None:
     """A shared context daemon serves every home, and models are per home.
 
-    The discriminator's model reference comes from the caller's conversation,
+    The decision model's model reference comes from the caller's conversation,
     but the daemon resolved it against the config it started with — a
     `ConfigError` in a second home, swallowed as "keep the context", so recall
     never ran there.
@@ -1333,12 +1333,12 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
-    assert answer.data["discriminator"] == "", "the model answered"
+    assert answer.data["decision"] == "", "the model answered"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
 async def _down(*arguments: Any) -> str:
-    """A discriminator whose model server never answers."""
+    """A decision model whose model server never answers."""
     raise RuntimeError("the model server is down")
 
 
@@ -1350,7 +1350,7 @@ async def _down(*arguments: Any) -> str:
     ],
 )
 @pytest.mark.asyncio
-async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
+async def test_a_decision_that_decided_nothing_says_the_recall_failed(
     ask: Any, status: str
 ) -> None:
     """**A recall nobody asked for is not a recall that found nothing.**
@@ -1381,7 +1381,7 @@ async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
     assert answer.data["changed"] is False
     assert answer.data["kept"] == 1
     assert answer.data["recalled"] == 0
-    assert answer.data["discriminator"] == status
+    assert answer.data["decision"] == status
 
 
 @pytest.mark.asyncio
@@ -1519,7 +1519,7 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
     assert answer.data["turn_ids"] == ids
     assert answer.data["recalled"] == 1
-    assert answer.data["discriminator"] == "", "the decision answered"
+    assert answer.data["decision"] == "", "the decision answered"
     # The premise: the kept turn ranks first, so without the exclusion it would
     # be the first thing the recall spends the headroom on.
     store = TurnStore(agent_dir("jack") / "turns.db")
@@ -1531,7 +1531,7 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> None:
     """**Every turn in hand is excluded, not only the kept ones.**
 
-    The discriminator read the whole conversation, so a turn it left out of the
+    The decision model read the whole conversation, so a turn it left out of the
     keep-list was left out deliberately: a recall that answered a query with it
     would overturn the decision it was made in.  The turn outside the
     conversation is still recalled — that is what the recall is for.
@@ -1563,7 +1563,7 @@ async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> Non
 async def test_a_sentence_recall_reads_the_decisions_sentences() -> None:
     """The decision's sentences are the meaning leg's questions.
 
-    There is no separate input to add: the discriminator read the conversation,
+    There is no separate input to add: the decision model read the conversation,
     and a sentence it wrote is the subject it chose to ask the log for.
     """
     reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
@@ -1871,7 +1871,7 @@ async def test_a_refused_reply_is_asked_again_with_the_reason() -> None:
     assert previous == "I could not decide.", "the model sees what it said"
     assert "not one JSON object" in repair, "and what was wrong with it"
     assert answer.data["changed"] is True, "the corrected decision was acted on"
-    assert answer.data["discriminator"] == "", "a repaired reply is a decision"
+    assert answer.data["decision"] == "", "a repaired reply is a decision"
     assert answer.data["turn_ids"] == []
 
 
@@ -1917,7 +1917,7 @@ async def test_a_failed_call_is_not_asked_again() -> None:
         answer = await _rebuild(client, "")
 
     assert calls == [""], "one ask, and the repair never ran"
-    assert answer.data["discriminator"] == "failed"
+    assert answer.data["decision"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -2067,7 +2067,7 @@ async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
     A reply of the right *shape* whose `since` is in no grammar this build speaks
     — `whenever`, `sometime last year` — is a boundary case the two halves of the
     system answer differently: a bound the *model* passes to `turn_list` is a
-    `ToolError` it reads and corrects, while a bound the *discriminator* writes is
+    `ToolError` it reads and corrects, while a bound the *decision model* writes is
     refused with the grammar and asked once more (the repair above).  Handed to
     the store it would raise from inside a query and fail the turn, so the reply
     is dropped where dropping is still something a caller can decide — and a
@@ -2436,7 +2436,7 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
 ) -> None:
     """**Four ways to keep the context, and the log may not fold any two of them.**
 
-    `rebuild`'s `_in_hand` is one answer for four situations — a discriminator
+    `rebuild`'s `_in_hand` is one answer for four situations — a decision model
     that decided nothing, a decision that asks for nothing, a decision that
     equals what is held, and a selection that cannot be fetched.  The outcome
     line it writes is the only sight anybody gets of *which exit* ran, and it
@@ -2452,7 +2452,7 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     """
     caplog.set_level(logging.INFO, logger=CONTEXT_LOGGER)
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # One server, one scripted discriminator, four calls: an unreadable reply
+    # One server, one scripted decision model, four calls: an unreadable reply
     # (and its repair, also unreadable), a decision that asks for nothing, a
     # decision equal to what is held, and a keep-list naming a turn the log does
     # not have.
@@ -2503,7 +2503,7 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
         assert answer.data["changed"] is False, "nothing was fetched or written"
         assert answer.data["recalled"] == 0
     said = [record.getMessage() for record in caplog.records]
-    assert any(line.startswith("recall_discriminator_unparsed") for line in said), (
+    assert any(line.startswith("recall_decision_unparsed") for line in said), (
         "the failure is named, and twice: the repair was refused too"
     )
     assert "recall_not_needed reason=no_decision" in said, "and it is not a decision"
@@ -2523,7 +2523,7 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
 
 
 @pytest.mark.asyncio
-async def test_the_discriminators_fields_are_logged(caplog) -> None:
+async def test_the_decisions_fields_are_logged(caplog) -> None:
     """**The outcome cannot say what was decided.**
 
     `recall_rebuilt turns=0 recalled=0 published=true` is the same line for a
@@ -2560,11 +2560,11 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
     recall = json.loads(decided.partition("recall=")[2])
     assert recall["sentences"] == ["the code review prompt"]
     assert any(
-        line.startswith("recall_discriminator_reply attempt=first ") for line in said
+        line.startswith("recall_decision_reply attempt=first ") for line in said
     ), "the raw reply is kept for the shape the parser read"
 
 
-# --- the transport, which the discriminator cannot see from where it sits ------
+# --- the transport, which the decision model cannot see from where it sits ------
 
 
 class NoStructuredContent:
@@ -2587,7 +2587,7 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
 
     `StreamChatResult.from_wire(None)` builds a result with no text, so a model
     server from another build reached `_discriminate` as "the model answered
-    with nothing": it logged `recall_discriminator_unparsed` and kept the
+    with nothing": it logged `recall_decision_unparsed` and kept the
     context, and so did every rebuild for the rest of the session — pointing
     whoever read the log at the model's output rather than at the transport.
     `slife2.clients.model` raises for this on the loop's own hop, and this is

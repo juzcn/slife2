@@ -15,7 +15,7 @@ Bytes need no vocabulary and cost one expression to measure, and a UTF-8 byte
 tracks text volume across scripts better than a character does.
 
 **Why the head and not a selection.**  Choosing the *interesting* lines is what
-a discriminator model call used to do here.  It was expensive — every shortened
+a model call used to do here.  It was expensive — every shortened
 result paid a second model call carrying the result and the conversation — and
 it was unreliable in the way that matters: its input could itself be the whole
 output, so the step meant to protect the context could overflow it.  A

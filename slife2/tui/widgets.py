@@ -624,7 +624,7 @@ class ChatView(VerticalScroll):
         is a pure harness note, which never carries one.
 
         **The turn stays open by default, and that is load-bearing.**  A note
-        lands *inside* a turn that is still going: the discriminator's `[kept …]`
+        lands *inside* a turn that is still going: the decision model's `[kept …]`
         arrives before the first delta, and everything the model then streams has
         to flow into the block under it — closing the turn here would make
         `append_text` drop the rest of the answer as though it belonged to
@@ -698,7 +698,7 @@ class ChatView(VerticalScroll):
         leave it to be closed again by anything that writes a line first:
         `add_note` closes the block it is given, so a note arriving before the
         first delta would leave an empty assistant block in the transcript, a
-        blank gap between the prompt and the answer.  The discriminator's note
+        blank gap between the prompt and the answer.  The decision model's note
         is such a line, and so is `[interrupted]` on a turn that streamed
         nothing before it was interrupted.
 

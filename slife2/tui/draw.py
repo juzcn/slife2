@@ -64,7 +64,7 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
             is_harness(name) and is_harness_call(call_id)
         ):
             # **The machinery's own pair is the note on its answer.**  The call
-            # id is the discriminator: a model's own call to any harness tool —
+            # id is what tells the two apart: a model's own call to any harness tool —
             # `_check_new_input` included — falls through to the ordinary panel
             # below.
             return True

@@ -398,7 +398,7 @@ class Recorder:
         """Make one recorded turn addressable — its id and its footnote as one act.
 
         **They are one act, and separating them fails in both directions.**  An
-        id in `turn_ids` that no message carries is a turn the discriminator
+        id in `turn_ids` that no message carries is a turn the decision
         cannot name: the ids it writes in a keep-list are the ones it read, and
         it reads them in `[TURN:…]`.  A footnote whose id is not in `turn_ids`
         is worse: the keep-list contains it, and `rebuild`'s intersection drops

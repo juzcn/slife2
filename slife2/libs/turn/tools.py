@@ -59,7 +59,7 @@ no boundary the harness alone knows better, and each edits a view the record
 keeps.  The compaction hides messages from the rest of the turn; the rebuild
 changes only the historical selection, never the turn running (it has no id
 yet), and a dropped turn is still in the log for a later rebuild to recall.
-The discriminator makes the selection — the model supplies an intent, not a
+The decision model makes the selection — the model supplies an intent, not a
 list — which is what keeps the call an edit rather than a deletion.  A tool
 that *would* do damage there is not protected from being one; it is simply not
 one — it stays undeclared, which is what the audience gate is for.

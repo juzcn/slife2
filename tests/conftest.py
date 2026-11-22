@@ -68,7 +68,7 @@ from slife2.libs.turn import tokens
 #:     network, the peers a turn of the agent's own reaches directly; the leak
 #:     that would *write* to a developer's real conversation goes through the
 #:     runtime.
-#:   * `context_server` — the model its discriminator needs to choose a context.
+#:   * `context_server` — the model its decision needs to choose a context.
 #:   * `llm.client` — `open_backend`, which is how anything above reaches a
 #:     model server at all.
 #:   * `embedder` — the embeddings endpoint, the other paid address.

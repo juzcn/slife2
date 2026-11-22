@@ -719,7 +719,7 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     the whole turn in view.
 
     **Tool results and tool-call arguments are out, and that is measured.**  With
-    30 discriminator-style subject queries over the same log, dropping the
+    30 decision-style subject queries over the same log, dropping the
     per-call argument head raised MRR from 0.83 to 0.88, and adding the reasoning
     raised it to 0.92 (hit@1 0.77 to 0.90); keeping the full arguments as well
     cost 2.7x the chunks and recovered one query.  Results are 56–99% of a
@@ -1355,7 +1355,7 @@ class TurnStore:
         against it.
 
         **`exclude` is what the caller already holds.**  A rebuild passes the
-        live list: the discriminator read every turn in it, so a recall is asked
+        live list: the decision model read every turn in it, so a recall is asked
         for what is missing rather than for what is in hand, and a turn in it
         would spend a candidate slot, a place in the `k` and a share of the
         token budget on something already there.  All three branches filter

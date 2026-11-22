@@ -115,7 +115,7 @@ def test_a_tool_result_and_its_call_are_not_what_a_turn_is_about() -> None:
 
     Tool results are already out — they are 56–99% of a turn's text.  The
     call's argument head followed them after the chunked index made
-    the cost visible: on this repository's live log, with 30 discriminator-style
+    the cost visible: on this repository's live log, with 30 decision-style
     subject queries, dropping it raised MRR from 0.83 to 0.88, and keeping the
     full arguments cost 2.7x the chunks to recover one query.  A result is still
     in the turn, which is what `turn_read` reads.

@@ -197,7 +197,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
             "kept": 2,
             "recalled": 1,
             "rerank": "unavailable",
-            "discriminator": "",
+            "decision": "",
         }
     )
     messages = [
@@ -212,7 +212,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
     assert rebuilt.turn_ids == [7, 8]
     assert (rebuilt.changed, rebuilt.kept, rebuilt.recalled) == (True, 2, 1)
-    assert (rebuilt.rerank, rebuilt.discriminator) == ("unavailable", "")
+    assert (rebuilt.rerank, rebuilt.decision) == ("unavailable", "")
     name, arguments = store.calls[0]
     assert name == "rebuild"
     assert arguments == {
@@ -241,7 +241,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
             "kept": 0,
             "recalled": 0,
             "rerank": "",
-            "discriminator": "",
+            "decision": "",
         }
     )
 
@@ -270,7 +270,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "kept": 0,
                 "recalled": 0,
                 "rerank": "",
-                "discriminator": "",
+                "decision": "",
             },
             "message list",
         ),
@@ -281,7 +281,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "kept": 0,
                 "recalled": 0,
                 "rerank": "",
-                "discriminator": "",
+                "decision": "",
             },
             "turn-id list",
         ),
@@ -308,7 +308,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "recalled": 0,
                 "rerank": "",
             },
-            "discriminator's status",
+            "decision's status",
         ),
     ],
 )
@@ -332,7 +332,7 @@ async def test_rebuild_refuses_a_turn_id_that_is_not_one(
         "kept": 0,
         "recalled": 0,
         "rerank": "",
-        "discriminator": "",
+        "decision": "",
     }
     with pytest.raises(UnreadableAnswer, match="turn-id list"):
         await wired(Store(rebuild=answer)).rebuild(IDENTITY, [], [], 0, REF.reference)
@@ -355,7 +355,7 @@ async def test_rebuild_refuses_counts_that_are_not_ints(
         "kept": kept,
         "recalled": recalled,
         "rerank": "",
-        "discriminator": "",
+        "decision": "",
     }
     with pytest.raises(UnreadableAnswer, match="counts"):
         await wired(Store(rebuild=answer)).rebuild(IDENTITY, [], [], 0, REF.reference)

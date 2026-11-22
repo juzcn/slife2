@@ -531,7 +531,7 @@ class StubEmbedder:
 async def keep_the_context(
     agent: str, subagent: str, model: str, messages: list[Any]
 ) -> str:
-    """A discriminator that answers "keep what is in hand" — `{}`.
+    """A decision model that answers "keep what is in hand" — `{}`.
 
     **The context plugin's other real seam, and the one that is easy to leave
     open.**  `build_server` takes `ask`, and an un-injected one is a *real model

@@ -3,7 +3,7 @@
 A transcript holds three kinds of line — what the person said, what the model
 said, and what the *harness* did — and the third is the one nothing in the
 conversation itself accounts for: history came back when the window opened, the
-discriminator kept some turns and went to the log for others, a turn was
+decision model kept some turns and went to the log for others, a turn was
 cancelled, a peer came online or went away.  This is the one place their words
 are written, so a reader who has learned `[restored 3 turns]` meets the same
 shape everywhere and a producer cannot quietly invent a fourth spelling.
@@ -51,7 +51,7 @@ def as_turns(count: int) -> str:
     """`3 turns`, or `1 turn` — the phrase the counting notes are written in.
 
     Shared rather than spelled twice: the restored-history note and the
-    discriminator's note are the same kind of line, and a reader who has learned
+    decision model's note are the same kind of line, and a reader who has learned
     to read one should not meet `1 turns` in the other.
 
     **The choice between the two spellings is made here**, in the one place that

@@ -508,7 +508,7 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
     everything" is the only thing that can be said about them.
 
     A rebuild that decides to keep everything rebuilds nothing at all, and the
-    fixture's discriminator answers `{}` — which *is* that case — so
+    fixture's decision model answers `{}` — which *is* that case — so
     `messages_from_turns` is never reached and the annotation is the only thing
     that can be putting a footnote here.  That is what makes this a test of the
     annotation rather than of the rebuild's renderer.
@@ -633,7 +633,7 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
 
     A subagent owns its conversation, and its turns are written to its own
     store — so the newest turn in its live list has to be as addressable as its
-    maker's.  Without the footnote the discriminator cannot name the turn it was
+    maker's.  Without the footnote the decision cannot name the turn it was
     just given, and a keep-list silently drops it.  The second half of the key
     is the half that used to decide this; the annotation must not read it.
     """
@@ -2171,7 +2171,7 @@ async def test_a_failed_turn_is_annotated_when_the_next_turn_settles_its_id(
     and `annotate_turn` cannot run there.  The next turn waits for the write
     (`settle_record`) and is the first moment the id exists — so that is where
     the footnote belongs too.  An id that joins `turn_ids` without one is a turn
-    the discriminator can never name in a keep-list, which is the whole reason
+    the decision can never name in a keep-list, which is the whole reason
     the footnote exists.
 
     The spelling is checked against the row, not merely for being present: the
@@ -3171,7 +3171,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
             "kept": len(turn_ids),
             "recalled": 0,
             "rerank": "",
-            "discriminator": "",
+            "decision": "",
         }
 
     state = {"refuse_next": True, "next_id": 1}

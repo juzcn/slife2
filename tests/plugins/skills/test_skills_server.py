@@ -161,7 +161,7 @@ async def test_skill_use_returns_a_long_playbook_whole(
 
     The document is the answer.  A result too large for the conversation is the
     harness's oversized-result path, which stores it and lets the dump
-    discriminator choose the lines the conversation carries; a shorter answer
+    model choose the lines the conversation carries; a shorter answer
     invented here would stop a procedure in the middle of a step.
     """
     skill(isolated_runtime, "long", body="\n".join(f"step {n}" for n in range(20000)))

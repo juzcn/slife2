@@ -288,7 +288,8 @@ def can_place(value: str, *, role: str = "since") -> bool:
     caller that hands a model-written bound straight to the store finds out it
     is unreadable as an `InvalidTimeBound` out of the middle of a query — which
     is the right thing for a caller with no answer, and the wrong thing for one
-    that has a better answer available.  `slife2.libs.turn.context`'s discriminator reply
+    that has a better answer available.  `slife2.libs.turn.context`'s
+    decision-model reply
     is the second kind: a bound it cannot place is a reply it should drop, and
     an exception out of there fails a whole turn that had a perfectly good
     fallback.

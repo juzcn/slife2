@@ -1180,7 +1180,7 @@ async def test_a_turn_rides_beside_a_call_the_hub_routes() -> None:
     A live-conversation tool resolves a loop by `(agent, subagent)`, and that id
     alone cannot tell the agent server's own turn from an agent task standing in
     for the same conversation.  The token the caller's broker minted is the
-    discriminator, and a proxy has to pass it on: the hub forwards it to the
+    what tells them apart, and a proxy has to pass it on: the hub forwards it to the
     plugin that runs the tool, beside — not inside — the conversation identity.
     """
     seen: dict[str, Any] = {}
