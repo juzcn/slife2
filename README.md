@@ -322,7 +322,7 @@ one server.
 | `slife2-llm-openai-responses` | OpenAI Responses | 24003 |
 | `slife2-llm-embeddings` | Embeddings | 24004 |
 | `slife2-tui` | Terminal inbox, one session per agent | 24005 |
-| `slife2-context` | Turn log and context decision | 24010 |
+| `slife2-context` | Turn log and context decisions | 24010 |
 | `slife2-toolhub` | Tool catalogue and model tool list | 24020 |
 | `slife2-wechat` | WeChat login and messaging | 24030 |
 | `slife2-skills` | Playbooks and `skill_use` | 24031 |
@@ -615,6 +615,10 @@ itself. The turn running is never part of the selection. The model can call
 estimate of the context the turn runs on from there. If a recall matches more
 than fits, only what fits is returned. A failed decision keeps the context in
 hand; a missing turn store fails the turn.
+
+`_context_rebuild` and `_turn_compact` are the two decision tools: each runs one
+decision-model call, forced to a structured answer, and a decision that fails or
+cannot be read leaves the turn on the context it has.
 
 A turn that grows past `agent.compact_at` of the model's window (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`

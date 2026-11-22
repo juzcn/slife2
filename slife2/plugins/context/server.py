@@ -16,28 +16,39 @@ a server.  `TurnStore` is therefore imported by the process that writes it, and
 this plugin is a serve face over that import: one holder of the schema, one
 embedder hop, one startup pass over every file, for the half it owns.
 
-The two decisions, and where they sit in a turn
------------------------------------------------
-`restore` runs when a conversation starts, and `rebuild` is the other half of
-the first boundary's `_context_rebuild`:
+The two decision models, and where they sit in a turn
+-----------------------------------------------------
+`restore` runs when a conversation starts.  After it, both model decisions are
+made through this plugin: `rebuild` for `_context_rebuild` at the first
+boundary, and `select_live` for `_turn_compact` when the turn crosses
+`agent.compact_at`:
 
 ```
 send_message
   └─ the first message for a key → restore      ← the exit-time context, replayed
   └─ per turn, inside the lock:
        run the turn (the loop appends the message)
-       first iteration boundary → _context_rebuild   ← keep ∪ recall, one model call
-       save                                       the new id joins the live list
+       first boundary → _context_rebuild        ← keep ∪ recall, one decision call
+       each compact_at crossing → _turn_compact ← what the turn still needs,
+                                                  one decision call
+       save                                     the new id joins the live list
 ```
+
+**The two decisions are one contract.**  `_ask_tool` builds the forced request
+and the repair exchange, `_ask_with_repair` holds the one-retry rule, and
+`_ask_model` and `_ask_selector` keep only their schema, instruction and log
+subject; SDD §5.3 states the contract both answer to.  A failed decision is not
+a failed turn: `rebuild` keeps the context in hand and `select_live` compacts
+nothing.
 
 **`restore` is the harness's API and not the model's.**  `rebuild` is this
 plugin's API and not the model's either — but it is reached through
 `_context_rebuild`, a *harness tool*: LLM-visible, auto-invoked at the first
 boundary, and written into the conversation as a pair whose answer reports what
 was kept and recalled (`slife2.libs.turn.tools` tells the two words apart).  The
-model has `turn_list`, `turn_read` and `_context_rebuild`; the decision model
-still decides the selection, and the footnote it reads on each turn is how it
-says what it wants kept without calling anything
+model has `turn_list`, `turn_read`, `_context_rebuild` and `_turn_compact`; the
+decision model still decides the selection, and the footnote it reads on each
+turn is how it says what it wants kept without calling anything
 (`slife2.libs.turn.context`).
 
 What is deliberately absent

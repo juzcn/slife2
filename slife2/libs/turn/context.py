@@ -28,6 +28,12 @@ would have discarded the context it replaced, so a query that merely failed to
 match would empty it and the turn would be answered from the system prompt
 alone.  Clearing is only ever the explicit clear.
 
+**The live selection is the same decision, one question later.**  `_turn_compact`
+asks which of the running turn's messages it no longer needs; `parse_live` reads
+that answer into message positions, and `LIVE_REPLY` is its schema.  The same
+call, repair and failure rules apply (`slife2.plugins.context.server`; SDD §5.3).
+Its answer edits a view, never the history.
+
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
 a row every time a list is built and never stored.  `turn_prompt_note` is
@@ -61,7 +67,7 @@ from slife2.libs.turn.tools import INTERRUPTED
 INSTRUCTION_TEMPLATE = "recall.j2"
 
 #: The live compaction selector's instruction — the same kind of template, and
-#: the same entry point, one decision later in a turn.
+#: the same entry point, as `INSTRUCTION_TEMPLATE`.
 LIVE_TEMPLATE = "live.j2"
 
 #: The two decision tools, and the one line each tool says about itself.  The

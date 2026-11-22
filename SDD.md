@@ -244,7 +244,7 @@ Each plugin has one job:
 | Plugin | Job |
 |---|---|
 | `agent` | The conversation loops |
-| `context` | The turn log and the context decision |
+| `context` | The turn log and the context decisions |
 | `toolhub` | The tool set |
 | `slife2-llm-*` | One wire protocol each |
 | `mcp-tools`, `restapi-tools` | Outward connections for `mcp:` and `rest-api:` |
@@ -1004,19 +1004,45 @@ moments, the model may call either itself, and both edit what the turn runs on
 without touching the record (`_turn_compact` hides from the view, §5.5;
 `_context_rebuild` chooses the historical turns). They are also **the two
 decision tools**: each body runs one decision model call over the live view,
-and a call costs a second `stream_chat`, logged under its own `kind` and not
-added to the turn's own bill.
+and the contract below is what that call answers to.
 
-**Decision tools are LLM-backed harness tools.** A decision tool is a harness
-tool whose body runs one decision model call and applies its answer;
-`_context_rebuild` and `_turn_compact` are its two instances today. The call
-appends the decision instruction to the live conversation as a system message,
-declares one tool (`decide_context`, `select_messages`) whose `parameters` is
-the reply schema, and `tool_choice` forces that tool, so the answer is the
-tool's arguments and not prose. Thinking is off for the call — a thinking
-endpoint rejects a forced choice — and one unreadable answer is repaired with
-a tool result naming the reason; a second is no decision. The model chooses;
-the harness applies. No other harness tool calls a model.
+**Decision tools are LLM-backed harness tools under one contract.** A decision
+tool is a harness tool whose body runs exactly one decision model call and
+applies its answer; `_context_rebuild` (whose decision is `decide_context`) and
+`_turn_compact` (whose is `select_messages`) are its two instances today. The
+contract:
+
+1. **The call is structured.** The live messages go out as the turn runs them,
+   followed by the decision instruction as a system message; one tool is
+   advertised, with the reply schema as its `parameters`, and `tool_choice`
+   forces it, so the answer is the tool's arguments and not prose. A reply with
+   no call or a call to another tool is no answer — never a `{}` or an empty
+   selection.
+2. **Thinking is off.** A thinking endpoint rejects a forced `tool_choice`
+   (DeepSeek answers 400), and the structured call is what makes the answer
+   readable; the turn's own calls keep the configured thinking.
+3. **The call is silent.** It is made with no progress handler, so no decision
+   call reaches the transcript or an observer. The model server's usage line
+   names the call's `kind` (`decision`, `compactor`), and its tokens are not
+   added to the turn's bill.
+4. **It has no clock of its own.** The waits are the model service's, as for the
+   turn's own calls; a slow provider makes the turn late, and a failed call is
+   no decision rather than a failed turn.
+5. **One repair, never a retry.** An answer that cannot be read is handed back
+   as the model's own tool call with a tool result naming the reason; a second
+   refusal is no decision. A provider failure has no answer to correct and is
+   not asked again.
+6. **A failure keeps what is in hand.** A rebuild with no decision keeps the
+   context it had; a compaction with no decision hides nothing; the turn
+   continues either way.
+
+Both instances are the same call. `_ask_tool` builds the forced request and the
+repair exchange, `_ask_with_repair` holds the one-retry rule, and `_ask_model`
+and `_ask_selector` keep only their schema, instruction and log subject. The
+three wire adapters share `forced_tool` — a forced choice naming a tool the call
+does not send is refused, not sent — and `call_options`, which forwards the two
+per-call options only when set. The model chooses; the harness applies. No other
+harness tool calls a model.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -1127,32 +1153,23 @@ already. There is no separate input argument. Its answer is a selection, never a
 dump. The common answer is `{}`: a decision that asks for exactly what is in
 hand rebuilds nothing.
 
-The answer is a **forced tool call**, not model content: the decision
-instruction is a system message appended to the live conversation, and
-`tool_choice` names `decide_context`, whose `parameters` is `RECALL_REPLY`.
-Thinking is off for that call — a thinking endpoint rejects a forced choice —
-and the turn's own calls keep theirs; a model whose `compat.thinking: omit`
-says its endpoint refuses the field is not overridden, and a forced choice
+The answer is the forced `decide_context` call under §5.3's contract. The
+conversation is the input, exactly as the turn runs it, and the instruction is
+the one system message appended to it. A model whose `compat.thinking: omit`
+says its endpoint refuses the thinking field is not overridden; a forced choice
 the endpoint still refuses fails the decision and keeps the context (Appendix
-C). The conversation is the input, exactly as the turn runs it; the
-instruction is the one system message appended to it. A model left free in a
-tool-heavy conversation continues it instead of deciding, and a call naming
-any tool but the forced one is that same continuation: it is not a decision,
-whatever its arguments happen to parse to.
+C). A model left free in a tool-heavy conversation continues it instead of
+deciding, and a call naming any tool but the forced one is that same
+continuation: it is not a decision, whatever its arguments happen to parse to.
 
 Rules:
 
-- **An unreadable reply is asked once more, then it is not a decision.** The
-  refusal names the field (`parse_with_reason`), and the decision model is asked
-  again with its own reply and that reason — a correction to an answer already in
-  hand, not the blind retry a provider failure would be. A second refusal ends
-  it: the turn runs on the context it already has (Appendix C). The rebuild
-  reports the decision model's status (`failed`, `unparsed`, or empty) in its
-  answer, and a failed call answers `No rebuild: the decision model did not
-  answer (…)` — a recall nobody asked for is not a recall that found nothing.
-  **The decision model has no clock of its own**: it
-  is a model call like the turn's own, bounded by the model service, and a slow
-  provider makes the turn late rather than the recall fail.
+- **A `failed` or `unparsed` decision is reported, not hidden.** The refusal
+  names the field (`parse_with_reason`) and the one repair is §5.3's; a second
+  refusal ends it and the turn runs on the context it already has (Appendix C).
+  The rebuild reports the decision model's status in its answer, and a failed
+  call answers `No rebuild: the decision model did not answer (…)` — a recall
+  nobody asked for is not a recall that found nothing.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
@@ -1222,15 +1239,14 @@ Rules:
 live selection decision — a forced `select_messages` tool call over the view,
 numbered `[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages
 this turn no longer needs, and hides them from the list the rest of the turn is
-sent (`libs/turn/compact.py`). The selection decision is the same decision tool
-one decision later: the same forced tool, the same thinking off. It is shown the last measured call and the
+sent (`libs/turn/compact.py`). The selection decision is a decision tool call
+under §5.3's contract. It is shown the last measured call and the
 conversation's window, through the same `context_usage` the status bar uses, so
-the model and the person read
-one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
-the store's live-context list are the conversation, and the next turn starts
-from the full list. The system message and the turn's opening message are the
-only fixed messages; every other message, historical or current, is the model's
-to drop. The legality of a tool exchange is the *prompt's* rule — a call and its
+the model and the person read one figure. **Nothing is removed**: the live list,
+the turn's row, `covered` and the store's live-context list are the
+conversation, and the next turn starts from the full list. The system message
+and the turn's opening message are the only fixed messages; every other
+message, historical or current, is the model's to drop. The legality of a tool exchange is the *prompt's* rule — a call and its
 results go together — and the harness applies the answer as it came: a split
 pair is a failed next call, one turn, not a repaired answer. A selection
 decision that fails or cannot be read compacts nothing and the turn continues
@@ -1243,12 +1259,13 @@ the harness should ask again at every boundary. The model can still call
 **The rebuild is the durable edit; the compaction is the transient view.**
 `_context_rebuild` asks its decision model which historical turns to keep and
 which to recall from the turn log. The turn running has no id yet and is carried
-verbatim, so the selection is the history alone. It is a harness tool: the
-harness calls it at the first boundary, the model may call it when the work has
-moved, and its pair is the visibility — the answer reports kept/recalled and an
-estimate of the context the turn runs on from there (`estimate_turn_tokens` plus
-`context_usage`), never a provider measurement. The turn log keeps every turn; a
-dropped one can be recalled by a later rebuild. A rebuild resets the
+verbatim, so the selection is the history alone. It is a harness tool under
+§5.3's contract: the harness calls it at the first boundary, the model may call
+it when the work has moved, and its pair is the visibility — the answer reports
+kept/recalled and an estimate of the context the turn runs on from there
+(`estimate_turn_tokens` plus `context_usage`), never a provider measurement.
+The turn log keeps every turn; a dropped one can be recalled by a later
+rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
 over. The two tools share the pair and the failure rules: an answer that cannot
 be read is the decision's `failed`/`unparsed` and the turn continues on the
