@@ -230,6 +230,13 @@ async def _ask_model(
     call and none of it is stored — the repair is how a bad answer is corrected,
     not a turn.
 
+    **The instruction is a system message**, and that is what keeps the harness's
+    request apart from the conversation's own user message.  As a second user
+    turn the two read as one request: a turn whose prompt asked the model to act
+    — testing the harness tools itself was the case that found this — answered
+    with a tool call instead of the decision.  A system message says whose
+    request it is; the conversation stays the decision's input.
+
     The client is opened once per *model server* and kept for the process — the
     agent server's arrangement, for the agent server's reason: a handshake per
     call is a handshake per call.  Keyed by URL because a server speaks one wire
@@ -254,7 +261,7 @@ async def _ask_model(
     """
     asked = [
         *messages,
-        {"role": "user", "content": decisions.instruction()},
+        {"role": "system", "content": decisions.instruction()},
     ]
     if repair:
         # The model's own refused answer, then what was wrong with it.  An empty
@@ -295,8 +302,10 @@ async def _ask_selector(
     each message of this request; the record, the turn's saved row and every
     ordinary call keep the list they had.  The instruction names the candidates,
     the legality rule and the context figure the caller measured — the same
-    figure the status bar and the turn prompt show.  The transport's rules are
-    `_stream_chat`'s.
+    figure the status bar and the turn prompt show.  It is a system message for
+    `_ask_model`'s reason: the view already ends with the turn's own exchange,
+    and a second user turn would read as one request with it.  The transport's
+    rules are `_stream_chat`'s.
     """
     numbered = [
         decisions.with_message_id(message, index)
@@ -304,7 +313,7 @@ async def _ask_selector(
     ]
     asked = [
         *numbered,
-        {"role": "user", "content": decisions.live_instruction(selectable, usage)},
+        {"role": "system", "content": decisions.live_instruction(selectable, usage)},
     ]
     if repair:
         if previous:
@@ -1126,10 +1135,11 @@ def build_server(
         nothing and one nobody asked, and the person watching is owed the
         difference.
 
-        The instruction travels as a user message *appended to the conversation*,
-        which is what lets a follow-up be recognised as one: the subject of "what
-        about the other one" is in the list above it and nowhere else.  There is
-        no separate input — the conversation is the input.
+        The instruction travels as a **system message** appended to the
+        conversation, which is what lets a follow-up be recognised as one: its
+        subject is in the conversation and nowhere else.  A second user turn
+        would read as one request with it (`_ask_model`).  There is no separate
+        input — the conversation is the input.
         """
         try:
             text = await ask_model(agent, subagent, model, messages)

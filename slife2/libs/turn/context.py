@@ -521,9 +521,15 @@ def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
     every later request, and the number means nothing after this call.  A
     part-list gains a text part rather than having its first part rewritten,
     for `with_note`'s reason: replacing it would drop an attachment's note.
+
+    **The marker carries the number the model is asked to write back**, in the
+    turn footnote's shape: `[MESSAGE:{"id": 4}]`, not a label like `[M4]` that
+    hides the integer behind a letter.  The schema names integers, and a model
+    shown `M4` wrote `M4` back — a reply the parser refused for a reason that
+    said nothing about the wrong channel.
     """
     prefixed = dict(message)
-    prefix = f"[M{index}] "
+    prefix = f'[MESSAGE:{{"id": {index}}}] '
     content = prefixed.get("content")
     if isinstance(content, list):
         prefixed["content"] = [{"type": "text", "text": prefix}, *content]
@@ -547,7 +553,7 @@ def live_instruction(selectable: Sequence[int], usage: str) -> str:
     """
     return render_instruction(
         LIVE_TEMPLATE,
-        selectable=", ".join(f"M{index}" for index in selectable),
+        selectable=", ".join(str(index) for index in selectable),
         usage=usage,
         live_reply=json.dumps(LIVE_REPLY, indent=2, ensure_ascii=False),
     )

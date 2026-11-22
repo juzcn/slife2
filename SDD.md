@@ -1189,9 +1189,10 @@ Rules:
   builders would drift into two conversations.
 
 **The turn's own compaction is a view, not an edit.** `_turn_compact` asks the
-live selector — one silent model call over the view, numbered `[M…]` in its own
-copy and nowhere else — which messages this turn no longer needs, and hides
-them from the list the rest of the turn is sent (`libs/turn/compact.py`). The
+live selector — one silent model call over the view, numbered
+`[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages this
+turn no longer needs, and hides them from the list the rest of the turn is sent
+(`libs/turn/compact.py`). The
 selector is shown the last measured call and the conversation's window, through
 the same `context_usage` the status bar uses, so the model and the person read
 one figure. **Nothing is removed**: the live list, the turn's row, `covered` and

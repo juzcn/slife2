@@ -1912,6 +1912,99 @@ async def test_a_failed_call_is_not_asked_again() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_decisions_request_rides_as_a_system_message(monkeypatch) -> None:
+    """The harness's instruction is not a second user turn.
+
+    The live context already ends with the turn's own user message; appended as
+    another user message, the two read as one request, and a model whose prompt
+    told it to act answered with a tool call instead of the decision.  A system
+    message says whose request it is, and the conversation above stays the input.
+    """
+    seen: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def capture(
+        config: Any,
+        clients: Any,
+        opening: Any,
+        agent: str,
+        subagent: str,
+        model: str,
+        asked: list[dict[str, Any]],
+        *,
+        kind: str,
+    ) -> str:
+        seen.append((kind, asked))
+        return "{}"
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
+
+    await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", hold)
+    kind, asked = seen[0]
+    assert kind == "discriminator"
+    assert asked[:-1] == hold, "the conversation is the input, unchanged"
+    assert asked[-1]["role"] == "system", "not a second user turn"
+    assert "Context rebuild" in asked[-1]["content"]
+
+    await _ask_model(
+        object(),
+        {},
+        asyncio.Lock(),
+        "jack",
+        "",
+        "m",
+        hold,
+        previous="not json",
+        repair="the reply is not one JSON object",
+    )
+    _kind, asked = seen[1]
+    assert [message["role"] for message in asked] == [
+        "system",
+        "user",
+        "system",
+        "assistant",
+        "user",
+    ], "the refused answer and its correction follow the instruction"
+    assert asked[-2]["content"] == "not json"
+    assert "not one JSON object" in asked[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_the_selectors_request_rides_as_a_system_message(monkeypatch) -> None:
+    """The live selector's instruction is a system message for the same reason."""
+    seen: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def capture(
+        config: Any,
+        clients: Any,
+        opening: Any,
+        agent: str,
+        subagent: str,
+        model: str,
+        asked: list[dict[str, Any]],
+        *,
+        kind: str,
+    ) -> str:
+        seen.append((kind, asked))
+        return "{}"
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
+
+    await context_server._ask_selector(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, [1]
+    )
+
+    kind, asked = seen[0]
+    assert kind == "compactor"
+    assert asked[0]["content"].startswith('[MESSAGE:{"id": 0}] '), (
+        "the view is numbered"
+    )
+    assert asked[-1]["role"] == "system", "not a second user turn"
+    assert "Turn compaction" in asked[-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
     """The same fallback as an unreadable reply, and for the same reason.
 

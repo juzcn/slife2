@@ -121,20 +121,20 @@ def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
     original = {"role": "user", "content": "hi"}
     prefixed = with_message_id(original, 4)
 
-    assert prefixed["content"] == "[M4] hi"
+    assert prefixed["content"] == '[MESSAGE:{"id": 4}] hi'
     assert original["content"] == "hi", "the copy is a copy"
 
     parts = {"role": "user", "content": [{"type": "text", "text": "look"}]}
     got = with_message_id(parts, 2)
 
-    assert got["content"][0] == {"type": "text", "text": "[M2] "}
+    assert got["content"][0] == {"type": "text", "text": '[MESSAGE:{"id": 2}] '}
     assert got["content"][1] == {"type": "text", "text": "look"}
 
 
 def test_the_live_instruction_names_the_candidates() -> None:
     text = live_instruction([1, 4], usage="12,345 (1.2%)")
 
-    assert "M1, M4" in text
+    assert "1, 4" in text
     assert "12,345 (1.2%)" in text
     assert '"compact"' in text
     assert "goes as a whole" in text, "the legality rule is in the prompt"
