@@ -967,6 +967,30 @@ async def test_index_status_names_what_is_missing(tmp_path) -> None:
     assert status["problems"] == ["1 of 3 turns have no vector"]
 
 
+@pytest.mark.asyncio
+async def test_a_recorded_vector_table_that_is_gone_is_not_ready(tmp_path) -> None:
+    """A recorded index whose table vanished cannot run a semantic search.
+
+    `vector_table_gone` is the question the catalogue and the cabinet ask; the
+    turn store used to answer `ready: True` here, so the context plugin's
+    readiness gate let searches through to `no such table: turn_vec` — a plugin
+    reporting itself healthy over a leg it cannot serve.  The table is lost
+    outside a rebuild and there is no migration, so the report has to say so
+    rather than leave the failure to the first search.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    embedder = StubEmbedder()
+    await _corpus(store, embedder)
+    with db.connection_to(path) as connection:
+        connection.execute("DROP TABLE turn_vec")
+
+    status = store.index_status(embedder)
+
+    assert not status["ready"]
+    assert any("turn_vec" in problem for problem in status["problems"])
+
+
 # --- and the loop is not held while it happens --------------------------------
 
 

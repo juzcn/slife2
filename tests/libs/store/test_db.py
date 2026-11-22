@@ -985,6 +985,24 @@ async def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
     assert store.turn(999) is None
 
 
+@pytest.mark.asyncio
+async def test_a_turn_id_no_row_can_have_is_absent_rather_than_an_overflow(
+    tmp_path,
+) -> None:
+    """A rowid is a signed 64-bit integer, and a bigger Python int fails the bind.
+
+    The store's contract is `None` for an id that does not resolve.  A model
+    that wrote more digits than SQLite holds named exactly that, so the answer
+    is the same absence — `OverflowError` out of the query is the internal
+    error the tool's `no turn …` sentence exists to replace.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _turn(store, "first", "a", at=now())
+
+    assert store.turn(2**63) is None
+    assert store.update_summary(2**63, summary="nowhere") is False
+
+
 # --- the catalogue, and the argument it must be given -------------------------
 
 

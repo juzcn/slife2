@@ -124,6 +124,41 @@ async def test_restore_refuses_an_answer_it_cannot_read(
         await wired(Store(restore=answer)).restore(IDENTITY, [])
 
 
+@pytest.mark.parametrize("turn_ids", [[True], ["7"], [3.9], [None]])
+async def test_restore_refuses_a_turn_id_that_is_not_one(
+    turn_ids: list[Any],
+) -> None:
+    """A damaged id is not a turn, and it is refused before anything is adopted.
+
+    `True` is an `int` to `isinstance` and names turn 1; `int("7")` and
+    `int(3.9)` coerce rather than complain; `None` used to raise `TypeError`
+    out of the restore.  Each is a store answer this build did not write, and
+    an id that got in would be written back into the live-context list by the
+    next publishing rebuild — the same rule `Recorder.remember_turn` and
+    `select_live` keep for the ids they read.
+    """
+    store = Store(restore={"messages": [], "turn_ids": turn_ids, "turns": []})
+    with pytest.raises(UnreadableAnswer, match="turn-id list"):
+        await wired(store).restore(IDENTITY, [])
+
+
+@pytest.mark.parametrize(
+    "messages", [["not a message"], [{"role": "user", "content": "x"}, 7]]
+)
+async def test_restore_refuses_a_message_that_is_not_a_mapping(
+    messages: list[Any],
+) -> None:
+    """A list of something else is not a short conversation.
+
+    `Message.from_wire` reads a mapping; a string or a number in its place
+    raised `AttributeError` out of the restore — an internal error where the
+    sentence naming the build mismatch belongs.
+    """
+    store = Store(restore={"messages": messages, "turn_ids": [], "turns": []})
+    with pytest.raises(UnreadableAnswer, match="message list"):
+        await wired(store).restore(IDENTITY, [])
+
+
 @pytest.mark.parametrize(
     "turns",
     [
@@ -274,6 +309,49 @@ async def test_rebuild_refuses_an_answer_it_cannot_read(
 ) -> None:
     """A reply missing the counts is not a rebuild of zero of each."""
     with pytest.raises(UnreadableAnswer, match=sentence):
+        await wired(Store(rebuild=answer)).rebuild(
+            IDENTITY, [], [], 0, "q", REF.reference
+        )
+
+
+@pytest.mark.parametrize("turn_ids", [[True], ["8"], [3.9]])
+async def test_rebuild_refuses_a_turn_id_that_is_not_one(
+    turn_ids: list[Any],
+) -> None:
+    """The rebuilt list is an id list too, and read the same way as a restore's."""
+    answer = {
+        "messages": [],
+        "turn_ids": turn_ids,
+        "kept": 0,
+        "recalled": 0,
+        "rerank": "",
+        "discriminator": "",
+    }
+    with pytest.raises(UnreadableAnswer, match="turn-id list"):
+        await wired(Store(rebuild=answer)).rebuild(
+            IDENTITY, [], [], 0, "q", REF.reference
+        )
+
+
+@pytest.mark.parametrize(("kept", "recalled"), [(True, 0), ("2", 1), (0, 2.0)])
+async def test_rebuild_refuses_counts_that_are_not_ints(
+    kept: Any, recalled: Any
+) -> None:
+    """A count is the note's whole content; a coercion is a figure nobody gave.
+
+    `True` would draw `kept 1`, a numeric string would read as the number it
+    spells, and a float is not a count of turns — the store writes ints, so
+    anything else is another build speaking.
+    """
+    answer = {
+        "messages": [],
+        "turn_ids": [],
+        "kept": kept,
+        "recalled": recalled,
+        "rerank": "",
+        "discriminator": "",
+    }
+    with pytest.raises(UnreadableAnswer, match="counts"):
         await wired(Store(rebuild=answer)).rebuild(
             IDENTITY, [], [], 0, "q", REF.reference
         )

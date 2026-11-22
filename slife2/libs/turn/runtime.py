@@ -138,6 +138,59 @@ class LiveChoice:
     decision: str = ""
 
 
+def _message_list(payload: dict[str, Any]) -> list[Message]:
+    """The messages an answer carries, refused unless every one is a mapping.
+
+    **A list of something else is not a short list.**  `Message.from_wire`
+    reads a mapping; a string or a number in its place used to raise
+    `AttributeError` out of the restore, which is an internal error rather than
+    the sentence a build mismatch earns.  The whole list is checked before any
+    of it is adopted, so a damaged answer cannot half-replace a conversation
+    (`slife2.libs.turn.context.consistent` says the same for a stored one).
+    """
+    raw = payload.get("messages")
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise unreadable("the context store", "return a message list", payload)
+    try:
+        return [Message.from_wire(item) for item in raw]
+    except (AttributeError, KeyError, TypeError) as exc:
+        # A mapping whose own fields are the wrong shape is the same damage
+        # one level down: the type name is a traceback, not an answer.
+        raise unreadable("the context store", "return a message list", payload) from exc
+
+
+def _turn_id_list(payload: dict[str, Any]) -> list[int]:
+    """The turn ids an answer carries: whole ints, never bools or text.
+
+    **A damaged id is not a turn.**  `true` is an `int` to `isinstance` and
+    would name turn 1, a string is coerced by `int()`, and a float truncates —
+    each becomes a real id in `Loop.turn_ids`, and the next rebuild that
+    publishes anything writes that id into the stored live-context list.  The
+    two other readers of a store-written id (`Recorder.remember_turn`,
+    `TurnRuntime.select_live`) already refuse these; a restore is the same
+    question asked earlier, so it is answered the same way (SDD Appendix C).
+    """
+    raw = payload.get("turn_ids")
+    if not isinstance(raw, list):
+        raise unreadable("the context store", "return a turn-id list", payload)
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise unreadable("the context store", "return a turn-id list", payload)
+    return list(raw)
+
+
+def _count(payload: dict[str, Any], key: str) -> int:
+    """One rebuild count, refused unless it is the int the store writes.
+
+    `True` would read as 1 and `"2"` as 2; both would put a figure nobody
+    reported on the `[kept …]` line, which is the note's whole content.
+    """
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise unreadable("the context store", "report the rebuild's counts", payload)
+    return value
+
+
 class TurnRuntime:
     """The peers, the model and the context calls one turn is built on."""
 
@@ -382,12 +435,8 @@ class TurnRuntime:
                 },
             )
         )
-        raw = payload.get("messages")
-        if not isinstance(raw, list):
-            raise unreadable("the context store", "return a message list", payload)
-        turn_ids = payload.get("turn_ids")
-        if not isinstance(turn_ids, list):
-            raise unreadable("the context store", "return a turn-id list", payload)
+        restored = _message_list(payload)
+        turn_ids = _turn_id_list(payload)
         turns = payload.get("turns")
         if not isinstance(turns, list):
             raise unreadable("the context store", "return the stored turns", payload)
@@ -404,10 +453,9 @@ class TurnRuntime:
                 found = last.get("context_tokens")
                 if isinstance(found, int) and not isinstance(found, bool):
                     context_tokens = found
-        restored = [Message.from_wire(item) for item in raw]
         return Restored(
             messages=restored,
-            turn_ids=[int(turn_id) for turn_id in turn_ids],
+            turn_ids=turn_ids,
             covered=len(restored),
             context_tokens=context_tokens,
         )
@@ -463,17 +511,9 @@ class TurnRuntime:
         payload = tool_payload(
             await (await self.memory()).call_tool("rebuild", arguments)
         )
-        raw = payload.get("messages")
-        if not isinstance(raw, list):
-            raise unreadable("the context store", "return a message list", payload)
-        rebuilt_ids = payload.get("turn_ids")
-        if not isinstance(rebuilt_ids, list):
-            raise unreadable("the context store", "return a turn-id list", payload)
-        kept, recalled = payload.get("kept"), payload.get("recalled")
-        if kept is None or recalled is None:
-            raise unreadable(
-                "the context store", "report the rebuild's counts", payload
-            )
+        rebuilt = _message_list(payload)
+        rebuilt_ids = _turn_id_list(payload)
+        kept, recalled = _count(payload, "kept"), _count(payload, "recalled")
         rerank = payload.get("rerank")
         if not isinstance(rerank, str):
             raise unreadable(
@@ -486,14 +526,13 @@ class TurnRuntime:
                 "report the discriminator's status",
                 payload,
             )
-        rebuilt = [Message.from_wire(item) for item in raw]
         return Rebuilt(
             messages=rebuilt,
-            turn_ids=[int(turn_id) for turn_id in rebuilt_ids],
+            turn_ids=rebuilt_ids,
             covered=len(rebuilt) - carried,
             chosen=ContextChosen(
-                kept=int(kept),
-                recalled=int(recalled),
+                kept=kept,
+                recalled=recalled,
                 rerank=rerank,
                 discriminator=discriminator,
             ),

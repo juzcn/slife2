@@ -90,6 +90,7 @@ import sqlite_vec
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.paths import TURNS_DB, work_path
+from slife2.libs.paging import MAX_SQLITE_INT
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     MAX_SQL_VARS,
@@ -112,6 +113,7 @@ from slife2.libs.store.index import (
     storable,
     time_window,
     vector_identity,
+    vector_table_gone,
     where_clause,
 )
 from slife2.libs.turn import attachments
@@ -814,6 +816,24 @@ def _fuse_questions(
     ]
 
 
+def _row_id(turn_id: Any) -> int | None:
+    """One rowid a caller named, or None for one no row in SQLite can have.
+
+    **SQLite binds a signed 64-bit integer, and a larger Python int raises
+    `OverflowError` at the bind** — an internal error where the store's contract
+    is `None` for an id that does not resolve.  A turn id is a model-supplied
+    number, so a larger one is simply an id that is not there; a `bool` is
+    excluded because `True == 1` would name turn 1, and text is not a rowid at
+    all (the tools' schema says integer).  The upper bound is `MAX_SQLITE_INT`,
+    the same one `page_window` clamps an offset to.
+    """
+    if isinstance(turn_id, bool) or not isinstance(turn_id, int):
+        return None
+    if not 0 <= turn_id <= MAX_SQLITE_INT:
+        return None
+    return turn_id
+
+
 class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
@@ -1069,6 +1089,10 @@ class TurnStore:
         """
         if summary is None and tags is None:
             return False
+        rowid = _row_id(turn_id)
+        if rowid is None:
+            # An id no row can have is the same answer as one no row does.
+            return False
         with self._connect() as connection:
             # **The read is inside the write lock.**  The two columns are read
             # and written back as a pair, so a second writer's call landing
@@ -1079,11 +1103,11 @@ class TurnStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT messages, summary, tags FROM turn WHERE rowid = ?",
-                (turn_id,),
+                (rowid,),
             ).fetchone()
             if row is None:
                 return False
-            messages = _messages(row["messages"], what=f"turn {turn_id}'s messages")
+            messages = _messages(row["messages"], what=f"turn {rowid}'s messages")
             # **The two columns go through `storable` like every other text.**
             # A lone surrogate in a summary is reachable from the same model
             # answer the messages are, and the insert is the thing that must not
@@ -1094,11 +1118,11 @@ class TurnStore:
             new_tags = storable(str(row["tags"] or "") if tags is None else tags)
             connection.execute(
                 "UPDATE turn SET summary = ?, tags = ? WHERE rowid = ?",
-                (new_summary, new_tags, turn_id),
+                (new_summary, new_tags, rowid),
             )
             connection.execute(
                 "UPDATE turn_fts SET search = ? WHERE rowid = ?",
-                (searchable_text(messages, new_summary, new_tags), turn_id),
+                (searchable_text(messages, new_summary, new_tags), rowid),
             )
         return True
 
@@ -1156,10 +1180,13 @@ class TurnStore:
         the caller has something useful to say about — `turn_read` names the id
         it could not find, which is what a model that miscopied one needs.
         """
+        rowid = _row_id(turn_id)
+        if rowid is None:
+            return None
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT rowid AS turn_id, * FROM turn WHERE rowid = ?",
-                (int(turn_id),),
+                (rowid,),
             ).fetchone()
         return _row_to_record(row) if row else None
 
@@ -1646,6 +1673,14 @@ class TurnStore:
                 connection.execute("SELECT COUNT(*) FROM turn_fts").fetchone()[0]
             )
             meta = self.index_meta(connection)
+            # **A recorded index whose table is gone is a broken file, not an
+            # embedder that has not run.**  The catalogue and the cabinet ask
+            # this question through `vector_table_gone`; this store is the one
+            # the context plugin gates readiness on, and it used to answer
+            # `ready` over the damage — the plugin served, and the first
+            # semantic search raised `no such table: turn_vec` instead of the
+            # gate saying what was wrong (SDD Appendix C).
+            vector_gone = vector_table_gone(connection, vec_table="turn_vec")
         # **Asked of the same helper `sync_indexes` uses, not of a second copy
         # of the query.**  "Pending" has to mean what the sync can fix: a turn
         # with nothing to embed is not one of these (see
@@ -1659,6 +1694,12 @@ class TurnStore:
             problems.append(
                 "the vector index was built by a different model or a different "
                 "text contract than the configured one"
+            )
+        if vector_gone:
+            problems.append(
+                "the vector index is recorded in this file but its table "
+                "`turn_vec` is gone and there is no migration — delete the file "
+                "and let it be recorded afresh"
             )
         if pending:
             problems.append(f"{pending} of {turns} turns have no vector")

@@ -172,6 +172,32 @@ def test_a_name_belonging_to_another_source_is_refused(tmp_path) -> None:
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"]
 
 
+def test_two_remote_names_that_sanitise_alike_are_refused(tmp_path) -> None:
+    """The catalogue's name is a row's identity, and sanitising can lose one.
+
+    A provider accepts only letters, digits, underscore and hyphen, so a
+    server's `read.file` and its `read_file` both become `fake__read_file`.
+    Keeping the first and warning would record one tool and make the one
+    advertised name run it — the second tool vanishes, and a model that read
+    about it calls something else.  That is the collision `sanitise` says the
+    catalogue refuses; a genuine repeat (one remote name listed twice) stays
+    the no-op it was.
+    """
+    store = store_at(tmp_path)
+
+    with pytest.raises(ValueError, match="both become"):
+        merge(
+            store,
+            "fake",
+            "mcp",
+            [
+                tool("fake__read_file", remote_name="read.file"),
+                tool("fake__read_file", remote_name="read_file"),
+            ],
+        )
+    assert rows_in(store) == [], "a refused listing records nothing"
+
+
 def test_a_name_claimed_between_the_plan_and_the_write_is_the_same_refusal(
     tmp_path,
 ) -> None:

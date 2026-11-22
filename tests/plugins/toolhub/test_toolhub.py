@@ -1523,6 +1523,26 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_nested_list_in_a_term_list_is_read_as_text_not_a_crash() -> None:
+    """A local tool's schema is shown to a model, not enforced for it.
+
+    `_listed` coerces and dedupes the terms, and it hashed the raw element
+    before the `str()` the comprehension returned — so `keywords: [["echo"]]`
+    raised `TypeError: unhashable type: 'list'`, and the tool answered with
+    that type name (plus an ERROR traceback) instead of a page.  Reading each
+    element as the text it was already going to be is the same answer without
+    the internal error.
+    """
+    async with Client(hub_for()) as hub:
+        answer = await call(
+            hub, "tool_search", {"keywords": [["echo"]], "sentences": []}
+        )
+
+    assert answer["ok"] is True, answer["text"]
+    assert "unhashable" not in answer["text"]
+
+
+@pytest.mark.asyncio
 async def test_the_two_inputs_go_to_the_two_legs() -> None:
     """Words are matched exactly, sentences by meaning, and a row both found wins.
 

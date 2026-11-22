@@ -382,6 +382,28 @@ async def test_the_page_reports_the_limit_that_built_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_offset_past_every_row_is_the_empty_page() -> None:
+    """A page start beyond SQLite's integer range is still "past the end".
+
+    `page_window` clamps it to the largest bindable value — binding the
+    original would raise `OverflowError` rather than answer — and the response
+    carries the offset it applied, so the caller's `offset + len < total`
+    arithmetic still says there is nothing more.  Every listing shares that
+    helper, so this is the rule rather than this tool's.
+    """
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        page = await client.call_tool(
+            "turn_list", {"offset": 2**63}, meta=conversation_meta("jack")
+        )
+
+    assert page.data["entries"] == []
+    assert page.data["total"] == 1
+    assert page.data["offset"] == 2**63 - 1
+
+
+@pytest.mark.asyncio
 async def test_a_bound_the_grammar_does_not_know_is_a_refusal() -> None:
     """A `ToolError` the model reads and corrects, not an empty page."""
 
@@ -399,6 +421,30 @@ async def test_reading_a_turn_that_is_not_there_says_which_one() -> None:
         with pytest.raises(ToolError, match="no turn 7"):
             await client.call_tool(
                 "turn_read", {"turn_id": 7}, meta=conversation_meta("jack")
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_id_no_row_can_have_is_a_refusal_not_an_internal_error() -> None:
+    """SQLite binds a signed 64-bit integer, and a bigger one raises at the bind.
+
+    A model can write more digits than that; the tools' contract is the
+    sentence naming the id it could not find, which is what a model that
+    invented one needs — not `OverflowError` out of the query.
+    """
+    huge = 2**63
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        with pytest.raises(ToolError, match=f"no turn {huge}"):
+            await client.call_tool(
+                "turn_read", {"turn_id": huge}, meta=conversation_meta("jack")
+            )
+        with pytest.raises(ToolError, match=f"no turn {huge}"):
+            await client.call_tool(
+                "turn_summarize",
+                {"turn_id": huge, "summary": "nowhere"},
+                meta=conversation_meta("jack"),
             )
 
 

@@ -443,6 +443,23 @@ def _name_taken(name: str, owner: str) -> ValueError:
     )
 
 
+def _names_collide(name: str, source: str, first: str, second: str) -> ValueError:
+    """The refusal for one source offering two tools under one model name.
+
+    A provider accepts only letters, digits, underscore and hyphen, so a
+    server's `read.file` and its `read_file` both become `read_file`
+    (`slife2.clients.gateway.sanitise`) — two tools, one name the model can
+    call.  Keeping either and warning would make the one advertised name run
+    the other tool, which is the failure `sanitise` says the catalogue refuses.
+    The two remote names are in the sentence because they are the correction.
+    """
+    return ValueError(
+        f"{source} offers two tools whose names both become {name!r} "
+        f"({first!r} and {second!r}); a name is a row's identity and a "
+        f"provider-legal spelling has to be unique — rename one of the tools"
+    )
+
+
 def unknown_category(category: str) -> str:
     """The refusal for a category that is not one the table knows.
 
@@ -883,7 +900,10 @@ class ToolStore:
         reconnected: list[str] = []
         documents: list[tuple[str, str]] = []
         skipped = 0
-        incoming: set[str] = set()
+        #: The names this listing offers, each with the remote name it came
+        #: from — the second half is what tells a repeated row from two tools a
+        #: provider's alphabet forced onto one name.
+        incoming: dict[str, str] = {}
 
         with self._connect() as connection:
             existing = {
@@ -909,7 +929,15 @@ class ToolStore:
                     continue
                 if name in owned_elsewhere:
                     raise _name_taken(name, owned_elsewhere[name])
-                if name in incoming:  # one list naming one tool twice
+                remote = str(row.get("remote_name") or name)
+                if name in incoming:
+                    if remote != incoming[name]:
+                        # Two remote tools, one provider-legal name.  Only the
+                        # first would be recorded, and a call to that name would
+                        # reach it — the other tool would be unreachable with
+                        # nothing saying it existed (`_names_collide`).
+                        raise _names_collide(name, source, incoming[name], remote)
+                    # One list naming one tool twice, which is not a collision.
                     logger.warning(
                         "%s listed %s twice in one list; keeping the first",
                         source,
@@ -917,7 +945,7 @@ class ToolStore:
                     )
                     skipped += 1
                     continue
-                incoming.add(name)
+                incoming[name] = remote
                 # **The text columns go through `storable`.**  A lone surrogate
                 # in a description is the same answer text the turn store
                 # normalises, and one of them used to fail the whole insert —

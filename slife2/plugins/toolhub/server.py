@@ -2254,7 +2254,14 @@ def _listed(given: Any) -> list[str]:
         given = [given]
     if not isinstance(given, Sequence):
         return []
-    return [str(item) for item in dict.fromkeys(given) if str(item).strip()]
+    # **Dedupe on the string this returns, not on the raw element.**  A local
+    # tool's schema is shown to a model and not enforced for it, so an element
+    # can be a nested array — unhashable, and `dict.fromkeys` used to raise
+    # `TypeError: unhashable type: 'list'` out of a tool whose answer then read
+    # as an internal error.  `str` is what the old comprehension returned
+    # anyway; taking it before the hash is the same list without the crash.
+    keys = dict.fromkeys(map(str, given))
+    return [text for text in keys if text.strip()]
 
 
 def _names_of(arguments: Mapping[str, Any]) -> list[str]:

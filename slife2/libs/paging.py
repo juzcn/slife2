@@ -14,12 +14,24 @@ it is a parameter rather than a rule buried here.
 
 from __future__ import annotations
 
+#: The largest integer SQLite can bind — a signed 64-bit one — and therefore
+#: the largest page start it can be asked for.  **A model can write more digits
+#: than that**, and the bind raises `OverflowError` rather than answering the
+#: empty page the number means; clamping here is the one place every listing
+#: gets the answer, because every listing takes its window from this module.
+MAX_SQLITE_INT = 2**63 - 1
+
 
 def page_window(limit: int, offset: int, *, unset: int, cap: int) -> tuple[int, int]:
     """The page size and its start, both already bounded.
 
     `offset` is floored at zero for the same reason it is echoed back: it is the
     number the caller will add its page to, and a negative one would make the
-    next page overlap this one.
+    next page overlap this one.  It is capped at `MAX_SQLITE_INT` for the other
+    end of the same arithmetic: a value past what SQLite can bind is a page no
+    row can be on, and binding it would raise instead of answering.
     """
-    return (min(int(limit), cap) if limit > 0 else unset), max(0, int(offset))
+    return (
+        min(int(limit), cap) if limit > 0 else unset,
+        min(max(0, int(offset)), MAX_SQLITE_INT),
+    )
