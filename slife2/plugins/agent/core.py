@@ -1218,10 +1218,10 @@ class AgentCore:
             """The tool to call at this iteration boundary, or `None`.
 
             **The turn's rebuild goes first, once.**  `_context_rebuild` runs
-            before the first model call; its body sets `loop.rebuilt`, so every
-            later boundary only has the cut-in and the compaction to consider.
-            A failed rebuild has already marked the turn, so a transport failure
-            is not re-asked at every boundary — the model can still call it.
+            before the first model call; this marks the turn before the call,
+            so every later boundary only has the cut-in and the compaction to
+            consider.  A failed rebuild — including a hub hop that never
+            reached the body — is not re-asked; the model can still call it.
 
             **Cheap, and it decides only *whether*.**  The name it returns is
             handed to the loop, which makes the call through the same registry
@@ -1251,12 +1251,18 @@ class AgentCore:
             iteration, and the message may be what makes the turn grow anyway.
             """
             if not loop.rebuilt and agent_loop is not None:
+                # **Set before the call, not by its body.**  The body runs on
+                # the far side of the hub hop, so a hop that fails answers
+                # with error text and never reaches it — a flag set there
+                # would leave this asking again at every boundary.  The turn's
+                # one automatic rebuild is this attempt; the model can still
+                # call the tool itself.
+                loop.rebuilt = True
                 if agent_loop.declares(CONTEXT_REBUILD):
                     return AutoCall(CONTEXT_REBUILD)
                 # A hub that does not advertise the tool is a build that
                 # predates it; the turn runs on the context it has instead of
                 # writing an error pair at every boundary.
-                loop.rebuilt = True
             if loop.inbox:
                 waiting = loop.inbox[0]
                 if not waiting.images:
@@ -1365,10 +1371,11 @@ class AgentCore:
         )
         # **The turn's prompt.**  The context decision is the first boundary's
         # `_context_rebuild`, which runs after this marker is on the message and
-        # strips it for the decision model's own prompt; the marker is removed in
-        # the `finally` below so the row, the next turn's rebuild and the
-        # `[TURN:]` footnote never see it.  It is a prompt for this turn, not a
-        # record of it.
+        # reads the conversation exactly as the turn runs it — marker included,
+        # which is what "the conversation is the input" means.  The marker is
+        # removed in the `finally` below so the row, the next turn's rebuild and
+        # the `[TURN:]` footnote never see it.  It is a prompt for this turn,
+        # not a record of it.
         #
         # **The plan is read here because a rebuild cannot carry it.**  It is
         # the conversation's own file, not a turn the decision chose
@@ -2623,10 +2630,6 @@ class AgentCore:
         caller = turn_of(request_meta(ctx))
         if loop is None or (caller and caller != loop.turn_token):
             return "No live turn to rebuild."
-        # **One automatic rebuild per turn.**  Set before the call so a
-        # transport failure does not make `auto_invoke` ask again at every
-        # boundary; the model can still call the tool itself.
-        loop.rebuilt = True
         at = compact.opening(loop.messages)
         if at is None:
             return "This turn has no opening message; nothing to rebuild."

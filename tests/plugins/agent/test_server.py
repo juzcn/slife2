@@ -40,6 +40,7 @@ from fakes import (
     StubEmbedder,
     a_home,
     keep_the_context,
+    plugin_transports,
     text_turn,
 )
 from fastmcp import Client, Context, FastMCP
@@ -57,7 +58,12 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
-from slife2.libs.plugin.audience import TURN, conversation_key, conversation_meta
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    TURN,
+    conversation_key,
+    conversation_meta,
+)
 from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments, plan
@@ -80,7 +86,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.loop import DENIED
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, INTERRUPTED
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, CONTEXT_REBUILD, INTERRUPTED
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -3646,10 +3652,9 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     kinds = [type(e).__name__ for e in seen]
     # The tool count comes first: it is what the request's list was, and the
     # turn's rebuild is not in this hub's list (the plain fixture does not
-    # stand an agent server up as its source).  The rebuild's own pair is
-    # `tests/plugins/agent/test_context_rebuild.py`'s subject.
+    # stand an agent server up as its source), so this turn opens no rebuild
+    # pair.  The tests that assert that pair give the hub an agent source.
     assert kinds[0] == "ToolsCounted"
-    assert "ContextChosen" not in kinds, "the pre-turn event is gone"
     assert "ToolsCounted" in kinds
     assert "TextDelta" in kinds
     assert "ToolCallStarted" in kinds
@@ -3670,6 +3675,68 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]
     assert finished.iterations == 2  # type: ignore[union-attr]
+
+
+def failing_rebuild_agent(reached: list[str]) -> FastMCP:
+    """The agent source's `_context_rebuild`, failing before its body runs.
+
+    The hub's declaration is what makes the auto call; the body is never
+    reached, which is the transport failure the test below is about.
+    """
+    mcp = FastMCP("agent")
+
+    @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
+    async def context_rebuild(ctx: Context) -> str:
+        reached.append(CONTEXT_REBUILD)
+        raise ToolError("the context server is down")
+
+    return mcp
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_hop_that_fails_is_not_asked_again(context) -> None:
+    """**The turn's automatic rebuild is one attempt, not one per boundary.**
+
+    The flag used to be set by the tool's body, on the far side of the hub hop.
+    A hop that fails never reaches the body, so the next boundary asked again
+    and wrote an error pair per iteration.  This turn makes two model calls;
+    the stub counts the attempts and must see one.
+    """
+    from slife2.plugins.toolhub.server import build_server as build_hub
+
+    reached: list[str] = []
+    base = default_config()
+    hub_server = build_hub(
+        base,
+        transports=plugin_transports(
+            base, {"agent": lambda _settings: failing_rebuild_agent(reached)}
+        ),
+        embedder=StubEmbedder(),
+    )
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="tool_search",
+                        arguments={"sentences": ["anything"]},
+                    ),
+                ),
+                stop_reason="tool_calls",
+            )
+        ),
+        ScriptedTurn(result=StreamChatResult(text="done", stop_reason="stop")),
+    )
+    async with Client(hub_server) as hub_client:
+        server = build_server(
+            config(), context_client=context, hub_client=hub_client, backend=backend
+        )
+        result = await send(server, "one")
+
+    assert result.data["text"] == "done"
+    assert reached == [CONTEXT_REBUILD], "one attempt for the turn"
 
 
 @pytest.mark.asyncio
@@ -3740,13 +3807,13 @@ async def test_a_broken_observer_does_not_lose_the_message(
 ) -> None:
     """A UI that throws must not end a turn — the server's own events included.
 
-    `ContextChosen` is reported *before* the turn runs, so an exception from the
-    observer there lands before the prompt has been appended or recorded: it
-    propagates out of `send_message`, the caller is told the turn failed, and the
-    message is gone — nowhere in the conversation and nowhere in the log.  The
-    same observer failing on a `TextDelta` is swallowed by `emit`,
-    which is the whole reason that seam exists; the two events the *server* raises
-    were the ones not routed through it.
+    The server's own `ToolsCounted` is reported *before* the turn runs, so an
+    exception from the observer there would land before the prompt has been
+    appended or recorded: it would propagate out of `send_message`, the caller
+    would be told the turn failed, and the message would be gone — nowhere in
+    the conversation and nowhere in the log.  `emit` is the seam that swallows
+    it, and the server raises its events through it for exactly this reason;
+    the same observer failing on a `TextDelta` is swallowed one layer down.
     """
     from slife2.plugins.agent import core as core_module
 

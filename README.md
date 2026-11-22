@@ -419,11 +419,12 @@ not start a new conversation. The transcript is restored with its timestamps,
 tool calls, and results; reasoning is folded where it was folded live.
 
 The status bar reports the context size left by the last model call and its
-fraction of the model's window. Before each turn, a note names what the context
-decision kept and what it recalled. It also reports `tools 26/358`: the hub's
-loaded set, then the catalogue's size. Skills, jobs, and CLI entries count in
-the total, and so do the tools of a server that is down; the loaded half is what
-the next request carries. Both come from the same ask.
+fraction of the model's window. At the start of each turn, `_context_rebuild`'s
+answer names what the context decision kept and what it recalled. It also
+reports `tools 26/358`: the hub's loaded set, then the catalogue's size. Skills,
+jobs, and CLI entries count in the total, and so do the tools of a server that
+is down; the loaded half is what the next request carries. Both come from the
+same ask.
 
 ### Images
 

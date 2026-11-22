@@ -234,9 +234,12 @@ async def _ask_model(
     the decision readable; the turn's own calls keep the configured thinking.
 
     **A repair ask is the same call with the refused answer as the model's own
-    tool call and the reason as its result** (`decisions.repair_note`).  All of
-    it is a prompt for one call and none of it is stored — the repair is how a
-    bad answer is corrected, not a turn.
+    tool call, and the reason and the refused text as its result**
+    (`decisions.repair_note`).  The text rides the result as well because not
+    every wire can replay a malformed call — Anthropic's `tool_use.input` is an
+    object — and a result is text on all three.  All of it is a prompt for one
+    call and none of it is stored — the repair is how a bad answer is
+    corrected, not a turn.
 
     **No progress handler**, which is what makes the call silent: the server
     reports progress only to a caller that asked for a token, so a decision
@@ -297,7 +300,10 @@ async def _ask_model(
         asked.append(
             {
                 "role": "tool",
-                "content": decisions.repair_note(repair),
+                # The refused text rides the result too: a wire that cannot
+                # replay a malformed call (Anthropic's `input` is an object)
+                # would otherwise show the model `{}` instead of its reply.
+                "content": decisions.repair_note(repair, previous),
                 "tool_call_id": call_id,
             }
         )
@@ -314,7 +320,7 @@ async def _ask_model(
         thinking="disabled",
         kind="decision",
     )
-    return decision_arguments(result)
+    return decision_arguments(result, decisions.DECISION_TOOL)
 
 
 async def _ask_selector(
@@ -376,7 +382,7 @@ async def _ask_selector(
         asked.append(
             {
                 "role": "tool",
-                "content": decisions.repair_note(repair),
+                "content": decisions.repair_note(repair, previous),
                 "tool_call_id": call_id,
             }
         )
@@ -393,7 +399,7 @@ async def _ask_selector(
         thinking="disabled",
         kind="compactor",
     )
-    return decision_arguments(result)
+    return decision_arguments(result, decisions.SELECTION_TOOL)
 
 
 async def _stream_chat(
@@ -477,18 +483,27 @@ async def _stream_chat(
         ) from exc
 
 
-def decision_arguments(result: StreamChatResult) -> str:
+def decision_arguments(result: StreamChatResult, expected: str) -> str:
     """The decision tool's arguments, as the text the parser reads.
 
-    **A call is the decision.**  A response with no call is a provider that
-    ignored a forced `tool_choice`; it has no answer to correct, so it is raised
-    and `_decide`'s or `_select_live`'s handler logs it as a failed call.
-    A damaged call keeps the model's own argument text (`raw_arguments`) so the
-    parser can name what was wrong with it.
+    **A call is the decision, and it has to be the forced tool's.**  A response
+    with no call is a provider that ignored a forced `tool_choice`; it has no
+    answer to correct, so it is raised and `_decide`'s or `_select_live`'s
+    handler logs it as a failed call.  A call to *another* tool is the same
+    kind of no-answer — a model that continued the conversation instead of
+    deciding, which is the failure the forced choice exists to prevent — and
+    reading its arguments as a decision would attribute a `{}` (keep
+    everything) or an empty list to the decision model.  A damaged call keeps
+    the model's own argument text (`raw_arguments`) so the parser can name what
+    was wrong with it.
     """
     if not result.tool_calls:
         raise RuntimeError("the decision call returned no tool call")
     call = result.tool_calls[0]
+    if call.name != expected:
+        raise RuntimeError(
+            f"the decision call answered with {call.name!r}, not {expected!r}"
+        )
     if call.raw_arguments is not None:
         return call.raw_arguments
     return json.dumps(call.arguments, ensure_ascii=False)
@@ -622,7 +637,7 @@ def build_server(
         finally:
             # Both halves of what this process holds open: the embedder it opened
             # for the startup pass, and one connection per model server it was
-            # asked to discriminate with.  Cleared as well as closed, because
+            # asked to decide with.  Cleared as well as closed, because
             # this hook is not the process's lifetime over the in-memory
             # transport — a client left in place is one the next session is
             # handed already shut, and every `rebuild` of it would fail at its
@@ -1190,9 +1205,11 @@ def build_server(
         fraction of it, and there is no second way to size a recall.
 
         **A model the config cannot resolve is a failure, not a zero.**  A
-        window that cannot be *asked for* fails the turn, rather than leaving a
-        recall to spend by retrieval width with no token cap (SDD Appendix C: a
-        weaker path is not a substitute for a missing capability).
+        window that cannot be *asked for* fails the rebuild — its tool result
+        is the sentence the model reads, and the turn keeps the context it had
+        — rather than leaving a recall to spend by retrieval width with no
+        token cap (SDD Appendix C: a weaker path is not a substitute for a
+        missing capability).
         """
         return int(current().resolve(model)[2].context_window)
 
@@ -1376,11 +1393,11 @@ def build_server(
     ) -> dict[str, Any]:
         """Decide which of a running turn's live messages it no longer needs.
 
-        Called by the agent server's `_turn_compact`, **not by a model**: the
-        ids are the caller's view numbering, they mean nothing outside that
-        call, and nothing is stored with them.  `messages` is the view — the
-        list the model will run on, not the turn's record — and `selectable`
-        names the view positions that are candidates.
+        Called by `_turn_compact`'s body — the agent server's and an agent
+        task's — **not by a model**: the ids are the caller's view numbering,
+        they mean nothing outside that call, and nothing is stored with them.
+        `messages` is the view — the list the model will run on, not the turn's
+        record — and `selectable` names the view positions that are candidates.
 
         `context_tokens` is the conversation's last measured call and
         `context_window` its model's window: the same pair the status bar
@@ -1535,6 +1552,17 @@ def build_server(
         )
         if unknown:
             logger.info("recall_kept_ids_unknown ids=%s", unknown)
+        if decision.keep is not None and decision.keep and not base:
+            # **A keep-list that named nothing in hand did not say "clear".**
+            # Every id was a turn this conversation no longer holds — a
+            # miscopied or hallucinated number — so the intersection is empty
+            # only because the ids were unknown.  Emptying a context nobody
+            # asked to empty is the one outcome this fallback refuses: the
+            # explicit clear is the string (or the empty list), and a decision
+            # that cannot be acted on keeps the context the turn had
+            # (SDD §5.5, Appendix C).
+            logger.info("recall_kept_nothing_known ids=%s", decision.keep)
+            return _in_hand(messages, turn_ids)
 
         recalled: list[int] = []
         rerank = ""
@@ -1572,11 +1600,12 @@ def build_server(
         # the run is the end.**  Nothing here can check that: the ids and the
         # messages arrive as two shapes and are joined by neither, so a caller
         # whose unbacked messages sat somewhere else would be handed back the
-        # wrong slice and told nothing.  `slife2.plugins.agent.core.rebuild_into`
-        # is the one caller that can pass a nonzero `carried`, and `Loop.covered`
-        # is where it keeps the run at the end — a turn that follows unbacked
-        # messages does not join `turn_ids`, which is what keeps the count
-        # honest.  A task restores its list and carries nothing.
+        # wrong slice and told nothing.  `AgentCore.context_rebuild` is the
+        # caller that can pass a nonzero `carried`, and `Loop.covered` is where
+        # it keeps the run at the end — a turn that follows unbacked messages
+        # does not join `turn_ids`, which is what keeps the count honest.  An
+        # agent task's own `context_rebuild` carries its opening the same way
+        # with `publish=False`; it records nothing, but it still has a turn.
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
         # **A private rebuild stops here.**  The decision belongs to the
@@ -1585,13 +1614,14 @@ def build_server(
         # for.
         if publish:
             # Published before the caller is told, and a failure here **fails
-            # the turn**.  The list is authoritative (SDD §5.5): the caller
+            # the rebuild**.  The list is authoritative (SDD §5.5): the caller
             # adopts this answer as its context, so returning the in-memory
             # rebuild while the *persisted* list did not move leaves the two
             # disagreeing, and the next start replays the stale one — a
             # conversation that comes back one turn short, silently.  The
-            # caller that cannot have the write is told rather than handed a
-            # context the log will not have on the next start.
+            # caller that cannot have the write is told — and keeps the context
+            # it had — rather than handed a context the log will not have on
+            # the next start.
             await off_loop(store.set_context_turns, target)
         logger.info(
             "recall_rebuilt turns=%d recalled=%d published=%s",

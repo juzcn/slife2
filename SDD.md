@@ -1131,10 +1131,14 @@ The answer is a **forced tool call**, not model content: the decision
 instruction is a system message appended to the live conversation, and
 `tool_choice` names `decide_context`, whose `parameters` is `RECALL_REPLY`.
 Thinking is off for that call — a thinking endpoint rejects a forced choice —
-and the turn's own calls keep theirs. The conversation is the input, exactly
-as the turn runs it; the instruction is the one system message appended to it.
-A model left free in a tool-heavy conversation continues it instead of
-deciding.
+and the turn's own calls keep theirs; a model whose `compat.thinking: omit`
+says its endpoint refuses the field is not overridden, and a forced choice
+the endpoint still refuses fails the decision and keeps the context (Appendix
+C). The conversation is the input, exactly as the turn runs it; the
+instruction is the one system message appended to it. A model left free in a
+tool-heavy conversation continues it instead of deciding, and a call naming
+any tool but the forced one is that same continuation: it is not a decision,
+whatever its arguments happen to parse to.
 
 Rules:
 
@@ -1151,7 +1155,10 @@ Rules:
   provider makes the turn late rather than the recall fail.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
-  overriding selection would discard the context it replaced.
+  overriding selection would discard the context it replaced. **A keep-list
+  that names no turn in hand is not a clear**: the explicit clear is the string
+  (or the empty list), and a selection with no known turn to keep leaves the
+  context in hand.
 - **A question has two spellings.** `sentences` are read by meaning, one question
   per entry; `query` is the words the keyword leg requires and the meaning
   fallback. The keyword leg is fused into each sentence's list, and a later
@@ -1198,9 +1205,11 @@ Rules:
   no prompt-cache miss is paid on rebuild.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added before the turn and removed before it is saved
-  (`without_lead`), so it never reaches the row, the index or a rebuild. Its
-  payload is a mapping — today `now` and `plan` — because a per-turn fact can
-  grow. The agent, its subagents and an agent task all carry it.
+  (`without_lead`), so it never reaches the row or the index; a list rebuilt
+  from the row does not carry it, and the running turn a rebuild carries
+  verbatim does. Its payload is a mapping — today `now` and `plan` — because a
+  per-turn fact can grow. The agent, its subagents and an agent task all carry
+  it.
 - **The turn prompt carries no context figure.** The last measured call is the
   previous turn's, and a rebuild can change the list before this turn's first
   call; a figure drawn there would describe a context the turn does not run on.
@@ -2235,8 +2244,8 @@ Properties:
    agent has one task namespace.
 2. **A task's turn is not written to the agent's database.** The task reads a
    clone of the maker's context and adds nothing to it — no turn, and no context
-   decision. What the conversation gains is the answer, which the agent server
-   records as a message.
+   decision written back. What the conversation gains is the answer, which the
+   agent server records as a message.
 3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
 4. **Background work and a nested task are the prompt's rule.** A task runs one
@@ -3153,7 +3162,7 @@ The four shapes an undeclared fallback takes:
 |---|---|---|---|---|
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
-| The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
+| The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked at restore (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
 | The selection decision fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |

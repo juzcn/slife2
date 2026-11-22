@@ -41,6 +41,7 @@ from slife2.libs.turn.context import (
     turn_note,
 )
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.tools import CONTEXT_REBUILD
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -1289,9 +1290,8 @@ def test_a_long_question_does_not_cut_the_answer_out_of_the_rerank_document() ->
 async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> None:
     """No `rerank_model` is a capability the caller is told about, not silence.
 
-    A window that did not know would show `[kept …]` and look exactly like one
-    whose ranker ran — the two are different answers to "why is this order
-    this order".
+    A report that did not say so would look exactly like one whose ranker ran —
+    the two are different answers to "why is this order this order".
     """
     async with Client(
         build_server(
@@ -1335,6 +1335,40 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     assert answer.data["turn_ids"] == [1]
     assert answer.data["decision"] == "", "the model answered"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_keep_list_that_names_no_known_turn_keeps_the_context() -> None:
+    """**A miscopied id is not a clear.**
+
+    The keep-list is an intersection with the turns in hand, so a list the
+    conversation no longer holds has an empty intersection — and publishing
+    that would empty the context on a typo.  The explicit clear is the string
+    (or the empty list); a decision that names nothing the conversation has is
+    one that cannot be acted on, and it keeps the context the turn had
+    (SDD §5.5, Appendix C).
+    """
+    hold = [
+        SYSTEM,
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "1"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "2"},
+    ]
+
+    async with Client(
+        build_server(
+            default_config(), embedder=EMBEDDER, ask=Replies('{"context": [99]}')
+        )
+    ) as client:
+        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await _rebuild(client, "", messages=hold, turn_ids=ids)
+
+    assert answer.data["changed"] is False
+    assert answer.data["messages"] == hold
+    assert answer.data["turn_ids"] == ids
+    assert answer.data["decision"] == "", "the model answered"
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == ids
 
 
 async def _down(*arguments: Any) -> str:
@@ -1668,7 +1702,7 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_context_list_that_cannot_be_written_fails_the_turn(
+async def test_a_context_list_that_cannot_be_written_fails_the_rebuild(
     monkeypatch,
 ) -> None:
     """The list is authoritative, so a publish that did not land must not pass.
@@ -1997,6 +2031,32 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"context": "bad"}'
     assert asked[-2]["tool_calls"][0]["id"] == asked[-1]["tool_call_id"]
     assert "could not be read" in asked[-1]["content"]
+    # The refused text is in the result too: a wire that cannot replay a
+    # malformed call still has to show the model what it wrote.
+    assert '{"context": "bad"}' in asked[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_to_another_tool_is_not_a_decision(monkeypatch) -> None:
+    """**Only the forced tool's arguments are the answer.**
+
+    A provider that ignores `tool_choice` can return a call the conversation
+    already asked for — a harness tool's `{}` would parse as "keep
+    everything", and the decision model would be credited with an answer it
+    never gave.  The name is part of the decision, so a different one is a
+    failed call (keep the context), not a decision.
+    """
+
+    async def capture(*_args: Any, **_kwargs: Any) -> StreamChatResult:
+        return StreamChatResult(
+            tool_calls=(ToolCall(id="c1", name=CONTEXT_REBUILD, arguments={}),),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+
+    with pytest.raises(RuntimeError, match="not 'decide_context'"):
+        await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", [SYSTEM])
 
 
 @pytest.mark.asyncio
@@ -2058,6 +2118,22 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
     assert tool["parameters"] == LIVE_REPLY
     assert call["tool_choice"] == SELECTION_TOOL
     assert call["thinking"] == "disabled"
+
+    await context_server._ask_selector(
+        object(),
+        {},
+        asyncio.Lock(),
+        "jack",
+        "",
+        "m",
+        hold,
+        [1],
+        previous='{"compact": "all"}',
+        repair="the reply is not a JSON object",
+    )
+    asked = seen[1]["asked"]
+    assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"compact": "all"}'
+    assert '{"compact": "all"}' in asked[-1]["content"], "the refused text is shown"
 
 
 @pytest.mark.asyncio
@@ -2586,8 +2662,8 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
     """**An unreadable answer is not an empty one**, on this hop too.
 
     `StreamChatResult.from_wire(None)` builds a result with no text, so a model
-    server from another build reached `_discriminate` as "the model answered
-    with nothing": it logged `recall_decision_unparsed` and kept the
+    server from another build reached `_decide` as "the model answered with
+    nothing": it logged `recall_decision_unparsed` and kept the
     context, and so did every rebuild for the rest of the session — pointing
     whoever read the log at the model's output rather than at the transport.
     `slife2.clients.model` raises for this on the loop's own hop, and this is

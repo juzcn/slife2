@@ -335,9 +335,11 @@ class Loop:
     #: historical prefix under a running turn, which moves the opening.  The
     #: tool body updates this; `run_turn_into` slices the record from it.
     turn_opening: int = 0
-    #: Whether this turn's `_context_rebuild` has run.  The automatic call is
-    #: once per turn, at the first boundary; after it the tool is the model's
-    #: to call.  Reset with `hidden` when a turn starts.
+    #: Whether this turn's automatic `_context_rebuild` has been tried.  It is
+    #: set at the first boundary *before* the harness's call, because a hub hop
+    #: that fails never reaches the tool's body; the attempt is the turn's one
+    #: automatic rebuild, whether or not it ran, and after it the tool is the
+    #: model's to call.  Reset with `hidden` when a turn starts.
     rebuilt: bool = False
     #: The last turn's last model call, in tokens — the figure the status bar
     #: shows.  Set from the restored last turn and after every turn; 0 for a

@@ -62,11 +62,11 @@ def _files(data: Path) -> list[str]:
 def _prompt_words(content: str) -> str:
     """A live user message as the person wrote it, the turn's prompt taken off.
 
-    `[TURN-PROMPT:{…}]` — the clock and the status bar's figure — is added to
-    the message after the recall has chosen the conversation and removed before
-    the turn is saved.  The model is its only reader, so a request read back
-    from the stub carries it while the row, the transcript and every later
-    rebuild do not.  What the two agree on is the words underneath.
+    `[TURN-PROMPT:{…}]` — the clock and the plan — is added when the turn opens
+    and removed before it is saved.  Its readers are the model answering and
+    the context decision, which reads the live conversation, so a request read
+    back from the stub carries it while the row, the transcript and a list
+    rebuilt from them do not.  What the two agree on is the words underneath.
     """
     return strip_marker(content, TURN_PROMPT_PREFIX)
 

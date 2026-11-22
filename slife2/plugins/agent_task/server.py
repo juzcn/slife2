@@ -11,9 +11,10 @@ which task it was (SDD §9.3).
 
 **It is a plugin because it holds loops**, which is what `slife2-agent` holds and
 why that one is a plugin.  What it does *not* do is reach for anything the agent
-*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` with
-`auto=None` — there is no inbox to cut in from — and an observer that publishes
-the turn to whoever is watching.  That observer is a reader, not a caller's
+*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` with its
+own `auto` — the rebuild at the first boundary and the compaction, never an
+inbox, which a task does not have — and an observer that publishes the turn to
+whoever is watching.  That observer is a reader, not a caller's
 progress stream: a task has no caller waiting on it.  A behaviour this turn needs
 and the loop does not have belongs in `AgentLoop` behind a parameter that
 defaults off, never in a copy of the loop.
@@ -21,10 +22,11 @@ defaults off, never in a copy of the loop.
 **A task runs on a clone of the caller's context, under the caller's own key.**
 The key every hop carries is `(agent, subagent)`: the agent's own conversation
 for a task the agent started, and the subagent's when a subagent started it.
-`restore` reads that conversation's live-context list, and `rebuild` once before
-the turn decides on that snapshot with `publish=False` — the task's context is
-its own, and the conversation's list is not moved.  The head is that
-conversation's system prompt, rendered the way the agent server renders it.
+`restore` reads that conversation's live-context list, and `rebuild` at the
+turn's first boundary decides on that snapshot with `publish=False` — the
+task's context is its own, and the conversation's list is not moved.  The head
+is that conversation's system prompt, rendered the way the agent server renders
+it.
 SDD §5.5's *the context is chosen, not accumulated* has no exception for a
 task: one that ran on whatever happened to be in a list would be the one turn in
 this system whose context nobody decided.  `restore` and `rebuild` are
@@ -36,18 +38,20 @@ reaches the conversation as a message and *that* message is what the agent serve
 records, so writing the task's own round trip as well would file the same answer
 twice under a description that is a rendered template rather than anything the person
 said.  A task reads a clone of the caller's context and adds nothing to it — no
-turn, and no context decision.
+turn, and no context decision written back.
 
-**Two of the model's tools are served here rather than by the agent server.**
+**Four of the model's tools are served here rather than by the agent server.**
 A task is a live turn, but the agent server's live turn is a different one — the
 same conversation id, a different message list, in a different process — so the
-two tools that act on a live list are the task's own (`LIVE_CONVERSATION_TOOLS`).
-`_check_new_input` has nothing to hand over: a task has no inbox and no harness
-cut-in, so it answers "nothing waiting" and never touches the maker's queue.
-`attach_image` injects into the task's own single user message — the rendered
-description — because that message *is* the turn's request, and the cabinet key
-route is asked of the cabinet directly, as the agent server asks it.  A by-name
-call reaches the same two bodies; neither is left to fall through to the hub.
+four tools that act on a live turn are the task's own
+(`LIVE_CONVERSATION_TOOLS`).  `_check_new_input` has nothing to hand over: a task
+has no inbox and no harness cut-in, so it answers "nothing waiting" and never
+touches the maker's queue.  `attach_image` injects into the task's own single
+user message — the rendered description — because that message *is* the turn's
+request, and the cabinet key route is asked of the cabinet directly, as the
+agent server asks it.  `_turn_compact` and `_context_rebuild` act on the task's
+own list and its clone of the history.  A by-name call reaches the same four
+bodies; none is left to fall through to the hub.
 
 **A running task is watchable, and the watch is a read.**  The turn's observer
 publishes to the task's tap and watchers (`slife2.libs.turn.watchhub`, shared
@@ -183,7 +187,7 @@ CONFIG_KEY = CHANNEL
 
 # **A task shares the maker's identity, and the prompt carries the rest.**  The
 # modes it must not use — `_async` and another task — are named in the opening
-# template; the registry is the hub's list, with the two live-conversation
+# template; the registry is the hub's list, with the four live-conversation
 # bodies replaced by this turn's own (`live_bodies`).
 
 # The tools, the states, the channel and the marker are
@@ -403,11 +407,8 @@ class TaskTurn:
     #: replaces them, and the opening after `covered` is the carried tail.
     turn_ids: list[int] = field(default_factory=list)
     covered: int = 0
-    #: The index where `run_turn` appends the task's opening — the record's
-    #: boundary even here, where there is no record: the rebuild's `carried` tail
-    #: starts at the message after it.
-    turn_opening: int = 0
-    #: Whether this task's one automatic `_context_rebuild` has run.
+    #: Whether this task's one automatic `_context_rebuild` has been tried —
+    #: set before the call, because a failed hub hop never reaches the body.
     rebuilt: bool = False
     #: The messages this task's own compaction has hidden from its later model
     #: calls.  The same turn-scoped projection the agent server keeps: the list
@@ -771,7 +772,6 @@ def build_server(
             verbatim, exactly as on the agent server, and the decision is made
             from the live context — the task's own opening is in it.
             """
-            turn.rebuilt = True
             at = compact.opening(turn.messages)
             if at is None:
                 return "This task has no opening message; nothing to rebuild."
@@ -783,11 +783,9 @@ def build_server(
                 turn.model,
                 publish=False,
             )
-            new_opening = len(rebuilt.messages) - (len(turn.messages) - at)
             turn.messages[:] = rebuilt.messages
             turn.turn_ids = rebuilt.turn_ids
             turn.covered = rebuilt.covered
-            turn.turn_opening = new_opening
             turn.hidden.clear()
             turn.compact_hold = False
             logger.info(
@@ -993,10 +991,13 @@ def build_server(
             `publish=False` and no record — then the compaction when due.
             """
             if not turn.rebuilt and turn.live is not None:
+                # **Set before the call, not by its body** — a failed hub hop
+                # never reaches the body (`slife2.plugins.agent.core` says why
+                # for the agent server's turn).  A hub that predates the tool
+                # is the same fall-through: the task runs on what it has.
+                turn.rebuilt = True
                 if turn.live.declares(CONTEXT_REBUILD):
                     return AutoCall(CONTEXT_REBUILD)
-                # A hub that predates the tool: the task runs on what it has.
-                turn.rebuilt = True
             return AutoCall(TURN_COMPACT) if compact_due() else None
 
         # **The task's prompt marker, and no strip after it.**  A task's messages
@@ -1013,7 +1014,6 @@ def build_server(
                 plan.read(*task.identity),
             ),
         )
-        turn.turn_opening = len(turn.messages)
         result = await loop.run_turn(turn.messages, opening, observer, auto=auto_invoke)
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the

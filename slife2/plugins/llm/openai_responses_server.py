@@ -188,10 +188,19 @@ def to_responses_input(
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
-                        # Re-serialised to a JSON string because that is what
-                        # the wire requires — the awkwardness is theirs, and
-                        # this is the one place it is dealt with.
-                        "arguments": json.dumps(call.arguments, ensure_ascii=True),
+                        # A JSON string, because that is what the wire requires
+                        # — the awkwardness is theirs, and this is the one
+                        # place it is dealt with.  **A damaged call's original
+                        # text goes back as it came** (`raw_arguments`), the
+                        # rule `ToolCall.to_wire` states for the chat wire:
+                        # re-serialising its empty dict would send a call the
+                        # model never made, and the repair round (and every
+                        # later replay) would lose the answer being corrected.
+                        "arguments": (
+                            call.raw_arguments
+                            if call.raw_arguments is not None
+                            else json.dumps(call.arguments, ensure_ascii=True)
+                        ),
                     }
                 )
             # An assistant turn with neither text nor calls carries nothing.

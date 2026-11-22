@@ -269,9 +269,8 @@ async def emit(observer: TurnObserver, event: TurnEvent) -> bool:
 
     A fact about observers, not about the loop: the loop emits its own events
     through this, and so do the callers that emit beside it (the agent server's
-    approval request, its tools-counted and context-chosen lines, the agent
-    task's), which is why it lives here rather than as a private method one of
-    them asks the class for.
+    approval request and tools-counted line, the agent task's), which is why it
+    lives here rather than as a private method one of them asks the class for.
 
     A UI that throws must not end a turn — the answer is still correct and
     still returned.  `CancelledError` is deliberately not caught: it derives
@@ -451,9 +450,8 @@ def decode(message: str) -> TurnEvent | None:
 
     # Every key `encode` always writes is required here: a hole is a line this
     # build did not write, not a value it may invent.  The keys `encode` omits
-    # when they are empty (`args`, the iteration pair, a cut-in's receipt, a
-    # context's rerank and decision statuses) are the only ones absent may
-    # stand for.
+    # when they are empty (`args`, the iteration pair, a cut-in's receipt) are
+    # the only ones absent may stand for.
     match payload.get("t"):
         case "tools" if _counts_ok(payload, "n", "l"):
             return ToolsCounted(total=payload["n"], loaded=payload["l"])

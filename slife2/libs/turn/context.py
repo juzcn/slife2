@@ -10,15 +10,15 @@ without a process is the part worth stating on its own.
 Two ideas, and the implementation is deliberately faithful to them because each
 one is load-bearing:
 
-**The context is chosen, not accumulated.**  Before every turn the agent says
-what to keep of the turns in hand and what to *recall* from the turn log, and the
-turn runs on the two together.  One model call decides it — the *decision
-model* — and it is the single most expensive thing here, which is why a failure
-ends in
-"keep the context" rather than in a retry.  The exception is an answer this build
-cannot read: the refusal names the field (`parse_with_reason`) and the model is
-asked once more with that reason, because correcting an answer already in hand is
-not the same bet as asking a silent provider again.
+**The context is chosen, not accumulated.**  At each turn's first boundary the
+agent says what to keep of the turns in hand and what to *recall* from the turn
+log, and the turn runs on the two together.  One model call decides it — the
+*decision model* — and it is the single most expensive thing here, which is why
+a failure ends in "keep the context" rather than in a retry.  The exception is
+an answer this build cannot read: the refusal names the field
+(`parse_with_reason`) and the model is asked once more with that reason, because
+correcting an answer already in hand is not the same bet as asking a silent
+provider again.
 
 **The union is what makes "keep this and add that" expressible.**  Kept and
 recalled are joined by id and never reconciled: a turn both kept and recalled is
@@ -31,13 +31,14 @@ alone.  Clearing is only ever the explicit clear.
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
 a row every time a list is built and never stored.  `turn_prompt_note` is
-`[TURN-PROMPT:{…}]`, the clock, the context size and the conversation's plan at
-the start of the turn about to run: it is added to the user's message *after*
-the recall has chosen the conversation and removed before the turn is saved, so
-it never reaches the row, the index or a rebuild.  The second is the only place
-a per-turn fact can live without becoming a fact about the turn for ever — and
-its payload is a mapping for exactly that reason: what a turn needs to know can
-grow without giving the past a copy of it.
+`[TURN-PROMPT:{…}]`, the clock and the conversation's plan at the start of the
+turn about to run: it is added to the user's message when the turn opens and
+removed before the turn is saved, so it never reaches the row or the index — a
+list rebuilt from the row does not carry it, and the turn a rebuild carries
+verbatim does.  The second is the only place a per-turn fact can live without
+becoming a fact about the turn for ever — and its payload is a mapping for
+exactly that reason: what a turn needs to know can grow without giving the past
+a copy of it.
 """
 
 from __future__ import annotations
@@ -229,9 +230,11 @@ TURN_PREFIX = "[TURN:"
 #: the model is about to answer.  **A second capitals marker, and the one that is
 #: not derived from a row**: `[TURN:]` is a record of a turn that ran, while this
 #: is a prompt for the turn about to run — added to the user's message before the
-#: turn, and removed before the turn is saved.  It is therefore never stored,
-#: never rebuilt, and never seen by a screen; its only reader is the model that
-#: is answering.  **No context figure**: the previous call's is stale before the
+#: turn, and removed before the turn is saved.  It is therefore never stored and
+#: never reconstructed from a row; its readers are the model answering and the
+#: decision that reads the live conversation, and the running turn a rebuild
+#: carries verbatim is the only place it survives one.  It is never seen by a
+#: screen.  **No context figure**: the previous call's is stale before the
 #: rebuild, and `_context_rebuild`'s report carries the turn's own estimate.
 TURN_PROMPT_PREFIX = "[TURN-PROMPT:"
 #: The harness's record of a turn that died, as a message of its own.  **The
@@ -490,16 +493,24 @@ def parse_with_reason(text: str) -> tuple[Decision | None, str]:
     return Decision(keep=keep, recall=recall), ""
 
 
-def repair_note(reason: str) -> str:
+def repair_note(reason: str, reply: str = "") -> str:
     """What a refused reply is answered with, before the one correction round.
 
     **One round, not a loop.**  The schema the correction refers to is the
     instruction already in the conversation, so the note does not repeat it; the
     reply that was refused is there too, sent beside it.  A second refusal is
     where the repair stops and the turn keeps the context it has.
+
+    **The text is repeated in the result as well.**  The assistant call beside
+    this note is the model's own reply on the wires that can replay one, but
+    not every wire can carry a malformed one: Anthropic's `tool_use.input` is
+    an object by protocol, so a reply that was not an object arrives there as
+    `{}`.  A tool result is text on every wire, and it is the one channel that
+    shows the model what it actually wrote.
     """
+    shown = f" It was: {reply}" if reply else ""
     return (
-        f"That reply could not be read: {reason}. "
+        f"That reply could not be read: {reason}.{shown} "
         "Reply again with ONE JSON object holding the fields asked for, and "
         "nothing else."
     )
@@ -765,9 +776,11 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
     """The prompt a turn opens with, built from the facts its caller has.
 
     **A prompt for the turn about to run, not a record of one.**  It is added to
-    the user's message after the recall has chosen the conversation and removed
-    before the turn is saved, so it never enters the row, the index or a
-    rebuild — the `[TURN:]` footnote is what a later reader sees.
+    the user's message when the turn opens — after the message is appended and
+    before the turn's first model call — and removed before the turn is saved,
+    so it never enters the row or the index; a list rebuilt from the row does
+    not carry it, while the running turn a rebuild carries verbatim does.  The
+    `[TURN:]` footnote is what a later reader sees.
 
     `facts` is the whole payload, and a mapping rather than a fixed argument
     list because this is where a per-turn fact belongs as it appears: today
@@ -836,9 +849,12 @@ def rebuild_report(
             f"No rebuild: the decision model did not answer ({decision}); "
             f"the turn continues on the context it had; context ~{tokens}."
         )
-    if not changed:
-        return f"No rebuild: the context is unchanged; context ~{tokens}."
+    # The rerank status is the recall's and belongs to both answers: a recall
+    # that ran and then chose nothing is still one whose cross-encoder was
+    # lost, and "unchanged" alone would hide the stage that said so.
     tail = f" (rerank {rerank})" if rerank else ""
+    if not changed:
+        return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
     return f"kept {kept} turn(s), recalled {recalled}{tail}; context ~{tokens}."
 
 

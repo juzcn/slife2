@@ -13,11 +13,11 @@ work. The system leaves the messages you name out of the model's context for
 the rest of this turn: keep the context the work still depends on, and give up
 what it does not.
 
-Nothing is deleted. The turn log keeps every message, and the next turn starts
-from the full conversation. This is the turn's view, not the conversation's
-shape: the historical turns are `_context_rebuild`'s to edit, and a rebuild
-starts this view over. The system prompt and the turn's opening message are
-fixed.
+Nothing is deleted: every message stays in the conversation, and the next turn
+— where there is one — starts from the full list. This is the turn's view, not
+the conversation's shape: the historical turns are `_context_rebuild`'s to
+edit, and a rebuild starts this view over. The system prompt and the turn's
+opening message are fixed.
 
 Each message above carries its live id ([MESSAGE:{"id": n}]). The ids exist
 only for this call, are not part of the conversation, and are stored nowhere.

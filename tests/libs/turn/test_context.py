@@ -20,6 +20,7 @@ from slife2.libs.turn.context import (
     instruction,
     live_instruction,
     parse_live,
+    rebuild_report,
     with_message_id,
 )
 from slife2.libs.turn.tools import INTERRUPTED
@@ -152,3 +153,25 @@ def test_a_live_reply_is_a_drop_list() -> None:
     assert parse_live("not json")[0] is None
     assert parse_live('{"drop": [1]}')[0] is None
     assert parse_live('{"compact": [true]}')[0] is None
+
+
+def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
+    """A recall that ran and chose nothing still lost its cross-encoder.
+
+    The unchanged answer used to drop the status, which is the one fact saying
+    why the fused order stood — exactly where the decision had asked for a
+    recall.  `rebuild_report`'s docstring promises the report says so on both
+    answers, and this is the half that did not.
+    """
+    report = rebuild_report(
+        changed=False,
+        kept=2,
+        recalled=0,
+        rerank="failed",
+        decision="",
+        tokens="1,000 (10.0%)",
+    )
+
+    assert report == (
+        "No rebuild: the context is unchanged (rerank failed); context ~1,000 (10.0%)."
+    )

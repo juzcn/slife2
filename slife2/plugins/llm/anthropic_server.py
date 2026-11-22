@@ -233,6 +233,13 @@ def to_anthropic_messages(
                 *to_anthropic_blocks(message.content),
             ]
             for call in message.tool_calls:
+                # **A damaged call's original text has no place here.**  This
+                # wire's `input` is an object by protocol, so a call whose
+                # arguments were not one replays as `{}` — the regression the
+                # chat and Responses wires avoid by sending `raw_arguments`.
+                # The decision tools' repair round repeats the refused text in
+                # its tool result (`slife2.libs.turn.context.repair_note`),
+                # which is the channel this wire does carry as text.
                 blocks.append(
                     {
                         "type": "tool_use",

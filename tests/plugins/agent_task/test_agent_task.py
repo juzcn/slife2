@@ -1074,9 +1074,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     gate = asyncio.Event()
     keep_one = ""
 
-    async def discriminating(
-        agent: str, subagent: str, model: str, messages: Any
-    ) -> str:
+    async def deciding(agent: str, subagent: str, model: str, messages: Any) -> str:
         """The first task parks inside its rebuild; the second clears its own."""
         asked.append("")
         if len(asked) == 1:
@@ -1087,7 +1085,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
         return '{"context": "clear"}'
 
     async with Client(
-        build_context(default_config(), embedder=StubEmbedder(), ask=discriminating)
+        build_context(default_config(), embedder=StubEmbedder(), ask=deciding)
     ) as context_client:
         store = Store(client=context_client, ask=DecisionModel())
         async with Client(context_client.transport) as writer:
@@ -1799,7 +1797,7 @@ def tool_result(messages: list[Any], name: str) -> Any:
 
 
 def declaring_agent(reached: list[str]) -> FastMCP:
-    """The agent server's *declarations* for the two live-conversation tools.
+    """The agent server's *declarations* for the four live-conversation tools.
 
     The hub must advertise the names — a task's registry replaces their bodies
     and takes their declarations from the hub — and reaching one of these bodies

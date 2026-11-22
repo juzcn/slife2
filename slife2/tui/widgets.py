@@ -624,7 +624,7 @@ class ChatView(VerticalScroll):
         is a pure harness note, which never carries one.
 
         **The turn stays open by default, and that is load-bearing.**  A note
-        lands *inside* a turn that is still going: the decision model's `[kept …]`
+        lands *inside* a turn that is still going: `_context_rebuild`'s report
         arrives before the first delta, and everything the model then streams has
         to flow into the block under it — closing the turn here would make
         `append_text` drop the rest of the answer as though it belonged to

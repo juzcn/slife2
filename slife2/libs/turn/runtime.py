@@ -187,7 +187,7 @@ def _count(payload: dict[str, Any], key: str) -> int:
     """One rebuild count, refused unless it is the int the store writes.
 
     `True` would read as 1 and `"2"` as 2; both would put a figure nobody
-    reported on the `[kept …]` line, which is the note's whole content.
+    reported on the `kept …` line, which is the report's whole content.
     """
     value = payload.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
@@ -494,11 +494,11 @@ class TurnRuntime:
         store is not asked for its list and nothing is written.
 
         **All of the answer is read before the caller adopts any of it.**  An
-        answer that replaced the list but omitted the counts would draw
-        `[kept 0, recalled 0]`, a note reporting a decision nobody made; a
-        rerank status and the reason no decision was made are part of the same
-        shape, and an unrecognised one still reaches the window, which is where
-        its words live.
+        answer that replaced the list but omitted the counts would report
+        `kept 0, recalled 0` — a decision nobody made; a rerank status and the
+        reason no decision was made are part of the same shape, and an
+        unrecognised one still reaches the window, which is where its words
+        live.
         """
         carried = max(len(messages) - covered, 0)
         arguments: dict[str, Any] = {

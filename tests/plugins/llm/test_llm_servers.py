@@ -1507,6 +1507,29 @@ def test_responses_an_assistant_turn_is_its_text_then_its_calls() -> None:
     ]
 
 
+def test_responses_a_damaged_call_replays_its_own_arguments() -> None:
+    """**A call the wire could not read goes back as the wire carried it.**
+
+    `ToolCall.to_wire` preserves `raw_arguments` for the chat wire, and this
+    adapter used to re-serialise the empty dict instead: a replayed history
+    then held a call the model never made, and the decision tools' one repair
+    round — which sends the refused answer as the model's own call — showed the
+    model `{}` where its text should be.  The chat and Responses wires carry one
+    conversation now; the Anthropic wire's `input` is an object by protocol and
+    cannot carry damaged text at all.
+    """
+    damaged = ToolCall(
+        id="c1",
+        name="decide_context",
+        arguments={},
+        error='the arguments are not JSON: "Expecting value"',
+        raw_arguments='{"context": "keep"',
+    )
+    _, items = to_responses_input([Message(role="assistant", tool_calls=[damaged])])
+
+    assert items[0]["arguments"] == '{"context": "keep"'
+
+
 def test_responses_an_assistant_turn_with_only_calls_has_no_message_item() -> None:
     _, items = to_responses_input(
         [Message(role="assistant", tool_calls=[ToolCall(id="c1", name="calc")])]
@@ -2091,6 +2114,47 @@ def test_the_decision_options_are_per_call() -> None:
         openai_build_request(
             [], [], ModelSettings(model="m"), tool_choice="decide_context"
         )
+
+
+def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
+    """**The override reads the field, not only the reasoning flag.**
+
+    `compat.thinking: enabled` asks for a thinking block whatever `reasoning`
+    says (`thinking_parameter` reads the field), so keying the override on
+    `reasoning` alone sent `thinking` **and** a forced `tool_choice` — a
+    thinking endpoint answers that with a 400, and both decision calls would
+    fail on such a model.  A model that names neither is sent no field: the
+    override must not open a hatch the operator left closed.
+    """
+    tool = ToolSpec(
+        name="decide_context", description="d", parameters={"type": "object"}
+    )
+    declared = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=False, thinking="enabled", max_tokens=8000),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert declared["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    silent = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m"),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert "extra_body" not in silent, "an endpoint that was not asked to think"
+
+    omitted = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True, thinking="omit"),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert "extra_body" not in omitted, "the operator's `omit` is respected"
 
 
 def test_anthropic_and_responses_map_the_forced_choice() -> None:

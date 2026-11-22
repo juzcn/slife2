@@ -157,8 +157,26 @@ def build_request(
     caller's bug this build refuses rather than sends.  `thinking` overrides the
     model's configured `compat.thinking` for this call alone — the decision
     calls disable it — and leaves the config's value on every ordinary turn.
+
+    **The override applies when the model reasons natively or asks for thinking
+    explicitly**, and on this wire that is either flag: `reasoning: true` asks
+    a model that thinks natively, and `compat.thinking: enabled` asks
+    explicitly whatever `reasoning` says (`thinking_parameter` reads the field,
+    not the flag).  Keying on `reasoning` alone left an explicitly-enabled
+    model sending `thinking` **and** a forced `tool_choice`, which a thinking
+    endpoint answers 400 to — the decision calls' one job.  **`compat.thinking:
+    omit` is respected**: the operator has said this gateway rejects the field,
+    and a per-call override has no business reopening a hatch they closed.  A
+    model that reasons natively with no `compat.thinking` does get an explicit
+    `disabled` — that is how a thinking endpoint is told not to think for a
+    forced call — and one that neither reasons nor asks for thinking is sent no
+    field at all.
     """
-    if thinking and settings.reasoning:
+    if (
+        thinking
+        and settings.thinking != "omit"
+        and (settings.reasoning or settings.thinking == "enabled")
+    ):
         settings = replace(settings, thinking=thinking)
     if tool_choice and not tools:
         raise ValueError(
