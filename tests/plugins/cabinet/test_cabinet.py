@@ -728,6 +728,24 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_an_offset_past_sqlite_is_the_empty_page() -> None:
+    """A page start beyond SQLite's integer range is still "past the end".
+
+    The listing floored an offset at zero and did not cap the other end, so a
+    model that wrote more digits than SQLite binds made `note_list` answer
+    `OverflowError` out of the query — an internal error where the page, the
+    total and the offset applied are the whole answer.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_write", subject="n0", content="body 0")
+        page = await payload(client, "note_list", offset=2**63)
+
+    assert page["entries"] == []
+    assert page["total"] == 1
+    assert page["offset"] == 2**63 - 1
+
+
 # --- files: bytes on disk, never in the index ---------------------------------
 
 
