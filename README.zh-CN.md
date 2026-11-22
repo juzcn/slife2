@@ -420,23 +420,22 @@ system prompt 中。它是系统交付物，不是供人编辑的文件：重装
 
 | 节 | 用途 |
 |---|---|
-| `servers:` | 每个 plugin server 的地址和端口。缺省时使用默认值。 |
-| `providers:` | chat provider 及其模型。 |
-| `default:` | 新对话使用的模型，`provider/model`。 |
-| `agent:` | 迭代上限和 system-prompt 模板。 |
-| `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
-| `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
-| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
-| `context:` | 上下文决策的限额。 |
-| `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
-| `tool_result:` | 单个工具结果的尺寸预算，按 UTF-8 字节。 |
+| `providers:` | chat provider 及其模型；`providers.default:` 指定新对话使用的模型，`provider/model`。 |
+| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider；`embeddings.default:` 选择使用哪一个，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
+| `media:` | 图片、视频、语音和转写 provider。 |
+| `file-tunnel:` | 本地文件的公网 URL provider；`file-tunnel.default:` 选择使用哪一个。 |
 | `mcp:` | 外部 MCP server（stdio 或 HTTP）。 |
 | `rest-api:` | 暴露为工具的 OpenAPI 文档。 |
 | `cli:` | 机器上已经安装的命令。 |
 | `skills:` | `skills/` 下 playbook 的环境变量。 |
-| `media:` | 图片、视频、语音和转写 provider。 |
-| `file-tunnel:` | 本地文件的公网 URL provider。 |
+| `agent:` | 迭代上限和 system-prompt 模板。 |
+| `context:` | 上下文决策的限额。 |
+| `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
+| `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
 | `peer_agent:` | 远端 peer-agent 网络。 |
+| `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
+| `tool_result:` | 单个工具结果的尺寸预算，按 UTF-8 字节。 |
+| `servers:` | 每个 plugin server 的地址和端口。缺省时使用默认值。 |
 
 没有 `wechat:`、`cabinet:`、`schedule:` 或 `tui:` 节。微信登录通过扫码创建并保存在
 agent 目录下。文件柜、调度器和终端收件箱由各自的 server 及其持有的数据启用。
@@ -528,7 +527,7 @@ skills:
 | `cli:` | `cli_get`、`cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
 | `jobs/`（文件夹） | `job_set`、`job_list`、`job_read`、`job_run`、`job_remove` |
-| `providers:` 与 `default:` | `model_get`、`model_set`、`model_list`、`model_remove`、`model_switch` |
+| `providers:`（含其 `default:`） | `model_get`、`model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），在跨进程锁下进行。写入
 保留注释，结果由启动时同一个 loader 校验。loader 拒绝的条目会被还原，并告诉调用方

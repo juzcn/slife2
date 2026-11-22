@@ -474,23 +474,22 @@ is a `${VAR}` reference resolved at runtime.
 
 | Section | Purpose |
 |---|---|
-| `servers:` | Address and port of each plugin server. Defaults are used when absent. |
-| `providers:` | Chat providers and their models. |
-| `default:` | The model a new conversation starts on, as `provider/model`. |
-| `agent:` | The iteration cap and the system-prompt template. |
-| `agent-task:` | `max_running`, the number of background tasks per agent. |
-| `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
-| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes, each with an optional `rerank_model` for the recall's rerank stage. |
-| `context:` | Limits for the context decision. |
-| `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
-| `tool_result:` | Size budget for a single tool result, in UTF-8 bytes. |
+| `providers:` | Chat providers and their models; `providers.default:` names the model a new conversation starts on, as `provider/model`. |
+| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes; `embeddings.default:` selects the one in use, and each may name an optional `rerank_model` for the recall's rerank stage. |
+| `media:` | Image, video, speech, and transcription providers. |
+| `file-tunnel:` | The public-URL provider for local files; `file-tunnel.default:` selects it. |
 | `mcp:` | External MCP servers (stdio or HTTP). |
 | `rest-api:` | OpenAPI documents exposed as tools. |
 | `cli:` | Commands already installed on the machine. |
 | `skills:` | Environment for playbooks under `skills/`. |
-| `media:` | Image, video, speech, and transcription providers. |
-| `file-tunnel:` | The public-URL provider for local files. |
+| `agent:` | The iteration cap and the system-prompt template. |
+| `context:` | Limits for the context decision. |
+| `agent-task:` | `max_running`, the number of background tasks per agent. |
+| `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
 | `peer_agent:` | The remote peer-agent network. |
+| `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
+| `tool_result:` | Size budget for a single tool result, in UTF-8 bytes. |
+| `servers:` | Address and port of each plugin server. Defaults are used when absent. |
 
 There is no `wechat:`, `cabinet:`, `schedule:`, or `tui:` section. A WeChat login
 is created by scanning a QR code and stored under the agent's directory. The
@@ -590,7 +589,7 @@ its own tools:
 | `cli:` | `cli_get`, `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
 | `jobs/` (a folder) | `job_set`, `job_list`, `job_read`, `job_run`, `job_remove` |
-| `providers:` and `default:` | `model_get`, `model_set`, `model_list`, `model_remove`, `model_switch` |
+| `providers:` (including its `default:`) | `model_get`, `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
 cross-process lock. The write preserves comments, and the result is validated by

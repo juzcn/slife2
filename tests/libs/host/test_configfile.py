@@ -17,11 +17,11 @@ import pytest
 from slife2.libs.host.config import ConfigError, load
 from slife2.libs.host.configfile import (
     config_path,
-    read_scalar,
+    read_default,
     read_section,
     remove,
+    set_default,
     set_enabled,
-    set_scalar,
     update_entry,
     upsert,
 )
@@ -33,6 +33,7 @@ from slife2.libs.host.paths import DATA_ENV_VAR
 CONFIG = """\
 # slife2.yaml — the explanation lives here, and a write must not eat it.
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -48,7 +49,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 
 # ── Other people's servers ──────────────────────────────────────────────────
 mcp:
@@ -309,7 +309,7 @@ def test_an_edit_whose_judge_raises_a_non_config_error_is_rolled_back(tmp_path) 
         raise RuntimeError("keyring locked")
 
     with pytest.raises(RuntimeError, match="keyring locked"):
-        set_scalar("default", "local/big", check=refuses, path=path)
+        set_default("local/big", check=refuses, path=path)
 
     assert path.read_text(encoding="utf-8") == before, (
         "the unvalidated edit was rolled back"
@@ -637,20 +637,20 @@ def test_the_path_is_the_one_the_loader_reads(
     assert config_path() == isolated_runtime / "slife2.yaml"
 
 
-# --- the top-level scalar, and the locked update -----------------------------
+# --- the default model, and the locked update --------------------------------
 
 
-def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
-    """`default:` is not a section, so it needs a writer of its own.
+def test_the_default_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
+    """`providers.default` is a key of a section, and `set_default` writes it.
 
-    And `load` accepts any string there — only `Config.resolve` knows a
-    reference from a typo — which is why the caller passes its own judge and a
-    write naming no model is rolled back like any other the reader refuses.
+    `load` accepts any string there — only `Config.resolve` knows a reference
+    from a typo — which is why the caller passes its own judge and a write
+    naming no model is rolled back like any other the reader refuses.
     """
     path = write(tmp_path)
 
-    set_scalar("default", "local/big", path=path)
-    assert read_scalar("default", path=path) == "local/big"
+    set_default("local/big", path=path)
+    assert read_default(path=path) == "local/big"
     assert load(path).default == "local/big"
     # Everything the one assignment had nothing to do with is untouched.
     assert "# slife2.yaml — the explanation lives here" in path.read_text(
@@ -659,8 +659,7 @@ def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
 
     before = path.read_text(encoding="utf-8")
     with pytest.raises(ConfigError):
-        set_scalar(
-            "default",
+        set_default(
             "nobody/knows",
             check=lambda config: config.resolve("nobody/knows"),
             path=path,
@@ -668,9 +667,9 @@ def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
     assert path.read_text(encoding="utf-8") == before, "rolled back"
 
 
-def test_a_scalar_that_is_not_there_reads_as_the_default(tmp_path) -> None:
-    path = write(tmp_path)
-    assert read_scalar("nobody-wrote-this", default="?", path=path) == "?"
+def test_an_absent_default_reads_as_empty(tmp_path) -> None:
+    path = write(tmp_path, REQUIRED)
+    assert read_default(path=path) == ""
 
 
 def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
@@ -727,6 +726,7 @@ def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
 #: `mcp:` as a scalar, with nothing under it.
 BROKEN_SECTION = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -734,7 +734,6 @@ providers:
     models:
       - model: big
         name: 'Big one'
-default: local/big
 
 mcp: "oops"
 """
@@ -742,6 +741,7 @@ mcp: "oops"
 #: And one entry inside a section that is a mapping.
 BROKEN_ENTRY = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -749,7 +749,6 @@ providers:
     models:
       - model: big
         name: 'Big one'
-default: local/big
 
 mcp:
   chinese: "oops"

@@ -3174,6 +3174,7 @@ def test_the_sdk_clients_never_retry_a_call_behind_the_callers_back() -> None:
 #: has no provider to serve.
 ONLY_OPENAI = """
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -3186,7 +3187,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -3244,6 +3244,7 @@ def test_the_matching_protocol_serves_every_provider_of_it(
 
 ONLY_RESPONSES = """
 providers:
+  default: oai/big
   oai:
     api: openai-responses
     base_url: https://example.test/v1
@@ -3256,7 +3257,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: oai/big
 """
 
 

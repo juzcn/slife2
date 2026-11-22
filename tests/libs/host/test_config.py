@@ -34,6 +34,7 @@ from slife2.libs.host.paths import DATA_ENV_VAR
 
 A_PROVIDER = """
 providers:
+  default: local/small
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -50,7 +51,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: small-emb
-default: local/small
 """
 
 
@@ -1458,8 +1458,8 @@ def test_an_unknown_tunnel_provider_is_a_config_error(tmp_path) -> None:
     """A tunnel publishes the machine; which provider does it is the operator's
     decision, so a name this build lacks is refused rather than swapped for the
     default."""
-    with pytest.raises(ConfigError, match="file-tunnel.active.*made-up"):
-        load(write(tmp_path, "file-tunnel:\n  active: made-up\n"))
+    with pytest.raises(ConfigError, match="file-tunnel.default.*made-up"):
+        load(write(tmp_path, "file-tunnel:\n  default: made-up\n"))
 
 
 def test_an_unknown_tunnel_providers_entry_is_a_config_error(tmp_path) -> None:
@@ -1807,7 +1807,7 @@ def test_the_switch_is_a_boolean_or_it_is_refused(
 
 # --- embeddings: which endpoint answers ---------------------------------------
 #
-# The table is a list of endpoints, and `active_model` picks one.  A name the
+# The table is a list of endpoints, and `default` picks one.  A name the
 # file does not define is a mistake, not a vote for the first endpoint — a
 # substitution there changes where every vector comes from and, with it, the
 # index's recorded identity.
@@ -1824,21 +1824,23 @@ embeddings:
 """
 
 
-def test_an_unknown_active_model_is_refused_rather_than_substituted(tmp_path) -> None:
+def test_an_unknown_embedding_default_is_refused_rather_than_substituted(
+    tmp_path,
+) -> None:
     """**A name the config does not define is not the first name it does.**
 
-    A stale `active_model` used to fall back to the first provider, so vectors
-    came from an endpoint nobody chose and the index's identity changed
-    underneath with nothing in any file to say why.  The refusal names both the
-    missing model and the ones that exist.
+    A stale `default` used to fall back to the first provider, so vectors came
+    from an endpoint nobody chose and the index's identity changed underneath
+    with nothing in any file to say why.  The refusal names both the missing
+    model and the ones that exist.
     """
-    path = write(tmp_path, EMBEDDINGS_TWO + "  active_model: gone\n")
+    path = write(tmp_path, EMBEDDINGS_TWO + "  default: gone\n")
     with pytest.raises(ConfigError, match="gone") as caught:
         load(path)
     assert "first" in str(caught.value) and "second" in str(caught.value)
 
 
-def test_no_active_model_still_takes_the_first(tmp_path) -> None:
+def test_no_embedding_default_still_takes_the_first(tmp_path) -> None:
     """The designed default, not a substitution: naming none is not naming a
     name that does not exist."""
     config = load(write(tmp_path, EMBEDDINGS_TWO))
@@ -1882,7 +1884,7 @@ media:
 def test_a_stale_media_default_is_refused_at_load(tmp_path) -> None:
     """**A name the config does not define is not the first name it does.**
 
-    Same rule as `embeddings.active_model`: a default is the operator's own
+    Same rule as `embeddings.default`: a default is the operator's own
     statement, and a typo is refused where the file is — not silently replaced
     by the first model of the kind and paid for at a provider nobody named.
     """
@@ -2349,7 +2351,7 @@ def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None
         "tool_load:\n  threshhold: 5\n": "threshold",
         "tool_result:\n  bytse: 32768\n": "bytes",
         "media:\n  provider: {}\n": "providers",
-        "file-tunnel:\n  actve: ngrok\n": "active",
+        "file-tunnel:\n  actve: ngrok\n": "default",
         "servers:\n  agent:\n    prot: 24000\n": "port",
     }
     for extra, known in cases.items():
@@ -2365,7 +2367,7 @@ def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None
                 base.replace("embeddings:\n", "embeddings:\n  active: local\n"),
             )
         )
-    assert "active_model" in str(refused.value)
+    assert "default" in str(refused.value)
 
 
 def test_a_command_or_url_that_is_not_a_string_is_refused_not_coerced() -> None:

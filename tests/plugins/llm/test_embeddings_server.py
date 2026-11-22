@@ -597,7 +597,7 @@ async def test_a_provider_refusal_is_a_sentence_not_a_traceback() -> None:
             await client.call_tool("embed", {"texts": ["a"]})
 
     assert "402" in str(caught.value)
-    assert "embeddings.active_model" in str(caught.value)
+    assert "embeddings.default" in str(caught.value)
 
 
 def test_each_refusal_status_gets_its_own_action() -> None:

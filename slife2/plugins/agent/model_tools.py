@@ -1,9 +1,9 @@
 """The `model_*` tools: the model config, edited where it is resolved.
 
-The four model config tools live in the process that turns `default:` and
-`providers:` into a conversation's model — the edit and the read that honours it
-are one process, so a switch needs no reload protocol between them ("哪个 plugin
-用，哪个 plugin 管").  The hub reaches them because this server is one of
+The four model config tools live in the process that turns the provider table
+and its `default:` into a conversation's model — the edit and the read that
+honours it are one process, so a switch needs no reload protocol between them
+("哪个 plugin 用，哪个 plugin 管").  The hub reaches them because this server is one of
 `Config.plugins()`, the same way it reaches `_check_new_input`.
 
 **Everything here reads the file, never `Config.providers`.**  A held provider
@@ -42,22 +42,23 @@ from .core import AgentCore
 
 
 def _providers() -> dict[str, dict[str, Any]]:
-    """The `providers:` section as the file has it — secrets unresolved."""
-    return configfile.read_section("providers")
+    """The `providers:` entries as the file has them — secrets unresolved."""
+    return configfile.read_providers()
 
 
 def _active_default(providers: dict[str, dict[str, Any]]) -> str:
     """The model reference the system runs on, read off the file.
 
-    `default:` when the file has one, else the first model of the first
-    provider — `slife2.libs.host.config.first_reference`'s rule, read from the
-    file rather than from `Config` so that it reflects an edit this process
-    has just made.  **A bare provider is the reference its first model
-    makes**, which is `Config.resolve`'s reading: the loader accepts
-    `default: deepseek`, so comparing the raw scalar here made the "it is the
-    default model" guard compare two spellings of one model and never fire.
+    `providers.default` when the file has one, else the first model of the
+    first provider —
+    `slife2.libs.host.config.first_reference`'s rule, read from the file rather
+    than from `Config` so that it reflects an edit this process has just made.
+    **A bare provider is the reference its first model makes**, which is
+    `Config.resolve`'s reading: the loader accepts a bare provider, so
+    comparing the raw scalar here made the "it is the default model" guard
+    compare two spellings of one model and never fire.
     """
-    return first_reference(providers, configfile.read_scalar("default"))
+    return first_reference(providers, configfile.read_default())
 
 
 def _model_ref(ref: str) -> tuple[str, str]:
@@ -236,8 +237,8 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
 
         The answer is the canonical entry — `config.provider` and
         `config.model`, every writable field present — so `model_set` takes the
-        same object back. `default` says whether the config's `default:` names
-        this model.
+        same object back. `default` says whether `providers.default` names this
+        model.
 
         `config.provider.api_key` is the `${VAR}` reference, never the
         resolved key; empty means the file has a literal key that is not shown. A hand-written typo in the entry is refused here rather than
@@ -451,7 +452,7 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
     async def model_switch(ref: str) -> dict[str, Any]:
         """Make `provider/model` the model this system runs on, at once.
 
-        Writes the top-level `default:` in the config file, and moves every
+        Writes `providers.default:` in the config file, and moves every
         conversation this server is holding onto it: each keeps its history and
         runs on the new model from its next turn. That is what makes it the way
         out of a model that has stopped answering. The model must be one the
@@ -462,8 +463,8 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
 
         Returns:
             `default` — the reference the system now runs on — `previous`, what
-            `default:` said before, and `moved`, how many conversations that were
-            already running this server moved onto it from their next turn.
+            the default said before, and `moved`, how many conversations that
+            were already running this server moved onto it from their next turn.
         """
         provider, model = _model_ref(ref)
         ref = f"{provider}/{model}"
@@ -481,7 +482,7 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
             raise _no_such_model(ref)
 
         # What the conversations below are moved *onto*, and it is not the same
-        # question as the judge inside the writer.  `default:` is a scalar the
+        # question as the judge inside the writer.  The default is a scalar the
         # model's own settings do not depend on, so resolving the reference a
         # moment before the write reads the same entry the write leaves behind —
         # which is what lets the move be made from an answer `resolve` gave
@@ -498,12 +499,12 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
             config.resolve(ref)
 
         try:
-            configfile.set_scalar("default", ref, check=resolves)
+            configfile.set_default(ref, check=resolves)
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
 
         # **The conversations move with it, and this is the half that makes the
-        # tool worth having.**  Writing `default:` alone changes what the *next*
+        # tool worth having.**  Writing the default alone changes what the *next*
         # conversation starts on — so switching away from a model that has
         # stopped answering, which is the whole reason to do this, would leave
         # the window being answered (or not) by the model it was trying to

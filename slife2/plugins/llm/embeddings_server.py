@@ -559,7 +559,7 @@ def provider_refusal(exc: Any) -> str:
     if status == 402:
         hint = (
             "the account is in arrears — free models are gated too; top up or "
-            "switch `embeddings.active_model`"
+            "switch `embeddings.default`"
         )
     elif status == 401:
         hint = "check the provider's `api_key`"

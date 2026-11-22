@@ -407,6 +407,7 @@ def _config_with_every_protocol(tmp_path) -> Path:
     path.write_text(
         """
 providers:
+  default: a/m
   a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m, context_window: 1000}]}
   b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n, context_window: 1000}]}
   c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o, context_window: 1000}]}
@@ -414,7 +415,6 @@ providers:
 embeddings:
   providers:
     local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}
-default: a/m
 """,
         encoding="utf-8",
     )

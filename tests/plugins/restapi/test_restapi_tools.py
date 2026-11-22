@@ -27,6 +27,7 @@ pytestmark = pytest.mark.unit
 
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -40,7 +41,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 
 # ── REST APIs ───────────────────────────────────────────────────────────────
 rest-api:

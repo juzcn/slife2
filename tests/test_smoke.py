@@ -147,6 +147,7 @@ def test_version_prints_the_version(capsys) -> None:
 #: there — the state a provider rename leaves behind.
 STALE_DEFAULT = """\
 providers:
+  default: nosuch/model
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -160,7 +161,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: nosuch/model
 """
 
 
@@ -1155,6 +1155,7 @@ def test_the_flag_picks_that_models_own_window(tmp_path) -> None:
     path.write_text(
         """
 providers:
+  default: p/small
   p:
     api: openai-completions
     base_url: https://example.test/v1
@@ -1168,7 +1169,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: p/small
 """,
         encoding="utf-8",
     )
@@ -1191,6 +1191,7 @@ def test_a_model_with_no_window_is_refused_before_the_window_opens(tmp_path) -> 
     path.write_text(
         """
 providers:
+  default: p/m
   p:
     api: openai-completions
     base_url: https://example.test/v1
@@ -1201,7 +1202,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: p/m
 """,
         encoding="utf-8",
     )

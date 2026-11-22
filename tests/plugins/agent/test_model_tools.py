@@ -22,7 +22,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import DEFAULT_AGENT, load, load_cached
-from slife2.libs.host.configfile import read_scalar, read_section
+from slife2.libs.host.configfile import read_default, read_providers
 from slife2.libs.host.launcher import Outcome, Status
 from slife2.libs.model.base import Chunk, StreamChatResult
 from slife2.libs.plugin.audience import conversation_meta
@@ -46,6 +46,7 @@ pytestmark = pytest.mark.unit
 #: preserve and "remove one" has something to leave behind.
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -62,13 +63,13 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 #: One model with every field at a non-default value, so a `set` that changed
 #: one field and dropped another is visible.
 RICH = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -90,7 +91,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -125,7 +125,7 @@ def written(isolated_runtime: Path) -> str:
 
 
 def section(isolated_runtime: Path) -> dict[str, Any]:
-    return read_section("providers", path=isolated_runtime / "slife2.yaml")
+    return read_providers(path=isolated_runtime / "slife2.yaml")
 
 
 def model_config(
@@ -591,9 +591,10 @@ async def test_a_file_without_a_default_names_the_model_it_falls_back_to(
 
     `_active_default` answers `first_reference(providers, default)` — one rule
     for both the "what does the system run on" answer and the guard — so a file
-    that leaves `default:` out still reports, and protects, its first model.
+    that leaves `providers.default` out still reports, and protects, its first
+    model.
     """
-    no_default = CONFIG.replace("default: local/big\n", "")
+    no_default = CONFIG.replace("  default: local/big\n", "")
 
     async with Client(server_for(isolated_runtime, no_default)) as client:
         listed = await ask(client, "model_list")
@@ -614,7 +615,7 @@ async def test_the_default_written_as_a_bare_provider_cannot_be_removed(
     `local/big`, never matched, and removing the model the system actually ran
     on was allowed — silently switching the system to the next one.
     """
-    bare = CONFIG.replace("default: local/big", "default: local")
+    bare = CONFIG.replace("  default: local/big", "  default: local")
 
     async with Client(server_for(isolated_runtime, bare)) as client:
         with pytest.raises(ToolError) as refused:
@@ -646,6 +647,7 @@ async def test_removing_a_providers_last_model_takes_its_entry_too(
     """
     two = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -669,7 +671,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
     write_config(isolated_runtime, two)
 
@@ -840,9 +841,7 @@ async def test_switching_writes_the_scalar_and_refuses_a_stranger(
     """The default is one top-level scalar, and the writer's judge is `resolve`."""
     async with Client(server_for(isolated_runtime)) as client:
         answer = await ask(client, "model_switch", ref="local/small")
-        assert read_scalar("default", path=isolated_runtime / "slife2.yaml") == (
-            "local/small"
-        )
+        assert read_default(path=isolated_runtime / "slife2.yaml") == ("local/small")
         assert answer["previous"] == "local/big"
         assert answer["moved"] == 0, "nothing was running on this server"
 
@@ -947,6 +946,7 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
 #: a reference *that home's* file cannot name — so this home must not have it.
 OTHER_HOME = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -960,7 +960,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -1041,7 +1040,5 @@ async def test_a_reference_is_the_same_reference_however_it_is_spaced(
     """
     async with Client(server_for(isolated_runtime)) as client:
         answer = await ask(client, "model_switch", ref="local / small")
-        assert read_scalar("default", path=isolated_runtime / "slife2.yaml") == (
-            "local/small"
-        )
+        assert read_default(path=isolated_runtime / "slife2.yaml") == ("local/small")
         assert answer["previous"] == "local/big"

@@ -185,6 +185,7 @@ tool_load:
     - subagent_send_message
 
 providers:
+  default: stub/small
   stub:
     api: openai-completions
     base_url: {provider_url}
@@ -213,7 +214,6 @@ peer_agent:
 subagent:
   broker: {{host: 127.0.0.1, port: {broker_port}}}
 
-default: stub/small
 """
 
 

@@ -2572,12 +2572,11 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | Section | Reader |
 |---|---|
 | `servers:` | The launcher, every plugin, the terminal, and the CLI |
-| `providers:` | The agent server (reference resolution, and the list `Ctrl+S` reads at the key), model backends, and the terminal (the status bar's model facts) |
-| `default:` | The agent server |
+| `providers:` | The agent server (reference resolution, including `providers.default:`, and the list `Ctrl+S` reads at the key), model backends, and the terminal (the status bar's model facts) |
 | `agent:` | The agent server and agent-task server |
 | `agent-task:` | The agent-task server |
 | `subagent:` | The agent server and the local network plugin |
-| `embeddings:` | The context store, the cabinet, and the tool hub |
+| `embeddings:` | The context store, the cabinet, and the tool hub; `embeddings.default:` selects the provider |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
 | `tool_result:` | The harness, the cabinet's readers and `dump_read`/`dump_grep`, and the agent-task turn's cut |
@@ -2586,8 +2585,13 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | `cli:` | `slife2-cli` |
 | `skills:` | `slife2-skills` |
 | `media:` | `slife2-media` |
-| `file-tunnel:` | `slife2-file-tunnel` |
+| `file-tunnel:` | `slife2-file-tunnel`; `file-tunnel.default:` selects the provider |
 | `peer_agent:` | `slife2-a2a`, the terminal, and the CLI |
+
+`default:` is a key of the section it chooses from — `providers.default`,
+`embeddings.default`, `file-tunnel.default` — and never a section of its own.
+It names the one entry a feature runs on: a model reference, an embedding
+provider, a tunnel provider.
 
 Every section has one owner, and that owner reads the section in full. A value
 another process also reads is a shared fact, stated rather than accidental: the

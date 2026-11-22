@@ -1257,8 +1257,9 @@ class EmbeddingsSettings:
 
     #: name -> endpoint.  Never empty in a config that loaded; see `_embeddings`.
     providers: dict[str, EmbeddingProviderSettings] = field(default_factory=dict)
-    #: Which of them is in use.  A provider id, not a `provider/model` ref: there
-    #: is one model per endpoint here, and the endpoint is the choice being made.
+    #: Which of them is in use — the section's `default:` key.  A provider id,
+    #: not a `provider/model` ref: there is one model per endpoint here, and
+    #: the endpoint is the choice being made.
     active: str = ""
 
     def active_provider(self) -> EmbeddingProviderSettings:
@@ -1280,7 +1281,7 @@ class EmbeddingsSettings:
         if self.active not in self.providers:
             known = ", ".join(sorted(self.providers))
             raise ConfigError(
-                f"embeddings.active_model: {self.active!r} is not a configured "
+                f"embeddings.default: {self.active!r} is not a configured "
                 f"provider; it has: {known}"
             )
         return self.providers[self.active]
@@ -1907,7 +1908,7 @@ class MediaSettings:
 
         **A `defaults[kind]` that names nothing is refused, not replaced.**  A
         default is a name the operator wrote, and a name that no longer resolves
-        is a typo in the file — the same rule `embeddings.active_model` follows.
+        is a typo in the file — the same rule `embeddings.default` follows.
         Falling through to the first model of the kind would silently spend a
         paid call on a model named in no `defaults:` line; the fourth step is
         for a kind with no default at all, which is a different fact.  The
@@ -1970,7 +1971,7 @@ class MediaSettings:
         return provider, entry
 
 
-#: The provider used when the section, or its `active:`, is absent.  A name this
+#: The provider used when the section, or its `default:`, is absent.  A name this
 #: build does not have is a `ConfigError` instead (`_file_tunnel`).
 #:
 #: **The names live here rather than in the provider module**, because this
@@ -1996,7 +1997,7 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` is a config error and is refused**, like every other
+    **An unknown `default:` is a config error and is refused**, like every other
     section's: a provider this build does not have is a typo or a config copied
     from a build that had one, and a tunnel is the one capability whose provider
     is a *reachability* decision — substituting another one makes that decision
@@ -2005,7 +2006,8 @@ class FileTunnelSettings:
     A malformed *shape* is refused too, by `_mapping`.
     """
 
-    #: Which provider is live.  The others stay configured and inert.
+    #: Which provider is live — the section's `default:` key.  The others stay
+    #: configured and inert.
     #:
     #: The default is `DEFAULT_TUNNEL_PROVIDER`, which this module owns; the
     #: provider module imports the name rather than spelling it a second time.
@@ -2019,7 +2021,7 @@ class FileTunnelSettings:
 
         Empty rather than an error, because every provider has to work from
         its own defaults: that is what makes ``ngrok: {}`` a complete entry,
-        and an `active:` naming a provider nobody configured a working one.
+        and a `default:` naming a provider nobody configured a working one.
 
         **Resolution happens here** rather than in `_file_tunnel` so that the
         credential-store lookups are paid by the process starting a tunnel, not
@@ -2231,7 +2233,8 @@ class Config:
     #: which holds the connections: the section is named for what it configures
     #: and the process for the plugin that serves it (`Net`, `PLUGINS`).
     peer_agent: A2ASettings = field(default_factory=A2ASettings)
-    #: `"provider/model"`, the model the agent starts with.
+    #: `"provider/model"`, the model the agent starts with — `providers.default:`
+    #: in the file.
     default: str = ""
     #: How far this instance's ports moved from the configured numbers — 0
     #: unless WSL's mirrored networking was detected.  Kept for the start-up
@@ -2259,7 +2262,9 @@ class Config:
         """
         reference = reference or self.default
         if not reference:
-            raise ConfigError("no model configured; set `default: provider/model`")
+            raise ConfigError(
+                "no model configured; set `providers.default: provider/model`"
+            )
 
         name, _, model_id = reference.partition("/")
         provider = self.provider(name)
@@ -2677,7 +2682,6 @@ _TOP_LEVEL_KEYS = (
     "wsl_port_offset",
     "servers",
     "providers",
-    "default",
     "agent",
     "agent-task",
     "subagent",
@@ -2730,7 +2734,13 @@ def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     # built-in provider: the file is the description, and a file that names no
     # provider describes a machine with no models.  `providers: {}` is refused as
     # well, because an empty section is a statement, and the statement is "none".
-    providers_raw = read_mapping(raw.get("providers"), "providers")
+    providers_raw = dict(read_mapping(raw.get("providers"), "providers"))
+    # **The default model is a key of the providers it names.**  `default:`
+    # sits beside the table it chooses from; it is taken out before the entries
+    # are built, because every other key here is a provider name.
+    nested_default = providers_raw.pop("default", None)
+    if nested_default is not None and not isinstance(nested_default, str):
+        raise ConfigError("providers.default: expected a `provider/model` reference")
     if not providers_raw:
         raise ConfigError(
             "providers: needs at least one provider — the file is the machine's "
@@ -2798,7 +2808,7 @@ def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
                 subagent.network.broker_port,
             ),
         ),
-        default=str(raw.get("default") or first_reference(providers_raw)),
+        default=str(nested_default or first_reference(providers_raw)),
     )
     return _with_port_offset(config, port_offset(raw.get("wsl_port_offset")))
 
@@ -2921,7 +2931,7 @@ _MESH_FIELDS: tuple[Field, ...] = (
         "provider",
         read_text,
         # **An unknown `provider:` is refused rather than downgraded.**  The
-        # same rule `file_tunnel.active` states (SDD §12.1): a name in a file a
+        # same rule `file_tunnel.default` states (SDD §12.1): a name in a file a
         # person edits is either one this build has or a mistake to report.
         # Falling back would leave `peer_agent_*` tools offered to a model for a
         # mesh that is not running — the silence-with-tools outcome.
@@ -3206,7 +3216,7 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     **Every name is checked against this build's providers**, and a malformed
     shape is refused the same way: both are mistakes in a file a person edits,
     and the module refuses both at load rather than at the call that finds them.
-    `active:` cannot degrade to another provider — which tunnel a machine
+    `default:` cannot degrade to another provider — which tunnel a machine
     publishes through is the operator's decision, not a default to fall back on.
     """
     return parse_section(raw, "file-tunnel", base, _FILE_TUNNEL_FIELDS)
@@ -3244,8 +3254,9 @@ def _tunnel_providers(value: Any, where: str) -> dict[str, dict]:
 
 _FILE_TUNNEL_FIELDS: tuple[Field, ...] = (
     Field(
-        "active",
+        "default",
         read_text,
+        attrs="active",
         check=bound(
             lambda name: name in KNOWN_TUNNEL_PROVIDERS,
             "{value} is not a tunnel provider; known: "
@@ -3417,13 +3428,13 @@ def _embeddings(raw: Any) -> EmbeddingsSettings:
     that *is* there may not be empty, for the same reason: there is no
     configuration in which a store runs without an embedding model.
 
-    **An `active_model` this config does not define is refused, naming the
-    providers that do exist.**  It used to fall back to the first provider, so
-    vectors came from an endpoint nobody chose and the index's recorded
-    identity changed underneath — a name the config does not define is not a
-    vote for the first name that does (SDD Appendix C).  A section that names
-    no `active_model` still takes the first, which is the designed default and
-    not a substitution.
+    **A `default` this config does not define is refused, naming the providers
+    that do exist.**  It used to fall back to the first provider, so vectors
+    came from an endpoint nobody chose and the index's recorded identity
+    changed underneath — a name the config does not define is not a vote for
+    the first name that does (SDD Appendix C).  A section that names no
+    `default` still takes the first, which is the designed default and not a
+    substitution.
     """
     if raw is None:
         raise ConfigError(
@@ -3442,7 +3453,7 @@ def _embeddings(raw: Any) -> EmbeddingsSettings:
     elif settings.active not in settings.providers:
         known = ", ".join(sorted(settings.providers))
         raise SectionError(
-            f"embeddings.active_model: {settings.active!r} is not a configured "
+            f"embeddings.default: {settings.active!r} is not a configured "
             f"provider; it has: {known}"
         )
     return settings
@@ -3473,7 +3484,7 @@ _EMBEDDINGS_FIELDS: tuple[Field, ...] = (
         _embedding_providers,
         required=_EMBEDDINGS_NEEDS_PROVIDERS,
     ),
-    Field("active_model", read_text, attrs="active"),
+    Field("default", read_text, attrs="active"),
 )
 
 

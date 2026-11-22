@@ -34,6 +34,7 @@ pytestmark = pytest.mark.unit
 #: and read back with `load()`, so a test drives the same path a start does.
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
@@ -47,7 +48,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 
 # The servers are here, and this comment is the file's; an edit nearby must not
 # eat it.

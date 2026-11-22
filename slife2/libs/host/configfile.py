@@ -43,7 +43,7 @@ import contextlib
 import logging
 import os
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -216,9 +216,18 @@ def _edit(
 
 
 def read_section(
-    section: str, *, path: Path | None = None
+    section: str,
+    *,
+    skip: Collection[str] = (),
+    path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """One section as the *file* has it, as plain Python, secrets unresolved.
+
+    **`skip` names the section's scalars, not its entries.**  `providers:` has
+    one — `default:` — and it sits beside the provider entries it chooses
+    between; reading it as an entry would refuse a perfectly good section.
+    The entries themselves are still mappings, and a value that is not one is
+    still refused.
 
     **The listing tools read this rather than the settings they hold**, and the
     difference is a leak: `ToolServerSettings.env` may hold a literal secret, and
@@ -254,6 +263,8 @@ def read_section(
         )
     entries: dict[str, dict[str, Any]] = {}
     for name, entry in values.items():
+        if str(name) in skip:
+            continue
         if not isinstance(entry, dict):
             raise ConfigError(
                 f"{target}: `{section}.{name}:` is not a mapping. Reading it as "
@@ -261,6 +272,11 @@ def read_section(
             )
         entries[str(name)] = dict(entry)
     return entries
+
+
+def read_providers(*, path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """The `providers:` entries — `default` is the section's scalar, not one."""
+    return read_section("providers", skip=("default",), path=path)
 
 
 def config_path() -> Path:
@@ -746,46 +762,42 @@ def update_entry(
     return existed
 
 
-def set_scalar(
-    name: str,
-    value: Any,
+def read_default(*, path: Path | None = None) -> str:
+    """The default model: `providers.default`, beside the providers it chooses.
+
+    A value that is not a string is refused — it is a config the next start
+    would refuse, not a value this reader may flatten.  An absent key is `""`,
+    which `first_reference` reads as the first provider's first model.
+    """
+    target = path or config_path()
+    document = _read(target)
+    providers = document.get("providers")
+    if not isinstance(providers, dict):
+        return ""
+    nested = providers.get("default")
+    if nested is None:
+        return ""
+    if not isinstance(nested, str):
+        raise ConfigError("providers.default: expected a `provider/model` reference")
+    return nested.strip()
+
+
+def set_default(
+    value: str,
     *,
     check: Callable[[Config], None] | None = None,
     path: Path | None = None,
 ) -> None:
-    """Write a top-level scalar — `name: value` — replacing what is there.
-
-    **The one thing a section writer cannot do.**  `upsert` and the rest edit
-    `section → name → mapping`, and `default:` is neither a section nor a
-    mapping: it is the `provider/model` the agent starts a conversation on.  So
-    this is the narrow writer for a top-level scalar, and the document edit is
-    one assignment, which is what keeps every comment around it.
-
-    `check` is the judge for a value `load` alone would accept — `default:` is a
-    plain string to the loader and a reference only to `Config.resolve`, so a
-    caller that knows its value passes `lambda c: c.resolve(ref)` and an edit
-    naming no model is refused before it is published rather than left for the
-    next conversation to trip over.
-    """
+    """Write `providers.default`, the model a new conversation starts on."""
     target = path or config_path()
 
     def mutate(document: CommentedMap) -> None:
-        document[name] = value
+        providers = _section(document, "providers")
+        assert providers is not None
+        providers["default"] = value
 
     _edit(target, mutate, check=check)
-    logger.info("config_set_scalar name=%s", name)
-
-
-def read_scalar(name: str, *, default: str = "", path: Path | None = None) -> str:
-    """A top-level scalar as the file has it, or *default* when it is absent.
-
-    A read like `read_section`, and safe for the same reason: nothing here is
-    resolved, and the one scalar anybody reads — `default:` — is a model
-    reference rather than a secret.
-    """
-    target = path or config_path()
-    value = _read(target).get(name)
-    return default if value is None else str(value)
+    logger.info("config_set_default value=%s", value)
 
 
 def _read(target: Path) -> dict[str, Any]:
