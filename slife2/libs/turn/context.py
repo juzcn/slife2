@@ -802,7 +802,7 @@ def rebuild_report(
     discriminator: str,
     tokens: str,
 ) -> str:
-    """What `_context_rebuild` answers the model, in one sentence.
+    """What `_context_rebuild` answers the model, in one line.
 
     **The estimate is always there**, because this tool is the model's only
     context figure since the turn prompt stopped carrying one.  `tokens` is
@@ -812,7 +812,7 @@ def rebuild_report(
     `discriminator` non-empty means no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
     made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
-    the fused order stands and the sentence says so.  `changed` false is the
+    the fused order stands and the report says so.  `changed` false is the
     ordinary no-op: the decision asked for exactly what was in hand.
     """
     if discriminator:
@@ -823,10 +823,7 @@ def rebuild_report(
     if not changed:
         return f"No rebuild: the context is unchanged; context ~{tokens}."
     tail = f" (rerank {rerank})" if rerank else ""
-    return (
-        f"Rebuilt the context: kept {kept} turn(s), recalled {recalled}{tail}; "
-        f"context ~{tokens}. The turn log keeps every turn."
-    )
+    return f"kept {kept} turn(s), recalled {recalled}{tail}; context ~{tokens}."
 
 
 def turn_note(

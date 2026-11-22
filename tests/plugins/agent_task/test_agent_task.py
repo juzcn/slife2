@@ -446,7 +446,7 @@ async def wait_for_rebuild(frames: list[Any], *, timeout: float = 10.0) -> Any:
     while time.monotonic() < deadline:
         for item in frames:
             if isinstance(item, MessageCutIn) and item.text.startswith(
-                ("Rebuilt the context", "No rebuild")
+                ("kept ", "No rebuild")
             ):
                 return item
         await asyncio.sleep(0.01)
