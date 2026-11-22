@@ -1115,6 +1115,13 @@ already. There is no separate input argument. Its answer is a selection, never a
 dump. The common answer is `{}`: a decision that asks for exactly what is in
 hand rebuilds nothing.
 
+The answer is a **forced tool call**, not model content: `decide_context` is
+advertised with the instruction as its description and `RECALL_REPLY` as its
+`parameters`, and `tool_choice` names it. Thinking is off for that call — a
+thinking endpoint rejects a forced choice — and the turn's own calls keep
+theirs. The message list is the conversation exactly as it runs; a model left
+free in a tool-heavy conversation continues it instead of deciding.
+
 Rules:
 
 - **An unreadable reply is asked once more, then it is not a decision.** The
@@ -1189,12 +1196,14 @@ Rules:
   builders would drift into two conversations.
 
 **The turn's own compaction is a view, not an edit.** `_turn_compact` asks the
-live selector — one silent model call over the view, numbered
+live selector — a forced `select_messages` tool call over the view, numbered
 `[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages this
 turn no longer needs, and hides them from the list the rest of the turn is sent
 (`libs/turn/compact.py`). The
-selector is shown the last measured call and the conversation's window, through
-the same `context_usage` the status bar uses, so the model and the person read
+selector is the discriminator's call one decision later: the same forced tool,
+the same thinking off. It is shown the last measured call and the
+conversation's window, through the same `context_usage` the status bar uses, so
+the model and the person read
 one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
 the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the

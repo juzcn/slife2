@@ -30,8 +30,15 @@ from slife2.libs.host.paths import agent_dir, subagent_path
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
-from slife2.libs.turn.context import turn_footnote, turn_note
-from slife2.libs.turn.messages import Usage
+from slife2.libs.turn.context import (
+    DECISION_TOOL,
+    LIVE_REPLY,
+    RECALL_REPLY,
+    SELECTION_TOOL,
+    turn_footnote,
+    turn_note,
+)
+from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -1912,15 +1919,14 @@ async def test_a_failed_call_is_not_asked_again() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_decisions_request_rides_as_a_system_message(monkeypatch) -> None:
-    """The harness's instruction is not a second user turn.
+async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
+    """The conversation is the whole input; the decision is the one tool's call.
 
-    The live context already ends with the turn's own user message; appended as
-    another user message, the two read as one request, and a model whose prompt
-    told it to act answered with a tool call instead of the decision.  A system
-    message says whose request it is, and the conversation above stays the input.
+    No instruction message is appended: a model left free in a tool-heavy
+    conversation continues it instead of deciding, so the decision tool is
+    forced and thinking is off (a thinking endpoint rejects the forced choice).
     """
-    seen: list[tuple[str, list[dict[str, Any]]]] = []
+    seen: list[dict[str, Any]] = []
 
     async def capture(
         config: Any,
@@ -1931,20 +1937,44 @@ async def test_the_decisions_request_rides_as_a_system_message(monkeypatch) -> N
         model: str,
         asked: list[dict[str, Any]],
         *,
+        tools: list[dict[str, Any]],
+        tool_choice: str,
+        thinking: str,
         kind: str,
-    ) -> str:
-        seen.append((kind, asked))
-        return "{}"
+    ) -> StreamChatResult:
+        seen.append(
+            {
+                "asked": asked,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "thinking": thinking,
+                "kind": kind,
+            }
+        )
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name=DECISION_TOOL,
+                    arguments={"context": "clear"},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
 
     monkeypatch.setattr(context_server, "_stream_chat", capture)
     hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
 
-    await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", hold)
-    kind, asked = seen[0]
-    assert kind == "discriminator"
-    assert asked[:-1] == hold, "the conversation is the input, unchanged"
-    assert asked[-1]["role"] == "system", "not a second user turn"
-    assert "Context rebuild" in asked[-1]["content"]
+    answer = await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", hold)
+    assert answer == '{"context": "clear"}', "the tool arguments are the decision"
+    call = seen[0]
+    assert call["kind"] == "discriminator"
+    assert call["asked"] == hold, "the conversation is the input, unchanged"
+    tool = call["tools"][0]["function"]
+    assert tool["name"] == DECISION_TOOL
+    assert tool["parameters"] == RECALL_REPLY
+    assert call["tool_choice"] == DECISION_TOOL
+    assert call["thinking"] == "disabled"
 
     await _ask_model(
         object(),
@@ -1954,25 +1984,20 @@ async def test_the_decisions_request_rides_as_a_system_message(monkeypatch) -> N
         "",
         "m",
         hold,
-        previous="not json",
-        repair="the reply is not one JSON object",
+        previous='{"context": "bad"}',
+        repair="the reply could not be read",
     )
-    _kind, asked = seen[1]
-    assert [message["role"] for message in asked] == [
-        "system",
-        "user",
-        "system",
-        "assistant",
-        "user",
-    ], "the refused answer and its correction follow the instruction"
-    assert asked[-2]["content"] == "not json"
-    assert "not one JSON object" in asked[-1]["content"]
+    asked = seen[1]["asked"]
+    assert asked[:-2] == hold, "the refused call and its result are the only addition"
+    assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"context": "bad"}'
+    assert asked[-2]["tool_calls"][0]["id"] == asked[-1]["tool_call_id"]
+    assert "could not be read" in asked[-1]["content"]
 
 
 @pytest.mark.asyncio
-async def test_the_selectors_request_rides_as_a_system_message(monkeypatch) -> None:
-    """The live selector's instruction is a system message for the same reason."""
-    seen: list[tuple[str, list[dict[str, Any]]]] = []
+async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
+    """The live selector is the same forced call, over the numbered view."""
+    seen: list[dict[str, Any]] = []
 
     async def capture(
         config: Any,
@@ -1983,25 +2008,48 @@ async def test_the_selectors_request_rides_as_a_system_message(monkeypatch) -> N
         model: str,
         asked: list[dict[str, Any]],
         *,
+        tools: list[dict[str, Any]],
+        tool_choice: str,
+        thinking: str,
         kind: str,
-    ) -> str:
-        seen.append((kind, asked))
-        return "{}"
+    ) -> StreamChatResult:
+        seen.append(
+            {
+                "asked": asked,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "thinking": thinking,
+                "kind": kind,
+            }
+        )
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_2",
+                    name=SELECTION_TOOL,
+                    arguments={"compact": [1]},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
 
     monkeypatch.setattr(context_server, "_stream_chat", capture)
     hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
 
-    await context_server._ask_selector(
+    answer = await context_server._ask_selector(
         object(), {}, asyncio.Lock(), "jack", "", "m", hold, [1]
     )
-
-    kind, asked = seen[0]
-    assert kind == "compactor"
-    assert asked[0]["content"].startswith('[MESSAGE:{"id": 0}] '), (
+    assert answer == '{"compact": [1]}'
+    call = seen[0]
+    assert call["kind"] == "compactor"
+    assert call["asked"][0]["content"].startswith('[MESSAGE:{"id": 0}] '), (
         "the view is numbered"
     )
-    assert asked[-1]["role"] == "system", "not a second user turn"
-    assert "Turn compaction" in asked[-1]["content"]
+    tool = call["tools"][0]["function"]
+    assert tool["name"] == SELECTION_TOOL
+    assert tool["parameters"] == LIVE_REPLY
+    assert call["tool_choice"] == SELECTION_TOOL
+    assert call["thinking"] == "disabled"
 
 
 @pytest.mark.asyncio

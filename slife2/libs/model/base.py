@@ -97,6 +97,12 @@ class Streamer(Protocol):
     closes the stream on every way out of the call, so an interrupted turn
     releases the SDK response and the provider pool's lease deterministically
     instead of leaving the provider generating on an abandoned connection.
+
+    `tool_choice` names the one tool this call must use; empty leaves the choice
+    to the model.  `thinking` overrides the model's configured `thinking` for
+    this call only (`"enabled"` / `"disabled"`); empty uses the config.  Both
+    are per-call facts — the decision tools are the one caller that forces them
+    — and a wire that cannot express one raises rather than ignoring it.
     """
 
     def __call__(
@@ -105,6 +111,9 @@ class Streamer(Protocol):
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
     ) -> AsyncGenerator[ProviderEvent]: ...
 
 

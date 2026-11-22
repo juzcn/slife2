@@ -342,14 +342,29 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
 ) -> dict[str, Any]:
-    """The request body, containing only what the config asked for."""
+    """The request body, containing only what the config asked for.
+
+    `tool_choice` names the one tool the call must use and `thinking` overrides
+    the model's configured value for this call — `openai_server.build_request`
+    states the same two options, and a forced choice with no tool list is
+    refused here for the same reason.
+    """
+    if thinking and settings.reasoning:
+        settings = replace(settings, thinking=thinking)
+    if tool_choice and not tools:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
+        )
     max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
-    thinking = thinking_parameter(settings, max_tokens)
+    thinking_block = thinking_parameter(settings, max_tokens)
     # A model that did not ask for thinking is a model to which a signed block
     # is not ours to send; the empty model makes `reasoning_blocks` drop them.
     system, converted = to_anthropic_messages(
-        messages, model=settings.model if thinking is not None else ""
+        messages, model=settings.model if thinking_block is not None else ""
     )
 
     request: dict[str, Any] = {
@@ -362,6 +377,8 @@ def build_request(
         request["system"] = system
     if tools:
         request["tools"] = to_anthropic_tools(tools)
+        if tool_choice:
+            request["tool_choice"] = {"type": "tool", "name": tool_choice}
 
     # Only what was configured: `None` means say nothing, not "use a default".
     #
@@ -386,8 +403,8 @@ def build_request(
         if value is not None
     }
 
-    if thinking is not None:
-        request["thinking"] = thinking
+    if thinking_block is not None:
+        request["thinking"] = thinking_block
         # A thinking budget must leave room for an answer, and sampling is what
         # this endpoint rejects alongside extended thinking — so it is dropped
         # where it is collected rather than sent and refused.

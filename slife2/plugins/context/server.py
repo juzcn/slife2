@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -100,7 +101,7 @@ from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit, time_window
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
-from slife2.libs.turn.messages import StreamChatResult, Usage
+from slife2.libs.turn.messages import StreamChatResult, ToolSpec, Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
@@ -162,13 +163,13 @@ INSTRUCTIONS = (
 )
 
 
-#: The discriminator call, as a seam: the conversation and the input in, whatever
-#: the model said out.  A test injects one; production uses the model server
-#: named by the conversation's model.
+#: The discriminator call, as a seam: the conversation in, the decision tool's
+#: arguments out.  A test injects one; production uses the model server named by
+#: the conversation's model.
 #:
-#: `previous` and `repair` are the second half of one call's life — the reply
-#: that could not be read, and why — and are empty on the first ask.  A test that
-#: varies what the model said can ignore them unless it is about the repair.
+#: `previous` and `repair` are the second half of one call's life — the argument
+#: text that could not be read, and why — and are empty on the first ask.  A test
+#: that varies the decision can ignore them unless it is about the repair.
 class Discriminator(Protocol):
     def __call__(
         self,
@@ -184,11 +185,11 @@ class Discriminator(Protocol):
 
 class Selector(Protocol):
     """The live compaction selector, as a seam: the view and its candidates in,
-    whatever the model said out.
+    the selection tool's arguments out.
 
     The same two-reply life as `Discriminator` — `previous` and `repair` carry
-    a reply that could not be read — and a test that varies the answer injects
-    one instead of reaching a model server.
+    argument text that could not be read — and a test that varies the answer
+    injects one instead of reaching a model server.
     """
 
     def __call__(
@@ -217,25 +218,30 @@ async def _ask_model(
     previous: str = "",
     repair: str = "",
 ) -> str:
-    """One `stream_chat` call, with no tools and nothing listening to it.
+    """One forced decision-tool call, and nothing listening to it.
+
+    **The decision is a tool call, and the conversation is its input.**  The
+    live messages go out exactly as the turn runs on them — no appended
+    instruction, no second system message — and the one tool advertised is
+    `decide_context`, forced by `tool_choice`.  The instruction is that tool's
+    description; the reply schema is its `parameters`.  A model left free in a
+    tool-heavy conversation continues the conversation's own calls instead of
+    deciding (a turn that had been testing the harness tools did exactly that);
+    a forced tool has nowhere else to put the answer.
+
+    **Thinking is off for this call.**  A thinking endpoint rejects a forced
+    `tool_choice` (DeepSeek answers 400), and the structured call is what makes
+    the decision readable; the turn's own calls keep the configured thinking.
+
+    **A repair ask is the same call with the refused answer as the model's own
+    tool call and the reason as its result** (`decisions.repair_note`).  All of
+    it is a prompt for one call and none of it is stored — the repair is how a
+    bad answer is corrected, not a turn.
 
     **No progress handler**, which is what makes the call silent: the server
     reports progress only to a caller that asked for a token, so a discriminator
     turn reaches no transcript and no observer by construction rather than by a
     filter somebody has to remember.
-
-    **A repair ask is the same call with the conversation extended**: the
-    instruction, the refused answer as the model's own message, and the reason
-    it was refused (`decisions.repair_note`).  All of it is a prompt for one
-    call and none of it is stored — the repair is how a bad answer is corrected,
-    not a turn.
-
-    **The instruction is a system message**, and that is what keeps the harness's
-    request apart from the conversation's own user message.  As a second user
-    turn the two read as one request: a turn whose prompt asked the model to act
-    — testing the harness tools itself was the case that found this — answered
-    with a tool call instead of the decision.  A system message says whose
-    request it is; the conversation stays the decision's input.
 
     The client is opened once per *model server* and kept for the process — the
     agent server's arrangement, for the agent server's reason: a handshake per
@@ -252,25 +258,47 @@ async def _ask_model(
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
     result — so a model server from another build would arrive here as "the model
-    answered with nothing": `_discriminate` logs `recall_discriminator_unparsed`
-    and keeps the context, and every rebuild for the rest of the session does the
-    same, with the log pointing at the model's output rather than at the
-    transport.  `slife2.clients.model` raises for exactly this on the loop's own
-    hop, and this is the same check with the same sentence, because the cause is
-    the same: a daemon from another build.
+    answered with nothing": `decision_arguments` raises, `_discriminate` logs the
+    call as failed and keeps the context, with the log pointing at the model's
+    output rather than at the transport.  `slife2.clients.model` raises for
+    exactly this on the loop's own hop, and this is the same check with the same
+    sentence, because the cause is the same: a daemon from another build.
     """
-    asked = [
-        *messages,
-        {"role": "system", "content": decisions.instruction()},
-    ]
+    tool = ToolSpec(
+        name=decisions.DECISION_TOOL,
+        description=decisions.instruction(),
+        parameters=decisions.RECALL_REPLY,
+    )
+    asked = [*messages]
     if repair:
-        # The model's own refused answer, then what was wrong with it.  An empty
-        # answer has nothing to show, and a provider may refuse an empty
-        # assistant message — the note alone is the correction then.
-        if previous:
-            asked.append({"role": "assistant", "content": previous})
-        asked.append({"role": "user", "content": decisions.repair_note(repair)})
-    return await _stream_chat(
+        # The model's own refused call, then what was wrong with it.  The tool
+        # result is the correct channel for a refusal: a user turn here would
+        # sit beside the turn's own opening message and read as one request.
+        call_id = f"_harness_{decisions.DECISION_TOOL}_{uuid.uuid4().hex}"
+        asked.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": decisions.DECISION_TOOL,
+                            "arguments": previous,
+                        },
+                    }
+                ],
+            }
+        )
+        asked.append(
+            {
+                "role": "tool",
+                "content": decisions.repair_note(repair),
+                "tool_call_id": call_id,
+            }
+        )
+    result = await _stream_chat(
         config,
         clients,
         opening,
@@ -278,8 +306,12 @@ async def _ask_model(
         subagent,
         model,
         asked,
+        tools=[tool.to_wire()],
+        tool_choice=decisions.DECISION_TOOL,
+        thinking="disabled",
         kind="discriminator",
     )
+    return decision_arguments(result)
 
 
 async def _ask_selector(
@@ -296,30 +328,53 @@ async def _ask_selector(
     previous: str = "",
     repair: str = "",
 ) -> str:
-    """The live selector's model call, built from the numbered copy.
+    """The live selector's forced tool call, built from the numbered copy.
 
     **The ids are written here and nowhere else.**  `with_message_id` prefixes
     each message of this request; the record, the turn's saved row and every
-    ordinary call keep the list they had.  The instruction names the candidates,
-    the legality rule and the context figure the caller measured — the same
-    figure the status bar and the turn prompt show.  It is a system message for
-    `_ask_model`'s reason: the view already ends with the turn's own exchange,
-    and a second user turn would read as one request with it.  The transport's
-    rules are `_stream_chat`'s.
+    ordinary call keep the list they had.  The tool description names the
+    candidates, the legality rule and the context figure the caller measured —
+    the same figure the status bar and the turn prompt show.  The call is forced
+    and thinking is off for `_ask_model`'s reason: the view already ends with
+    the turn's own exchange, and a model left free continues it.  The
+    transport's rules are `_stream_chat`'s.
     """
     numbered = [
         decisions.with_message_id(message, index)
         for index, message in enumerate(messages)
     ]
-    asked = [
-        *numbered,
-        {"role": "system", "content": decisions.live_instruction(selectable, usage)},
-    ]
+    tool = ToolSpec(
+        name=decisions.SELECTION_TOOL,
+        description=decisions.live_instruction(selectable, usage),
+        parameters=decisions.LIVE_REPLY,
+    )
+    asked = [*numbered]
     if repair:
-        if previous:
-            asked.append({"role": "assistant", "content": previous})
-        asked.append({"role": "user", "content": decisions.repair_note(repair)})
-    return await _stream_chat(
+        call_id = f"_harness_{decisions.SELECTION_TOOL}_{uuid.uuid4().hex}"
+        asked.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": decisions.SELECTION_TOOL,
+                            "arguments": previous,
+                        },
+                    }
+                ],
+            }
+        )
+        asked.append(
+            {
+                "role": "tool",
+                "content": decisions.repair_note(repair),
+                "tool_call_id": call_id,
+            }
+        )
+    result = await _stream_chat(
         config,
         clients,
         opening,
@@ -327,8 +382,12 @@ async def _ask_selector(
         subagent,
         model,
         asked,
+        tools=[tool.to_wire()],
+        tool_choice=decisions.SELECTION_TOOL,
+        thinking="disabled",
         kind="compactor",
     )
+    return decision_arguments(result)
 
 
 async def _stream_chat(
@@ -340,14 +399,20 @@ async def _stream_chat(
     model: str,
     asked: list[dict[str, Any]],
     *,
+    tools: list[dict[str, Any]],
+    tool_choice: str,
+    thinking: str,
     kind: str,
-) -> str:
+) -> StreamChatResult:
     """One silent `stream_chat` call: the transport both decisions share.
 
-    **No progress handler**, which is what makes the call silent: the server
-    reports progress only to a caller that asked for a token, so a decision
-    reaches no transcript and no observer by construction rather than by a
-    filter somebody has to remember.
+    **The call is structured and silent.**  `tools` is the one decision tool and
+    `tool_choice` forces it, so the provider returns a tool call rather than
+    content; `thinking` is the per-call override that makes a forced choice
+    legal on a thinking endpoint.  No progress handler is passed, which is what
+    makes the call silent: the server reports progress only to a caller that
+    asked for a token, so a decision reaches no transcript and no observer by
+    construction rather than by a filter somebody has to remember.
 
     The client is opened once per *model server* and kept for the process — the
     agent server's arrangement, for the agent server's reason: a handshake per
@@ -364,12 +429,11 @@ async def _stream_chat(
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
     result — so a model server from another build would arrive here as "the model
-    answered with nothing": the caller logs an unparsed reply and keeps the
-    context, and every later decision does the same, with the log pointing at
-    the model's output rather than at the transport.  `slife2.clients.model`
-    raises for exactly this on the loop's own hop, and this is the same check
-    with the same sentence, because the cause is the same: a daemon from another
-    build.
+    answered with nothing": the caller raises, logs the call as failed and keeps
+    the context, with the log pointing at the model's output rather than at the
+    transport.  `slife2.clients.model` raises for exactly this on the loop's own
+    hop, and this is the same check with the same sentence, because the cause is
+    the same: a daemon from another build.
     """
     name, provider, settings = config.resolve(model)
     url = config.server(provider.api).url
@@ -391,18 +455,37 @@ async def _stream_chat(
             # kind: reading the decision apart from the turn's own calls is the
             # whole reason the word travels.
             "kind": kind,
-            "tools": [],
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "thinking": thinking,
             "messages": asked,
         },
     )
     if not isinstance(result.data, dict):
         raise unreadable("the model server", "return a stream_chat result", result.data)
     try:
-        return StreamChatResult.from_wire(result.data).text
+        return StreamChatResult.from_wire(result.data)
     except KeyError as exc:
         raise unreadable(
             "the model server", "return a stream_chat result", result.data
         ) from exc
+
+
+def decision_arguments(result: StreamChatResult) -> str:
+    """The decision tool's arguments, as the text the parser reads.
+
+    **A call is the decision.**  A response with no call is a provider that
+    ignored a forced `tool_choice`; it has no answer to correct, so it is raised
+    and `_discriminate`'s or `_select_live`'s handler logs it as a failed call.
+    A damaged call keeps the model's own argument text (`raw_arguments`) so the
+    parser can name what was wrong with it.
+    """
+    if not result.tool_calls:
+        raise RuntimeError("the decision call returned no tool call")
+    call = result.tool_calls[0]
+    if call.raw_arguments is not None:
+        return call.raw_arguments
+    return json.dumps(call.arguments, ensure_ascii=False)
 
 
 def build_server(
@@ -1135,11 +1218,10 @@ def build_server(
         nothing and one nobody asked, and the person watching is owed the
         difference.
 
-        The instruction travels as a **system message** appended to the
-        conversation, which is what lets a follow-up be recognised as one: its
-        subject is in the conversation and nowhere else.  A second user turn
-        would read as one request with it (`_ask_model`).  There is no separate
-        input — the conversation is the input.
+        The instruction is the decision tool's description, and the call is that
+        tool forced: the live messages go out exactly as they run, which is what
+        lets a follow-up be recognised from the conversation.  There is no
+        separate input — the conversation is the input.
         """
         try:
             text = await ask_model(agent, subagent, model, messages)
@@ -1147,11 +1229,11 @@ def build_server(
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
             return None, "failed"
-        # **The raw reply, for the one question the parsed answer cannot
-        # answer**: *why* a model that wrote something the parser read a
-        # certain way wrote it that way.  DEBUG because it is the model's text
-        # and this line is for whoever is already looking at the protocol; the
-        # parsed fields are the INFO line `rebuild` writes.
+        # **The raw arguments, for the one question the parsed answer cannot
+        # answer**: *why* a model that filled the tool a certain way did so.
+        # DEBUG because it is the model's text and this line is for whoever is
+        # already looking at the protocol; the parsed fields are the INFO line
+        # `rebuild` writes.
         logger.debug("recall_discriminator_reply attempt=first %r", text)
         decision, refusal = decisions.parse_with_reason(text)
         if decision is not None:

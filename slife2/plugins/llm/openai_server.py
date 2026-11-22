@@ -25,6 +25,7 @@ and so drop it, which reaches the same result from the other side.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from slife2.libs.host.config import ModelSettings, plugin
@@ -141,13 +142,28 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
     Separated from the call so the whole parameter surface can be asserted on
     without a network: which fields are present matters as much as their values,
     and "absent" is a real choice here rather than an oversight.
+
+    `tool_choice` names the one tool the call must use; it is written only when
+    a tool list is present, because a forced choice with nothing to choose is a
+    caller's bug this build refuses rather than sends.  `thinking` overrides the
+    model's configured `compat.thinking` for this call alone — the decision
+    calls disable it — and leaves the config's value on every ordinary turn.
     """
+    if thinking and settings.reasoning:
+        settings = replace(settings, thinking=thinking)
+    if tool_choice and not tools:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
+        )
     request: dict[str, Any] = {
         "model": settings.model,
         "messages": to_provider_messages(messages, reasoning=settings.reasoning),
@@ -155,6 +171,11 @@ def build_request(
     }
     if tools:
         request["tools"] = [t.to_wire() for t in tools]
+        if tool_choice:
+            request["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tool_choice},
+            }
     if settings.stream_usage != "omit":
         # An OpenAI extension.  Some compatible servers reject it with a 400,
         # and `compat.stream_usage: omit` is the switch for those — per model,
@@ -173,8 +194,8 @@ def build_request(
     if settings.max_tokens is not None:
         request["max_tokens"] = settings.max_tokens
 
-    thinking = thinking_parameter(settings)
-    if thinking is not None:
+    thinking_block = thinking_parameter(settings)
+    if thinking_block is not None:
         # **`extra_body`, because the SDK's typed surface has no `thinking`.**
         # `chat.completions.create` accepts no such keyword, so passing it at the
         # top level raises a `TypeError` here before anything is sent — on every
@@ -182,7 +203,7 @@ def build_request(
         # Through `extra_body` the configured value reaches the wire: a gateway
         # that accepts the field gets it, and one that does not answers in its own
         # words.  The Anthropic adapter routes `sampling` the same way.
-        request["extra_body"] = {"thinking": thinking}
+        request["extra_body"] = {"thinking": thinking_block}
     return request
 
 

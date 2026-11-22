@@ -2,17 +2,20 @@
 
 `consistent` is the one function here whose failure is not a wrong answer but a
 turn no provider will accept, so its rules are stated as cases.  `instruction`
-renders the discriminator's prompt, and its bound grammar is checked here too:
-the prompt is the other place a model reads it, and a copy in the template is a
-copy that drifts.
+renders the discriminator's tool description, and its bound grammar is checked
+here too: the schema is the tool's `parameters`, and a copy in the template is
+a copy that drifts.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.turn.context import (
+    RECALL_REPLY,
     consistent,
     instruction,
     live_instruction,
@@ -25,16 +28,16 @@ pytestmark = pytest.mark.unit
 
 
 def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None:
-    """**The template must not carry a second copy of the grammar.**
+    """**The tool schema is the one place the grammar is written.**
 
     `BOUND_GRAMMAR` is the sentence `turn_list`/`turn_search` print in their
     schemas and `normalize_bound` raises with; the recall template's own list
     had fallen behind it and told the discriminator less than `since` and
-    `until` accept — no `tomorrow`, `now`, `quarter` or datetime.
+    `until` accept — no `tomorrow`, `now`, `quarter` or datetime.  The schema is
+    the decision tool's `parameters`, so the template carries no copy.
     """
-    text = instruction()
-
-    assert BOUND_GRAMMAR in text
+    assert BOUND_GRAMMAR in json.dumps(RECALL_REPLY)
+    assert BOUND_GRAMMAR not in instruction()
 
 
 def call(call_id: str, name: str = "search") -> dict:
@@ -136,7 +139,7 @@ def test_the_live_instruction_names_the_candidates() -> None:
 
     assert "1, 4" in text
     assert "12,345 (1.2%)" in text
-    assert '"compact"' in text
+    assert "additionalProperties" not in text, "the schema is the tool's parameters"
     assert "goes as a whole" in text, "the legality rule is in the prompt"
 
 

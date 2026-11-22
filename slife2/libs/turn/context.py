@@ -62,8 +62,15 @@ INSTRUCTION_TEMPLATE = "recall.j2"
 #: the same entry point, one decision later in a turn.
 LIVE_TEMPLATE = "live.j2"
 
-#: The live selector's reply schema, rendered into its instruction (`RECALL_REPLY`
-#: states why a schema rather than prose).
+#: The two decision calls are forced tool calls, one tool each.  The name is the
+#: call's own vocabulary, not the model's: neither tool is ever advertised in a
+#: turn, only in the decision request whose `tool_choice` names it.
+DECISION_TOOL = "decide_context"
+SELECTION_TOOL = "select_messages"
+
+#: The live selector's tool schema: the decision call's `parameters`, so the
+#: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
+#: states the same for the discriminator).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -83,10 +90,10 @@ LIVE_REPLY: dict[str, Any] = {
     },
 }
 
-#: The reply's schema: the types, the allowed values, and the one rule that
-#: couples the two fields.  Rendered into the instruction rather than described
-#: in prose (SDD §2.3, "Schema over prompt"): a field's wording is what a model
-#: copies, and a constraint that fits a schema is not a prompt sentence.
+#: The discriminator's tool schema: the types, the allowed values, and the one
+#: rule that couples the two fields.  The decision call is a forced tool call
+#: (SDD §2.3, "Schema over prompt"): the schema is the tool's `parameters`, so
+#: the field's wording is what the model fills, not a sentence it copies.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -492,25 +499,22 @@ def repair_note(reason: str) -> str:
 
 
 def instruction() -> str:
-    """What the discriminator is asked, appended to the conversation.
+    """What the discriminator's tool says: the task, the cases, one guard.
 
     **No input is passed beside the messages.**  The rebuild runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
     delivered), so the instruction is the same every time and the decision is
-    made from the conversation it is appended to.  A separate prompt would be
-    the previous design's — it existed only because the rebuild ran before the
+    made from the conversation the call is made over.  A separate prompt would
+    be the previous design's — it existed only because the rebuild ran before the
     message was appended.
 
-    **The bound grammar is the module's one spelling.**  It is inside the reply
+    **The bound grammar is the module's one spelling.**  It is inside the tool
     schema's `since`/`until` descriptions (`RECALL_REPLY`), so the template
-    carries no copy of it: the tools' schemas print `BOUND_GRAMMAR` and the code
+    carries no copy of it: the schema is the tool's `parameters` and the code
     that decides reads it, and a copy in the template had fallen behind it — no
     `tomorrow`, `now`, `quarter` or datetime.
     """
-    return render_instruction(
-        INSTRUCTION_TEMPLATE,
-        recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),
-    )
+    return render_instruction(INSTRUCTION_TEMPLATE)
 
 
 def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
@@ -539,14 +543,14 @@ def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
 
 
 def live_instruction(selectable: Sequence[int], usage: str) -> str:
-    """What the live selector is asked, with the ids it may drop.
+    """What the live selector's tool says, with the ids it may drop.
 
     The ids are the *candidates* — every message but the fixed ones — and they
     are the copy's numbering, not the record's: `with_message_id` writes it into
     the one request, and nothing else ever sees it.  `usage` is the same figure
     the turn prompt and the status bar show, measured against the view the
     selector is deciding about — the model needs to know how full the window is
-    to know how much it has to give up.  The legality rule is in the prompt
+    to know how much it has to give up.  The legality rule is in the tool text
     rather than in the harness: a model that keeps calls and results together
     writes a history every provider accepts, and a system that repaired its
     answer would be making a decision the model was asked to make.
@@ -555,7 +559,6 @@ def live_instruction(selectable: Sequence[int], usage: str) -> str:
         LIVE_TEMPLATE,
         selectable=", ".join(str(index) for index in selectable),
         usage=usage,
-        live_reply=json.dumps(LIVE_REPLY, indent=2, ensure_ascii=False),
     )
 
 

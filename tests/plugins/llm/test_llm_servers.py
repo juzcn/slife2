@@ -1700,6 +1700,52 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_decision_options_reach_the_streamer() -> None:
+    """The two per-call options cross the MCP hop, and only when set.
+
+    The decision calls are the only caller that sets them; a turn's own call
+    sends neither and a scripted four-argument streamer still works.
+    """
+    seen: dict[str, str] = {}
+
+    async def stream(
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
+    ) -> AsyncGenerator[Chunk | Finish]:
+        seen["tool_choice"] = tool_choice
+        seen["thinking"] = thinking
+        yield Chunk(text="ok")
+        yield Finish("stop")
+
+    server = build_llm_server(name="t", streamer=stream)
+    result, _chunks = await call_stream_chat(
+        server,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "decide_context",
+                    "description": "d",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        model="m",
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+
+    assert seen == {"tool_choice": "decide_context", "thinking": "disabled"}
+    assert result.data["text"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_a_resolved_credential_is_masked_from_the_result() -> None:
     """A provider that echoes the key it was given is not put in front of the model.
 
@@ -2012,6 +2058,68 @@ def test_openai_thinking_is_opt_in() -> None:
     omitted_request = openai_build_request([], [], omitted)
     assert "thinking" not in omitted_request
     assert "extra_body" not in omitted_request, "nothing to carry, no hatch opened"
+
+
+def test_the_decision_options_are_per_call() -> None:
+    """A forced tool and thinking off are the call's, not the model's config.
+
+    The decision calls force one tool and disable thinking; the turn's own
+    calls keep the configured value, so neither field may leak into a request
+    that did not ask for it.
+    """
+    tool = ToolSpec(
+        name="decide_context", description="d", parameters={"type": "object"}
+    )
+    request = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert request["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "decide_context"},
+    }
+    assert request["extra_body"]["thinking"]["type"] == "disabled"
+
+    plain = openai_build_request([], [tool], ModelSettings(model="m", reasoning=True))
+    assert "tool_choice" not in plain
+    assert "extra_body" not in plain, "the override is not a config edit"
+
+    with pytest.raises(ValueError, match="sends no tools"):
+        openai_build_request(
+            [], [], ModelSettings(model="m"), tool_choice="decide_context"
+        )
+
+
+def test_anthropic_and_responses_map_the_forced_choice() -> None:
+    """The same two options, in each wire's own spelling."""
+    tool = ToolSpec(
+        name="decide_context", description="d", parameters={"type": "object"}
+    )
+    anthropic = anthropic_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True, max_tokens=8000),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert anthropic["tool_choice"] == {"type": "tool", "name": "decide_context"}
+    assert "thinking" not in anthropic, "the override suppresses the configured block"
+
+    responses = responses_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True),
+        tool_choice="decide_context",
+        thinking="disabled",
+    )
+    assert responses["tool_choice"] == {
+        "type": "function",
+        "name": "decide_context",
+    }
+    assert "reasoning" not in responses
 
 
 def test_thinking_enabled_without_a_cap_is_refused() -> None:

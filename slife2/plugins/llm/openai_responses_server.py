@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 from slife2.libs.host.config import ModelSettings, plugin
@@ -265,8 +266,23 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
 ) -> dict[str, Any]:
-    """The request body, containing only what the config asked for."""
+    """The request body, containing only what the config asked for.
+
+    `tool_choice` names the one tool the call must use and `thinking` overrides
+    the model's configured value for this call — `openai_server.build_request`
+    states the same two options, and a forced choice with no tool list is
+    refused here for the same reason.
+    """
+    if thinking and settings.reasoning:
+        settings = replace(settings, thinking=thinking)
+    if tool_choice and not tools:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
+        )
     reasoning = reasoning_parameter(settings)
     # A model that did not ask for reasoning is a model to which another one's
     # items are not ours to send; the empty model makes `reasoning_items` drop
@@ -284,6 +300,8 @@ def build_request(
         request["instructions"] = instructions
     if tools:
         request["tools"] = to_responses_tools(tools)
+        if tool_choice:
+            request["tool_choice"] = {"type": "function", "name": tool_choice}
 
     # Only what was configured.  `None` means "say nothing and let the gateway
     # decide", which is not the same as passing a default — and unlike

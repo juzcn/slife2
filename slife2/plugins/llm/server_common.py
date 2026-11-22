@@ -255,6 +255,9 @@ async def stream_chat_impl(
     tools: list[dict[str, Any]],
     model: str,
     ctx: Context,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
 ) -> dict[str, Any]:
     """Run one streamed model call and return the assembled result.
 
@@ -286,9 +289,22 @@ async def stream_chat_impl(
     a connection nobody reads.  `aclosing` runs the adapter's own cleanup
     deterministically instead: the SDK stream is closed and the lease released
     on the way out, whichever way out it is.
+
+    **The two per-call options are forwarded only when set.**  `tool_choice`
+    forces the one tool the decision calls must use, and `thinking` overrides
+    the model's configured value for this call; empty is the wire's ordinary
+    behaviour, and a scripted streamer in a test keeps its four-argument call.
     """
     builder = _TurnBuilder()
     reported = 0
+    # **Passed only when asked for.**  A scripted streamer in a test speaks the
+    # four-argument call; adding two always-present keywords would break every
+    # one of them for an option none of those tests set.
+    options: dict[str, str] = {}
+    if tool_choice:
+        options["tool_choice"] = tool_choice
+    if thinking:
+        options["thinking"] = thinking
 
     async with contextlib.aclosing(
         streamer(
@@ -296,6 +312,7 @@ async def stream_chat_impl(
             [Message.from_wire(m) for m in messages],
             [ToolSpec.from_wire(t) for t in tools],
             model,
+            **options,
         )
     ) as events:
         async for event in events:
@@ -744,7 +761,7 @@ def sdk_streamer(
     api: str,
     server_name: str,
     sdk_client: Callable[[ProviderSettings, str], Any],
-    build_request: Callable[[list[Message], list[ToolSpec], Any], dict[str, Any]],
+    build_request: Callable[..., dict[str, Any]],
     start: StartStream,
     translator: Translator,
 ) -> Streamer:
@@ -772,6 +789,9 @@ def sdk_streamer(
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
     ) -> AsyncGenerator[ProviderEvent]:
         # Held for the whole stream, not just to look the provider up: the
         # client is what carries the response being read below, and a config
@@ -779,7 +799,12 @@ def sdk_streamer(
         # (`LiveProviders.lease`).
         async with pool.lease() as clients:
             settings = clients.provider(provider).model(model)
-            request = build_request(messages, tools, settings)
+            options: dict[str, str] = {}
+            if tool_choice:
+                options["tool_choice"] = tool_choice
+            if thinking:
+                options["thinking"] = thinking
+            request = build_request(messages, tools, settings, **options)
             response = await start(clients.client(provider), request)
             translate = translator()
             # **The response is closed on every way out of the loop.**  An
@@ -832,6 +857,8 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         agent: str = "",
         subagent: str = "",
         kind: str = "",
+        tool_choice: str = "",
+        thinking: str = "",
     ) -> dict[str, Any]:
         """Stream one chat completion.
 
@@ -865,13 +892,29 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 keyed on it; it is the word the usage line is read by, because
                 the two are separate prompt lineages and a cache-hit ratio that
                 averaged them could not say which one was missing.
+            tool_choice: The name of the one tool this call must use.  Empty
+                leaves the choice to the model; the decision calls name their
+                single decision tool, because a model left free in a tool-heavy
+                conversation continues the conversation instead of deciding.
+            thinking: `enabled` or `disabled` to override the model's configured
+                `compat.thinking` for this call only; empty uses the config.
+                The decision calls disable it — a thinking endpoint rejects a
+                forced `tool_choice`, and the structured call is what makes the
+                decision readable.
         """
         who = f"{agent}/{subagent}" if subagent else agent or "(unstated)"
         what = kind or "(unstated)"
         began = time.monotonic()
         try:
             result = await stream_chat_impl(
-                streamer, provider, messages, tools, model, ctx
+                streamer,
+                provider,
+                messages,
+                tools,
+                model,
+                ctx,
+                tool_choice=tool_choice,
+                thinking=thinking,
             )
         except Exception as exc:
             # **A failed call carries the identity on the line**: FastMCP's own
