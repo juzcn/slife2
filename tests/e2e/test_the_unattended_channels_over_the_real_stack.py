@@ -37,7 +37,7 @@ from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.turn.events import TurnFinished
 from slife2.libs.turn.watch import Snapshot, TurnStarted
 from slife2.tui.client import MCPAgentClient, MCPMeshClient
-from tests.e2e.edges import WECHAT_AGENT, ChatAnswer, Peer, ToolAsk, Window
+from tests.e2e.edges import WECHAT_AGENT, ChatAnswer, Peer, ToolAsk, Window, decision
 
 pytestmark = pytest.mark.e2e
 
@@ -93,8 +93,8 @@ async def test_a_wechat_message_becomes_a_turn_and_the_reply_goes_back(stack) ->
     await window.start()
     try:
         provider.script = [
-            # The context store's discriminator, before the turn runs.
-            ChatAnswer(text="{}"),
+            # The context decision, before the turn runs.
+            decision(),
             ChatAnswer(
                 tool=ToolAsk(
                     id="call_e2e_wechat",
@@ -128,15 +128,18 @@ async def test_a_wechat_message_becomes_a_turn_and_the_reply_goes_back(stack) ->
     finally:
         await window.stop()
 
-    # Three calls: the discriminator, the turn's tool request, and the turn
+    # Three calls: the decision, the turn's tool request, and the turn
     # after the tool answered.  Step by step, so a different count says which.
     assert provider.chats == 3, [len(call) for call in provider.calls]
     assert "wechat_send_message" in provider.tool_names[1], provider.tool_names[1]
     # The turn's own request carries the marker: the message off the phone is
-    # prompt content, and the prompt marker the harness adds sits in front of
-    # it — so this reads the body of that first user message rather than its
-    # first character.
-    turn = provider.calls[1][-1]["content"]
+    # prompt content, and the rebuild's pair closes the request — so the prompt
+    # is found among the user messages rather than by position.
+    turn = "\n".join(
+        str(message.get("content") or "")
+        for message in provider.calls[1]
+        if message.get("role") == "user"
+    )
     assert "[Wechat:" in turn and TOKEN in turn, turn[:200]
     assert "what is the number?" in turn, turn[:200]
 
@@ -188,7 +191,7 @@ async def test_a_peer_task_runs_a_turn_and_the_answer_returns_over_the_mesh(
         task_id = uuid.uuid4().hex
         answer = "The number is 42."
         provider.script = [
-            ChatAnswer(text="{}"),
+            decision(),
             ChatAnswer(
                 tool=ToolAsk(
                     id="call_e2e_task_response",
@@ -282,11 +285,11 @@ async def test_a_scheduled_fire_runs_the_task_and_the_answer_reaches_the_window(
     await window.start()
     try:
         provider.script = [
-            # The agent task's rebuild, then its answer.
-            ChatAnswer(text="{}"),
+            # The agent task's decision, then its answer.
+            decision(),
             ChatAnswer(text=TASK_ANSWER),
             # The window's turn on the delivered answer, then its reply.
-            ChatAnswer(text="{}"),
+            decision(),
             ChatAnswer(text="Noted in the conversation."),
         ]
         # **A fire in the next minute, and not again for an hour.**  `* * * * *`
@@ -336,7 +339,7 @@ async def test_a_scheduled_fire_runs_the_task_and_the_answer_reaches_the_window(
     finally:
         await window.stop()
 
-    # Two turns, two discriminator calls: the task's, and the window's on the
+    # Two turns, two decision calls: the task's, and the window's on the
     # answer it was handed.
     assert provider.chats == 4, [len(call) for call in provider.calls]
     assert window.replies, "the delivered answer ran a turn of its own"
@@ -390,7 +393,7 @@ async def test_a_watched_subagent_runs_unattended_and_the_watch_sees_it(
                 what="watch snapshot",
             )
             provider.script = [
-                ChatAnswer(text="{}"),
+                decision(),
                 ChatAnswer(
                     tool=ToolAsk(
                         id="call_e2e_subagent",

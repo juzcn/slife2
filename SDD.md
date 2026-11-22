@@ -850,11 +850,12 @@ loop is handed a `present` callback with the list it advances; the model is sent
 `present(messages)` and the record is `messages`. `_turn_compact` (§5.3) is
 called by the harness when the last call's `total_tokens` crosses
 `agent.compact_at` of the conversation's window — or by the model itself — and
-its selector hides the messages the turn no longer needs from the view for the
-rest of the turn. A compaction that dropped something leaves the automated pass
-live: a context that grows back over the fraction is asked about again at the
-next boundary. One that kept everything, or one whose selector failed, is a
-decision about the whole context and stops the automated pass for that turn
+its selection decision hides the messages the turn no longer needs from the view
+for the rest of the turn. A compaction that dropped something leaves the
+automated pass live: a context that grows back over the fraction is asked about
+again at the next boundary. One that kept everything, or one whose selection
+decision failed, is a decision about the whole context and stops the automated
+pass for that turn
 (`Loop.compact_hold`); the model may still call the tool itself, and a later
 successful call resumes the pass. The turn's row, `covered` and the store never
 see the view, and the next turn starts from the full list.
@@ -935,7 +936,7 @@ reader can continue from a match. Character mode exists because some text files
 are not organized in lines: minified JSON, one long record, output whose
 separators are not line breaks.
 
-**Why not a discriminator.** A model asked which lines matter is a second model
+**Why not a model call.** A model asked which lines matter is a second model
 call for every oversized result, carrying the result and the conversation. That
 is expensive, and its input can itself be larger than the context it was meant
 to protect. A fixed head costs one measurement and cannot overflow; the model
@@ -1001,10 +1002,21 @@ conversation. `_turn_compact` and `_context_rebuild` are the two whose model
 call is *wanted* as well as harmless: the harness calls them at their own
 moments, the model may call either itself, and both edit what the turn runs on
 without touching the record (`_turn_compact` hides from the view, §5.5;
-`_context_rebuild` chooses the historical turns). They are also **the two tools
-whose bodies call a model** — the selector and the discriminator — so a call
-costs a second `stream_chat`, logged under `kind=compactor` or
-`kind=discriminator` and not added to the turn's own bill.
+`_context_rebuild` chooses the historical turns). They are also **the two
+decision tools**: each body runs one decision model call over the live view,
+and a call costs a second `stream_chat`, logged under its own `kind` and not
+added to the turn's own bill.
+
+**Decision tools are LLM-backed harness tools.** A decision tool is a harness
+tool whose body runs one decision model call and applies its answer;
+`_context_rebuild` and `_turn_compact` are its two instances today. The call
+appends the decision instruction to the live conversation as a system message,
+declares one tool (`decide_context`, `select_messages`) whose `parameters` is
+the reply schema, and `tool_choice` forces that tool, so the answer is the
+tool's arguments and not prose. Thinking is off for the call — a thinking
+endpoint rejects a forced choice — and one unreadable answer is repaired with
+a tool result naming the reason; a second is no decision. The model chooses;
+the harness applies. No other harness tool calls a model.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -1104,35 +1116,37 @@ Each turn, the context plugin answers one question: what will this turn run on?
 1. **`restore`**, when a conversation starts. It replays the stored live-context
    list.
 2. **`_context_rebuild`**, at the first boundary of each turn — and whenever the
-   model calls it. Its discriminator reads the conversation, the turn's own
+   model calls it. Its decision model reads the conversation, the turn's own
    message already in it, and answers what to keep of the historical turns in
    hand and what to recall from the turn log. The turn running has no id yet and
    is carried verbatim; the rebuild never touches it.
 
-The discriminator reads the whole conversation — a follow-up usually names its
+The decision model reads the whole conversation — a follow-up usually names its
 subject through the turns above it, and the turn's own message is in the list
 already. There is no separate input argument. Its answer is a selection, never a
 dump. The common answer is `{}`: a decision that asks for exactly what is in
 hand rebuilds nothing.
 
-The answer is a **forced tool call**, not model content: `decide_context` is
-advertised with the instruction as its description and `RECALL_REPLY` as its
-`parameters`, and `tool_choice` names it. Thinking is off for that call — a
-thinking endpoint rejects a forced choice — and the turn's own calls keep
-theirs. The message list is the conversation exactly as it runs; a model left
-free in a tool-heavy conversation continues it instead of deciding.
+The answer is a **forced tool call**, not model content: the decision
+instruction is a system message appended to the live conversation, and
+`tool_choice` names `decide_context`, whose `parameters` is `RECALL_REPLY`.
+Thinking is off for that call — a thinking endpoint rejects a forced choice —
+and the turn's own calls keep theirs. The conversation is the input, exactly
+as the turn runs it; the instruction is the one system message appended to it.
+A model left free in a tool-heavy conversation continues it instead of
+deciding.
 
 Rules:
 
 - **An unreadable reply is asked once more, then it is not a decision.** The
-  refusal names the field (`parse_with_reason`), and the discriminator is asked
+  refusal names the field (`parse_with_reason`), and the decision model is asked
   again with its own reply and that reason — a correction to an answer already in
   hand, not the blind retry a provider failure would be. A second refusal ends
   it: the turn runs on the context it already has (Appendix C). The rebuild
-  reports `discriminator` (`failed`, `unparsed`, or empty) in its answer, and a
-  failed call answers `No rebuild: the discriminator did not answer (…)` — a
-  recall nobody asked for is not a recall that found nothing. **The
-  discriminator has no clock of its own**: it
+  reports the decision model's status (`failed`, `unparsed`, or empty) in its
+  answer, and a failed call answers `No rebuild: the decision model did not
+  answer (…)` — a recall nobody asked for is not a recall that found nothing.
+  **The decision model has no clock of its own**: it
   is a model call like the turn's own, bounded by the model service, and a slow
   provider makes the turn late rather than the recall fail.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
@@ -1143,11 +1157,11 @@ Rules:
   fallback. The keyword leg is fused into each sentence's list, and a later
   sentence can only add a turn or raise one.
 - **There is no separate input.** The decision's `sentences` are the recall's
-  questions — the discriminator read the conversation and wrote what it is
+  questions — the decision model read the conversation and wrote what it is
   asking the log for. A keyword-only recall keeps its query as the one meaning
   question; a period recall is not narrowed by anything.
 - **A recall is asked for what is missing.** Every turn in hand is excluded from
-  its candidates — the discriminator read all of them, so a turn it dropped from
+  its candidates — the decision model read all of them, so a turn it dropped from
   the keep-list was dropped deliberately — and nothing already in hand spends
   retrieval depth or budget. **The exclusion is part of the KNN's own
   restriction**, through a per-call temp table, so an excluded turn's chunks
@@ -1196,12 +1210,11 @@ Rules:
   builders would drift into two conversations.
 
 **The turn's own compaction is a view, not an edit.** `_turn_compact` asks the
-live selector — a forced `select_messages` tool call over the view, numbered
-`[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages this
-turn no longer needs, and hides them from the list the rest of the turn is sent
-(`libs/turn/compact.py`). The
-selector is the discriminator's call one decision later: the same forced tool,
-the same thinking off. It is shown the last measured call and the
+live selection decision — a forced `select_messages` tool call over the view,
+numbered `[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages
+this turn no longer needs, and hides them from the list the rest of the turn is
+sent (`libs/turn/compact.py`). The selection decision is the same decision tool
+one decision later: the same forced tool, the same thinking off. It is shown the last measured call and the
 conversation's window, through the same `context_usage` the status bar uses, so
 the model and the person read
 one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
@@ -1210,15 +1223,16 @@ from the full list. The system message and the turn's opening message are the
 only fixed messages; every other message, historical or current, is the model's
 to drop. The legality of a tool exchange is the *prompt's* rule — a call and its
 results go together — and the harness applies the answer as it came: a split
-pair is a failed next call, one turn, not a repaired answer. A selector that
-fails or cannot be read compacts nothing and the turn continues (Appendix C); a
-selector that keeps everything stops the automated pass for the rest of the
+pair is a failed next call, one turn, not a repaired answer. A selection
+decision that fails or cannot be read compacts nothing and the turn continues
+(Appendix C); a selection decision that keeps everything stops the automated
+pass for the rest of the
 turn, because that is a decision about the whole context rather than something
 the harness should ask again at every boundary. The model can still call
 `_turn_compact` itself.
 
 **The rebuild is the durable edit; the compaction is the transient view.**
-`_context_rebuild` asks the discriminator which historical turns to keep and
+`_context_rebuild` asks its decision model which historical turns to keep and
 which to recall from the turn log. The turn running has no id yet and is carried
 verbatim, so the selection is the history alone. It is a harness tool: the
 harness calls it at the first boundary, the model may call it when the work has
@@ -1228,7 +1242,7 @@ estimate of the context the turn runs on from there (`estimate_turn_tokens` plus
 dropped one can be recalled by a later rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
 over. The two tools share the pair and the failure rules: an answer that cannot
-be read is the discriminator's `failed`/`unparsed` and the turn continues on the
+be read is the decision's `failed`/`unparsed` and the turn continues on the
 context it had.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
@@ -1261,7 +1275,7 @@ them 0.002–0.036 — below the shipped 0.3 — which is the floor doing the wo
 the cosine gate could not. A provider with no `rerank_model` simply omits the
 rerank stage.
 
-A missing store fails the turn, like any missing plugin. A discriminator
+A missing store fails the turn, like any missing plugin. A decision-model
 provider error or unreadable answer does not. There is no switch to
 turn the decision off: an append-only context is bounded by nothing.
 
@@ -1450,7 +1464,7 @@ adapters accept either shape; an adapter that handles only the documented OpenAI
 shape reports zero tokens against a real DeepSeek endpoint.
 
 `stream_chat` takes a `kind` word: `turn` for the loop's own calls, and
-`discriminator` for the recall decision, the one call that reaches the model
+`decision` for the recall decision, the one call that reaches the model
 server outside the loop's backend. One line is logged per call with the
 breakdown and the call's `elapsed`, because a cache hit rate distinguishes a
 rebuild from an append. A call that raises logs `stream_chat_failed` with the
@@ -3139,8 +3153,8 @@ The four shapes an undeclared fallback takes:
 |---|---|---|---|---|
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
-| The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
-| The live selector fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
+| The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
+| The selection decision fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
 | A catalogue hint cannot be asked (the hub's answer is unreadable) | The call keeps its generic "unknown tool" sentence | The catalogue's explanation and next step | A readable answer | An INFO line naming the name |

@@ -243,11 +243,11 @@ ATTACH_IMAGE = "attach_image"
 #: pair under it.
 #:
 #: **And one of the two tools whose bodies call a model.**  `_turn_compact` runs
-#: the context plugin's selector — one silent, tool-less `stream_chat` over the
-#: numbered view — so a call costs a second model call.  Its tokens are logged
-#: by the model server under `kind=compactor` and are not added to the turn's
-#: own bill; `_context_rebuild`'s discriminator is the same arrangement under
-#: `kind=discriminator`.
+#: the context plugin's selection decision — a forced `select_messages` tool
+#: call over the numbered view — so a call costs a second model call.  Its
+#: tokens are logged by the model server under `kind=compactor` and are not
+#: added to the turn's own bill; `_context_rebuild`'s decision is the same
+#: arrangement under `kind=decision`.
 TURN_COMPACT = "_turn_compact"
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the

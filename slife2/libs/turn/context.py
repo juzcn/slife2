@@ -62,11 +62,17 @@ INSTRUCTION_TEMPLATE = "recall.j2"
 #: the same entry point, one decision later in a turn.
 LIVE_TEMPLATE = "live.j2"
 
-#: The two decision calls are forced tool calls, one tool each.  The name is the
-#: call's own vocabulary, not the model's: neither tool is ever advertised in a
-#: turn, only in the decision request whose `tool_choice` names it.
+#: The two decision tools, and the one line each tool says about itself.  The
+#: instruction travels as a system message appended to the live conversation;
+#: the tool description says only what the call records, and the reply schema is
+#: the tool's `parameters`.  Neither name is ever advertised in a turn — only in
+#: the decision request whose `tool_choice` names it.
 DECISION_TOOL = "decide_context"
 SELECTION_TOOL = "select_messages"
+DECISION_TOOL_TEXT = "Record the context decision described by the system instruction."
+SELECTION_TOOL_TEXT = (
+    "Record the live-message selection described by the system instruction."
+)
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
@@ -826,7 +832,7 @@ def rebuild_report(
     """
     if discriminator:
         return (
-            f"No rebuild: the discriminator did not answer ({discriminator}); "
+            f"No rebuild: the decision model did not answer ({discriminator}); "
             f"the turn continues on the context it had; context ~{tokens}."
         )
     if not changed:

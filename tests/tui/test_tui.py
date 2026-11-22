@@ -1804,10 +1804,10 @@ async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
     assert "assistant-message" in blocks[-1]
 
 
-async def test_a_failed_discriminator_is_reported_in_the_rebuilds_answer() -> None:
+async def test_a_failed_decision_is_reported_in_the_rebuilds_answer() -> None:
     """No decision is a fact the model reads, not a zero it has to explain."""
     report = (
-        "No rebuild: the discriminator did not answer (timeout); the turn "
+        "No rebuild: the decision model did not answer (timeout); the turn "
         "continues on the context it had; context ~1,000 (1.0%)."
     )
     app = window(FakeAgentClient(rebuild_of(report)))
@@ -1815,7 +1815,7 @@ async def test_a_failed_discriminator_is_reported_in_the_rebuilds_answer() -> No
         await submit(pilot, "hi")
         text = shown(app)
 
-    assert "the discriminator did not answer (timeout)" in text
+    assert "the decision model did not answer (timeout)" in text
 
 
 async def test_the_restored_history_says_how_much_came_back() -> None:

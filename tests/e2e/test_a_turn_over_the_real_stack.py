@@ -40,7 +40,7 @@ from slife2.libs.turn.context import TURN_PROMPT_PREFIX
 from slife2.libs.turn.tools import as_tool_text
 from slife2.plugins.cabinet.store import DUMP, UPSERT, index_path, store_of
 from slife2.tui.client import MCPAgentClient
-from tests.e2e.edges import ANSWER, WINDOW, ChatAnswer, ToolAsk
+from tests.e2e.edges import ANSWER, WINDOW, ChatAnswer, ToolAsk, decision
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.e2e
@@ -81,17 +81,17 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
     *second* connection, and it is on disk, written by the context process.
 
     **Two provider calls and not one**, which is worth knowing before reading
-    the count: the context store's discriminator is a model call of its own
+    the count: the context decision is a model call of its own
     (`slife2-context` decides what a turn runs on before it runs), and it comes
     through the same provider as the turn.
     """
     config = stack["config"]
     provider = stack["provider"]
-    # The discriminator first, then the turn's answer.  The stub's default
-    # repeats one answer for every call; a discriminator answered with the
-    # turn's prose is a reply this build refuses, and the refusal is asked to
+    # The decision first, then the turn's answer.  The stub's default repeats
+    # one answer for every call; a decision answered with the turn's prose is a
+    # reply this build refuses, and the refusal is asked to
     # repair itself — a second call this test is not about.
-    provider.script = [ChatAnswer(text="{}"), ChatAnswer(text=ANSWER)]
+    provider.script = [decision(), ChatAnswer(text=ANSWER)]
     events: list[str] = []
     client = MCPAgentClient(config.agent.server.url, agent="e2e")
     await client.connect()
@@ -204,16 +204,16 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     tool's sentence rather than anything this test composed.
 
     **Three calls, and the first is not the turn's.**  The context store's
-    discriminator decides what a turn runs on before it runs, and it is a model
+    decision model decides what a turn runs on before it runs, and it is a model
     call of its own; the second is the turn's first iteration, which asks for the
     tool; the third is the iteration after the tool has answered.
     """
     provider = stack["provider"]
     provider.script = [
-        # The discriminator.  `{}` is "nothing changes" — what the context
-        # plugin's own tests answer with, and the one answer that leaves the
-        # conversation this test is about alone.
-        ChatAnswer(text="{}"),
+        # The decision.  `{}` is "nothing changes" — what the context plugin's
+        # own tests answer with, and the one answer that leaves the conversation
+        # this test is about alone.
+        decision(),
         ChatAnswer(
             tool=ToolAsk(
                 id="call_e2e_note",
@@ -241,7 +241,7 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     # The model was *offered* the tool it called, by the bare name our own
     # plugins use — so the catalogue reached the model and the name the model
     # wrote is the name the hub routes by.  Read from the turn's own call and
-    # not the discriminator's, which is a completion and carries no tools.
+    # not the decision call's, which carries the decision tool and no others.
     assert "note_write" in provider.tool_names[1], provider.tool_names[1]
 
     # And the tool's answer came back into the conversation: the third request

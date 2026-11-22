@@ -2,7 +2,7 @@
 
 `consistent` is the one function here whose failure is not a wrong answer but a
 turn no provider will accept, so its rules are stated as cases.  `instruction`
-renders the discriminator's tool description, and its bound grammar is checked
+renders the decision tool's system instruction, and its bound grammar is checked
 here too: the schema is the tool's `parameters`, and a copy in the template is
 a copy that drifts.
 """
@@ -32,7 +32,7 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
 
     `BOUND_GRAMMAR` is the sentence `turn_list`/`turn_search` print in their
     schemas and `normalize_bound` raises with; the recall template's own list
-    had fallen behind it and told the discriminator less than `since` and
+    had fallen behind it and told the decision model less than `since` and
     `until` accept — no `tomorrow`, `now`, `quarter` or datetime.  The schema is
     the decision tool's `parameters`, so the template carries no copy.
     """

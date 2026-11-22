@@ -537,7 +537,6 @@ context:
   min_similarity: 0.52       # above the embedding model's noise floor
   keyword_weight: 1.0        # weighted RRF; the meaning leg is always 1.0
   rerank_min_score: 0.3      # its score floor, 0-1; 0 keeps all it returned
-  timeout: 20.0              # seconds for the discriminator call
 
 tool_load:
   threshold: 100             # loaded tools before the least recently used go

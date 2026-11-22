@@ -32,9 +32,11 @@ from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import (
     DECISION_TOOL,
+    DECISION_TOOL_TEXT,
     LIVE_REPLY,
     RECALL_REPLY,
     SELECTION_TOOL,
+    SELECTION_TOOL_TEXT,
     turn_footnote,
     turn_note,
 )
@@ -1920,11 +1922,11 @@ async def test_a_failed_call_is_not_asked_again() -> None:
 
 @pytest.mark.asyncio
 async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
-    """The conversation is the whole input; the decision is the one tool's call.
+    """The conversation plus one system instruction, answered by the one tool.
 
-    No instruction message is appended: a model left free in a tool-heavy
-    conversation continues it instead of deciding, so the decision tool is
-    forced and thinking is off (a thinking endpoint rejects the forced choice).
+    The instruction is appended as a system message; the decision tool is forced
+    and thinking is off (a thinking endpoint rejects the forced choice).  The
+    live conversation is not otherwise touched.
     """
     seen: list[dict[str, Any]] = []
 
@@ -1968,10 +1970,13 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     answer = await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", hold)
     assert answer == '{"context": "clear"}', "the tool arguments are the decision"
     call = seen[0]
-    assert call["kind"] == "discriminator"
-    assert call["asked"] == hold, "the conversation is the input, unchanged"
+    assert call["kind"] == "decision"
+    assert call["asked"][:-1] == hold, "the conversation is the input, unchanged"
+    assert call["asked"][-1]["role"] == "system"
+    assert "Context rebuild" in call["asked"][-1]["content"]
     tool = call["tools"][0]["function"]
     assert tool["name"] == DECISION_TOOL
+    assert tool["description"] == DECISION_TOOL_TEXT
     assert tool["parameters"] == RECALL_REPLY
     assert call["tool_choice"] == DECISION_TOOL
     assert call["thinking"] == "disabled"
@@ -1988,7 +1993,7 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
         repair="the reply could not be read",
     )
     asked = seen[1]["asked"]
-    assert asked[:-2] == hold, "the refused call and its result are the only addition"
+    assert asked[:-2] == call["asked"], "only the refused call and its result are added"
     assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"context": "bad"}'
     assert asked[-2]["tool_calls"][0]["id"] == asked[-1]["tool_call_id"]
     assert "could not be read" in asked[-1]["content"]
@@ -2045,8 +2050,11 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
     assert call["asked"][0]["content"].startswith('[MESSAGE:{"id": 0}] '), (
         "the view is numbered"
     )
+    assert call["asked"][-1]["role"] == "system"
+    assert "Turn compaction" in call["asked"][-1]["content"]
     tool = call["tools"][0]["function"]
     assert tool["name"] == SELECTION_TOOL
+    assert tool["description"] == SELECTION_TOOL_TEXT
     assert tool["parameters"] == LIVE_REPLY
     assert call["tool_choice"] == SELECTION_TOOL
     assert call["thinking"] == "disabled"

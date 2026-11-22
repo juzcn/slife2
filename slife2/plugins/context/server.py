@@ -221,13 +221,13 @@ async def _ask_model(
     """One forced decision-tool call, and nothing listening to it.
 
     **The decision is a tool call, and the conversation is its input.**  The
-    live messages go out exactly as the turn runs on them — no appended
-    instruction, no second system message — and the one tool advertised is
-    `decide_context`, forced by `tool_choice`.  The instruction is that tool's
-    description; the reply schema is its `parameters`.  A model left free in a
-    tool-heavy conversation continues the conversation's own calls instead of
-    deciding (a turn that had been testing the harness tools did exactly that);
-    a forced tool has nowhere else to put the answer.
+    live messages go out exactly as the turn runs on them, followed by the
+    decision instruction as a system message; the one tool advertised is
+    `decide_context`, forced by `tool_choice`, with the reply schema as its
+    `parameters`.  A model left free in a tool-heavy conversation continues the
+    conversation's own calls instead of deciding (a turn that had been testing
+    the harness tools did exactly that); a forced tool has nowhere else to put
+    the answer.
 
     **Thinking is off for this call.**  A thinking endpoint rejects a forced
     `tool_choice` (DeepSeek answers 400), and the structured call is what makes
@@ -266,10 +266,13 @@ async def _ask_model(
     """
     tool = ToolSpec(
         name=decisions.DECISION_TOOL,
-        description=decisions.instruction(),
+        description=decisions.DECISION_TOOL_TEXT,
         parameters=decisions.RECALL_REPLY,
     )
-    asked = [*messages]
+    asked = [
+        *messages,
+        {"role": "system", "content": decisions.instruction()},
+    ]
     if repair:
         # The model's own refused call, then what was wrong with it.  The tool
         # result is the correct channel for a refusal: a user turn here would
@@ -309,7 +312,7 @@ async def _ask_model(
         tools=[tool.to_wire()],
         tool_choice=decisions.DECISION_TOOL,
         thinking="disabled",
-        kind="discriminator",
+        kind="decision",
     )
     return decision_arguments(result)
 
@@ -332,7 +335,7 @@ async def _ask_selector(
 
     **The ids are written here and nowhere else.**  `with_message_id` prefixes
     each message of this request; the record, the turn's saved row and every
-    ordinary call keep the list they had.  The tool description names the
+    ordinary call keep the list they had.  The system message names the
     candidates, the legality rule and the context figure the caller measured —
     the same figure the status bar and the turn prompt show.  The call is forced
     and thinking is off for `_ask_model`'s reason: the view already ends with
@@ -345,10 +348,13 @@ async def _ask_selector(
     ]
     tool = ToolSpec(
         name=decisions.SELECTION_TOOL,
-        description=decisions.live_instruction(selectable, usage),
+        description=decisions.SELECTION_TOOL_TEXT,
         parameters=decisions.LIVE_REPLY,
     )
-    asked = [*numbered]
+    asked = [
+        *numbered,
+        {"role": "system", "content": decisions.live_instruction(selectable, usage)},
+    ]
     if repair:
         call_id = f"_harness_{decisions.SELECTION_TOOL}_{uuid.uuid4().hex}"
         asked.append(

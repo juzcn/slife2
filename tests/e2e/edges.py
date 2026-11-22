@@ -129,6 +129,23 @@ class ChatAnswer:
         return _sse(self.text)
 
 
+def decision(arguments: str = "{}") -> ChatAnswer:
+    """The context decision's forced tool call; `{}` keeps the context unchanged.
+
+    The decision call advertises one tool and forces it, so a scripted text
+    answer is not a decision this build can read — it would be a failed decision
+    and the note `No rebuild`.  The stub therefore answers it the way a real
+    provider does: with the tool's arguments.
+    """
+    return ChatAnswer(
+        tool=ToolAsk(
+            id="call_e2e_decision",
+            name="decide_context",
+            arguments=arguments,
+        )
+    )
+
+
 class _ProviderHandler(BaseHTTPRequestHandler):
     """Two routes of an OpenAI-compatible API, answered in a thread.
 
@@ -211,7 +228,7 @@ class StubProvider:
     simplified shape would prove nothing about the server in between.
 
     **It answers a script rather than one answer**, because one turn is more
-    than one model call: the context store's discriminator is a call of its own
+    than one model call: the context decision is a call of its own
     before the turn runs, and a turn whose model asks for a tool has another
     after the tool has answered.  The last entry repeats, so the single-answer
     script the other tests write is this mechanism's one-entry case rather than
