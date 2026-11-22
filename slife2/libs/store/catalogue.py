@@ -160,13 +160,13 @@ NOT_APPLICABLE = "n/a"
 #: point is that the `_` mark answers *who calls it* — the model's list and the
 #: unload rule are asked separately.  Here the two answers happen to line up,
 #: because what makes a tool a harness tool is a pair, and a pair has to name a
-#: tool the request declares.  All three are here for that one reason.
+#: tool the request declares.  All four are here for that one reason.
 #:
 #: Spelled rather than imported for the reason `PLUGIN` is spelled in two
 #: modules: the hub must not be importable from the catalogue's half, and the db
 #: must not import a server.
 MODEL_VISIBLE_HARNESS_TOOLS = frozenset(
-    {"_func_tool_unload", "_check_new_input", "_turn_compact"}
+    {"_func_tool_unload", "_check_new_input", "_turn_compact", "_context_rebuild"}
 )
 
 #: The columns the code reads or writes on `tool`, checked at open in both

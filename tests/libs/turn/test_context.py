@@ -32,7 +32,7 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     had fallen behind it and told the discriminator less than `since` and
     `until` accept — no `tomorrow`, `now`, `quarter` or datetime.
     """
-    text = instruction("what did we decide?")
+    text = instruction()
 
     assert BOUND_GRAMMAR in text
 

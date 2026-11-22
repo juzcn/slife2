@@ -529,7 +529,7 @@ class StubEmbedder:
 
 
 async def keep_the_context(
-    agent: str, subagent: str, model: str, messages: list[Any], prompt: str
+    agent: str, subagent: str, model: str, messages: list[Any]
 ) -> str:
     """A discriminator that answers "keep what is in hand" — `{}`.
 

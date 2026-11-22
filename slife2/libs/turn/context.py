@@ -93,7 +93,7 @@ RECALL_REPLY: dict[str, Any] = {
     "properties": {
         "context": {
             "description": (
-                "The turns in hand this input is answered from. Omit for all of "
+                "The turns in hand this decision is answered from. Omit for all of "
                 "them. A follow-up keeps the turn it continues, even when the "
                 'input brings a new word and does not name it. "clear" only '
                 "when the input stands on its own: a turn dropped here cannot be "
@@ -144,16 +144,6 @@ RECALL_REPLY: dict[str, Any] = {
                     "type": "string",
                     "minLength": 1,
                 },
-                "prompt_as_sentence": {
-                    "description": (
-                        "Whether the input is read as a question beside the "
-                        "sentences. Default true; set false when it does not "
-                        'carry its own subject ("hi", "continue", "what about '
-                        'the other one?").'
-                    ),
-                    "type": "boolean",
-                    "default": True,
-                },
                 "since": {
                     "description": f"Start of a period. Takes {BOUND_GRAMMAR}.",
                     "type": "string",
@@ -185,7 +175,6 @@ ANCHORS = ("newest", "oldest")
 RECALL_KEYS = (
     "query",
     "sentences",
-    "prompt_as_sentence",
     "since",
     "until",
     "anchor",
@@ -222,13 +211,14 @@ KEEP_NONE = "clear"
 #: to copy wrong.  The space that sets a marker off from the text beside it is
 #: outside the bracket, and it belongs to whoever joins the two.
 TURN_PREFIX = "[TURN:"
-#: The per-turn prompt marker: the clock and the context size at the start of
-#: the turn the model is about to answer.  **A second capitals marker, and the
-#: one that is not derived from a row**: `[TURN:]` is a record of a turn that
-#: ran, while this is a prompt for the turn about to run — added to the user's
-#: message after the recall has chosen the conversation, and removed before the
-#: turn is saved.  It is therefore never stored, never rebuilt, and never seen
-#: by a screen; its only reader is the model that is answering.
+#: The per-turn prompt marker: the clock and the plan at the start of the turn
+#: the model is about to answer.  **A second capitals marker, and the one that is
+#: not derived from a row**: `[TURN:]` is a record of a turn that ran, while this
+#: is a prompt for the turn about to run — added to the user's message before the
+#: turn, and removed before the turn is saved.  It is therefore never stored,
+#: never rebuilt, and never seen by a screen; its only reader is the model that
+#: is answering.  **No context figure**: the previous call's is stale before the
+#: rebuild, and `_context_rebuild`'s report carries the turn's own estimate.
 TURN_PROMPT_PREFIX = "[TURN-PROMPT:"
 #: The harness's record of a turn that died, as a message of its own.  **The
 #: one capitals marker that is a message rather than a footnote**: the failure
@@ -381,9 +371,8 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     cannot cost a turn an earlier one found), while `query` is the words the
     keyword leg asks for — names, paths, exact strings — and the meaning
     fallback when there is no sentence, which is why a recalled turn may not
-    carry them.  `prompt_as_sentence` says whether the person's
-    input is read beside those sentences; it defaults to true, and false is for
-    an input that names nothing — "hi", "continue", "what about the other one?".
+    carry them.  There is no separate input: the discriminator reads the
+    conversation the instruction is appended to.
 
     A key this build does not know is dropped rather than refused: the reply
     surface is written into the instruction, and a model that added a field of
@@ -411,11 +400,8 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
                 '"recall.sentences" is a list of strings, one sentence per idea'
             )
         sentences = [sentence for sentence in sentences if sentence.strip()]
-    prompt_as_sentence = raw.get("prompt_as_sentence")
-    if prompt_as_sentence is not None and not isinstance(prompt_as_sentence, bool):
-        return _Refused('"recall.prompt_as_sentence" is true or false')
     for key in RECALL_KEYS:
-        if key in ("sentences", "prompt_as_sentence"):
+        if key == "sentences":
             continue
         value = raw.get(key)
         if value is not None and not isinstance(value, str):
@@ -441,15 +427,10 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     # The filtered list, not the raw one: a list of blank sentences is a field
     # present and empty, and the `asked` below has to read it as nothing asked.
     condition["sentences"] = sentences
-    condition["prompt_as_sentence"] = prompt_as_sentence
     # Nothing filled in is the same answer as no `recall` field at all, and it
     # has to be normalised here: a store asked for nothing at all cannot answer,
-    # and "asked and given nothing" must not become an error downstream.  The
-    # flag alone is not a question — it only says how one is asked — so it is
-    # not part of "asked".
-    asked = any(
-        value for key, value in condition.items() if key != "prompt_as_sentence"
-    )
+    # and "asked and given nothing" must not become an error downstream.
+    asked = any(value for value in condition.values())
     return condition if asked else None
 
 
@@ -510,15 +491,15 @@ def repair_note(reason: str) -> str:
     )
 
 
-def instruction(user_input: str) -> str:
-    """What the discriminator is asked, with the input it is being asked about.
+def instruction() -> str:
+    """What the discriminator is asked, appended to the conversation.
 
-    The *current input* travels inside the instruction rather than as a message
-    of its own, and that is not a shortcut: the turn being recalled is usually a
-    follow-up, so a query written from the input alone drops the subject the
-    conversation in hand is carrying.  The model reads the conversation — the
-    instruction is appended to it — and this is what tells it which input the
-    decision is about.
+    **No input is passed beside the messages.**  The rebuild runs where the
+    turn's own message is already in the list (or, mid-turn, the cut-in the loop
+    delivered), so the instruction is the same every time and the decision is
+    made from the conversation it is appended to.  A separate prompt would be
+    the previous design's — it existed only because the rebuild ran before the
+    message was appended.
 
     **The bound grammar is the module's one spelling.**  It is inside the reply
     schema's `since`/`until` descriptions (`RECALL_REPLY`), so the template
@@ -528,7 +509,6 @@ def instruction(user_input: str) -> str:
     """
     return render_instruction(
         INSTRUCTION_TEMPLATE,
-        user_input=user_input,
         recall_reply=json.dumps(RECALL_REPLY, indent=2, ensure_ascii=False),
     )
 
@@ -747,11 +727,12 @@ def turn_footnote(
 def context_usage(tokens: int, window: int) -> tuple[str, float]:
     """The status bar's context figure, as text and as a percentage.
 
-    **One formatter, because the bar and the model read the same number.**  The
-    TUI's status bar and the per-turn prompt marker both answer "how full is
-    this conversation", and two `f"{tokens:,} ({used:.1f}%)"` spellings would be
-    two chances to round differently.  `(text, percentage)` because the bar
-    colours the figure by the percentage and the marker only prints it.
+    **One formatter, because the bar, the selector and the rebuild's answer read
+    the same number.**  The TUI's status bar, the live selector's instruction and
+    `_context_rebuild`'s report all answer "how full is this conversation", and
+    two `f"{tokens:,} ({used:.1f}%)"` spellings would be two chances to round
+    differently.  `(text, percentage)` because the bar colours the figure by the
+    percentage and the report only prints it.
 
     A model with no declared window answers the count alone: a percentage of a
     window nobody declared is a number that means nothing (`StatusBar` says the
@@ -774,7 +755,7 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
 
     `facts` is the whole payload, and a mapping rather than a fixed argument
     list because this is where a per-turn fact belongs as it appears: today
-    `now` and `token-usage`, tomorrow whatever the turn needs and no later turn
+    `now` and `plan`, tomorrow whatever the turn needs and no later turn
     should remember.  The caller omits what it does not know; a missing key is
     silence, not a zero.
     """
@@ -782,18 +763,16 @@ def turn_prompt_note(facts: Mapping[str, Any]) -> str:
 
 
 def turn_prompt_lead(
-    context_tokens: int,
-    context_window: int,
     plan: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """The `[TURN-PROMPT:{…}]` lead a turn opens with.
 
-    **Three facts, one rule.**  The clock is sampled where the turn starts, and
-    the context figure is `context_usage`'s — the same function the status bar
-    calls — so the marker cannot round differently from the bar it mirrors.  A
-    figure that is empty (no tokens and no declared window) is omitted rather
-    than written as silence: a missing key is silence, not a zero
-    (`turn_prompt_note`).
+    **Two facts, one rule.**  The clock is sampled where the turn starts.  The
+    context figure is **not** here: the last measured call is the previous
+    turn's, and a rebuild can change the list before this turn's first call, so
+    a figure drawn here would describe a context the turn does not run on.  The
+    turn's own estimate comes from `_context_rebuild`'s report instead, which is
+    computed after the rebuild (`rebuild_report`).
 
     **The plan is replayed here because a rebuild cannot decide about it.**  It
     is the model's current list (`slife2.libs.turn.plan`), read from the
@@ -809,12 +788,45 @@ def turn_prompt_lead(
     owns the marker's vocabulary.
     """
     facts: dict[str, Any] = {"now": now()}
-    usage, _used = context_usage(context_tokens, context_window)
-    if usage:
-        facts["token-usage"] = usage
     if plan:
         facts["plan"] = [dict(item) for item in plan]
     return turn_prompt_note(facts)
+
+
+def rebuild_report(
+    *,
+    changed: bool,
+    kept: int,
+    recalled: int,
+    rerank: str,
+    discriminator: str,
+    tokens: str,
+) -> str:
+    """What `_context_rebuild` answers the model, in one sentence.
+
+    **The estimate is always there**, because this tool is the model's only
+    context figure since the turn prompt stopped carrying one.  `tokens` is
+    `context_usage`'s text for the rebuilt list — an estimate of the messages,
+    not the provider's measured count; the caller prefixes the `~` that says so.
+
+    `discriminator` non-empty means no decision was made at all: the turn keeps
+    the context it had, and `recalled 0` would be the count of a search nobody
+    made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
+    the fused order stands and the sentence says so.  `changed` false is the
+    ordinary no-op: the decision asked for exactly what was in hand.
+    """
+    if discriminator:
+        return (
+            f"No rebuild: the discriminator did not answer ({discriminator}); "
+            f"the turn continues on the context it had; context ~{tokens}."
+        )
+    if not changed:
+        return f"No rebuild: the context is unchanged; context ~{tokens}."
+    tail = f" (rerank {rerank})" if rerank else ""
+    return (
+        f"Rebuilt the context: kept {kept} turn(s), recalled {recalled}{tail}; "
+        f"context ~{tokens}. The turn log keeps every turn."
+    )
 
 
 def turn_note(

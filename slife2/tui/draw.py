@@ -32,7 +32,6 @@ from typing import assert_never
 
 from slife2.libs.harness import notes
 from slife2.libs.turn.events import (
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ThinkingDelta,
@@ -91,17 +90,6 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
             # the person's words — is taken off exactly where the bubble takes
             # it off.
             chat.add_note(text, new_call=True, channel=channel)
-        case ContextChosen(
-            kept=kept, recalled=recalled, rerank=rerank, discriminator=discriminator
-        ):
-            # The discriminator's decision, which is the only sight of it: the
-            # model call it took is one the conversation never shows.  The
-            # rerank status rides the same event because it is the same
-            # decision's last stage; the view says it once per change.  A
-            # discriminator that decided nothing turns the recall count into
-            # the word — `recalled 0` is the count of a search nobody made.
-            chat.add_note(notes.kept(kept, recalled, failed=bool(discriminator)))
-            chat.note_rerank(rerank)
         case TextDelta(text=text):
             chat.append_text(text)
         case ThinkingDelta(text=text):

@@ -131,8 +131,8 @@ class WatchHub[K: Hashable]:
         """Open a turn for watchers, and replace the key's last one.
 
         Called immediately before the turn's first observable step — the
-        rebuild, which may emit `ContextChosen` — so the tap is the turn and not
-        the one before it.
+        first boundary's `_context_rebuild` pair — so the tap is the turn and
+        not the one before it.
 
         A watcher of an idle conversation learns a turn has begun from this
         frame, not from its first delta: the message itself is the half of a

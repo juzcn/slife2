@@ -62,7 +62,6 @@ from slife2.libs.plugin.protocol import (
 from slife2.libs.turn import compact
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
-    ContextChosen,
     ToolCallFinished,
     ToolCallStarted,
     TurnObserver,
@@ -115,14 +114,19 @@ class Rebuilt:
     """What a turn runs on after the discriminator chose.
 
     `covered` counts the rebuilt turns; what follows them is the caller's
-    carried tail, which the store re-appended verbatim.  `chosen` is the
-    decision as the event that reports it.
+    carried tail, which the store re-appended verbatim.  The decision's own
+    counts and statuses travel here rather than as an event: the call is a
+    harness tool's, and the pair it writes is what reports it.
     """
 
     messages: list[Message]
     turn_ids: list[int]
     covered: int
-    chosen: ContextChosen
+    changed: bool
+    kept: int
+    recalled: int
+    rerank: str
+    discriminator: str
 
 
 @dataclass(frozen=True)
@@ -130,8 +134,8 @@ class LiveChoice:
     """One live selector's answer: the view ids to drop, and why not if none.
 
     `drop` is empty for both "nothing worth dropping" and "no decision", and
-    `decision` tells the two apart the way `ContextChosen.discriminator` does
-    for the rebuild.
+    `decision` tells the two apart the way `Rebuilt.discriminator` does for
+    the rebuild.
     """
 
     drop: list[int]
@@ -466,17 +470,16 @@ class TurnRuntime:
         messages: list[Message],
         turn_ids: list[int],
         covered: int,
-        prompt: str,
         model: str,
         *,
         publish: bool = True,
     ) -> Rebuilt:
         """Decide what this turn runs on: keep ∪ recall.
 
-        **Before the user's message is appended**, because the answer replaces
-        the list and an appended message would be destroyed by it.  This is why
-        what the person just said travels as `prompt` rather than being read
-        back out of the list, where it is not yet.
+        **Called after the turn's message is in the list** — at the first
+        boundary, or mid-turn after a cut-in — so there is no prompt to pass
+        beside it: the conversation is the input, and the current turn is the
+        `carried` tail.
 
         `carried` is what the message list holds beyond the turns in
         `turn_ids`: the **unbacked run at its end** — a cancelled turn's
@@ -503,7 +506,6 @@ class TurnRuntime:
             "subagent": identity[1],
             "messages": [message.to_wire() for message in messages],
             "turn_ids": list(turn_ids),
-            "prompt": prompt,
             "model": model,
             "carried": carried,
             "publish": publish,
@@ -513,6 +515,11 @@ class TurnRuntime:
         )
         rebuilt = _message_list(payload)
         rebuilt_ids = _turn_id_list(payload)
+        changed = payload.get("changed")
+        if not isinstance(changed, bool):
+            raise unreadable(
+                "the context store", "report whether the context changed", payload
+            )
         kept, recalled = _count(payload, "kept"), _count(payload, "recalled")
         rerank = payload.get("rerank")
         if not isinstance(rerank, str):
@@ -530,12 +537,11 @@ class TurnRuntime:
             messages=rebuilt,
             turn_ids=rebuilt_ids,
             covered=len(rebuilt) - carried,
-            chosen=ContextChosen(
-                kept=kept,
-                recalled=recalled,
-                rerank=rerank,
-                discriminator=discriminator,
-            ),
+            changed=changed,
+            kept=kept,
+            recalled=recalled,
+            rerank=rerank,
+            discriminator=discriminator,
         )
 
     # ── the turn's own compaction ────────────────────────────────────────

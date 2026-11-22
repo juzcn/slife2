@@ -84,13 +84,14 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import (
+    context_usage,
+    rebuild_report,
     turn_failed_note,
     turn_prompt_lead,
     with_lead,
     without_lead,
 )
 from slife2.libs.turn.events import (
-    ContextChosen,
     ToolApprovalRequested,
     ToolsCounted,
     TurnEvent,
@@ -102,9 +103,11 @@ from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.prompt import SUBAGENT_PROMPT, render_system_prompt
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
+from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
+    CONTEXT_REBUILD,
     TURN_COMPACT,
     CatalogueAnswer,
     Tool,
@@ -1024,40 +1027,6 @@ class AgentCore:
                 describe((loop.agent, loop.subagent)),
             )
 
-    async def rebuild_into(self, loop: Loop, prompt: str) -> ContextChosen:
-        """Ask what this turn runs on, take the answer, and report the counts.
-
-        **The call and its reading are the turn runtime's** (`rebuild`): the
-        unbacked tail, the compare-and-set `expected` and the strict counts all
-        live there.  What is this server's is the adoption — a `Loop` is this
-        server's conversation — and the event, because the discriminator is the
-        most expensive thing a turn does and its two numbers are the only sight
-        of it anybody gets.
-
-        **Before the user's message is appended**, because the answer replaces
-        the list and an appended message would be destroyed by it — and the
-        message therefore travels as `prompt` rather than being read back out of
-        the list, where it is not yet.
-
-        **Everything is read before anything is adopted.**  A reply that replaced
-        the list but omitted the counts is refused, and this loop keeps the list
-        it held; the next turn's `expected` compare-and-set recovers the store's
-        side, where adopting first would have left this conversation on a list
-        whose decision nobody could report.
-        """
-        rebuilt = await self.runtime.rebuild(
-            (loop.agent, loop.subagent),
-            loop.messages,
-            loop.turn_ids,
-            loop.covered,
-            prompt,
-            loop.model,
-        )
-        loop.messages = rebuilt.messages
-        loop.turn_ids = rebuilt.turn_ids
-        loop.covered = rebuilt.covered
-        return rebuilt.chosen
-
     async def trim_tools(self, loop: Loop, observer: TurnObserver) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
@@ -1246,14 +1215,20 @@ class AgentCore:
         agent_loop: AgentLoop | None = None
 
         def auto_invoke() -> AutoCall | None:
-            """The tool to call at this iteration boundary, or `None` — the cut-in.
+            """The tool to call at this iteration boundary, or `None`.
+
+            **The turn's rebuild goes first, once.**  `_context_rebuild` runs
+            before the first model call; its body sets `loop.rebuilt`, so every
+            later boundary only has the cut-in and the compaction to consider.
+            A failed rebuild has already marked the turn, so a transport failure
+            is not re-asked at every boundary — the model can still call it.
 
             **Cheap, and it decides only *whether*.**  The name it returns is
             handed to the loop, which makes the call through the same registry
             the model's calls go through, so this half never touches a tool and
-            never builds a message.  What it answers is one question — has
-            anything arrived for this conversation — and the answer is a queue
-            that is almost always empty.
+            never builds a message.  For the cut-in it answers one question —
+            has anything arrived for this conversation — and the answer is a
+            queue that is almost always empty.
 
             **The head's channel and receipt go with the name** because the loop
             is what writes the pair and raises the event, and neither field is
@@ -1275,6 +1250,13 @@ class AgentCore:
             first.**  A cut-in is a person waiting; a compaction can wait one
             iteration, and the message may be what makes the turn grow anyway.
             """
+            if not loop.rebuilt and agent_loop is not None:
+                if agent_loop.declares(CONTEXT_REBUILD):
+                    return AutoCall(CONTEXT_REBUILD)
+                # A hub that does not advertise the tool is a build that
+                # predates it; the turn runs on the context it has instead of
+                # writing an error pair at every boundary.
+                loop.rebuilt = True
             if loop.inbox:
                 waiting = loop.inbox[0]
                 if not waiting.images:
@@ -1329,12 +1311,17 @@ class AgentCore:
         # both are needed, and neither can be derived from the other without
         # reading the store's own timestamp format back (see `Outcome.elapsed`).
         started_mono = time.monotonic()
-        snapshot = len(loop.messages)
+        # **The opening is the record's boundary, and a field because a rebuild
+        # can move it.**  `_context_rebuild` replaces the historical prefix
+        # under the running turn; the suffix from this index on is the turn's
+        # own and is carried verbatim.
+        loop.turn_opening = len(loop.messages)
         # **The turn's view starts whole.**  A compaction is the turn's own: a
         # message it hid must not outlive it, and the next turn's rebuild is
         # what decides that turn's context.
         loop.hidden.clear()
         loop.compact_hold = False
+        loop.rebuilt = False
         outcome.started_at = now()
         # **The model is taken here, and that is a turn boundary.**  `loop_for`
         # below resolves the backend once for this turn, so this is what will
@@ -1376,20 +1363,20 @@ class AgentCore:
             if pairs
             else item.prompt
         )
-        # **The turn's prompt, added after the recall.**  `rebuild_into` has
-        # already chosen the conversation this turn runs on; the marker is
-        # added here so the discriminator never sees it, and removed in the
-        # `finally` below so the row, the next turn's rebuild and the `[TURN:]`
-        # footnote never see it either.  It is a prompt for this turn, not a
+        # **The turn's prompt.**  The context decision is the first boundary's
+        # `_context_rebuild`, which runs after this marker is on the message and
+        # strips it for the discriminator's own prompt; the marker is removed in
+        # the `finally` below so the row, the next turn's rebuild and the
+        # `[TURN:]` footnote never see it.  It is a prompt for this turn, not a
         # record of it.
         #
-        # **The plan is read here, after the rebuild, because a rebuild cannot
-        # carry it.**  It is the conversation's own file, not a turn the
-        # discriminator chose between: this is the half of the prompt that
-        # survives whatever a rebuild decides.
+        # **The plan is read here because a rebuild cannot carry it.**  It is
+        # the conversation's own file, not a turn the discriminator chose
+        # between: this is the half of the prompt that survives whatever a
+        # rebuild decides.  The context figure is not in the marker — it would
+        # be the previous call's and the rebuild can change the list; the
+        # turn's own estimate comes from `_context_rebuild`'s report.
         lead = turn_prompt_lead(
-            loop.context_tokens,
-            loop.context_window,
             plan.read(loop.agent, loop.subagent),
         )
         user = with_lead(user, lead)
@@ -1577,7 +1564,7 @@ class AgentCore:
             # (`Recorder.remember_turn`).  Put in before the snapshot below, so the
             # record, the `[TURN:]` footnote and `roll_back` all see it as the
             # turn's own opening message.
-            if len(loop.messages) == snapshot:
+            if len(loop.messages) == loop.turn_opening:
                 loop.messages.append(Message(role="user", content=user))
             # **The trim is wrapped.**  It is a *post-turn* step, so it only runs
             # when the turn answered — but it suspends on a real call to the hub
@@ -1647,7 +1634,7 @@ class AgentCore:
                 # appends have no await between them, so neither can be split
                 # from the other); then this snapshot is the whole completed
                 # turn, which is exactly what the record needs.
-                outcome.messages = list(loop.messages[snapshot:])
+                outcome.messages = list(loop.messages[loop.turn_opening :])
                 outcome.completed_at = now()
                 outcome.elapsed = time.monotonic() - started_mono
                 # **The bill is taken from the loop, not from the result.**
@@ -1994,11 +1981,11 @@ class AgentCore:
                 turn_token, turn_handle = logcontext.begin_turn()
                 loop.turn_token = turn_token
                 # **The turn is opened for watchers here**, before its first
-                # observable step: `rebuild_into` can emit `ContextChosen`, and
-                # a watcher that joined while it ran must find that event in the
-                # tap rather than before a turn it belongs to.  The message is
-                # the one frame a watcher never sent and so cannot otherwise
-                # see.
+                # observable step: `_context_rebuild` is the first boundary's
+                # harness pair, and a watcher that joined while it ran must find
+                # that pair in the tap rather than before a turn it belongs to.
+                # The message is the one frame a watcher never sent and so
+                # cannot otherwise see.
                 #
                 # **Inside the `try`, because the restore is inside it too.**
                 # From the moment this message left the inbox its turn is one to
@@ -2027,41 +2014,11 @@ class AgentCore:
                     observer = ProgressObserver(
                         ctx, publish=partial(self.watching.publish, key)
                     )
-                    # **The rebuild is inside this `try` too**, and not for
-                    # tidiness: when the discriminator is asked a question it
-                    # makes a model call carrying these same messages
-                    # (`slife2.plugins.context.server._ask_model`), so the very failure
-                    # this block repairs can arrive from here rather than from the
-                    # turn.  Anything that reaches a provider on this
-                    # conversation's behalf belongs on the repaired side of the
-                    # line.
-                    #
-                    # **Before the turn.**  It replaces the message list
-                    # wholesale — anything appended first, which includes this
-                    # very prompt, would be destroyed by it — and it reads the
-                    # list the previous turn's write maintains, so it has to wait
-                    # for that write the way the next turn does.
-                    chosen = await self.rebuild_into(loop, item.prompt)
-                    # **Reported before the turn**, because it is a fact about
-                    # what the turn runs on and not about how it went — and
-                    # because the answer that follows is the thing it is about.
-                    # The discriminator is one model call the caller never sees,
-                    # so this is the only place its decision is visible at all.
-                    #
-                    # **Through the loop's own fault tolerance**, like every
-                    # other event this conversation raises.  A broken progress
-                    # stream throws from `on_event` (`ctx.report_progress` on a
-                    # closed stream), and a throw from *here* lands before the
-                    # prompt has been appended or recorded at all — so the
-                    # caller's message is lost outright, where the same observer
-                    # failing on a `TextDelta` is swallowed one layer down
-                    # (`emit`).  A module function, so it is asked before the
-                    # `AgentLoop` is built for the turn below.
-                    await emit(observer, chosen)
-                    # How long the list was when this turn began.  What the write
-                    # below covers is what the turn *appends*, and the difference
-                    # is the whole of it — see `covered` in the success branch.
-                    before = len(loop.messages)
+                    # **The rebuild is not here any more.**  It is the first
+                    # boundary's `_context_rebuild`, a harness tool whose pair
+                    # reports the decision to the model and the transcript.  A
+                    # rebuild that cannot be made is a tool result the model
+                    # reads, not a turn that never starts.
                     await self.run_turn_into(loop, item, observer, outcome)
                 except BaseException as exc:
                     failure = exc
@@ -2139,7 +2096,9 @@ class AgentCore:
                     # this turn began on a wholly backed list — where it began
                     # being `began`, derived rather than kept because
                     # `keep_opening` may have put the opening message in here.
-                    began = len(loop.messages) - len(outcome.messages)
+                    # The field is the opening's index, moved by a rebuild's
+                    # prefix replacement.
+                    began = loop.turn_opening
                     if isinstance(exc, Exception):
                         # **A failure waits for its own row.**  A store or
                         # cabinet refusal is a hard failure: the turn is
@@ -2196,7 +2155,7 @@ class AgentCore:
                         # row is on its way.  The next turn writes the footnote —
                         # but only a turn that began on a wholly backed list can
                         # have its id claimed (the same prefix rule as above).
-                        if loop.covered == before:
+                        if loop.covered == loop.turn_opening:
                             loop.record_pending = PendingRecord(written, outcome, item)
                         raise
                     except Exception as refusal:  # noqa: BLE001 - a refused write is a hard failure
@@ -2237,7 +2196,7 @@ class AgentCore:
                     # (`remember_turn`) — and the rebuild that next changes the
                     # context carries the whole run back in beside the turns it
                     # keeps, which is what makes this a delay rather than a loss.
-                    if turn_id is not None and loop.covered == before:
+                    if turn_id is not None and loop.covered == loop.turn_opening:
                         # **Only what this turn appended is covered.**  Setting
                         # `covered` to the whole list counted the carried tail
                         # with it — a cancelled turn's unbacked messages, which
@@ -2248,7 +2207,7 @@ class AgentCore:
                         # the ones appended since `before`, and they are the whole
                         # of the run because the guard above says nothing was
                         # carried into this turn.
-                        loop.covered += len(loop.messages) - before
+                        loop.covered += len(loop.messages) - loop.turn_opening
                         # ...and it is addressable now, which is what the next
                         # turn's discriminator needs: a turn it cannot name is
                         # one a keep-list cannot keep.
@@ -2647,6 +2606,74 @@ class AgentCore:
             or NOTHING_WAITING
         )
 
+    async def context_rebuild(self, ctx: Context) -> str:
+        """Rebuild the conversation's live context — its historical turns.
+
+        The tool edits the turns the conversation is made of: it may drop some
+        of them and recall others from the turn log. **The turn running is never
+        touched** — it has no turn id yet, so it is carried verbatim while the
+        history around it is rebuilt. The decision is made from the live
+        context, including the turn's own message; the answer carries an
+        estimate of the context this turn runs on from here.
+        """
+        conversation_id = request_conversation(ctx)
+        if not conversation_id:
+            return "No live conversation to rebuild."
+        loop = self.conversations.get(conversation_key(*conversation_id))
+        caller = turn_of(request_meta(ctx))
+        if loop is None or (caller and caller != loop.turn_token):
+            return "No live turn to rebuild."
+        # **One automatic rebuild per turn.**  Set before the call so a
+        # transport failure does not make `auto_invoke` ask again at every
+        # boundary; the model can still call the tool itself.
+        loop.rebuilt = True
+        at = compact.opening(loop.messages)
+        if at is None:
+            return "This turn has no opening message; nothing to rebuild."
+        rebuilt = await self.runtime.rebuild(
+            (loop.agent, loop.subagent),
+            loop.messages,
+            loop.turn_ids,
+            loop.covered,
+            loop.model,
+            publish=True,
+        )
+        # **The prefix moves; the suffix does not.**  `carried` re-appended every
+        # message from the opening on, so the opening's new index is the old one
+        # shifted by the prefix's change in length.
+        new_opening = len(rebuilt.messages) - (len(loop.messages) - at)
+        loop.messages[:] = rebuilt.messages
+        loop.turn_ids = rebuilt.turn_ids
+        loop.covered = rebuilt.covered
+        loop.turn_opening = new_opening
+        # **A rebuild resets the view.**  `_turn_compact` is a per-turn
+        # projection; a history edit is the moment it starts over, and the model
+        # can compact again if it still needs to.
+        loop.hidden.clear()
+        loop.compact_hold = False
+        logger.info(
+            "context_rebuilt %s changed=%s kept=%d recalled=%d rerank=%s "
+            "discriminator=%s",
+            describe((loop.agent, loop.subagent)),
+            rebuilt.changed,
+            rebuilt.kept,
+            rebuilt.recalled,
+            rebuilt.rerank or "-",
+            rebuilt.discriminator or "-",
+        )
+        tokens = context_usage(
+            estimate_turn_tokens([message.to_record() for message in loop.messages]),
+            loop.context_window,
+        )[0]
+        return rebuild_report(
+            changed=rebuilt.changed,
+            kept=rebuilt.kept,
+            recalled=rebuilt.recalled,
+            rerank=rebuilt.rerank,
+            discriminator=rebuilt.discriminator,
+            tokens=tokens,
+        )
+
     async def turn_compact(self, ctx: Context) -> str:
         """Drop what this turn no longer needs from its own model context.
 
@@ -2807,6 +2834,9 @@ class AgentCore:
             ),
             FunctionTool.from_function(
                 self.check_new_input, name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL
+            ),
+            FunctionTool.from_function(
+                self.context_rebuild, name=CONTEXT_REBUILD, meta=FOR_THE_MODEL
             ),
             FunctionTool.from_function(
                 self.turn_compact, name=TURN_COMPACT, meta=FOR_THE_MODEL

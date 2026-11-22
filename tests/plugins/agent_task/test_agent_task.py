@@ -60,9 +60,18 @@ from slife2.libs.plugin.audience import (
 )
 from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
-from slife2.libs.turn.events import ContextChosen, TextDelta, TurnFinished
+from slife2.libs.turn.events import (
+    MessageCutIn,
+    TextDelta,
+    TurnFinished,
+)
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import ATTACH_IMAGE, CHECK_NEW_INPUT, TURN_COMPACT
+from slife2.libs.turn.tools import (
+    ATTACH_IMAGE,
+    CHECK_NEW_INPUT,
+    CONTEXT_REBUILD,
+    TURN_COMPACT,
+)
 from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief
 from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.agent_task.server import (
@@ -100,12 +109,12 @@ class Discriminator:
     """
 
     answer: str = "{}"
-    calls: list[str] = field(default_factory=list)
+    calls: list[Any] = field(default_factory=list)
 
     async def __call__(
-        self, agent: str, subagent: str, model: str, messages: Any, prompt: str
+        self, agent: str, subagent: str, model: str, messages: Any
     ) -> str:
-        self.calls.append(prompt)
+        self.calls.append(messages)
         return self.answer
 
 
@@ -289,12 +298,26 @@ async def store() -> Any:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def hub() -> Any:
-    """The real toolhub, with every plugin it asks standing in memory."""
+    """The real toolhub, with every plugin it asks standing in memory.
+
+    **The agent entry declares the live-conversation tools**, as the agent
+    server does in production: a task's registry replaces their bodies with its
+    own and takes the declarations from the hub, and the automatic
+    `_context_rebuild` asks the registry whether the name is there before it
+    runs.  `hub_declaring_them` is the same arrangement for a test that also
+    records the agent server's bodies.
+    """
     from slife2.plugins.toolhub.server import build_server as build_hub
 
     base = default_config()
     async with Client(
-        build_hub(base, transports=plugin_transports(base), embedder=StubEmbedder())
+        build_hub(
+            base,
+            transports=plugin_transports(
+                base, {"agent": lambda _settings: declaring_agent([])}
+            ),
+            embedder=StubEmbedder(),
+        )
     ) as client:
         yield client
 
@@ -411,6 +434,23 @@ async def wait_for_frame(
                 return item
         await asyncio.sleep(0.01)
     raise AssertionError(f"{kind.__name__} never arrived; frames: {frames}")
+
+
+async def wait_for_rebuild(frames: list[Any], *, timeout: float = 10.0) -> Any:
+    """The rebuild's answer, polled — the harness auto call's note.
+
+    The auto path writes the pair and emits the tool's own answer as a
+    `MessageCutIn`; that line is what a watcher replays from the turn's start.
+    """
+    deadline = time.monotonic() + timeout  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        for item in frames:
+            if isinstance(item, MessageCutIn) and item.text.startswith(
+                ("Rebuilt the context", "No rebuild")
+            ):
+                return item
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"the rebuild never finished; frames: {frames}")
 
 
 @contextlib.asynccontextmanager
@@ -558,9 +598,11 @@ async def test_the_context_is_rebuilt_exactly_once(
     await settle(built)
 
     assert len(store.ask.calls) == 1
-    # And it was asked about the *user message*, passed beside the list rather
-    # than inside it, because a rebuild replaces the list wholesale.
-    assert store.ask.calls[0].startswith("▸ Agent task: research")
+    # The decision reads the conversation; the task's own opening is its last
+    # user message, not a prompt passed beside the list.
+    assert any(
+        "▸ Agent task: research" in str(message) for message in store.ask.calls[0]
+    )
 
 
 async def test_the_context_it_runs_on_is_the_agents_own(
@@ -1033,10 +1075,10 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     keep_one = ""
 
     async def discriminating(
-        agent: str, subagent: str, model: str, messages: Any, prompt: str
+        agent: str, subagent: str, model: str, messages: Any
     ) -> str:
         """The first task parks inside its rebuild; the second clears its own."""
-        asked.append(prompt)
+        asked.append("")
         if len(asked) == 1:
             parked.set()
             await gate.wait()
@@ -1530,9 +1572,9 @@ async def test_a_watch_opens_with_the_brief_and_replays_a_turn_it_joined(
         assert brief.description == DESCRIPTION
         assert brief.status == "running", "the status the task had when it began"
 
-        # The discriminator's decision is in the tap even though it was made
-        # before this watcher joined — the other half of the replay.
-        await wait_for_frame(frames, ContextChosen)
+        # The rebuild's pair is in the tap even though it ran after this
+        # watcher joined — the other half of the replay.
+        await wait_for_rebuild(frames)
         finished = await wait_for_frame(frames, TurnFinished)
         assert finished.text == "abcdef"
         closed = await wait_for_frame(frames, Closed)
@@ -1681,7 +1723,7 @@ async def test_a_cancelled_runs_finally_leaves_the_replacements_watch_alone(
         # A watcher joining after the old finally still replays the new
         # task's turn from its start — the tap the old drop would have taken.
         async with watching(built) as (frames2, call2):
-            await wait_for_frame(frames2, ContextChosen)
+            await wait_for_rebuild(frames2)
             second_release.set()
             closed2 = await wait_for_frame(frames2, Closed)
             assert "finished" in closed2.reason
@@ -1735,6 +1777,27 @@ def tool_turn(*calls: ToolCall, usage: Usage | None = None) -> ScriptedTurn:
     )
 
 
+def tool_result(messages: list[Any], name: str) -> Any:
+    """The result of the call to *name* in one model call's message list.
+
+    The turn opens with `_context_rebuild`'s harness pair, so the first tool
+    message is not the one a test about `_check_new_input` or `attach_image`
+    wants; the pair's id is what tells them apart.
+    """
+    ids = {
+        call.id
+        for message in messages
+        if message.role == "assistant"
+        for call in message.tool_calls
+        if call.name == name
+    }
+    return next(
+        message
+        for message in messages
+        if message.role == "tool" and message.tool_call_id in ids
+    )
+
+
 def declaring_agent(reached: list[str]) -> FastMCP:
     """The agent server's *declarations* for the two live-conversation tools.
 
@@ -1759,6 +1822,11 @@ def declaring_agent(reached: list[str]) -> FastMCP:
     async def turn_compact(ctx: Context) -> str:
         reached.append(TURN_COMPACT)
         return "the agent's compaction"
+
+    @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
+    async def context_rebuild(ctx: Context) -> str:
+        reached.append(CONTEXT_REBUILD)
+        return "the agent's rebuild"
 
     return mcp
 
@@ -1857,7 +1925,7 @@ async def test_a_task_has_no_cut_in_and_takes_nothing_from_the_maker(
         await settle(built)
 
     assert reached == [], "the task reached the agent server's cut-in"
-    tool = [message for message in built.messages() if message.role == "tool"][0]
+    tool = tool_result(built.messages(), CHECK_NEW_INPUT)
     assert tool.content == NOTHING_WAITING
 
 
@@ -1941,7 +2009,7 @@ async def test_a_tasks_attach_image_lands_on_its_own_next_call(
         if isinstance(part, dict) and part.get("type") == "image_url"
     ]
     assert urls == [source]
-    tool = [message for message in messages if message.role == "tool"][0]
+    tool = tool_result(messages, ATTACH_IMAGE)
     assert json.loads(tool.content) == {"attached": [source], "refused": []}
 
 

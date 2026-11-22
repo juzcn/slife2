@@ -22,7 +22,6 @@ from slife2.libs.host.config import (
     default_config,
 )
 from slife2.libs.plugin.protocol import UnreadableAnswer
-from slife2.libs.turn.events import ContextChosen
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
 from slife2.libs.turn.tools import ToolRegistry
@@ -194,6 +193,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
                 {"role": "assistant", "content": "answer"},
             ],
             "turn_ids": [7, 8],
+            "changed": True,
             "kept": 2,
             "recalled": 1,
             "rerank": "unavailable",
@@ -207,15 +207,12 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         Message(role="user", content="unbacked"),
     ]
 
-    rebuilt = await wired(store).rebuild(
-        IDENTITY, messages, [7, 8], 2, "what now", REF.reference
-    )
+    rebuilt = await wired(store).rebuild(IDENTITY, messages, [7, 8], 2, REF.reference)
 
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
     assert rebuilt.turn_ids == [7, 8]
-    assert rebuilt.chosen == ContextChosen(
-        kept=2, recalled=1, rerank="unavailable", discriminator=""
-    )
+    assert (rebuilt.changed, rebuilt.kept, rebuilt.recalled) == (True, 2, 1)
+    assert (rebuilt.rerank, rebuilt.discriminator) == ("unavailable", "")
     name, arguments = store.calls[0]
     assert name == "rebuild"
     assert arguments == {
@@ -223,7 +220,6 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         "subagent": "",
         "messages": [message.to_wire() for message in messages],
         "turn_ids": [7, 8],
-        "prompt": "what now",
         "model": REF.reference,
         "carried": 2,
         "publish": True,
@@ -241,6 +237,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
         rebuild={
             "messages": [{"role": "system", "content": "sys"}],
             "turn_ids": [],
+            "changed": True,
             "kept": 0,
             "recalled": 0,
             "rerank": "",
@@ -253,7 +250,6 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
         [Message(role="system", content="sys")],
         [],
         0,
-        "q",
         REF.reference,
         publish=False,
     )
@@ -270,6 +266,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
         (
             {
                 "turn_ids": [],
+                "changed": True,
                 "kept": 0,
                 "recalled": 0,
                 "rerank": "",
@@ -280,6 +277,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
         (
             {
                 "messages": [],
+                "changed": True,
                 "kept": 0,
                 "recalled": 0,
                 "rerank": "",
@@ -287,15 +285,25 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
             },
             "turn-id list",
         ),
-        ({"messages": [], "turn_ids": []}, "counts"),
         (
-            {"messages": [], "turn_ids": [], "kept": 0, "recalled": 0},
+            {"messages": [], "turn_ids": [], "changed": True},
+            "counts",
+        ),
+        (
+            {
+                "messages": [],
+                "turn_ids": [],
+                "changed": True,
+                "kept": 0,
+                "recalled": 0,
+            },
             "rerank status",
         ),
         (
             {
                 "messages": [],
                 "turn_ids": [],
+                "changed": True,
                 "kept": 0,
                 "recalled": 0,
                 "rerank": "",
@@ -309,9 +317,7 @@ async def test_rebuild_refuses_an_answer_it_cannot_read(
 ) -> None:
     """A reply missing the counts is not a rebuild of zero of each."""
     with pytest.raises(UnreadableAnswer, match=sentence):
-        await wired(Store(rebuild=answer)).rebuild(
-            IDENTITY, [], [], 0, "q", REF.reference
-        )
+        await wired(Store(rebuild=answer)).rebuild(IDENTITY, [], [], 0, REF.reference)
 
 
 @pytest.mark.parametrize("turn_ids", [[True], ["8"], [3.9]])
@@ -322,15 +328,14 @@ async def test_rebuild_refuses_a_turn_id_that_is_not_one(
     answer = {
         "messages": [],
         "turn_ids": turn_ids,
+        "changed": True,
         "kept": 0,
         "recalled": 0,
         "rerank": "",
         "discriminator": "",
     }
     with pytest.raises(UnreadableAnswer, match="turn-id list"):
-        await wired(Store(rebuild=answer)).rebuild(
-            IDENTITY, [], [], 0, "q", REF.reference
-        )
+        await wired(Store(rebuild=answer)).rebuild(IDENTITY, [], [], 0, REF.reference)
 
 
 @pytest.mark.parametrize(("kept", "recalled"), [(True, 0), ("2", 1), (0, 2.0)])
@@ -346,15 +351,14 @@ async def test_rebuild_refuses_counts_that_are_not_ints(
     answer = {
         "messages": [],
         "turn_ids": [],
+        "changed": True,
         "kept": kept,
         "recalled": recalled,
         "rerank": "",
         "discriminator": "",
     }
     with pytest.raises(UnreadableAnswer, match="counts"):
-        await wired(Store(rebuild=answer)).rebuild(
-            IDENTITY, [], [], 0, "q", REF.reference
-        )
+        await wired(Store(rebuild=answer)).rebuild(IDENTITY, [], [], 0, REF.reference)
 
 
 async def test_a_malformed_rebuild_leaves_the_callers_list_alone() -> None:
@@ -369,12 +373,13 @@ async def test_a_malformed_rebuild_leaves_the_callers_list_alone() -> None:
         rebuild={
             "messages": [{"role": "user", "content": "other"}],
             "turn_ids": [1],
+            "changed": True,
         }
     )
     messages = [Message(role="system", content="sys")]
 
     with pytest.raises(UnreadableAnswer, match="counts"):
-        await wired(store).rebuild(IDENTITY, messages, [], 0, "q", REF.reference)
+        await wired(store).rebuild(IDENTITY, messages, [], 0, REF.reference)
 
     assert messages == [Message(role="system", content="sys")]
 

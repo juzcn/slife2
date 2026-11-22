@@ -126,12 +126,11 @@ class Replies:
         subagent: str,
         model: str,
         messages: list,
-        prompt: str,
         *,
         previous: str = "",
         repair: str = "",
     ) -> str:
-        self.asked.append((prompt, previous, repair))
+        self.asked.append(("", previous, repair))
         return self.replies.pop(0) if self.replies else "{}"
 
 
@@ -970,7 +969,6 @@ async def _rebuild(client: Client, reply: str, **overrides):
                 {"role": "assistant", "content": "1"},
             ],
             "turn_ids": [1],
-            "prompt": "and then?",
             **overrides,
         },
     )
@@ -1320,7 +1318,6 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
                 "agent": "jack",
                 "messages": hold,
                 "turn_ids": [1],
-                "prompt": "and then?",
             },
         )
 
@@ -1368,7 +1365,6 @@ async def test_a_discriminator_that_decided_nothing_says_the_recall_failed(
                 "agent": "jack",
                 "messages": hold,
                 "turn_ids": [1],
-                "prompt": "and then?",
             },
         )
 
@@ -1400,7 +1396,6 @@ async def test_a_clear_empties_the_context_and_is_published() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM, {"role": "user", "content": "one"}],
                 "turn_ids": [1],
-                "prompt": "ignore all that",
             },
         )
 
@@ -1437,7 +1432,6 @@ async def test_a_keep_list_intersects_with_what_is_in_hand() -> None:
                     {"role": "user", "content": "two"},
                 ],
                 "turn_ids": [1, 2],
-                "prompt": "the second one",
             },
         )
 
@@ -1475,7 +1469,6 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
                     {"role": "assistant", "content": "2"},
                 ],
                 "turn_ids": [ids[1]],
-                "prompt": "what did we start with?",
             },
         )
 
@@ -1512,7 +1505,6 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
                     {"role": "assistant", "content": "1"},
                 ],
                 "turn_ids": [ids[0]],
-                "prompt": "那另一条呢？",
             },
         )
 
@@ -1551,7 +1543,6 @@ async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> Non
                     {"role": "assistant", "content": "1"},
                 ],
                 "turn_ids": [ids[0]],
-                "prompt": "and the other?",
             },
         )
 
@@ -1560,13 +1551,11 @@ async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_sentence_recall_also_asks_with_the_persons_input() -> None:
-    """**The model's sentence is a paraphrase; the input is what it paraphrases.**
+async def test_a_sentence_recall_reads_the_decisions_sentences() -> None:
+    """The decision's sentences are the meaning leg's questions.
 
-    A recall asked in sentences gets at least two questions — the sentence and
-    the person's own words — so a paraphrase that misses cannot be the only way
-    the subject is found.  The input is not in the message list yet; `rebuild`
-    carries it separately for exactly this reason.
+    There is no separate input to add: the discriminator read the conversation,
+    and a sentence it wrote is the subject it chose to ask the log for.
     """
     reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
 
@@ -1580,38 +1569,6 @@ async def test_a_sentence_recall_also_asks_with_the_persons_input() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
-            },
-        )
-
-    assert answer.data["turn_ids"] == ids
-    assert answer.data["recalled"] == 2
-
-
-@pytest.mark.asyncio
-async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None:
-    """The model sees the input and the conversation; a greeting names nothing.
-
-    `prompt_as_sentence: false` is the decision saying the sentence is the only
-    question — what makes "hi" or "continue" safe beside a subject the
-    conversation carries.
-    """
-    reply = (
-        '{"context": "clear", "recall": {"sentences": ["trump"],'
-        ' "prompt_as_sentence": false}}'
-    )
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
-    ) as client:
-        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
-        answer = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": [SYSTEM],
-                "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1621,11 +1578,10 @@ async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None
 
 @pytest.mark.asyncio
 async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() -> None:
-    """The input is not added beside a keyword phrase.
+    """A keyword recall asks one meaning question: the query.
 
     A query is already the meaning fallback; the keyword phrase is the
-    deliberate question, and a second raw question there can only reorder it.
-    The phrase is what both halves read; the input is not a third question.
+    deliberate question, and the decision's sentences would be a second one.
     """
     reply = '{"context": "clear", "recall": {"query": "trump"}}'
 
@@ -1639,7 +1595,6 @@ async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() ->
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1662,7 +1617,6 @@ async def test_a_period_recall_is_not_narrowed_by_the_input() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1697,7 +1651,6 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
                     {"role": "assistant", "content": "2"},
                 ],
                 "turn_ids": [ids[1]],
-                "prompt": "what did we start with?",
             },
         )
 
@@ -1744,7 +1697,6 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
                         {"role": "assistant", "content": "1"},
                     ],
                     "turn_ids": ids,
-                    "prompt": "hi",
                 },
             )
 
@@ -1762,9 +1714,7 @@ async def test_a_private_rebuild_decides_without_moving_the_conversation() -> No
     parked = asyncio.Event()
     release = asyncio.Event()
 
-    async def deciding(
-        agent: str, subagent: str, model: str, messages: list, prompt: str
-    ) -> str:
+    async def deciding(agent: str, subagent: str, model: str, messages: list) -> str:
         parked.set()
         await release.wait()
         return '{"context": "clear"}'
@@ -1784,7 +1734,6 @@ async def test_a_private_rebuild_decides_without_moving_the_conversation() -> No
                         *_exchange("one", "1"),
                     ],
                     "turn_ids": ids,
-                    "prompt": "a private question",
                     "publish": False,
                 },
             )
@@ -1826,7 +1775,7 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> N
         ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
         answer = await client.call_tool(
             "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [ids[1]], "prompt": "hi"},
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[1]]},
         )
 
     assert answer.data["changed"] is False
@@ -1864,7 +1813,6 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
                     "agent": "jack",
                     "messages": [SYSTEM, {"role": "user", "content": "one"}],
                     "turn_ids": [1],
-                    "prompt": "hi",
                     "model": "no-such-provider/model",
                 },
             )
@@ -1888,7 +1836,7 @@ async def test_an_unreadable_reply_keeps_the_context() -> None:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
             "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+            {"agent": "jack", "messages": hold, "turn_ids": [1]},
         )
 
     assert len(replies.asked) == 2, "one ask, one repair, and no third"
@@ -1985,7 +1933,7 @@ async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
             "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+            {"agent": "jack", "messages": hold, "turn_ids": [1]},
         )
 
     assert answer.data["changed"] is False
@@ -2014,7 +1962,6 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM, {"role": "user", "content": "one"}, tail],
                 "turn_ids": [1],
-                "prompt": "still there?",
                 "carried": 1,
             },
         )
@@ -2145,13 +2092,18 @@ def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
     assert context_usage(140_127, 0) == ("140,127", 0.0)
     assert context_usage(0, 0) == ("", 0.0)
 
-    note = turn_prompt_note({"now": "2026-10-27T20:40:34+08:00", "token-usage": text})
+    note = turn_prompt_note(
+        {
+            "now": "2026-10-27T20:40:34+08:00",
+            "plan": [{"text": "x", "status": "active"}],
+        }
+    )
     assert note.startswith(TURN_PROMPT_PREFIX)
     assert note.endswith("]")
     payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
     assert payload == {
         "now": "2026-10-27T20:40:34+08:00",
-        "token-usage": "140,127 (14.0%)",
+        "plan": [{"text": "x", "status": "active"}],
     }
 
     # A fact the caller does not have is absent, not empty.
@@ -2161,28 +2113,28 @@ def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
     }
 
 
-def test_the_turn_prompt_lead_is_one_builder_for_the_clock_and_the_size() -> None:
+def test_the_turn_prompt_lead_is_one_builder_for_the_clock_and_the_plan() -> None:
     """**Two servers, one marker.**  The agent server and the agent-task server
-    each assembled this lead; a rule that decides whether the figure is shown
-    cannot be two rules, or a task's turn and an agent's would disagree about
-    the same conversation.
+    each assembled this lead; a rule that decides what it carries cannot be two
+    rules, or a task's turn and an agent's would disagree about the same
+    conversation.
+
+    **No context figure.**  The last measured call is the previous turn's, and
+    a rebuild can change the list before this turn's first call — the number
+    the turn runs on is `_context_rebuild`'s report.
     """
     from slife2.libs.turn.context import TURN_PROMPT_PREFIX, turn_prompt_lead
 
-    note = turn_prompt_lead(140_127, 1_000_000)
+    note = turn_prompt_lead()
     assert note.startswith(TURN_PROMPT_PREFIX)
     payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
-    assert payload["token-usage"] == "140,127 (14.0%)"
     assert payload["now"], "a turn always knows when it started"
-
-    # No declared window and no tokens: the figure is omitted, not empty.
-    bare = json.loads(turn_prompt_lead(0, 0)[len(TURN_PROMPT_PREFIX) : -1])
-    assert set(bare) == {"now"}
+    assert "token-usage" not in payload, "the stale figure is gone"
 
     # The plan rides the same marker, and an empty one is omitted like every
     # fact the caller does not have.
     plan = [{"text": "read the config", "status": "active"}]
-    with_plan = json.loads(turn_prompt_lead(0, 0, plan)[len(TURN_PROMPT_PREFIX) : -1])
+    with_plan = json.loads(turn_prompt_lead(plan)[len(TURN_PROMPT_PREFIX) : -1])
     assert with_plan["plan"] == plan
 
 
@@ -2252,7 +2204,6 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
             recall={
                 "query": "the very first",
                 "sentences": None,
-                "prompt_as_sentence": None,
                 "since": None,
                 "until": None,
                 "anchor": None,
@@ -2290,7 +2241,6 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         recall={
             "query": None,
             "sentences": ["the dean", "the anniversary"],
-            "prompt_as_sentence": None,
             "since": None,
             "until": None,
             "anchor": None,
@@ -2306,46 +2256,6 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         assert parse(not_sentences) is None, not_sentences
 
 
-def test_a_recall_can_say_the_input_is_not_a_question() -> None:
-    """**The model sees the input and the conversation; this judgement is its.**
-
-    The input is read beside the sentences by default.  A greeting or a
-    follow-up names nothing, so the decision can say so — the flag alone is not
-    a question, and a value that is not a boolean is a reply this build does
-    not obey.
-    """
-    from slife2.libs.turn.context import Decision, parse_with_reason
-
-    def parse(reply: str) -> Decision | None:
-        """The decision half of the one reader — `parse` was superseded by
-        `parse_with_reason`, and these assertions are about the decision."""
-        return parse_with_reason(reply)[0]
-
-    assert parse(
-        '{"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}'
-    ) == Decision(
-        recall={
-            "query": None,
-            "sentences": ["the other school"],
-            "prompt_as_sentence": False,
-            "since": None,
-            "until": None,
-            "anchor": None,
-        }
-    )
-    for flag_only in (
-        '{"recall": {"prompt_as_sentence": false}}',
-        '{"recall": {"prompt_as_sentence": true}}',
-    ):
-        decision = parse(flag_only)
-        assert decision is not None and decision.recall is None
-    for not_a_bool in (
-        '{"recall": {"prompt_as_sentence": "false"}}',
-        '{"recall": {"prompt_as_sentence": 0}}',
-    ):
-        assert parse(not_a_bool) is None, not_a_bool
-
-
 def test_a_refusal_names_the_field_a_repair_has_to_fix() -> None:
     """**The reason is the model's instruction, not a log word.**
 
@@ -2359,7 +2269,6 @@ def test_a_refusal_names_the_field_a_repair_has_to_fix() -> None:
         ("no object here", "not one JSON object"),
         ('{"context": [true]}', "turn ids"),
         ('{"recall": {"sentences": "one"}}', "list of strings"),
-        ('{"recall": {"prompt_as_sentence": "no"}}', "true or false"),
         ('{"recall": {"anchor": "first"}}', '"newest" or "oldest"'),
         ('{"recall": {"since": "whenever"}}', BOUND_GRAMMAR),
         ('{"context": [], "why": "because"}', '"why"'),
@@ -2413,19 +2322,19 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
         answers.append(
             await client.call_tool(
                 "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
         answers.append(
             await client.call_tool(
                 "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
         answers.append(
             await client.call_tool(
                 "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
         answers.append(
@@ -2437,7 +2346,6 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
                     # is the disagreement this exit exists for.
                     "messages": [SYSTEM, {"role": "user", "content": "one"}],
                     "turn_ids": [1, 99],
-                    "prompt": "hi",
                 },
             )
         )
@@ -2481,10 +2389,7 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
     looking at the protocol.
     """
     caplog.set_level(logging.DEBUG, logger=CONTEXT_LOGGER)
-    reply = (
-        '{"context": "clear", "recall": {"sentences": ["the code review prompt"], '
-        '"prompt_as_sentence": false}}'
-    )
+    reply = '{"context": "clear", "recall": {"sentences": ["the code review prompt"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -2496,7 +2401,6 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
                 "agent": "jack",
                 "messages": [SYSTEM, {"role": "user", "content": "one"}],
                 "turn_ids": [1],
-                "prompt": "有现成的skill吗",
             },
         )
 
@@ -2506,7 +2410,6 @@ async def test_the_discriminators_fields_are_logged(caplog) -> None:
     )
     recall = json.loads(decided.partition("recall=")[2])
     assert recall["sentences"] == ["the code review prompt"]
-    assert recall["prompt_as_sentence"] is False
     assert any(
         line.startswith("recall_discriminator_reply attempt=first ") for line in said
     ), "the raw reply is kept for the shape the parser read"
@@ -2548,6 +2451,4 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
     clients: dict[str, Any] = {config.server(provider.api).url: NoStructuredContent()}
 
     with pytest.raises(ConnectionError, match="another build"):
-        await _ask_model(
-            config, clients, asyncio.Lock(), "jack", "", "", [], "and then?"
-        )
+        await _ask_model(config, clients, asyncio.Lock(), "jack", "", "", [])

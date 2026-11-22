@@ -40,6 +40,7 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
     HARNESS_CALL_PREFIX,
     HARNESS_PREFIX,
     INTERRUPTED,
@@ -283,6 +284,17 @@ class AgentLoop:
         if self._refresh is not None:
             self._tools = await self._refresh()
 
+    def declares(self, name: str) -> bool:
+        """Whether this turn's tool list carries *name*.
+
+        The harness asks before auto-invoking a tool whose body it would
+        otherwise write a pair for: a hub from a build that predates the tool
+        does not advertise it, and the turn runs on what it has rather than
+        writing an error pair at every boundary.  In a current build the name is
+        in `REQUIRED_AUTOLOAD`, so this answers True.
+        """
+        return self._tools.spec_of(name) is not None
+
     async def run_turn(
         self,
         messages: list[Message],
@@ -476,6 +488,14 @@ class AgentLoop:
                             receipt=receipt,
                         ),
                     )
+                elif wanted.name != CHECK_NEW_INPUT:
+                    # **A harness auto call that delivers no message still has
+                    # an answer the person should see.**  The compaction's count
+                    # and the rebuild's report are the tool's own words; the
+                    # note is the same line a cut-in's answer wears, with no
+                    # channel and no receipt.  A cut-in that took nothing sends
+                    # none: the window marks the submission drawn on that event.
+                    await emit(observer, MessageCutIn(text=text))
             # The tool list goes with the call, so it is asked for with the
             # call.  `specs` is read after this and never cached across
             # iterations.

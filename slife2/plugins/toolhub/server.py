@@ -89,9 +89,10 @@ names it unloaded come back — to the harness's log, and to the model, as the
 tool pair the trim is recorded as.  The leading underscore is the system's mark
 for a tool the machinery calls rather than one a model chooses, and the names
 that carry it *and* are in the model's list are the ones whose pairs the harness
-writes into a conversation — the trim, and the message a running turn is handed
-(`_check_new_input`).  A pair has to name a declared tool, so the model has them
-too; `tool_load.autoload` is where they are kept from leaving.
+writes into a conversation — the trim, the message a running turn is handed
+(`_check_new_input`), the turn's compaction and the context rebuild.  A pair has
+to name a declared tool, so the model has them too; `tool_load.autoload` is
+where they are kept from leaving.
 
 Why the tools are *here* and not in the agent
 ---------------------------------------------

@@ -224,7 +224,7 @@ tool_load:
   # listed with `tool_list`, and loaded with `func_tool_load`. Keep this list to
   # what a turn almost always needs: it is re-sent with every request and the
   # model cannot take a name back out. Removing a name does not unload it; it
-  # only stops being protected from eviction. The first eight are what the
+  # only stops being protected from eviction. The first ten are what the
   # system works by; a list without them fails the start.
   autoload:
     - tool_search
@@ -233,6 +233,7 @@ tool_load:
     - _func_tool_unload
     - _check_new_input
     - _turn_compact
+    - _context_rebuild
     - skill_use
     # The two that can use the task id an `_async` call returns.
     - check_async

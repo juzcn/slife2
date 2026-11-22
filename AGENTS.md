@@ -52,6 +52,7 @@ The harness's tools are the `_`-prefixed ones; the system invokes them automatic
 - `_check_new_input` hands over a message that arrived while the turn was running.
 - `_func_tool_unload` trims the loaded list.
 - `_turn_compact` trims your own context mid-turn, automatically at `agent.compact_at` or by your call; the turn log keeps every message.
+- `_context_rebuild` rebuilds the historical turns your live context is made of — keep some, recall others from the turn log. The harness calls it at the first boundary; you may call it yourself when the work has moved. The turn running is never part of the selection, and the answer carries an estimate of the context you run on from there.
 
 ## Who you are talking to
 
@@ -67,7 +68,7 @@ The marker at the start of a message says where it came from.
 
 ## The turn you are in
 
-- Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now`, `token-usage` and, when the conversation has one, `plan`.
+- Current turn's message opens with `[TURN-PROMPT:{…}]`, carrying `now` and, when the conversation has one, `plan`.
 - A `[TURN:{…}]` footnote records when a past turn ran.
 - A turn that could not go on ends with an assistant message `[TURN-FAILED:{"by":"harness","error":…}]`: the harness stopped it, not you. A tool's own failure is its result, and the turn carries on.
 

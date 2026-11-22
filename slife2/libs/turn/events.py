@@ -52,37 +52,6 @@ def preview(text: str, limit: int = PREVIEW_CHARS) -> str:
 
 
 @dataclass(frozen=True)
-class ContextChosen:
-    """What the turn is about to run on, reported before it runs.
-
-    The discriminator's answer (`slife2.libs.turn.context`).  It arrives **first**, before
-    any text, because it is a fact about what the conversation is about to be
-    and not about how the turn went — a display that only learned it afterwards
-    would be showing one turn's context under another turn's answer.
-
-    Two counts, because the decision has two halves and they are what somebody
-    watching wants to know: `kept` is how much of what was in hand survived it,
-    `recalled` is how much came back from the turn log.  Their sum is how many
-    turns the turn runs on.
-    """
-
-    kept: int
-    recalled: int
-    #: Why the recall could not use its cross-encoder, or `""` when it did (or
-    #: when no recall was asked).  `"unavailable"`, `"failed"` and `"empty"`
-    #: are the context server's words; the display turns them into its own
-    #: sentence and shows one per change, not one per turn.
-    rerank: str = ""
-    #: Why there was no decision to act on — `""` when the discriminator
-    #: answered, otherwise `"failed"` or `"unparsed"`.  A decision that asks for
-    #: nothing is an *answer* and leaves this empty: the count of recalled turns
-    #: is not the question this field answers.  The display says one thing for
-    #: both — the recall never ran — where `recalled: 0` would be the count of a
-    #: search nobody made.
-    discriminator: str = ""
-
-
-@dataclass(frozen=True)
 class ToolsCounted:
     """The model's tool list against the catalogue it was chosen from.
 
@@ -257,8 +226,7 @@ class TurnFinished:
 
 
 TurnEvent = (
-    ContextChosen
-    | ToolsCounted
+    ToolsCounted
     | UsageReported
     | TextDelta
     | ThinkingDelta
@@ -339,14 +307,6 @@ def encode(event: TurnEvent) -> str:
     payload: dict[str, Any] = {}
 
     match event:
-        case ContextChosen(
-            kept=kept, recalled=recalled, rerank=rerank, discriminator=discriminator
-        ):
-            payload = {"t": "context", "kept": kept, "recalled": recalled}
-            if rerank:
-                payload["r"] = rerank
-            if discriminator:
-                payload["d"] = discriminator
         case ToolsCounted(total=total, loaded=loaded):
             # Two integers per model call; short keys like every other, because
             # the volume this convention is for is per token and this is not,
@@ -495,19 +455,6 @@ def decode(message: str) -> TurnEvent | None:
     # context's rerank and discriminator statuses) are the only ones absent may
     # stand for.
     match payload.get("t"):
-        case "context" if _counts_ok(payload, "kept", "recalled"):
-            rerank = payload.get("r", "")
-            if not isinstance(rerank, str):
-                return None
-            discriminator = payload.get("d", "")
-            if not isinstance(discriminator, str):
-                return None
-            return ContextChosen(
-                kept=payload["kept"],
-                recalled=payload["recalled"],
-                rerank=rerank,
-                discriminator=discriminator,
-            )
         case "tools" if _counts_ok(payload, "n", "l"):
             return ToolsCounted(total=payload["n"], loaded=payload["l"])
         case "usage" if _usage_ok(payload.get("last")):

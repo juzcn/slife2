@@ -405,6 +405,7 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # business — this is about which names it serves, and what they are.
     assert sorted(t.name for t in tools) == [
         "_check_new_input",
+        "_context_rebuild",
         "_turn_compact",
         "answer_approval",
         "attach_image",
@@ -559,17 +560,19 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_each_turn_opens_with_its_own_clock_and_context_figure(
-    context, hub
-) -> None:
+async def test_each_turn_opens_with_its_own_clock_and_plan(context, hub) -> None:
     """**The prompt marker is for the turn running, and the row never sees it.**
 
-    `[TURN-PROMPT:{…}]` carries the clock and the status bar's context figure.
-    It is added after the recall and removed before the save, so the first call
-    sees it on the current message, the next call sees the first turn as the row
-    holds it — words and the `[TURN:]` footnote, no prompt marker — and the
-    stored rows are the person's words only.  That is also what keeps it out of
-    search, recall and a later rebuild.
+    `[TURN-PROMPT:{…}]` carries the clock and the plan.  It is added before the
+    turn and removed before the save, so the first call sees it on the current
+    message, the next call sees the first turn as the row holds it — words and
+    the `[TURN:]` footnote, no prompt marker — and the stored rows are the
+    person's words only.  That is also what keeps it out of search, recall and a
+    later rebuild.
+
+    **No context figure**: the last measured call is the previous turn's, and
+    the rebuild changes the list before this turn's first call.  The turn's own
+    estimate is `_context_rebuild`'s report.
     """
     backend = FakeBackend(
         ScriptedTurn(
@@ -603,7 +606,7 @@ async def test_each_turn_opens_with_its_own_clock_and_context_figure(
     end = first.index("] ")
     facts = json.loads(first[len(TURN_PROMPT_PREFIX) : end])
     assert datetime.fromisoformat(facts["now"])  # a real clock reading
-    assert facts["token-usage"] == "0 (0.0%)", "no turn had run before this one"
+    assert "token-usage" not in facts, "the stale pre-rebuild figure is gone"
     assert first[end + 2 :] == "one"
 
     previous, current = as_sent[1]
@@ -612,7 +615,7 @@ async def test_each_turn_opens_with_its_own_clock_and_context_figure(
     assert current.startswith(TURN_PROMPT_PREFIX)
     end = current.index("] ")
     second = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
-    assert second["token-usage"] == "140,127 (14.0%)", "the status bar's figure"
+    assert "token-usage" not in second
     assert current[end + 2 :] == "two"
 
     # ...and the record holds no marker.
@@ -851,30 +854,6 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     )
 
     with pytest.raises(ToolError, match="turn-id list"):
-        await send(server, "hi", agent="jack")
-
-
-@pytest.mark.asyncio
-async def test_a_rebuild_that_carried_no_counts_is_refused_rather_than_drawn_as_zero(
-    hub,
-) -> None:
-    """`kept`/`recalled` were read as `int(payload.get(...) or 0)`.
-
-    A reply that replaced the context list but omitted the two counts drew
-    `[kept 0, recalled 0]` — a note reporting a decision nobody made, since the
-    discriminator *was* paid and did decide.  The answer is refused the way a
-    shape `_adopt` cannot read is, naming the payload (SDD Appendix C: a
-    failure is not a verdict).
-    """
-    store = UnreadableStore(
-        restore={"messages": [], "turn_ids": [], "turns": []},
-        rebuild={"messages": [], "turn_ids": []},
-    )
-    server = build_server(
-        config(), context_client=store, hub_client=hub, backend=answering("x")
-    )
-
-    with pytest.raises(ToolError, match="counts"):
         await send(server, "hi", agent="jack")
 
 
@@ -1433,7 +1412,9 @@ async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
             await asyncio.sleep(0.05)
             await asyncio.gather(first, second)
 
-    cut_ins = [event for event in seen if isinstance(event, MessageCutIn)]
+    cut_ins = [
+        event for event in seen if isinstance(event, MessageCutIn) and event.channel
+    ]
     assert cut_ins == [
         MessageCutIn(text="two", channel="wechat", receipt="window-7"),
     ]
@@ -3663,11 +3644,12 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     await send_with_progress(server, "what is 6*7?", on_progress)
 
     kinds = [type(e).__name__ for e in seen]
-    # The context first, and that ordering is the point of the event: what the
-    # turn runs on is decided before the turn says anything, so a display that
-    # learned it last would be showing one turn's context under another turn's
-    # answer.
-    assert kinds[0] == "ContextChosen"
+    # The tool count comes first: it is what the request's list was, and the
+    # turn's rebuild is not in this hub's list (the plain fixture does not
+    # stand an agent server up as its source).  The rebuild's own pair is
+    # `tests/plugins/agent/test_context_rebuild.py`'s subject.
+    assert kinds[0] == "ToolsCounted"
+    assert "ContextChosen" not in kinds, "the pre-turn event is gone"
     assert "ToolsCounted" in kinds
     assert "TextDelta" in kinds
     assert "ToolCallStarted" in kinds

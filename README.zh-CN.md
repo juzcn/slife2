@@ -482,8 +482,8 @@ context:
 tool_load:
   threshold: 100             # 超出后逐出最久未使用的已加载工具
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, _turn_compact, skill_use, check_async,
-             cancel_async, turn_read]                # 且永不被逐出
+             _check_new_input, _turn_compact, _context_rebuild, skill_use,
+             check_async, cancel_async, turn_read]    # 且永不被逐出
 
 tool_result:
   bytes: 32768               # 每个结果的预算；最小 2048
@@ -542,13 +542,16 @@ schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有�
 
 ### 对话与记忆
 
-对话不会无界地累积上下文。每一轮之前，`slife2-context` 进行一次模型调用，决定保留
-哪些轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的结果上按时间顺序运行。如果
-召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的上下文；轮次存储
-缺失则使该轮失败。
+对话不会无界地累积上下文。每一轮的第一个 boundary，harness 调用 `_context_rebuild`，
+由一次模型调用决定保留哪些历史轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的
+结果上按时间顺序运行，当前轮跟在最后。当前轮永远不在选择范围内。当工作已经转向时，
+模型也可以自己调用 `_context_rebuild`，它的回答会带上这一轮从那儿开始运行所需的上下文
+估算。如果召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的上下文；
+轮次存储缺失则使该轮失败。
 
 一轮的内容超过模型窗口的 `agent.compact_at`（默认 0.9）时，该轮还会从自己的模型
-上下文中丢掉不再需要的消息。轮次日志保留每一条消息，下一轮仍从完整对话开始。
+上下文中丢掉不再需要的消息。`_turn_compact` 是视图，不是编辑：轮次日志保留每一条
+消息，下一轮仍从完整对话开始，而 `_context_rebuild` 会让这个视图重新开始。
 
 模型用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用 `turn_read`
 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list` 按最新优先，每轮一行；
@@ -563,9 +566,8 @@ agent 参数：模型只能读取自己的历史。
 `limit`。`confidence` 在排序页上是 `sure`、`weak` 或 `none`，在浏览页上是
 `null`。
 
-每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now`、`token-usage`，以及存在时的
-`plan`；它是提示文本，不会存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，
-写明它的 id、channel 和跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
+每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now`，以及存在时的 `plan`；它是提示文本，
+不会存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
 是发送者写的，会随消息一起存储。
 
 ### 工具

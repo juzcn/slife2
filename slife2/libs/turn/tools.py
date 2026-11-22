@@ -29,11 +29,13 @@ that varies about it, which is who calls it:
   machinery calls it on the model's behalf, at a moment the machinery decides,
   and it would be called whether or not the model ever chose it.  *LLM-visible*
   is why there are so few: the call is written into the conversation as a pair,
-  and a pair has to name a tool the request declares.  **There are three**,
-  `_func_tool_unload`, `_check_new_input` and `_turn_compact`, and that is the
-  whole class.  The third is the one whose model call is *wanted* as well as
-  harmless: a turn that sees its own context filling may ask for the same
-  compaction the harness would have asked for at the next threshold.
+  and a pair has to name a tool the request declares.  **There are four**,
+  `_func_tool_unload`, `_check_new_input`, `_turn_compact` and
+  `_context_rebuild`, and that is the whole class.  The last two are the ones
+  whose model call is *wanted* as well as harmless: a turn that sees its own
+  context filling may ask for the same compaction the harness would have asked
+  for at the next threshold, and a turn that sees an unrelated message arrive
+  may ask for the history to be rebuilt around it.
 
 **And the guard has to be there, because there is nowhere else for it to be.**  A
 pair has to name a declared tool, so a harness tool is in the model's list, where
@@ -51,12 +53,16 @@ damaging one:
 `_func_tool_unload` refuses the names in `tool_load.autoload` and can otherwise
 only shorten the model's own list, and `_check_new_input` hands over a message
 the next boundary would have handed over anyway, so a call from the model is
-the same thing sooner rather than something new.  `_turn_compact` is the third
-case and the one where the model's call is the point: there is no boundary the
-harness alone knows better, and the call only hides messages from the rest of
-the turn while the record keeps them.  A tool that *would* do damage there is
-not protected from being one; it is simply not one — it stays undeclared, which
-is what the audience gate is for.
+the same thing sooner rather than something new.  `_turn_compact` and
+`_context_rebuild` are the cases where the model's call is the point: there is
+no boundary the harness alone knows better, and each edits a view the record
+keeps.  The compaction hides messages from the rest of the turn; the rebuild
+changes only the historical selection, never the turn running (it has no id
+yet), and a dropped turn is still in the log for a later rebuild to recall.
+The discriminator makes the selection — the model supplies an intent, not a
+list — which is what keeps the call an edit rather than a deletion.  A tool
+that *would* do damage there is not protected from being one; it is simply not
+one — it stays undeclared, which is what the audience gate is for.
 
 A leading `_` is the mark on those two names (:data:`HARNESS_PREFIX`) and, more
 widely, on any name that is the machinery's rather than the model's — it is a
@@ -228,29 +234,41 @@ ATTACH_IMAGE = "attach_image"
 
 #: The turn's own compaction, by name.
 #:
-#: **The one harness tool whose model call is a second trigger rather than an
-#: accident.**  The agent server calls it when a turn's measured context crosses
-#: `agent.compact_at`, and the model may call it itself: the tool is declared, a
-#: provider can hand us the call, and the call does exactly what the harness's
-#: would have done.  Spelled once for `CHECK_NEW_INPUT`'s reason — the agent
-#: server serves it, the task serves its own body, and the loop writes the pair
-#: under it.
+#: **One of the two harness tools whose model call is a second trigger rather
+#: than an accident.**  The agent server calls it when a turn's measured context
+#: crosses `agent.compact_at`, and the model may call it itself: the tool is
+#: declared, a provider can hand us the call, and the call does exactly what the
+#: harness's would have done.  Spelled once for `CHECK_NEW_INPUT`'s reason — the
+#: agent server serves it, the task serves its own body, and the loop writes the
+#: pair under it.
 #:
-#: **And the only tool whose body calls a model.**  `_turn_compact` runs the
-#: context plugin's selector — one silent, tool-less `stream_chat` over the
+#: **And one of the two tools whose bodies call a model.**  `_turn_compact` runs
+#: the context plugin's selector — one silent, tool-less `stream_chat` over the
 #: numbered view — so a call costs a second model call.  Its tokens are logged
 #: by the model server under `kind=compactor` and are not added to the turn's
-#: own bill, the same arrangement the pre-turn discriminator has.
+#: own bill; `_context_rebuild`'s discriminator is the same arrangement under
+#: `kind=discriminator`.
 TURN_COMPACT = "_turn_compact"
 
-#: **The tools that act on a live turn's own message list.**  They are the three
+#: The durable counterpart of `_turn_compact`: the tool that edits the
+#: **historical turns** the conversation is made of.  `_turn_compact` hides
+#: messages from the current turn's view and forgets them at the turn's end;
+#: this drops and recalls turns in the live context itself, and the selection is
+#: what the conversation comes back to.  The turn running is never touched — it
+#: has no id yet — so it is carried verbatim while the history is rebuilt.
+CONTEXT_REBUILD = "_context_rebuild"
+
+#: **The tools that act on a live turn's own message list.**  They are the four
 #: the agent server serves against its loop: the cut-in takes a queued message,
-#: the attachment injects a part into the turn's last user message, and the
-#: compaction hides messages from the view the rest of the turn runs on.  A
-#: server that runs a turn of its own on the same conversation id — an agent task
-#: — must serve them against *its* list instead, because the id alone cannot
-#: tell the two loops apart (`slife2.plugins.agent_task.server`).
-LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE, TURN_COMPACT})
+#: the attachment injects a part into the turn's last user message, the
+#: compaction hides messages from the view the rest of the turn runs on, and the
+#: rebuild edits the historical turns around the turn.  A server that runs a turn
+#: of its own on the same conversation id — an agent task — must serve them
+#: against *its* list instead, because the id alone cannot tell the two loops
+#: apart (`slife2.plugins.agent_task.server`).
+LIVE_CONVERSATION_TOOLS = frozenset(
+    {CHECK_NEW_INPUT, ATTACH_IMAGE, TURN_COMPACT, CONTEXT_REBUILD}
+)
 
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut

@@ -147,16 +147,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     # What one turn's discriminator decided to run on.  Two counts that are not
     # the same number: what it kept of the conversation in hand, and how many
     # earlier turns it went to the log for.
-    "kept": {
-        "en": "kept {turns}, recalled {recalled}",
-        "zh": "保留 {turns}，召回 {recalled}",
-    },
-    # The same line when the discriminator never answered: no recall was asked
-    # for, and `recalled 0` would be the count of a search nobody made.
-    "kept_failed": {
-        "en": "kept {turns}, recall failed",
-        "zh": "保留 {turns}，召回 失败",
-    },
     # The trim's five lists, as the one sentence the transcript shows.  The
     # verdict a name carries is its list's, so each label is that verdict.
     "trim_unloaded": {
@@ -187,18 +177,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     # server's (`"unavailable"`, `"failed"`, `"empty"`); the sentence is the
     # window's, and it says what the person actually lost — the fused order
     # stands in place of the ranker's.
-    "rerank_unavailable": {
-        "en": "rerank off — the recall keeps its fused order",
-        "zh": "重排不可用 —— 召回保持融合顺序",
-    },
-    "rerank_failed": {
-        "en": "rerank failed — the recall keeps its fused order",
-        "zh": "重排失败 —— 召回保持融合顺序",
-    },
-    "rerank_empty": {
-        "en": "rerank returned nothing — the recall keeps its fused order",
-        "zh": "重排没有返回结果 —— 召回保持融合顺序",
-    },
     # A turn the person stopped.
     "interrupted": {
         "en": "interrupted",

@@ -7,6 +7,8 @@ turn a tail read from the wrong end.  So a compaction is a *projection* —
 :func:`view` builds the list the model is sent, from the list the conversation
 holds minus what earlier selections hid.  The record keeps everything, the
 turn's saved row is unchanged, and the next rebuild starts from the full list.
+**A `_context_rebuild` resets the view**: hiding is per-turn, and a history edit
+starts it over (`loop.hidden` is cleared).
 
 **The selection is the model's, and so is legality.**  The selector is asked
 which live messages this turn no longer needs; the prompt says a tool exchange

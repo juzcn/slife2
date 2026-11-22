@@ -50,6 +50,22 @@ pytestmark = pytest.mark.unit
 OLD = "the old tool result"
 
 
+def drop_echo(messages: list[dict], selectable: list[int]) -> list[int]:
+    """The `fake__echo` exchange's view ids — the pair this test is about.
+
+    The turn now opens with `_context_rebuild`'s harness pair, so "drop
+    everything selectable" would take that too; the mechanism under test is the
+    echo exchange and its result.
+    """
+    wanted: set[int] = set()
+    for index, message in enumerate(messages):
+        if message.get("role") == "tool" and message.get("content") == OLD:
+            wanted.add(index)
+            if index and messages[index - 1].get("role") == "assistant":
+                wanted.add(index - 1)
+    return sorted(wanted & set(selectable))
+
+
 def config_over(*, compact_at: float = 0.9):
     base = default_config()
     return replace(
@@ -206,7 +222,7 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     ) -> str:
         seen.append([dict(message) for message in messages])
         usages.append(usage)
-        return json.dumps({"compact": selectable})
+        return json.dumps({"compact": drop_echo(messages, selectable)})
 
     answer = await run_turn(cfg, backend, drop_all, on_progress)
 
@@ -288,7 +304,7 @@ async def test_the_harness_asks_at_the_measured_threshold(
         repair: str = "",
     ) -> str:
         usages.append(usage)
-        return json.dumps({"compact": selectable})
+        return json.dumps({"compact": drop_echo(messages, selectable)})
 
     answer = await run_turn(cfg, backend, drop_all)
 
@@ -346,7 +362,7 @@ async def test_a_successful_compaction_can_be_asked_again(
         repair: str = "",
     ) -> str:
         usages.append(usage)
-        return json.dumps({"compact": selectable})
+        return json.dumps({"compact": drop_echo(messages, selectable)})
 
     answer = await run_turn(cfg, backend, drop_all)
 

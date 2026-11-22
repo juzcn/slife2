@@ -53,7 +53,6 @@ from textual.widget import Widget
 from textual.widgets import Static, TextArea
 
 from slife2.clients.toolclient import ToolCounts
-from slife2.libs.harness import notes
 from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
 from slife2.libs.harness.i18n import t
@@ -411,10 +410,6 @@ class ChatView(VerticalScroll):
         #: restore turns it off, mounts the whole history and scrolls exactly
         #: once at the end — a scroll per widget is what makes a rebuild jitter.
         self._autoscroll = True
-        #: The last rerank status this view said.  `ContextChosen` arrives once
-        #: per turn, and a provider with no cross-encoder would otherwise write
-        #: the same line before every one; what is news is the change.
-        self._rerank_status = ""
 
     # --- following the tail --------------------------------------------------
 
@@ -597,23 +592,6 @@ class ChatView(VerticalScroll):
             # part of it — the distinction the styling carries, not a bracket.
             line.append(f" {footnote}", f"italic {PALETTE['dim']}")
         self._add(Static(line), "user-message")
-
-    def note_rerank(self, status: str) -> None:
-        """A recall that could not use its cross-encoder, said once per change.
-
-        The status arrives with every rebuild and is `""` when the stage ran.
-        A provider with no `rerank_model` would otherwise write the same line
-        before every turn, and a line that repeats is a line a reader stops
-        seeing.  So the note is the *change*: the first failure, a different
-        failure, or a recovery — the last says nothing, because "the ranker
-        worked" is not news about this turn; it only clears the state so a
-        later failure is news again.
-        """
-        if status == self._rerank_status:
-            return
-        self._rerank_status = status
-        if status:
-            self.add_note(notes.rerank(status))
 
     def add_note(
         self,

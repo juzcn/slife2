@@ -14,30 +14,15 @@ import json
 
 import pytest
 
-from slife2.libs.turn.events import ContextChosen, TurnFinished, UsageReported, decode
+from slife2.libs.turn.events import ToolsCounted, TurnFinished, UsageReported, decode
 from slife2.libs.turn.messages import Usage
 
 pytestmark = pytest.mark.unit
 
 
 def test_a_known_line_is_decoded() -> None:
-    assert decode(json.dumps({"t": "context", "kept": 2, "recalled": 1})) == (
-        ContextChosen(kept=2, recalled=1)
-    )
-    assert decode(
-        json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": "unavailable"})
-    ) == ContextChosen(kept=2, recalled=1, rerank="unavailable")
-    assert decode(
-        json.dumps({"t": "context", "kept": 2, "recalled": 1, "d": "timeout"})
-    ) == ContextChosen(kept=2, recalled=1, discriminator="timeout")
-
-    # A status of another type is a line this build does not know, not one
-    # whose status is empty.
-    assert (
-        decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": 3})) is None
-    )
-    assert (
-        decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "d": 3})) is None
+    assert decode(json.dumps({"t": "tools", "n": 2, "l": 1})) == ToolsCounted(
+        total=2, loaded=1
     )
 
 
@@ -45,8 +30,8 @@ def test_a_count_with_the_wrong_type_drops_the_line_instead_of_raising() -> None
     """**A readable line with the wrong type is still unreadable.**  `int("many")`
     used to raise out of `decode` and into the progress callback, where the
     registered answer is to drop the line."""
-    assert decode(json.dumps({"t": "context", "kept": "many"})) is None
-    assert decode(json.dumps({"t": "context", "kept": True})) is None
+    assert decode(json.dumps({"t": "tools", "n": "many", "l": 1})) is None
+    assert decode(json.dumps({"t": "tools", "n": True, "l": 1})) is None
     assert (
         decode(json.dumps({"t": "tool_start", "name": "x", "iteration": "1"})) is None
     )
@@ -80,7 +65,6 @@ def test_a_line_with_a_hole_is_not_read_as_a_zero() -> None:
     """`encode` writes every count it has, so a missing one is not this build's
     line — and reading the hole as a number would show a figure nobody measured."""
     assert decode(json.dumps({"t": "tools", "n": 3})) is None
-    assert decode(json.dumps({"t": "context", "kept": 2})) is None
     full = {
         "t": "done",
         "d": "ok",

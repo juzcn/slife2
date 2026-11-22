@@ -140,8 +140,13 @@ from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_MARKER as MARKER_PREFIX,
 )
 from slife2.libs.turn import attachments, compact, plan
-from slife2.libs.turn.context import turn_prompt_lead, with_lead
-from slife2.libs.turn.events import TurnEvent, TurnObserver, emit
+from slife2.libs.turn.context import (
+    context_usage,
+    rebuild_report,
+    turn_prompt_lead,
+    with_lead,
+)
+from slife2.libs.turn.events import TurnEvent, TurnObserver
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message
 from slife2.libs.turn.prompt import (
@@ -150,9 +155,11 @@ from slife2.libs.turn.prompt import (
     render_system_prompt,
 )
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime
+from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
+    CONTEXT_REBUILD,
     LIVE_CONVERSATION_TOOLS,
     TURN_COMPACT,
     CatalogueAnswer,
@@ -391,6 +398,17 @@ class TaskTurn:
     #: task's model is measured against.  Also the denominator of the automatic
     #: threshold below.  Required: the config entry states it.
     context_window: int
+    #: The turns `messages` is made of, and how many of them the prefix accounts
+    #: for.  The restored live-context list; a private `_context_rebuild`
+    #: replaces them, and the opening after `covered` is the carried tail.
+    turn_ids: list[int] = field(default_factory=list)
+    covered: int = 0
+    #: The index where `run_turn` appends the task's opening — the record's
+    #: boundary even here, where there is no record: the rebuild's `carried` tail
+    #: starts at the message after it.
+    turn_opening: int = 0
+    #: Whether this task's one automatic `_context_rebuild` has run.
+    rebuilt: bool = False
     #: The messages this task's own compaction has hidden from its later model
     #: calls.  The same turn-scoped projection the agent server keeps: the list
     #: `run_turn` advances is the task's whole exchange, and only the view the
@@ -625,11 +643,12 @@ def build_server(
         """The bodies behind `LIVE_CONVERSATION_TOOLS`, for **this task's own
         turn**.
 
-        **The two tools are the task's because the list is.**  A task is a single
+        **The four tools are the task's because the list is.**  A task is a single
         user message and a single turn; `_check_new_input` has no inbox to hand
-        anything over from and no harness cut-in to serve, and `attach_image`
+        anything over from and no harness cut-in to serve, `attach_image`
         injects into the task's own message list so the picture is on the task's
-        *next* model call.  The agent server's versions resolve a loop by the
+        *next* model call, and `_context_rebuild` edits the task's clone with
+        `publish=False`.  The agent server's versions resolve a loop by the
         conversation id alone, and a task's id is the maker's — the other live
         turn on that conversation — so leaving them in the list is the aliasing
         this body exists to close.
@@ -742,10 +761,65 @@ def build_server(
             )
             return compact.report(result, recorded=False)
 
+        async def context_rebuild(_arguments: dict[str, Any]) -> str:
+            """Rebuild this task's own clone of the conversation's history.
+
+            **The task's clone, and `publish=False`.**  The task records
+            nothing, so its context decision must not move the conversation it
+            stands in for; the restored list is the snapshot and the rebuild
+            replaces its historical prefix only.  The turn running is carried
+            verbatim, exactly as on the agent server, and the decision is made
+            from the live context — the task's own opening is in it.
+            """
+            turn.rebuilt = True
+            at = compact.opening(turn.messages)
+            if at is None:
+                return "This task has no opening message; nothing to rebuild."
+            rebuilt = await runtime.rebuild(
+                task.identity,
+                turn.messages,
+                turn.turn_ids,
+                turn.covered,
+                turn.model,
+                publish=False,
+            )
+            new_opening = len(rebuilt.messages) - (len(turn.messages) - at)
+            turn.messages[:] = rebuilt.messages
+            turn.turn_ids = rebuilt.turn_ids
+            turn.covered = rebuilt.covered
+            turn.turn_opening = new_opening
+            turn.hidden.clear()
+            turn.compact_hold = False
+            logger.info(
+                "agent task %s: context_rebuild changed=%s kept=%d recalled=%d "
+                "rerank=%s discriminator=%s",
+                task.name,
+                rebuilt.changed,
+                rebuilt.kept,
+                rebuilt.recalled,
+                rebuilt.rerank or "-",
+                rebuilt.discriminator or "-",
+            )
+            tokens = context_usage(
+                estimate_turn_tokens(
+                    [message.to_record() for message in turn.messages]
+                ),
+                turn.context_window,
+            )[0]
+            return rebuild_report(
+                changed=rebuilt.changed,
+                kept=rebuilt.kept,
+                recalled=rebuilt.recalled,
+                rerank=rebuilt.rerank,
+                discriminator=rebuilt.discriminator,
+                tokens=tokens,
+            )
+
         return {
             CHECK_NEW_INPUT: nothing_waiting,
             ATTACH_IMAGE: attach_image,
             TURN_COMPACT: turn_compact,
+            CONTEXT_REBUILD: context_rebuild,
         }
 
     # ── the loop ─────────────────────────────────────────────────────────
@@ -773,14 +847,13 @@ def build_server(
 
         **The observer is the watcher's half**, and it is the same seam the
         agent server uses: the loop reports every event through it, and the
-        rebuild's `ContextChosen` is reported here because the task's loop is
-        built after the rebuild.  A task has no caller progress stream; the
-        observer is the only reader its turn can have.
+        task's `_context_rebuild` pair is in the turn's stream like every other
+        tool's.  A task has no caller progress stream; the observer is the only
+        reader its turn can have.
 
-        `opening` travels **beside** the list rather than inside it, exactly as
-        the agent server passes its own prompt: the rebuild replaces the list
-        wholesale, so anything appended before it would be destroyed by it, and
-        `run_turn` is what appends the user message.
+        `opening` travels **beside** the list rather than inside it, and
+        `run_turn` appends it: the first boundary's `_context_rebuild` then
+        replaces the historical prefix and carries the task's opening verbatim.
 
         **The one step that is missing is the record, and it is missing on
         purpose.**  A task's result reaches the conversation as a message, and
@@ -833,41 +906,26 @@ def build_server(
         )
 
         # **A clone, not a share.**  `restore` reads the conversation's
-        # live-context list once; `rebuild` decides on that snapshot with
-        # `publish=False`, so the task's turn runs on a context of its own and
-        # the conversation's list is not moved.  A task records nothing, and a
-        # turn that leaves no record must not change what the conversation comes
-        # back to.  No lock is needed: a read and a private decision have no
-        # write to interleave.
+        # live-context list once; the task's own `_context_rebuild` decides on
+        # that snapshot with `publish=False`, so the task's turn runs on a
+        # context of its own and the conversation's list is not moved.  A task
+        # records nothing, and a turn that leaves no record must not change what
+        # the conversation comes back to.  No lock is needed: a read and a
+        # private decision have no write to interleave.
         restored = await runtime.restore(task.identity, head)
-        rebuilt = await runtime.rebuild(
-            task.identity,
-            restored.messages,
-            restored.turn_ids,
-            restored.covered,
-            opening,
-            model.reference,
-            publish=False,
-        )
 
-        # **Reported before the turn**, as the agent server reports it: the
-        # discriminator is one model call nobody sees, so its two counts are the
-        # only sight of it, and they are a fact about what the turn runs on
-        # rather than about how it went.  Through `emit`, so a watcher that
-        # cannot be served cannot cost the task its turn.
-        await emit(observer, rebuilt.chosen)
-
-        # **The live half of the turn**, made after the rebuild because the list
-        # a tool mutates is the one the rebuild decided on.  The registry closes
+        # **The live half of the turn**, made before the loop because the list a
+        # tool mutates is the one the rebuild decides on.  The registry closes
         # over it, so `attach_image` injects into the same list `run_turn`
-        # advances; nothing else holds it, and it goes out of scope with the
-        # turn.
+        # advances and `_context_rebuild` replaces the same prefix.
         turn = TaskTurn(
-            messages=rebuilt.messages,
+            messages=restored.messages,
             model=model.reference,
             accepts_images=settings.accepts_images,
             context_window=settings.context_window,
             compact_at=current.agent.compact_at,
+            turn_ids=restored.turn_ids,
+            covered=restored.covered,
         )
 
         loop = await runtime.make_loop(
@@ -928,26 +986,34 @@ def build_server(
             return bool(compact.selectable(view, turn.messages[at]))
 
         def auto_invoke() -> AutoCall | None:
-            """The harness's own move at an iteration boundary: the compaction."""
+            """The harness's own move at an iteration boundary.
+
+            **The rebuild first, once** — the task's clone gets the same
+            historical selection the agent server's turn gets, with
+            `publish=False` and no record — then the compaction when due.
+            """
+            if not turn.rebuilt and turn.live is not None:
+                if turn.live.declares(CONTEXT_REBUILD):
+                    return AutoCall(CONTEXT_REBUILD)
+                # A hub that predates the tool: the task runs on what it has.
+                turn.rebuilt = True
             return AutoCall(TURN_COMPACT) if compact_due() else None
 
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so
         # there is no row to keep the marker out of; it is prompt text for this
         # one turn and goes out of scope with the task.  The context figure is
-        # the restored conversation's last turn, which is the number that
-        # conversation's status bar would have shown when the task started.
+        # not here: `_context_rebuild`'s report carries the turn's own estimate.
         opening = with_lead(
             opening,
             turn_prompt_lead(
-                restored.context_tokens,
-                settings.context_window,
                 # A task runs on the maker's own conversation, so it runs on the
                 # same plan: the halfway case — a task that did not see the plan
                 # it could write — would be two answers to one conversation.
                 plan.read(*task.identity),
             ),
         )
+        turn.turn_opening = len(turn.messages)
         result = await loop.run_turn(turn.messages, opening, observer, auto=auto_invoke)
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the

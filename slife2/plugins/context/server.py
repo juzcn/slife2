@@ -18,25 +18,27 @@ embedder hop, one startup pass over every file, for the half it owns.
 
 The two decisions, and where they sit in a turn
 -----------------------------------------------
-`restore` runs when a conversation starts, and `rebuild` before every turn:
+`restore` runs when a conversation starts, and `rebuild` is the other half of
+the first boundary's `_context_rebuild`:
 
 ```
 send_message
   └─ the first message for a key → restore      ← the exit-time context, replayed
-  └─ per turn, inside the lock, before the user's message:
-       rebuild                                  ← keep ∪ recall, one model call
+  └─ per turn, inside the lock:
        run the turn (the loop appends the message)
+       first iteration boundary → _context_rebuild   ← keep ∪ recall, one model call
        save                                       the new id joins the live list
 ```
 
-**Both are the harness's API and neither is the model's** — which is not the same
-thing as a *harness tool*: those are LLM-visible and auto-invoked, and these two
-are never in the model's list at all (`slife2.libs.turn.tools` is where the two words are
-told apart).  The model has `turn_list`
-and `turn_read` — a model that can read its history is the point of a turn log —
-and it has no `rebuild`: what the context *is* is not something a model gets to
-ask for, and the footnote it reads on each turn is how it says what it wants kept
-without ever calling anything (`slife2.libs.turn.context`).
+**`restore` is the harness's API and not the model's.**  `rebuild` is this
+plugin's API and not the model's either — but it is reached through
+`_context_rebuild`, a *harness tool*: LLM-visible, auto-invoked at the first
+boundary, and written into the conversation as a pair whose answer reports what
+was kept and recalled (`slife2.libs.turn.tools` tells the two words apart).  The
+model has `turn_list`, `turn_read` and `_context_rebuild`; the discriminator
+still decides the selection, and the footnote it reads on each turn is how it
+says what it wants kept without calling anything
+(`slife2.libs.turn.context`).
 
 What is deliberately absent
 ---------------------------
@@ -174,7 +176,6 @@ class Discriminator(Protocol):
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
-        user_input: str,
         *,
         previous: str = "",
         repair: str = "",
@@ -212,7 +213,6 @@ async def _ask_model(
     subagent: str,
     model: str,
     messages: list[dict[str, Any]],
-    user_input: str,
     *,
     previous: str = "",
     repair: str = "",
@@ -254,7 +254,7 @@ async def _ask_model(
     """
     asked = [
         *messages,
-        {"role": "user", "content": decisions.instruction(user_input)},
+        {"role": "user", "content": decisions.instruction()},
     ]
     if repair:
         # The model's own refused answer, then what was wrong with it.  An empty
@@ -1103,7 +1103,6 @@ def build_server(
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
-        user_input: str,
     ) -> tuple[Decision | None, str]:
         """One model call — or two, when the first answer could not be read.
 
@@ -1129,10 +1128,11 @@ def build_server(
 
         The instruction travels as a user message *appended to the conversation*,
         which is what lets a follow-up be recognised as one: the subject of "what
-        about the other one" is in the list above it and nowhere else.
+        about the other one" is in the list above it and nowhere else.  There is
+        no separate input — the conversation is the input.
         """
         try:
-            text = await ask_model(agent, subagent, model, messages, user_input)
+            text = await ask_model(agent, subagent, model, messages)
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
             logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
             logger.debug("the discriminator call raised", exc_info=True)
@@ -1159,7 +1159,6 @@ def build_server(
                 subagent,
                 model,
                 messages,
-                user_input,
                 previous=text,
                 repair=refusal,
             )
@@ -1182,19 +1181,16 @@ def build_server(
     model_clients: dict[str, Client] = {}
     opening = asyncio.Lock()
     ask_model: Discriminator = injected or (
-        lambda agent, subagent, model, messages, user_input, *, previous="", repair="": (
-            _ask_model(
-                current(),
-                model_clients,
-                opening,
-                agent,
-                subagent,
-                model,
-                messages,
-                user_input,
-                previous=previous,
-                repair=repair,
-            )
+        lambda agent, subagent, model, messages, *, previous="", repair="": _ask_model(
+            current(),
+            model_clients,
+            opening,
+            agent,
+            subagent,
+            model,
+            messages,
+            previous=previous,
+            repair=repair,
         )
     )
 
@@ -1291,9 +1287,9 @@ def build_server(
         names the view positions that are candidates.
 
         `context_tokens` is the conversation's last measured call and
-        `context_window` its model's window: the same pair the status bar and
-        the turn prompt show, rendered by the same `context_usage`, so the
-        selector and the person read one figure.
+        `context_window` its model's window: the same pair the status bar
+        shows, rendered by the same `context_usage`, so the selector and the
+        person read one figure.
 
         The answer is `compact` (the positions to drop, as the model named them)
         and `decision` (`""` for an answer, otherwise `failed` or `unparsed`).
@@ -1321,17 +1317,17 @@ def build_server(
         agent: str,
         messages: list[dict[str, Any]],
         turn_ids: list[int],
-        prompt: str = "",
         subagent: str = "",
         model: str = "",
         carried: int = 0,
         publish: bool = True,
     ) -> dict[str, Any]:
-        """Decide what the next turn runs on: keep ∪ recall.
+        """Decide what this turn runs on: keep ∪ recall.
 
-        Called **once per turn, before the user's message is appended** — before,
-        because this replaces the message list wholesale and anything appended
-        first would be destroyed by it.
+        Called from `_context_rebuild`, **after** the turn's message was
+        appended — at the first boundary, or mid-turn after a cut-in.  The
+        current turn has no id and is not in `turn_ids`; `carried` carries it
+        back verbatim, so the selection is the historical turns only.
 
         One model call decides: which of the turns in hand to keep, and what to
         recall from the turn log.  The two are joined by id and never reconciled,
@@ -1340,9 +1336,9 @@ def build_server(
         turn in hand is excluded from the recall: the discriminator read all of
         them, so a turn it dropped from the keep-list was dropped deliberately,
         and a turn in both would spend retrieval depth and budget on something
-        the union would collapse anyway.  When the decision asks in sentences,
-        the input is read by meaning beside them, so the model's paraphrase is
-        never the only way the subject is asked for.
+        the union would collapse anyway.  The conversation is the input; there is
+        no separate prompt, and the decision's sentences are the recall's
+        questions.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -1362,10 +1358,6 @@ def build_server(
             turn_ids: The turns those messages came from, in order.  The
                 keep-list is read as an intersection with this, so an id that has
                 left the context cannot be kept by naming it.
-            prompt: What the user just said.  Passed **beside** the messages and
-                not inside them, because this runs before the caller appends it
-                — that order is the whole reason the argument exists, and reading
-                it back out of the list would be reading the previous turn's.
             subagent: Which of that agent's conversations; empty for its own.
             model: Which model this conversation runs on, as `provider/model`.
                 The window the selection is sized against is *this* model's, so
@@ -1398,9 +1390,10 @@ def build_server(
             that found nothing.
         """
         store = await store_of(agent, subagent)
-        decision, discriminator = await _discriminate(
-            agent, subagent, model, messages, prompt
-        )
+        # **The conversation is the input.**  The rebuild runs at the first
+        # boundary, after the turn's message was appended (or mid-turn, after a
+        # cut-in); there is no separate prompt to pass.
+        decision, discriminator = await _discriminate(agent, subagent, model, messages)
         # **Two ways to have no decision, and the log keeps them apart.**  Both
         # fall back to the turns in hand, and neither may be reported as the
         # other: this line is the only sight anybody gets of the discriminator
@@ -1451,7 +1444,7 @@ def build_server(
         rerank = ""
         if decision.recall is not None:
             recalled, rerank = await _recall_into(
-                store, decision.recall, base, turn_ids, model, prompt
+                store, decision.recall, base, turn_ids, model
             )
 
         target = decisions.union(base, recalled)
@@ -1537,7 +1530,6 @@ def build_server(
         base: list[int],
         in_hand: Sequence[int],
         model: str,
-        prompt: str,
     ) -> tuple[list[int], str]:
         """Run one recall condition, fit it, and report the rerank stage.
 
@@ -1584,18 +1576,11 @@ def build_server(
         the store, which can look past those turns for more rather than
         filtering a short answer here.
 
-        **The person's own words are a question too.**  When the decision asked
-        in sentences, the input joins them: the model's sentence is a paraphrase
-        of what the input points at, and the meaning leg reads the input as it
-        stands.  That gives a sentence recall at least two questions, so the
-        paraphrase is never the only way the subject is found — unless the
-        decision set `prompt_as_sentence` false, which is what it does when the
-        input names nothing ("hi", "continue", "what about the other one?") —
-        the model sees the input and the conversation, so that judgement is its
-        to make.  A keyword-only recall keeps its query as the one meaning
-        question — the phrase is the deliberate one, and a second raw question
-        there can only reorder it — and a period recall is not narrowed by the
-        input at all.
+        **The decision's sentences are the questions.**  There is no separate
+        input to append: the discriminator read the conversation, and a
+        sentence it wrote is the subject it chose to ask the log for.  A
+        keyword-only recall keeps its query as the one meaning question, and a
+        period recall has no question at all.
         """
         query = str(condition.get("query") or "")
         raw_sentences = condition.get("sentences")
@@ -1630,21 +1615,9 @@ def build_server(
             logger.info("recall_anchor_ignored anchor=%s", anchor)
             anchor = None
 
-        # What the input adds is the docstring's rule; `prompt_as_sentence` is
-        # the decision's say over whether it joins the sentences at all.
+        # The meaning leg's questions are the decision's sentences; a period
+        # recall has no question, and a keyword-only recall has only its query.
         asker = await embedding.get() if (query or sentences) else None
-        include_prompt = condition.get("prompt_as_sentence") is not False
-        if (
-            asker is not None
-            and sentences
-            and include_prompt
-            and prompt.strip()
-            and prompt not in sentences
-        ):
-            if len(prompt) > asker.max_chars:
-                logger.info("recall_prompt_too_long chars=%d", len(prompt))
-            elif terms(prompt):
-                sentences = [*sentences, prompt]
 
         # The policy is the caller's home's, like the window and the model:
         # this daemon serves every home, and `context:` is a section of the

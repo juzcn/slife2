@@ -1,10 +1,15 @@
-▸ Context recall
+▸ Context rebuild
 
-Decide what the next turn runs on: the turns to keep from those in hand, plus
-what to recall from the turn log. The turn runs on both, in time order.
+From the work in the conversation above, decide which historical turns to keep
+and which turns to recall from the turn log. The purpose is the work's context
+and nothing else: fewer tokens and less pollution in every call that follows,
+and a turn the work still refers to back in hand when it is no longer there.
+Keep the context the work depends on and let go of what it does not. The system
+rebuilds the context from your answer: the kept and recalled turns, in time
+order, followed by the turn itself.
 
-Current prompt:
-{{ user_input }}
+The turn running is already in the conversation above and is never part of the
+selection: it has no turn id yet, and the rebuild carries it verbatim.
 
 Reply with ONE JSON object matching this schema, and nothing else. An empty
 object means the turns in hand are enough for this turn:
@@ -15,70 +20,55 @@ Cases:
 
 1. The turns in hand answer it — the common case.
 
-   prompt: What did we decide about the retries?
-     your answer: {}
-   prompt: Is there a ready-made one?
      your answer: {}
 
 2. Keep part of them — the plan is in hand, the tool output around it is not.
 
-   prompt: Let's go with the plan we just settled on
      your answer: {"context": [31, 33]}
 
-3. Keep none — a new task.
+3. Keep none — a new task, nothing in hand is needed.
 
-   prompt: Translate this paragraph into French
      your answer: {"context": "clear"}
 
 4. A period — a range of time, and no topic.
 
-   prompt: What have I been doing these past two days?
      your answer: {"recall": {"since": "yesterday"}}
 
 5. A period from its beginning.
 
-   prompt: Where did we start last month?
      your answer: {"recall": {"since": "last month", "anchor": "oldest"}}
 
 6. The earliest turns of all — no bound to name.
 
-   prompt: Let's look at our earliest conversations
      your answer: {"recall": {"anchor": "oldest"}}
 
 7. Part of them plus a question — the turn that answered this has left the
    context, and the tool dumps around it are dead weight.
 
-   prompt: Who did you say was the dean of the management school?
      your answer: {"context": [27, 28], "recall": {"sentences": ["the dean of the management school"]}}
 
 8. None plus a question in a period — a topic, and when.
 
-   prompt: What did we say about the anniversary last week?
      your answer: {"context": "clear", "recall": {"sentences": ["what we said about the anniversary"], "since": "last week"}}
 
 9. A question in a period that has passed — a topic, and both ends of it.
 
-   prompt: What did we say about the anniversary last month?
      your answer: {"recall": {"sentences": ["what we said about the anniversary"], "since": "last month", "until": "this month"}}
 
 10. A follow-up whose subject is above but not in hand — carry it into the
     sentence.
 
-   prompt: What about the other one?
-     your answer: {"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}
+     your answer: {"recall": {"sentences": ["the other school"]}}
 
 11. A topic the log may have, with nothing in hand.
 
-   prompt: What about the alumni fund?
      your answer: {"context": "clear", "recall": {"sentences": ["the alumni fund"]}}
 
 12. The words exactly.
 
-   prompt: Which turn was about the alumni fund?
      your answer: {"context": "clear", "recall": {"query": "alumni fund"}}
 
 13. A message from a peer agent or a subagent — the sender is not the person,
     and the decision is the same.
 
-   prompt: [PeerAgent:{"from": "jack", "type": "message"}] What did you conclude about the retry backoff?
      your answer: {"recall": {"sentences": ["what was concluded about the retry backoff"]}}

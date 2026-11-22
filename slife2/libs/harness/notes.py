@@ -67,20 +67,6 @@ def restored(count: int) -> str:
     return t("restored", turns=as_turns(count))
 
 
-def kept(kept: int, recalled: int, *, failed: bool = False) -> str:
-    """What one turn's discriminator decided to run on.
-
-    `failed` is the case where it decided nothing: no recall was asked for, and
-    the number would otherwise say it asked and found none.  The reason (a
-    failed call, an unreadable reply) lives in the server's log; what the person
-    watching needs is the difference between "nothing matched" and "nobody
-    looked".
-    """
-    if failed:
-        return t("kept_failed", turns=as_turns(kept))
-    return t("kept", turns=as_turns(kept), recalled=recalled)
-
-
 def unloaded(answer: str) -> str:
     """The trim's answer as a person's line: what left the model's list.
 
@@ -115,29 +101,6 @@ def unloaded(answer: str) -> str:
         if names:
             parts.append(t(label, names=", ".join(str(name) for name in names)))
     return "; ".join(parts) if parts else t("trim_nothing")
-
-
-#: The context server's rerank statuses and the sentence each one owes the
-#: person.  The server's set is closed (`""` when the stage ran, then
-#: `unavailable`, `failed`, `empty`); a word outside it is a newer build's
-#: vocabulary, and the raw word is what the reader gets — see :func:`rerank`.
-_RERANK = {
-    "unavailable": "rerank_unavailable",
-    "failed": "rerank_failed",
-    "empty": "rerank_empty",
-}
-
-
-def rerank(status: str) -> str:
-    """A recall whose cross-encoder could not be used, and what that cost.
-
-    **An unknown status is drawn as its own word.**  It is a vocabulary this
-    build has no sentence for, and translating it into the generic failure
-    would report a verdict the event never carried — a newer server's word is
-    not a failure (SDD Appendix A, invariant 11: refuse, don't reinterpret).
-    """
-    key = _RERANK.get(status)
-    return t(key) if key is not None else status
 
 
 def interrupted() -> str:

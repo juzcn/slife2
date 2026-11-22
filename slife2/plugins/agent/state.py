@@ -183,8 +183,8 @@ class Loop:
     agent: str
     subagent: str
     model: str
-    #: The model's token window, for the per-turn prompt marker's percentage and
-    #: the automatic compaction's threshold.  Required: a conversation is only
+    #: The model's token window, for the automatic compaction's threshold and
+    #: `_context_rebuild`'s estimate.  Required: a conversation is only
     #: ever started on a model whose config entry states one.  Held with the rest
     #: of how this conversation reaches its model (see `accepts_images`): a model
     #: switch moves it, and a conversation whose model left the config keeps the
@@ -245,10 +245,10 @@ class Loop:
     #: rebuild takes back verbatim rather than reconstructing.
     #:
     #: **The ids have to describe a *prefix*, and that is the invariant the whole
-    #: count rests on.**  `rebuild_into` hands `len(messages) - covered` to the
-    #: store as "how many messages at the end no turn accounts for", and the store
-    #: re-appends `messages[-carried:]` — so an unbacked run that is not at the
-    #: end would be read off the wrong end of the list entirely.
+    #: count rests on.**  `_context_rebuild`'s body hands `len(messages) - covered`
+    #: to the store as "how many messages at the end no turn accounts for", and
+    #: the store re-appends `messages[-carried:]` — so an unbacked run that is not
+    #: at the end would be read off the wrong end of the list entirely.
     #:
     #: A turn is unbacked only while its write is *pending*: it was interrupted
     #: (the caller is gone) or its caller was cancelled during the save of a turn
@@ -329,12 +329,23 @@ class Loop:
     api: str = ""
     model_id: str = ""
     accepts_images: bool = True
+    #: The index in `messages` where this turn's opening sits.  **The record's
+    #: slice, and the prefix rule's boundary**, and the reason it is a field
+    #: rather than the local it used to be: `_context_rebuild` can replace the
+    #: historical prefix under a running turn, which moves the opening.  The
+    #: tool body updates this; `run_turn_into` slices the record from it.
+    turn_opening: int = 0
+    #: Whether this turn's `_context_rebuild` has run.  The automatic call is
+    #: once per turn, at the first boundary; after it the tool is the model's
+    #: to call.  Reset with `hidden` when a turn starts.
+    rebuilt: bool = False
     #: The last turn's last model call, in tokens — the figure the status bar
-    #: shows and the next turn's `[TURN-PROMPT:]` marker reports.  Set from the
-    #: restored last turn and after every turn; 0 for a conversation that has
-    #: not run one.  Not estimated from `messages`: what the bar shows is the
-    #: provider's count, and an estimate of the same list would be a second
-    #: figure that disagrees with it.
+    #: shows.  Set from the restored last turn and after every turn; 0 for a
+    #: conversation that has not run one.  Not estimated from `messages`: what
+    #: the bar shows is the provider's count, and an estimate of the same list
+    #: would be a second figure that disagrees with it.  **The model's figure is
+    #: `_context_rebuild`'s report**, computed from the rebuilt list after the
+    #: selection — this one is the previous call's and is not.
     context_tokens: int = 0
     #: The `_approve` calls this conversation is holding for an answer, by call
     #: id.  On the loop because a turn is what fills and empties it, and the

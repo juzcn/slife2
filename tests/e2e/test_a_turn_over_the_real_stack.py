@@ -104,7 +104,9 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
 
     assert answer.text == ANSWER
     assert answer.injected is False
-    assert events[0] == "ContextChosen", events
+    # The rebuild's harness pair is the first thing the turn does; its answer is
+    # the note that carries the decision (`MessageCutIn`), before any text.
+    assert events[0] == "MessageCutIn", events
     assert "TextDelta" in events and events[-1] == "TurnFinished"
     assert stack["provider"].chats == 2, stack["provider"].calls
     # **The agent server's own model tool crossed the hub**, which is the one
@@ -114,8 +116,13 @@ async def test_a_turn_runs_across_the_whole_stack_and_is_remembered(stack) -> No
         "provider"
     ].tool_names[1]
     # The model is the marker's only reader: the request carries it, across
-    # every process between the agent and the stub.
-    sent = stack["provider"].last_messages[-1]["content"]
+    # every process between the agent and the stub.  The turn's request ends
+    # with the rebuild's harness pair; the prompt is the last user message.
+    sent = [
+        message["content"]
+        for message in stack["provider"].last_messages
+        if message.get("role") == "user"
+    ][-1]
     assert sent.startswith(TURN_PROMPT_PREFIX), sent
     assert _prompt_words(sent) == "what is 6*7?"
 
@@ -161,10 +168,15 @@ async def test_a_second_turn_runs_on_the_first(stack) -> None:
     finally:
         await client.close()
 
-    assert stack["provider"].last_messages[-1]["role"] == "user"
-    assert (
-        _prompt_words(stack["provider"].last_messages[-1]["content"]) == "what number?"
-    )
+    # The request ends with the rebuild's harness pair; the turn's own message
+    # is the last *user* message before it.
+    users = [
+        message
+        for message in stack["provider"].last_messages
+        if message.get("role") == "user"
+    ]
+    assert users, stack["provider"].last_messages
+    assert _prompt_words(users[-1]["content"]) == "what number?"
     assert any(
         "remember the number 41" in json.dumps(message)
         for message in stack["provider"].last_messages[:-1]
@@ -235,8 +247,15 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     # And the tool's answer came back into the conversation: the third request
     # carries a `tool` message the loop built out of what the cabinet process
     # said.  The loop pairs it with the call by id, which is what the model
-    # needs to see which answer belongs to which request.
-    result = [message for message in provider.calls[2] if message.get("role") == "tool"]
+    # needs to see which answer belongs to which request.  The turn's own
+    # `_context_rebuild` pair is a tool message too, so the note is found by
+    # the id the model wrote.
+    result = [
+        message
+        for message in provider.calls[2]
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == "call_e2e_note"
+    ]
     assert len(result) == 1, provider.calls[2]
     assert result[0]["tool_call_id"] == "call_e2e_note", result[0]
     # The cabinet's own JSON, rendered by `as_tool_text` on its way into the

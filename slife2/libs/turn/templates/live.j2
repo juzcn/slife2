@@ -1,12 +1,20 @@
 ▸ Turn compaction
 
-Decide which messages this turn's later calls no longer need. The messages you
-name are left out of the model's context for the rest of this turn; keep what
-the work still needs and give up what it does not. Nothing is deleted: the turn
-log keeps every message, and the next turn starts from the full conversation.
-
 This turn is running against a limited context window. Current context:
 {{ usage }}.
+
+From the work in the conversation above, decide which messages this turn's
+later calls no longer need. The purpose is twofold: fewer tokens in every later
+call, and less context pollution from content that no longer bears on the
+work. The system leaves the messages you name out of the model's context for
+the rest of this turn: keep the context the work still depends on, and give up
+what it does not.
+
+Nothing is deleted. The turn log keeps every message, and the next turn starts
+from the full conversation. This is the turn's view, not the conversation's
+shape: the historical turns are `_context_rebuild`'s to edit, and a rebuild
+starts this view over. The system prompt and the turn's opening message are
+fixed.
 
 Each message above carries its live id ([M0], [M1], …). The ids exist only for
 this call, are not part of the conversation, and are stored nowhere. These are
@@ -29,12 +37,12 @@ Cases:
 
 1. An old tool exchange is spent — its call and all its results go together.
 
-   your answer: {"compact": [3, 4, 5]}
+     your answer: {"compact": [3, 4, 5]}
 
 2. A historical exchange no longer bears on the work.
 
-   your answer: {"compact": [1, 2, 3]}
+     your answer: {"compact": [1, 2, 3]}
 
 3. Nothing can go yet.
 
-   your answer: {}
+     your answer: {}

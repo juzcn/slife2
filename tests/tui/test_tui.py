@@ -31,7 +31,6 @@ from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.context import turn_failed_note
 from slife2.libs.turn.events import (
     PREVIEW_CHARS,
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ThinkingDelta,
@@ -468,15 +467,16 @@ async def test_final_answer_replaces_what_was_streamed() -> None:
 
 
 async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
-    """The drawn-prefix account's purpose, kept: a note closes a block inside
-    the answer that is still streaming, and the authoritative text covers what
-    that block held — so the final block writes only the remainder, and the
-    words appear once across the transcript rather than twice.
+    """A cut-in is a new call: the block after the note is its whole answer.
+
+    The note ends the iteration it arrived in, and the deltas after it belong to
+    the next call — whose authoritative text is drawn whole, not as the
+    remainder of a block the previous call had already closed.
     """
 
     def respond(prompt: str, on_event):
         on_event(TextDelta("The answer"))
-        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(MessageCutIn(text="note"))
         on_event(TextDelta(" is 42"))
         return "The answer is 42"
 
@@ -486,8 +486,8 @@ async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
         await settle(pilot, app)
         blocks = [widget.text for widget in app.query(AssistantMessage)]
 
-    assert blocks == ["The answer", " is 42"], (
-        "the closed block's prefix was drawn a second time"
+    assert blocks == ["The answer", "The answer is 42"], (
+        "the next call's answer is drawn whole after the cut-in"
     )
 
 
@@ -598,7 +598,7 @@ async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> Non
 
     def respond(prompt: str, on_event):
         on_event(TextDelta("Let me check"))
-        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(MessageCutIn(text="note"))
         on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
         on_event(
             ToolCallFinished(
@@ -635,7 +635,7 @@ async def test_a_cut_in_does_not_trim_the_final_answer() -> None:
 
     def respond(prompt: str, on_event):
         on_event(TextDelta("Let me check"))
-        on_event(ContextChosen(kept=3, recalled=1))
+        on_event(MessageCutIn(text="note"))
         on_event(MessageCutIn(text="also look at the logs", channel="wechat"))
         on_event(TextDelta("Let me check the results: 42"))
         return "Let me check the results: 42"
@@ -1764,18 +1764,11 @@ async def test_a_cancelled_turn_leaves_no_parked_plan_write() -> None:
     assert not view.display
 
 
-def context_of(kept: int, recalled: int, rerank: str = "", discriminator: str = ""):
-    """A scripted client whose turn reports the discriminator's answer first."""
+def rebuild_of(report: str):
+    """A scripted client whose turn carries the rebuild's answer first."""
 
     def respond(prompt: str, on_event):
-        on_event(
-            ContextChosen(
-                kept=kept,
-                recalled=recalled,
-                rerank=rerank,
-                discriminator=discriminator,
-            )
-        )
+        on_event(MessageCutIn(text=report))
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
@@ -1791,89 +1784,41 @@ def context_of(kept: int, recalled: int, rerank: str = "", discriminator: str = 
     return respond
 
 
-async def test_the_discriminators_decision_is_reported_under_the_prompt() -> None:
-    """One model call decides the context, and this is the only sight of it.
+async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
+    """The harness pair's answer is the model's and the person's one line.
 
-    The note is `add_note`'s, so it carries the class the restored history's line
-    carries — the same shape and the same dim styling, which is the point: both
-    say what the harness did, and a reader has one kind of line to learn.  It
-    lands between the prompt and the answer because that is what it is about:
-    the context the answer was written from, not a comment on how it went.
+    It lands between the prompt and the answer because that is what it is
+    about: the context the answer was written from, not a comment on how it
+    went.  The counts and the estimate are the tool's own report.
     """
-    app = window(FakeAgentClient(context_of(12, 3)))
+    report = (
+        "Rebuilt the context: kept 12 turn(s), recalled 3; context ~48,000 "
+        "(4.8%). The turn log keeps every turn."
+    )
+    app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         blocks = [widget.classes for widget in app.query_one(ChatView).children]
         text = shown(app)
 
-    assert "[kept 12 turns, recalled 3]" in text
+    assert report in text
     assert "user-message" in blocks[0]
-    assert "system-message" in blocks[1], "the line the restore writes is this line"
-    assert "assistant-message" in blocks[2]
+    assert "system-message" in blocks[1], "the note is the harness's line"
+    assert "assistant-message" in blocks[-1]
 
 
-async def test_the_context_note_is_spelled_the_way_the_restored_one_is() -> None:
-    """`1 turn`, not `1 turns` — one phrase, written in one place.
-
-    A reader who has learned to read `[restored 14 turns]` should not meet
-    `1 turns` in the note that sits beside it.
-    """
-    app = window(FakeAgentClient(context_of(1, 0)))
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "hi")
-        assert "[kept 1 turn, recalled 0]" in shown(app)
-
-
-async def test_a_reranker_that_cannot_be_used_is_reported_once_per_change() -> None:
-    """A provider with no cross-encoder is news once, not a line per turn.
-
-    The status rides every `ContextChosen`; a view that drew each one would put
-    the same sentence before every turn.  The note is the change, so the first
-    turn says it and the second — same status — does not.
-    """
-    app = window(FakeAgentClient(context_of(2, 1, rerank="unavailable")))
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "hi")
-        first = shown(app)
-        await submit(pilot, "again")
-        second = shown(app)
-
-    assert "rerank off — the recall keeps its fused order" in first
-    assert second.count("rerank off") == 1, "the same status is not news twice"
-
-
-async def test_an_unknown_rerank_status_is_drawn_as_its_own_word() -> None:
-    """A newer server's vocabulary is not a failure verdict.
-
-    The status set is closed; a word outside it is one this build has no
-    sentence for, and the generic failure would report a verdict the event
-    never carried.  The raw word reaches the reader instead (SDD Appendix A,
-    invariant 11: refuse, don't reinterpret).
-    """
-    app = window(FakeAgentClient(context_of(2, 1, rerank="throttled")))
+async def test_a_failed_discriminator_is_reported_in_the_rebuilds_answer() -> None:
+    """No decision is a fact the model reads, not a zero it has to explain."""
+    report = (
+        "No rebuild: the discriminator did not answer (timeout); the turn "
+        "continues on the context it had; context ~1,000 (1.0%)."
+    )
+    app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         text = shown(app)
 
-    assert "[throttled]" in text, "the server's own word, verbatim"
-    assert "rerank failed" not in text, "an unknown word is not a failure"
-
-
-async def test_a_failed_discriminator_reads_as_a_failed_recall_not_a_zero() -> None:
-    """**The count and the word are different facts.**
-
-    `recalled 0` is what a recall that found nothing reports; a discriminator
-    that never answered asked for no recall at all, and drawing the zero left
-    the person unable to tell a quiet log from a broken decision.  The reason
-    stays in the server's log; the line says what it cost.
-    """
-    app = window(FakeAgentClient(context_of(29, 0, discriminator="timeout")))
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "hi")
-        text = shown(app)
-
-    assert "[kept 29 turns, recall failed]" in text
-    assert "recalled 0" not in text
+    assert "the discriminator did not answer (timeout)" in text
 
 
 async def test_the_restored_history_says_how_much_came_back() -> None:

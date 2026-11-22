@@ -1635,6 +1635,7 @@ REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "_func_tool_unload",
     "_check_new_input",
     "_turn_compact",
+    "_context_rebuild",
     "skill_use",
     "check_async",
     "cancel_async",

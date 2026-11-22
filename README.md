@@ -542,8 +542,8 @@ context:
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, _turn_compact, skill_use, check_async,
-             cancel_async, turn_read]                # and never evicted
+             _check_new_input, _turn_compact, _context_rebuild, skill_use,
+             check_async, cancel_async, turn_read]    # and never evicted
 
 tool_result:
   bytes: 32768               # per-result budget; minimum 2048
@@ -607,15 +607,20 @@ There is no approval gate before a write.
 
 ### Conversation and memory
 
-A conversation does not accumulate an unbounded context. Before each turn,
-`slife2-context` makes one model call that decides which turns to keep and which
-to recall from the turn log; the turn runs on the two selections in time order.
-If a recall matches more than fits, only what fits is returned. A failed decision
-keeps the context in hand; a missing turn store fails the turn.
+A conversation does not accumulate an unbounded context. At the first boundary
+of each turn, the harness calls `_context_rebuild`, which makes one model call
+that decides which historical turns to keep and which to recall from the turn
+log; the turn runs on the two selections in time order, followed by the turn
+itself. The turn running is never part of the selection. The model can call
+`_context_rebuild` itself when the work has moved, and its answer carries an
+estimate of the context the turn runs on from there. If a recall matches more
+than fits, only what fits is returned. A failed decision keeps the context in
+hand; a missing turn store fails the turn.
 
 A turn that grows past `agent.compact_at` of the model's window (default 0.9)
-also drops what it no longer needs from its own model context. The turn log keeps
-every message, and the next turn starts from the full conversation.
+also drops what it no longer needs from its own model context. `_turn_compact`
+is a view, not an edit: the turn log keeps every message, the next turn starts
+from the full conversation, and a `_context_rebuild` starts the view over.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary
@@ -633,10 +638,10 @@ only.
 `browsed` and `limit` beside it. `confidence` is `sure`, `weak` or `none` on a
 ranked page and `null` on a browse.
 
-Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now`, `token-usage`
-and, when the conversation has one, `plan`; it is prompt text and is not stored.
-Each turn in a rebuilt context carries a `[TURN:{…}]` footnote naming its id,
-channel, and span.
+Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and, when the
+conversation has one, `plan`; it is prompt text and is not stored. Each turn in
+a rebuilt context carries a `[TURN:{…}]` footnote naming its id, channel, and
+span.
 Capitalized markers are harness annotations; a marker that reads as a word, such
 as `[Wechat:{…}]`, was written by a sender and is stored with the message.
 

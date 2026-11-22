@@ -42,7 +42,6 @@ from textual.worker import Worker
 
 from slife2.libs.harness.i18n import t
 from slife2.libs.turn.events import (
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ThinkingDelta,
@@ -278,8 +277,7 @@ class WatchScreen(Screen[None]):
                 # screen has none (`slife2.tui.draw` says the same on its side).
                 return
             case (
-                ContextChosen()
-                | TextDelta()
+                TextDelta()
                 | ThinkingDelta()
                 | ToolCallStarted()
                 | ToolCallFinished()

@@ -17,7 +17,6 @@ from slife2.libs.model.wire import decode_chunk, encode_chunk
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
     PREVIEW_CHARS,
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ToolCallFinished,
@@ -40,14 +39,6 @@ from slife2.libs.turn.messages import (
 pytestmark = pytest.mark.unit
 
 EVENTS = [
-    # The discriminator's answer, which arrives before any of the rest and is
-    # the only event a turn has that is about the context rather than the work.
-    ContextChosen(kept=12, recalled=3),
-    # The same event with the rerank stage's report — the key is omitted when
-    # empty, so both shapes have to round trip.
-    ContextChosen(kept=12, recalled=3, rerank="unavailable"),
-    # And with the discriminator's: no decision, so the recall never ran.
-    ContextChosen(kept=12, recalled=0, discriminator="failed"),
     # The model's list against the catalogue: both halves on one ask.
     ToolsCounted(loaded=24, total=253),
     # One model call's own usage, the figure the bar follows during a turn.
