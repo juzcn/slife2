@@ -566,24 +566,24 @@ def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
     return prefixed
 
 
-def live_instruction(selectable: Sequence[int], usage: str) -> str:
-    """What the live selector's tool says, with the ids it may drop.
+def live_instruction(usage: str) -> str:
+    """What the live selector's tool says: the figure and the candidate rule.
 
-    The ids are the *candidates* — every message but the fixed ones — and they
-    are the copy's numbering, not the record's: `with_message_id` writes it into
-    the one request, and nothing else ever sees it.  `usage` is the same figure
-    the turn prompt and the status bar show, measured against the view the
-    selector is deciding about — the model needs to know how full the window is
-    to know how much it has to give up.  The legality rule is in the tool text
-    rather than in the harness: a model that keeps calls and results together
-    writes a history every provider accepts, and a system that repaired its
-    answer would be making a decision the model was asked to make.
+    **The ids are on the messages, not in the instruction.**  `with_message_id`
+    prefixes every message of the one request with its copy number, and the
+    template states the fixed two and the legality rule in prose.  A list of
+    the candidates here would be a second spelling of the same set, growing
+    with the view on the call with the least room to spare.
+
+    `usage` is the same figure the turn prompt and the status bar show, measured
+    against the view the selector is deciding about — the model needs to know
+    how full the window is to know how much it has to give up.  The legality
+    rule is in the tool text rather than in the harness: a model that keeps
+    calls and results together writes a history every provider accepts, and a
+    system that repaired its answer would be making a decision the model was
+    asked to make.
     """
-    return render_instruction(
-        LIVE_TEMPLATE,
-        selectable=", ".join(str(index) for index in selectable),
-        usage=usage,
-    )
+    return render_instruction(LIVE_TEMPLATE, usage=usage)
 
 
 def parse_live(text: str) -> tuple[list[int] | None, str]:

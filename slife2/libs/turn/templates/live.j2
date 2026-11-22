@@ -16,20 +16,17 @@ what it does not.
 Nothing is deleted: every message stays in the conversation, and the next turn
 — where there is one — starts from the full list. This is the turn's view, not
 the conversation's shape: the historical turns are `_context_rebuild`'s to
-edit, and a rebuild starts this view over. The system prompt and the turn's
-opening message are fixed.
+edit, and a rebuild starts this view over.
 
 Each message above carries its live id ([MESSAGE:{"id": n}]). The ids exist
 only for this call, are not part of the conversation, and are stored nowhere.
-These are the ids you may name:
+The system message and the turn's opening message are fixed; every other
+numbered message is one you may name.
 
-{{ selectable }}
-
-Every other message is fixed. A tool exchange goes as a whole: an assistant
-message that asked for tools goes together with all of its results, and a tool
-result goes together with the assistant message that asked for it. A call
-without its answer, or an answer without its call, is a history no provider
-accepts.
+A tool exchange goes as a whole: an assistant message that asked for tools goes
+together with all of its results, and a tool result goes together with the
+assistant message that asked for it. A call without its answer, or an answer
+without its call, is a history no provider accepts.
 
 Cases:
 

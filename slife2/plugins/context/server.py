@@ -358,10 +358,14 @@ async def _ask_selector(
 
     **The ids are written here and nowhere else.**  `with_message_id` prefixes
     each message of this request; the record, the turn's saved row and every
-    ordinary call keep the list they had.  The system message names the
-    candidates, the legality rule and the context figure the caller measured —
-    the same figure the status bar and the turn prompt show.  The call and
-    repair rules are `_ask_tool`'s.
+    ordinary call keep the list they had.  The instruction states the fixed two,
+    the legality rule and the context figure the caller measured — the same
+    figure the status bar and the turn prompt show.  The call and repair rules
+    are `_ask_tool`'s.
+
+    `selectable` is the seam's candidate set, handed to an injected selector
+    so a test can script an answer against it; the instruction does not list it,
+    because every message already carries its id.
     """
     numbered = [
         decisions.with_message_id(message, index)
@@ -378,7 +382,7 @@ async def _ask_selector(
         tool_name=decisions.SELECTION_TOOL,
         tool_text=decisions.SELECTION_TOOL_TEXT,
         parameters=decisions.LIVE_REPLY,
-        instruction=decisions.live_instruction(selectable, usage),
+        instruction=decisions.live_instruction(usage),
         kind="compactor",
         previous=previous,
         repair=repair,

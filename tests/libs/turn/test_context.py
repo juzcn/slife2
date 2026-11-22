@@ -135,11 +135,19 @@ def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
     assert got["content"][1] == {"type": "text", "text": "look"}
 
 
-def test_the_live_instruction_names_the_candidates() -> None:
-    text = live_instruction([1, 4], usage="12,345 (1.2%)")
+def test_the_live_instruction_points_at_the_numbered_messages() -> None:
+    """The ids travel on the messages; the instruction names the fixed two.
 
-    assert "1, 4" in text
+    The candidate list was repeated here.  At a full window that is a second
+    spelling of the same ids, growing with the view on the call with the least
+    room to spare, so the numbered copy is the one place they are written.
+    """
+    text = live_instruction(usage="12,345 (1.2%)")
+
     assert "12,345 (1.2%)" in text
+    assert "The system message and the turn's opening message are fixed" in text
+    assert "numbered message is one you may name" in text
+    assert "These are the ids you may name" not in text
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
     assert "goes as a whole" in text, "the legality rule is in the prompt"
 
