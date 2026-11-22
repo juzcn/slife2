@@ -264,10 +264,17 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             raise InvalidTimeBound(_bound_error(role, value)) from None
         try:
             resolved = at(moment)
-        except (OverflowError, ValueError):
+        except (OverflowError, OSError, ValueError):
             # The offset rewrite can carry the instant past the calendar's end
             # (`9999-12-31T23:59:59+00:00` in a zone ahead of UTC), which is a
             # bound this build cannot place for the same reason as the above.
+            # **`OSError` is the same overflow, on the platforms that say it
+            # that way**: `astimezone` reaches the C library to restate the
+            # moment, and a moment past the calendar's end is a failure the C
+            # library may report as `OSError` rather than as the arithmetic's
+            # `OverflowError` — measured on Windows as `[Errno 22]`.  Both are
+            # this bound being unplaceable, and `can_place` promises to answer
+            # that rather than raise (SDD Appendix C).
             raise InvalidTimeBound(_bound_error(role, value)) from None
 
     return resolved
