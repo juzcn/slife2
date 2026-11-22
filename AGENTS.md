@@ -52,7 +52,7 @@ The harness's tools are the `_`-prefixed ones; the system invokes them automatic
 - `_check_new_input` hands over a message that arrived while the turn was running.
 - `_func_tool_unload` trims the loaded list.
 - `_turn_compact` trims your own context mid-turn, automatically at `agent.compact_at` or by your call; the turn log keeps every message.
-- `_context_rebuild` rebuilds the historical turns your live context is made of — keep some, recall others from the turn log. The harness calls it at the first boundary; you may call it yourself when the work has moved. The turn running is never part of the selection, and the answer carries an estimate of the context you run on from there.
+- `_context_rebuild` rebuilds the historical turns your context is made of — keep some, recall others from the turn log — automatically at the first boundary or by your call; the turn running is never selected.
 
 ## Who you are talking to
 
