@@ -310,6 +310,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
 | **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation and the turn. |
 | **Portability** | Tested on Windows, macOS, and Linux; the runtime has no POSIX-only dependency beyond a documented fallback. |
+
 ## 3. Plugin contract
 
 ### 3.1 Protocol and transport
@@ -810,6 +811,7 @@ implementation.
 picker; a stopped task has no events left to replay. Watching a task starts no
 turn and does not make it `finished` — the answer still reaches the conversation
 by hand-over.
+
 ## 5. Turn execution
 
 ### 5.1 Loop contract
@@ -980,8 +982,8 @@ The plan is not a turn and is not in the context store. Before every turn the
 agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
 removed before the turn is saved and re-derived from the file every turn: a
 rebuild chooses turns and never decides about the plan, and the prompt cache's
-prefix is untouched. A task runs on the maker's own conversation and sees the
-same plan.
+prefix is untouched. A task sees the same plan: it reads the conversation's file,
+though its context is a clone (§9.3).
 
 The harness stores, validates, replays and draws; it never derives a status,
 maps a tool call to an item, or marks one stale. The status is the model's
@@ -1416,6 +1418,7 @@ server outside the loop's backend. One line is logged per call with the
 breakdown and the call's `elapsed`, because a cache hit rate distinguishes a
 rebuild from an append. A call that raises logs `stream_chat_failed` with the
 provider, model, conversation and kind before the error propagates.
+
 ## 7. Tool system
 
 ### 7.1 Hub
@@ -1481,8 +1484,10 @@ Names are rewritten once, at the hub.
   name may contain.
 - A plugin's own tool keeps its bare name. Which plugin serves a tool is a fact
   about the system, not something the model needs in order to call it.
-- All of our tools share one namespace. Two plugins cannot offer the same name;
-  the catalogue refuses rather than resolving silently.
+- All tools share one namespace. Any two that would present one name — two
+  plugins, a source colliding with another, or two remote names the provider's
+  alphabet makes alike — are refused by the catalogue rather than resolved
+  silently.
 - A name from an external source is not trusted: `model_name` derives it,
   `sanitise` applies the provider's alphabet, and the separator makes it
   reversible.
@@ -1927,8 +1932,12 @@ rank against the same model and agree about what an embedding is.
 
 The server holds the provider key for the same reason the model servers do.
 Embeddings are a hard dependency: a turn is written with its vector in one
-transaction, so a save that cannot embed stores nothing. That is why there is no
-background drainer and no "index not ready" state.
+transaction, so a save that cannot embed stores nothing. There is no background
+drainer and no eventual-consistency mode: the context plugin checks a turn file
+once before serving it, and `index_status` names a partial sync, a missing
+vector, another model's identity, or a recorded vector index whose table is gone.
+The catalogue and the cabinet ask the same question at their searches, which
+raise rather than answering keyword-only (Appendix C).
 
 The SDK's own retries are zero (`timeouts.stream.retries`): a request that
 reached the provider may have been billed, and a 429 is the caller's to pace.
@@ -1951,6 +1960,7 @@ invalidates the index identity. The vector index is rebuilt whole on the next
 start, because vectors from two models cannot be ranked against each other. The
 turn store's text contract is `EMBED_TEXT_VERSION`, folded into the identity
 beside the model and width.
+
 ## 9. Inbound work
 
 Four kinds of work reach a conversation without a person typing it: WeChat
@@ -2163,8 +2173,8 @@ a profile message.
 
 `plugins/agent_task/` runs one turn of the caller's conversation on a
 description, and the answer comes back as a message. It is a separate mechanism
-from a subagent: it runs on the maker's own context, has no address of its own,
-records nothing, and accepts no second message.
+from a subagent: it runs on a clone of the maker's context, has no address of its
+own, records nothing, and accepts no second message.
 
 Properties:
 
@@ -2385,7 +2395,8 @@ to an agent with no window is refused by name (`NO_WINDOW`).
   with the opening history — a watcher reads it from its `Snapshot` — and
   updated by a `plan_write` call that succeeded. Its four statuses are the
   model's claims, not the harness's measurements, so `done` is not drawn in the
-  colour a tool panel's verified result wears.
+  colour a tool panel's verified result wears. A plan longer than the strip's
+  cap scrolls inside it.
 - **A question is a strip above the plan**, not a row in the transcript: an
   undecided picker (`Ctrl+S`, `Ctrl+O`) is current state, so it stays fixed
   while the loop keeps writing, and both strips stay visible. The choice writes
@@ -2424,7 +2435,9 @@ ran.
 that cannot be written means no client saw the question, and a client that hears
 it and never answers is bounded by the approval deadline; both refuse the call
 and leave the turn running. The row is mounted on the screen in front, so a
-watch screen does not hide the question it covers.
+watch screen does not hide the question it covers. **A turn's end settles the
+row it left pending** — a finish, a cancellation and a failure alike — because
+no turn is left to answer it.
 
 ### 10.4 Interface language
 
@@ -2486,6 +2499,7 @@ answer to everything folded into that turn, so no assistant text can be
 attributed to one injected prompt. The TUI road therefore asks through a task's
 named delivered message, and the A2A road's `task_response` is the per-request
 completion.
+
 ## 11. Configuration and environment
 
 ### 11.1 Configuration file
@@ -2956,8 +2970,8 @@ CI runs on Ubuntu, macOS, and Windows with Python 3.13: a wheel build, an
 assertion that the interpreter can load SQLite extensions, lint and format
 checks, type checking, the fast lane, and the e2e lane.
 
-The suite is the gate. Both lanes pass before a change is done. A bug found in
-the field arrives as a test that fails without the fix.
+The suite is the gate; both lanes pass before a change is done (Appendix A,
+invariant 13).
 
 ## 14. Open issues and deferred capabilities
 
@@ -3129,7 +3143,7 @@ The four shapes an undeclared fallback takes:
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
 | A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |
-| A catalogue's or cabinet's vector table is absent and **no index was ever recorded** (a corpus nobody has embedded under this model) | The meaning leg answers empty; the keyword leg still answers | The semantic half of that search until the index is built | A recorded identity whose table is gone, which raises; a malformed, wrong-width or corrupt table, which raises; the turn store, which raises on its own | `sync`/`index_status` reports the incomplete index |
+| A catalogue's or cabinet's vector table is absent and **no index was ever recorded** (a corpus nobody has embedded under this model) | The meaning leg answers empty; the keyword leg still answers | The semantic half of that search until the index is built | A recorded identity whose table is gone, which raises or is reported (the turn store's `index_status`); a malformed, wrong-width or corrupt table, which raises | `sync`/`index_status` reports the incomplete index |
 | The async registry is over `MAX_ASYNC_TASKS` with only finished undelivered tasks left | Drop the oldest finished tasks, their unread results with them | The one copy of a background result nobody read | Running tasks (never dropped); delivered results (text already cleared) | `check_async`/`cancel_async` refuse the id, naming the drop as a cause |
 | `wslinfo --networking-mode` cannot run | Mirrored mode is guessed from `/sys/class/net/loopback0` | Certainty about WSL networking without `wslinfo` | A platform that answers (its answer is used) | The offset decision the guess feeds |
 | A WeChat login save fails at scan confirmation | Keep the in-memory login and start the poll loop; the next cursor write saves it again | The login's on-disk record until that write (a restart before then needs a new scan) | A save that lands (the normal path) | A warning naming the session file |

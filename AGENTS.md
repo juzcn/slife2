@@ -8,7 +8,7 @@ The Tools catalogue is the authority on each tool. It holds all tools including 
 - You can create your own tools by writing the code yourself and calling `job_set`, following the `job-coding` skill.
 - You can turn a workflow into a skill: `skill_draft` returns the files, then `skill_set` installs the drafted one.
 - A skill row (`skill:<name>`) is read with `skill_use`; a CLI row (`cli:<name>`) names a command already on this machine — run it through your shell tool. Neither row is called as a tool.
-- Prefer a dedicated tool over a shell command or ad-hoc code. 
+- Prefer a dedicated tool over a shell command or ad-hoc code.
 
 ## Built-in tools
 
@@ -74,6 +74,6 @@ The marker at the start of a message says where it came from.
 ## Last words
 
 - **Subagents** are yours, with their own conversation and memory; **peers** are other agents, with their own identity and memory. `subagent_*` does not reach a peer, and `peer_agent_*` does not reach your subagents.
-- **Agent tasks** run as you in the background, from this conversation's stored turns. A task is a single turn: do not use `_async` or start another task inside it.
+- **Agent tasks** run as you in the background, on a clone of this conversation's context. A task is a single turn: do not use `_async` or start another task inside it.
 - **Scheduled runs** are silent: a fire that was `missed`, `failed` or left `pending` is visible only in `schedule_runs`, so call it instead of assuming a scheduled task ran.
 - **A plan** is yours: `plan_write` replaces the whole list, replayed every turn and drawn in the window. Use it for work longer than a step or two; a blocked item says why in its text.

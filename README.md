@@ -347,6 +347,7 @@ stacks share it. Mirrored mode makes the Windows and WSL loopbacks one, so a WSL
 stack on the default ports would be visible to — and silently reused by — a
 Windows instance. `wsl_port_offset` changes the shift: default 100, `0` disables
 it, and it is ignored outside mirrored mode.
+
 ## Using the terminal UI
 
 ### Keys
@@ -369,11 +370,11 @@ tokens arrive; sending a message returns it to the end.
 
 ### Sending messages
 
-A message sent while a turn is running is queued; the running turn finishes,
-then the queued message runs. The status bar shows the queue depth. `Esc`
-interrupts the running turn but leaves the queue intact. A message that arrives
-while a turn is running — typed, handed over by another channel, or input to a
-headless window — is delivered to that turn at the next iteration boundary.
+A message sent while a turn is running waits in the queue. The running turn
+takes it at its next iteration boundary and folds it into that turn; a message
+the turn does not reach runs as its own turn when its place comes. The status
+bar shows the queue depth. `Esc` interrupts the running turn but leaves the
+waiting messages intact.
 
 ### The plan
 
@@ -381,7 +382,8 @@ The model can keep a plan for the work in front of it. Each item is one line of
 text with a status — `pending`, `active`, `done` or `blocked` — and the model
 writes the whole list with `plan_write`. The list rides the `[TURN-PROMPT:{…}]`
 marker at the start of every turn, so a context rebuild cannot drop it, and the
-strip above the prompt shows it while there is one. The statuses are the model's
+strip above the prompt shows it while there is one, scrolling when the plan is
+longer than the strip. The statuses are the model's
 own claims, not the harness's observations: nothing in slife2 derives one from a
 tool call. The plan is stored as `plan.yaml` in the conversation's own directory;
 an empty write removes it.
@@ -598,8 +600,7 @@ caller is told why.
 `rest-api` and `cli`, read the matching `*_get` first: it returns the whole
 object, `*_set` takes it back with every field required, and a field left out is
 a schema error rather than a removal. `set_enabled` changes only `enabled`.
-There is no approval gate before a write; in particular, `mcp_set` with a
-`command:` records a program slife2 will start.
+There is no approval gate before a write.
 
 ## Capabilities
 
@@ -669,14 +670,17 @@ yet"; retry it in a few seconds rather than searching for a replacement.
 A restart restores what was left: the conversation's context, and the tool list
 as it stood. The loaded set lives in the catalogue, not in a process; only a
 change to `tool_load.autoload` alters it, and that only adds. The list is bounded
-by `tool_load.threshold` (default 100). Over the limit, the least recently
-called tools are unloaded; nothing in `tool_load.autoload` is ever evicted, and
+by `tool_load.threshold` (default 100). Over the limit, the tools least recently
+used or loaded are unloaded; nothing in `tool_load.autoload` is ever evicted, and
 the model cannot unload one of those names either. Removing a name from the list
 does not unload it: it only stops being protected. The trim happens at a turn
 boundary and is written into the conversation as a tool call and its result.
 
 Tool names: a tool from an `mcp:` entry is `{server}__{tool}`, for example
-`arxiv__arxiv_search_papers`; a plugin's own tools use bare names.
+`arxiv__arxiv_search_papers`; a plugin's own tools use bare names. Two tools
+that would present one name — another source's, or two remote names that differ
+only in characters the provider's alphabet replaces — are refused at the
+source; one never silently shadows the other.
 
 A tool result is a JSON object, except for the two answers whose text is the
 thing itself: `_check_new_input` returns a person's message verbatim, and

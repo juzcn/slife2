@@ -104,10 +104,6 @@ the container.
   basic turn needs `DEEPSEEK_API_KEY` (the default chat provider) and
   `SILICONFLOW_API_KEY` (the default embedding provider): every turn is
   embedded before it is saved, so a missing embedding key fails the turn.
-- **Keys are passed through the environment** (see Credentials above); a
-  mounted `slife2.yaml` whose values are literals is the other supported
-  source. The build runs `scripts/install.sh`, whose log lists the credential
-  names.
 - The `slife2` command in the image is the checkout's `.venv/bin/slife2`; the
   installer's `uv run slife2` is equivalent.
 - Every enabled `mcp:`/`rest-api:` source is **installed** at build time by
