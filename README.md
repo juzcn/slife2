@@ -621,8 +621,8 @@ the prompt and the request's `max_tokens` against one window, so the cap is
 `context.ceiling` of the window minus that completion request. A selection
 heavier than the cap — including one a collapse or restart restored — is cut
 from its oldest turns until it fits, and the answer's `fitted` count says how
-many. A failed decision keeps the context in hand; a missing turn store
-fails the turn.
+many. A failed decision keeps the context in hand and is not asked again that
+turn; a missing turn store fails the turn.
 
 `_context_rebuild` and `_turn_compact` are the two decision tools: the harness
 asks `decide` / `select_live` for the arguments and calls the tool with them,
@@ -631,13 +631,17 @@ failure is a tool error the agent reads and can correct.
 
 A turn that grows past `agent.compact_at` of the prompt budget (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`
-is a view, not an edit: the live view annotates each message with its id
-(`[MESSAGE:{"id": …}]`), so the model can name the ids to drop itself, and the
-harness's automatic call asks the selector first; the answer says how many left. A selection that
-names an id the view does not offer or splits a tool call from its results is
-refused with the reason, so the model can correct it while the view stays
-whole. The turn log keeps every message, the next turn starts from the full
-conversation, and a `_context_rebuild` starts the view over.
+is a view, not an edit: the live view annotates the person's messages and the
+tool results with their ids (`[MESSAGE:{"id": …}]`), so the model can name the
+ids to drop itself, and the harness's automatic call asks the selector first;
+the answer says how many left. A selection that names an id the view does not
+offer is refused with the reason, so the model can correct it while the view
+stays whole; a tool exchange named in part goes as a whole, call and results
+together. The turn log keeps every message, the next turn starts from the full
+conversation, and a `_context_rebuild` starts the view over. A decision that
+keeps everything or fails stops the automatic pass for the rest of the turn;
+the model can still call `_turn_compact` itself, and a later drop resumes the
+pass.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary

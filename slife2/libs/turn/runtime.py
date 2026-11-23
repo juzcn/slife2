@@ -55,6 +55,7 @@ from slife2.libs.host.config import (
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import ConversationId, conversation_key
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     close_server,
     open_server,
     tool_payload,
@@ -145,11 +146,12 @@ class Rebuilt:
     #: 0.  The harness's edit, named by the report rather than folded into
     #: `kept`: the window's bound is not a selection the model made.
     fitted: int = 0
-    #: The tool arguments the decision used: `{}` when there was no decision
-    #: or it asked for nothing, otherwise `context`/`recall` as the model would
-    #: have written them.  The pair `_context_rebuild` writes carries these, so
-    #: the model reads the selection rather than an empty call.
-    selection: dict[str, Any] | None = None
+    #: Which no-op the answer was, when nothing changed: `"asked"` (the decision
+    #: wants exactly what is in hand), `"recalled"` (a recall ran and found
+    #: nothing), `"unknown"` (a keep-list naming no turn in hand) or
+    #: `"unfetchable"`.  `""` on a changed answer.  The report names it so four
+    #: different facts are not one "unchanged" sentence.
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -283,7 +285,9 @@ def selection_from_arguments(arguments: Any, field: str) -> dict[str, Any]:
     them.
     """
     if isinstance(arguments, dict):
-        return arguments if arguments else {field: "the decision returned an empty object"}
+        return (
+            arguments if arguments else {field: "the decision returned an empty object"}
+        )
     if isinstance(arguments, str) and arguments:
         try:
             parsed = json.loads(arguments)
@@ -295,6 +299,21 @@ def selection_from_arguments(arguments: Any, field: str) -> dict[str, Any]:
             return {field: "the decision returned an empty object"}
         return {field: arguments}
     return {field: "the decision returned no arguments"}
+
+
+def measured_tokens(live: AgentLoop | None, fallback: int) -> int:
+    """The newest measured call's size, or the last saved figure when none measured.
+
+    **One expression for both tools and both servers.**  `AgentLoop.last_usage`
+    is reset to zero when a turn opens, so a turn that has not completed a call
+    yet — or one whose provider reported no usage — has no figure of its own.
+    `fallback` is the conversation's last saved measurement, which is what the
+    status bar shows until a call replaces it.  A decision that showed `0` there
+    would be reading a context the conversation does not have.
+    """
+    if live is not None and live.last_usage.total_tokens:
+        return live.last_usage.total_tokens
+    return fallback
 
 
 class TurnRuntime:
@@ -612,6 +631,49 @@ class TurnRuntime:
             )
         return Decided(arguments=arguments, decision=decision)
 
+    async def rebuild_arguments(
+        self,
+        identity: ConversationId,
+        messages: list[Message],
+        model: str,
+        *,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+    ) -> dict[str, Any]:
+        """The first boundary's `_context_rebuild` arguments — asked once.
+
+        **The decision is asked before the tool is called**, so the pair the
+        loop writes carries the selection from the start (SDD §5.3).  A
+        provider failure is carried into the arguments as the failure's own
+        words (`failure_text`), so the tool refuses them and the agent reads a
+        tool error naming what went wrong rather than an empty call.
+
+        **One rule for the agent, its subagents and an agent task.**  The two
+        servers call this instead of each shaping the failure's sentence; a
+        second copy is how one of them ends up saying something the other does
+        not.  A payload this build cannot read is not a provider failure — it is
+        a context store from another build, and it fails the turn
+        (`UnreadableAnswer`, SDD Appendix C).
+        """
+        try:
+            decided = await self.decide_context(
+                identity,
+                messages,
+                model,
+                context_tokens=context_tokens,
+                prompt_window=prompt_window,
+            )
+        except UnreadableAnswer:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a fallback, not a failure mode
+            logger.info(
+                "context_rebuild_skipped reason=%s", decisions.failure_text(exc)
+            )
+            return {"mode": "the decision call failed: " + decisions.failure_text(exc)}
+        if decided.decision:
+            return {"mode": "the decision model did not answer: " + decided.decision}
+        return selection_from_arguments(decided.arguments, "mode")
+
     async def rebuild(
         self,
         identity: ConversationId,
@@ -697,12 +759,10 @@ class TurnRuntime:
                 "report the decision's status",
                 payload,
             )
-        used = payload.get("selection")
-        if used is None:
-            used = selection or {}
-        if not isinstance(used, dict):
+        reason = payload.get("reason")
+        if not isinstance(reason, str):
             raise unreadable(
-                "the context store", "return the selection it used", payload
+                "the context store", "report which no-op it chose", payload
             )
         return Rebuilt(
             messages=rebuilt,
@@ -716,7 +776,7 @@ class TurnRuntime:
             rerank=rerank,
             decision=decision,
             fitted=fitted,
-            selection=used,
+            reason=reason,
         )
 
     # ── the turn's own compaction ────────────────────────────────────────
@@ -772,6 +832,47 @@ class TurnRuntime:
             )
         return LiveChoice(arguments=arguments, decision=decision)
 
+    async def compact_arguments(
+        self,
+        identity: ConversationId,
+        view: list[Message],
+        selectable: list[str],
+        model: str,
+        *,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+    ) -> dict[str, Any]:
+        """The automatic `_turn_compact` arguments — asked once.
+
+        **The selector is asked before the tool is called**, for
+        `rebuild_arguments`' reason: the pair carries the selection from the
+        start, and a failure is carried as its own words so the tool refuses it
+        and the agent reads a tool error naming what went wrong.  A payload this
+        build cannot read raises `UnreadableAnswer` and fails the turn.
+
+        `view` is the projection the caller built with `compact.due`, and
+        `selectable` is its candidate set — the ids the selector may name.
+        """
+        try:
+            choice = await self.select_live(
+                identity,
+                view,
+                selectable,
+                model,
+                prompt_window,
+                context_tokens=context_tokens,
+            )
+        except UnreadableAnswer:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a fallback, not a failure mode
+            logger.info("turn_compact_skipped reason=%s", decisions.failure_text(exc))
+            return {
+                "compact": "the selector call failed: " + decisions.failure_text(exc)
+            }
+        if choice.decision:
+            return {"compact": "the selector did not answer: " + choice.decision}
+        return selection_from_arguments(choice.arguments, "compact")
+
     async def compact_turn(
         self,
         identity: ConversationId,
@@ -782,7 +883,14 @@ class TurnRuntime:
         context_tokens: int = 0,
         selection: Any = None,
     ) -> compact.Compacted:
-        """Run one live compaction: ask, then hide what the answer names.
+        """Run one live compaction over a selection, hiding what it names.
+
+        **The selection is the caller's; the harness only checks it.**  Both
+        servers ask the selector before the call and pass its answer here (a
+        failure arrives as its text, `compact_arguments`).  A direct caller may
+        pass `None`, and then the selector is asked here — the same seam the
+        context plugin's `rebuild` keeps for a caller that has no selection of
+        its own.
 
         **A selection is read before it is applied, and the exchange rule after
         that.**  The model's own call writes the same `compact` list the
@@ -791,12 +899,10 @@ class TurnRuntime:
         can correct, not a list to guess at — a string is iterable, so `"12.3"`
         would otherwise be read as four ids.  An id the view did not offer is
         refused whole rather than filtered out, because the rest would be a
-        selection the model did not make.  And a selection that splits a call
-        from its results is refused (`Compacted.refused`) rather than applied,
-        so the caller can turn it into a tool error for the model's own call or
-        a report for the automatic one and the next request stays legal.  The
-        harness does not *repair* any of them — that would be making a decision
-        the model was asked to make.
+        selection the model did not make.  A tool exchange named in part is
+        completed to the whole (`compact.whole_exchanges`), which is the rule
+        the schema states: the next request stays legal without the model
+        having to list a call it cannot see.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.
@@ -849,15 +955,11 @@ class TurnRuntime:
                     "id is the one its [MESSAGE:…] annotation shows"
                 ),
             )
-        applied = [mid for mid in drop if mid not in hidden]
-        refused = compact.split_exchange(view, applied)
-        if refused:
-            return compact.Compacted(seen=len(view), dropped=0, refused=refused)
-        added: list[str] = []
-        for mid in applied:
-            hidden.add(mid)
-            added.append(mid)
-        return compact.Compacted(seen=len(view), dropped=len(added), ids=tuple(added))
+        applied = [
+            mid for mid in compact.whole_exchanges(view, drop) if mid not in hidden
+        ]
+        hidden.update(applied)
+        return compact.Compacted(seen=len(view), dropped=len(applied))
 
     # ── the turn boundary ────────────────────────────────────────────────
 

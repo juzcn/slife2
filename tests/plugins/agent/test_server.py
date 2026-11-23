@@ -307,16 +307,18 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
-#: The live-id footnote the view appends to every addressable message.
+#: The live-id footnote the view writes on the messages the model did not write.
 LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
 
 
 def without_id(content: Any) -> Any:
     """One message's content with the live-id footnote taken off.
 
-    The view appends it to every message it addresses (`[MESSAGE:{"id": …}]`),
-    the same way a rebuilt turn carries its `[TURN:]` footnote.  An assertion
-    about what a message *says* strips it: it is the id, not the words.
+    The view writes it on the person's messages and the tool results
+    (`[MESSAGE:{"id": …}]`) — never on an assistant message, whose content is
+    what the model said — the same way a rebuilt turn carries its `[TURN:]`
+    footnote.  An assertion about what a message *says* strips it: it is the
+    id, not the words.
     """
     if isinstance(content, str):
         return LIVE_ID_RE.sub("", content)

@@ -1103,7 +1103,7 @@ def build_server(
         outside: int,
         rerank: str = "",
         decision: str = "",
-        selection: dict[str, Any] | None = None,
+        reason: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
@@ -1137,6 +1137,13 @@ def build_server(
         a failure rather than an answer.  It is what the caller reads to say the
         recall *failed* rather than found nothing; the four exits are still one
         answer, and only this one has something to report.
+
+        `reason` names the exit for the report: `"asked"` (a decision that
+        wants exactly what is in hand), `"recalled"` (one whose recall ran and
+        found nothing), `"unknown"` (a keep-list naming no turn in hand) or
+        `"unfetchable"` (the store disagreed with its own list).  The model acts
+        on the four differently, so one "unchanged" sentence would be silence
+        where a fact belongs.
         """
         return {
             "messages": list(messages),
@@ -1151,9 +1158,7 @@ def build_server(
             # The no-decision and no-op answers cut nothing: the fit is the
             # changed path's, and its count there is the harness's edit.
             "fitted": 0,
-            # What the pair records as the call's arguments: the decision's own,
-            # or `{}` when there was none.
-            "selection": selection or {},
+            "reason": reason,
         }
 
     @mcp.tool
@@ -1250,15 +1255,13 @@ def build_server(
         try:
             text = await ask_model(agent, subagent, model, messages, usage=usage)
             # The raw answer, for whoever is already looking at the protocol.
-            logger.debug("recall_decision_reply attempt=first %r", text)
+            logger.debug("recall_decision_reply %r", text)
             return text, ""
         except Unanswered as exc:
             logger.info("recall_decision_unanswered reason=%s", exc.reason)
             return "", exc.reason
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-            logger.info(
-                "recall_decision_failed reason=%s", decisions.failure_text(exc)
-            )
+            logger.info("recall_decision_failed reason=%s", decisions.failure_text(exc))
             logger.debug("the decision call raised", exc_info=True)
             return "", decisions.failure_text(exc)
 
@@ -1313,7 +1316,7 @@ def build_server(
             text = await select_model(
                 agent, subagent, model, messages, selectable, usage=usage
             )
-            logger.debug("live_selector_reply attempt=first %r", text)
+            logger.debug("live_selector_reply %r", text)
             return text, ""
         except Unanswered as exc:
             logger.info("live_selector_unanswered reason=%s", exc.reason)
@@ -1356,9 +1359,7 @@ def build_server(
         if prompt_window <= 0:
             prompt_window = _configured_prompt_window(model)
         usage, _used = decisions.context_usage(context_tokens, prompt_window)
-        arguments, status = await _decide(
-            agent, subagent, model, messages, usage
-        )
+        arguments, status = await _decide(agent, subagent, model, messages, usage)
         return {"arguments": arguments, "decision": status}
 
     @mcp.tool
@@ -1373,11 +1374,12 @@ def build_server(
     ) -> dict[str, Any]:
         """Decide which of a running turn's live messages it no longer needs.
 
-        Called by `_turn_compact`'s body — the agent server's and an agent
-        task's — **not by a model**: the ids are the live view's, each message
-        already carries its `[MESSAGE:{"id": …}]`, and nothing is stored with
-        them.  `messages` is the view — the list the model will run on, not the
-        turn's record — and `selectable` names the ids that are candidates.
+        Called by the agent server's and an agent task's automatic boundary
+        **before `_turn_compact` is called**, not by a model: the ids are the
+        live view's, each message already carries its `[MESSAGE:{"id": …}]`, and
+        nothing is stored with them.  `messages` is the view — the list the
+        model will run on, not the turn's record — and `selectable` names the
+        ids that are candidates.
 
         `context_tokens` is the conversation's last measured call and
         `prompt_window` the space its prompt has: the same pair the status bar
@@ -1480,10 +1482,12 @@ def build_server(
             context_tokens: The last LLM call's size, for the decision's own
                 figure.
             prompt_window: The space a request's prompt has, in tokens.
-            selection: A selection to apply as it came — the model's own
-                `_context_rebuild` arguments — or None to let the decision
-                model choose.  A selection this build cannot read is a tool
-                error the caller corrects, not a decision call.
+            selection: The internal selection to apply as it came —
+                `context`/`recall`, as `rebuild_selection` maps the model's flat
+                arguments — or None to let the decision model choose (the direct
+                RPC path; both turn-running servers pass the selection they were
+                given).  A selection this build cannot read is a tool error the
+                caller corrects, not a decision call.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
@@ -1544,9 +1548,8 @@ def build_server(
             # **The caller's selection** — the model's own call, or the harness
             # carrying the selection the decision model returned.  A refusal is
             # a tool error: this caller handed in the arguments.
-            used = dict(selection)
             decision, refusal = decisions.parse_with_reason(
-                json.dumps(used, ensure_ascii=False)
+                json.dumps(dict(selection), ensure_ascii=False)
             )
             if decision is None:
                 raise ToolError(f"the selection could not be read: {refusal}")
@@ -1608,7 +1611,7 @@ def build_server(
             base, fitted_out = await fitted(list(turn_ids))
             if not fitted_out:
                 logger.info("recall_not_needed reason=context_sufficient")
-                return _in_hand(messages, turn_ids, outside, selection=used)
+                return _in_hand(messages, turn_ids, outside, reason="asked")
             logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
         else:
             base = (
@@ -1633,7 +1636,7 @@ def build_server(
                 # that cannot be acted on keeps the context the turn had
                 # (SDD §5.5, Appendix C).
                 logger.info("recall_kept_nothing_known ids=%s", decision.keep)
-                return _in_hand(messages, turn_ids, outside, selection=used)
+                return _in_hand(messages, turn_ids, outside, reason="unknown")
             base, fitted_out = await fitted(base)
             if fitted_out:
                 logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
@@ -1648,7 +1651,13 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids, outside, rerank=rerank, selection=used)
+            return _in_hand(
+                messages,
+                turn_ids,
+                outside,
+                rerank=rerank,
+                reason="recalled" if decision.recall is not None else "asked",
+            )
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
@@ -1657,7 +1666,9 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids, outside, rerank=rerank, selection=used)
+            return _in_hand(
+                messages, turn_ids, outside, rerank=rerank, reason="unfetchable"
+            )
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -1729,9 +1740,9 @@ def build_server(
             # end, or 0.  The harness's edit, named: it is the window's doing,
             # not a selection the model made.
             "fitted": fitted_out,
-            # The arguments the pair records: the decision's own, or the
-            # model's selection when it made one.
-            "selection": used,
+            # A changed answer has no no-op to name; the key is present so the
+            # shape is one shape (`_in_hand` carries the exit's name).
+            "reason": "",
         }
 
     async def _recall_into(

@@ -21,9 +21,10 @@ from slife2.libs.host.config import (
     TOOLHUB_SERVER_NAME,
     default_config,
 )
-from slife2.libs.plugin.protocol import UnreadableAnswer
-from slife2.libs.turn.messages import Message
-from slife2.libs.turn.runtime import ModelRef, TurnRuntime
+from slife2.libs.plugin.protocol import UnreadableAnswer, unreadable
+from slife2.libs.turn.compact import report
+from slife2.libs.turn.messages import Message, Usage
+from slife2.libs.turn.runtime import ModelRef, TurnRuntime, measured_tokens
 from slife2.libs.turn.tools import ToolRegistry
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -201,6 +202,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
             "fitted": 0,
             "rerank": "unavailable",
             "decision": "",
+            "reason": "",
         }
     )
     messages = [
@@ -279,6 +281,7 @@ async def test_rebuild_carries_the_live_ids_and_channels_back_unchanged() -> Non
             "fitted": 0,
             "rerank": "",
             "decision": "",
+            "reason": "",
         }
     )
     messages = [
@@ -325,6 +328,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
             "fitted": 0,
             "rerank": "",
             "decision": "",
+            "reason": "",
         }
     )
 
@@ -536,17 +540,17 @@ async def test_a_model_selection_is_read_by_the_selector_parser() -> None:
         hidden,
         REF.reference,
         8192,
-        selection=["6.1"],
+        selection=["6.0"],
     )
 
     assert (result.dropped, result.refused) == (1, "")
-    assert hidden == {"6.1"}
+    assert hidden == {"6.0"}
 
 
 async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused() -> None:
     """Filtering would apply half a selection; the whole answer is refused.
 
-    The fixed two and an id no build wrote are ids the view did not offer; the
+    A fixed message and an id no build wrote are ids the view did not offer; the
     caller turns the refusal into a tool error for the model's own call.
     """
     hidden: set[str] = set()
@@ -557,7 +561,7 @@ async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused() -> 
         hidden,
         REF.reference,
         8192,
-        selection=["6.1", "9.9"],
+        selection=["6.0", "9.9"],
     )
 
     assert result.dropped == 0
@@ -567,7 +571,7 @@ async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused() -> 
 
 async def test_an_already_hidden_id_is_not_an_error() -> None:
     """A model repeating a cumulative list is asking for the same view."""
-    hidden = {"6.1"}
+    hidden = {"6.0"}
 
     result = await wired(Store()).compact_turn(
         IDENTITY,
@@ -575,7 +579,7 @@ async def test_an_already_hidden_id_is_not_an_error() -> None:
         hidden,
         REF.reference,
         8192,
-        selection=["6.1"],
+        selection=["6.0"],
     )
 
     assert (result.dropped, result.refused) == (0, "")
@@ -597,6 +601,113 @@ async def test_a_malformed_model_selection_is_refused_as_unreadable() -> None:
     assert result.dropped == 0
     assert "could not be read" in result.refused
     assert hidden == set()
+
+
+async def test_a_compaction_with_no_selection_asks_the_selector() -> None:
+    """The direct-caller seam: no selection, one `select_live` call.
+
+    Both servers ask the selector before the call, so this is the context
+    plugin's asking path kept for a caller that holds no selection — the same
+    seam `rebuild` keeps.  The answer is read by `parse_live`, the model's own
+    call's parser.
+    """
+    store = Store(select_live={"arguments": '{"compact": ["6.0"]}', "decision": ""})
+    hidden: set[str] = set()
+
+    result = await wired(store).compact_turn(
+        IDENTITY, a_view(), hidden, REF.reference, 8192
+    )
+
+    assert (result.dropped, result.decision, result.refused) == (1, "", "")
+    assert hidden == {"6.0"}
+    name, arguments = store.calls[0]
+    assert name == "select_live"
+    assert arguments["selectable"] == ["6.0"]
+
+
+async def test_a_selector_failure_is_reported_and_nothing_is_hidden() -> None:
+    """A provider failure is a decision's absence, not an empty answer."""
+    store = Store(select_live={"arguments": "", "decision": "RuntimeError: down"})
+    hidden: set[str] = set()
+
+    result = await wired(store).compact_turn(
+        IDENTITY, a_view(), hidden, REF.reference, 8192
+    )
+
+    assert (result.dropped, result.decision) == (0, "RuntimeError: down")
+    assert hidden == set()
+    assert "did not answer" in report(result)
+
+
+async def test_the_automatic_arguments_carry_a_failure_as_its_own_words() -> None:
+    """One sentence for both servers: the failure is the tool's argument.
+
+    The tool body refuses what it cannot read, and the reason the agent reads is
+    the provider's own, not a status word.
+    """
+    runtime = wired(
+        Store(select_live={"arguments": "", "decision": "RuntimeError: down"})
+    )
+    assert await runtime.compact_arguments(
+        IDENTITY, a_view(), ["6.0"], REF.reference, prompt_window=1024
+    ) == {"compact": "the selector did not answer: RuntimeError: down"}
+
+    runtime = wired(Store(decide={"arguments": "", "decision": "TimeoutError: slow"}))
+    assert await runtime.rebuild_arguments(
+        IDENTITY, a_view(), REF.reference, prompt_window=1024
+    ) == {"mode": "the decision model did not answer: TimeoutError: slow"}
+
+
+class Down(Store):
+    """A context plugin whose tool call never comes back."""
+
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.failure = failure
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        raise self.failure
+
+
+async def test_a_decision_that_cannot_be_called_is_a_failure_selection() -> None:
+    """A transport failure keeps the context; the turn is not failed."""
+    runtime = TurnRuntime(
+        default_config(), context_client=Down(RuntimeError("the provider is down"))
+    )
+
+    assert await runtime.rebuild_arguments(IDENTITY, a_view(), REF.reference) == {
+        "mode": "the decision call failed: RuntimeError: the provider is down"
+    }
+    assert await runtime.compact_arguments(
+        IDENTITY, a_view(), ["6.0"], REF.reference
+    ) == {"compact": "the selector call failed: RuntimeError: the provider is down"}
+
+
+async def test_an_unreadable_answer_fails_the_turn_rather_than_becoming_arguments() -> (
+    None
+):
+    """A store from another build is a build mismatch, not a provider failure.
+
+    Reading it as a decision would keep the context for a reason nobody can
+    see; `UnreadableAnswer` is the type that fails the turn (SDD Appendix C).
+    """
+    failure = unreadable("the context store", "return the decision's arguments", {})
+    runtime = TurnRuntime(default_config(), context_client=Down(failure))
+
+    with pytest.raises(UnreadableAnswer):
+        await runtime.rebuild_arguments(IDENTITY, a_view(), REF.reference)
+    with pytest.raises(UnreadableAnswer):
+        await runtime.compact_arguments(IDENTITY, a_view(), ["6.0"], REF.reference)
+
+
+async def test_the_context_figure_falls_back_to_the_saved_measurement() -> None:
+    """A turn with no completed call yet has no figure of its own."""
+    live = SimpleNamespace(last_usage=Usage(prompt_tokens=300, completion_tokens=50))
+    empty = SimpleNamespace(last_usage=Usage())
+
+    assert measured_tokens(live, 999) == 350
+    assert measured_tokens(empty, 999) == 999
+    assert measured_tokens(None, 999) == 999
 
 
 # ── trim ─────────────────────────────────────────────────────────────────────

@@ -109,7 +109,7 @@ from slife2.libs.turn.prompt import SUBAGENT_PROMPT, render_system_prompt
 from slife2.libs.turn.runtime import (
     ModelRef,
     TurnRuntime,
-    selection_from_arguments,
+    measured_tokens,
 )
 from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.libs.turn.tools import (
@@ -1145,40 +1145,6 @@ class AgentCore:
         loop.injected.append(waiting)
         return waiting.prompt
 
-    def _compact_due(self, loop: Loop, agent_loop: AgentLoop | None) -> bool:
-        """Whether this turn should compact its own context at this boundary.
-
-        **The measurement is the last call's own**, and the fraction is
-        `agent.compact_at` of the window the conversation started on.  A turn
-        that began near its ceiling crosses it after one large batch.  The
-        just-appended batch is not in the measurement yet; the fraction is below
-        the window by enough to cover one.
-
-        **Re-asked whenever the threshold is crossed again.**  A compaction that
-        dropped something leaves the pass live, so a turn that grows back over
-        the fraction is asked again at the next boundary.  A compaction that
-        kept everything, or failed, is a decision about the whole context and
-        stops the automatic pass for the turn (`Loop.compact_hold`); the model
-        can still call the tool itself, and a later successful call resumes the
-        pass.  The threshold is a fraction of the conversation's model window;
-        the measurement is the last call's own.
-        """
-        if agent_loop is None:
-            return False
-        fraction = loop.compact_at
-        if fraction <= 0:
-            return False
-        if agent_loop.last_usage.total_tokens < loop.prompt_window * fraction:
-            return False
-        if loop.compact_hold:
-            return False
-        if compact.opening(loop.messages) is None:
-            return False
-        view = compact.view(loop.messages, loop.hidden)
-        at_view = compact.opening(view)
-        opening_mid = view[at_view].mid if at_view is not None else ""
-        return bool(compact.selectable(view, opening_mid))
-
     async def run_turn_into(
         self, loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
     ) -> None:
@@ -1249,37 +1215,17 @@ class AgentCore:
             if not loop.rebuilt and agent_loop is not None:
                 loop.rebuilt = True
                 if agent_loop.declares(CONTEXT_REBUILD):
-                    try:
-                        decided = await self.runtime.decide_context(
-                            (loop.agent, loop.subagent),
-                            loop.messages,
-                            loop.model,
-                            context_tokens=(
-                                loop.live.last_usage.total_tokens
-                                if loop.live is not None
-                                and loop.live.last_usage.total_tokens
-                                else loop.context_tokens
-                            ),
-                            prompt_window=loop.prompt_window,
-                        )
-                        selection = (
-                            selection_from_arguments(decided.arguments, "mode")
-                            if not decided.decision
-                            else {
-                                "mode": "the decision model did not answer: "
-                                + (decided.decision or "no answer")
-                            }
-                        )
-                    except Exception as exc:  # noqa: BLE001 - a fallback, not a failure mode
-                        # **A failed decision is a failed tool call, not an
-                        # empty one.**  The reason rides the arguments the tool
-                        # receives; the body refuses them and the agent reads a
-                        # tool error, exactly as for its own bad selection.
-                        logger.info("context_rebuild_skipped reason=%s", failure_text(exc))
-                        selection = {
-                            "mode": "the decision call failed: "
-                            + failure_text(exc)
-                        }
+                    # **A failed decision is a failed tool call, not an empty
+                    # one.**  The reason rides the arguments the tool receives;
+                    # the body refuses them and the agent reads a tool error,
+                    # exactly as for its own bad selection.
+                    selection = await self.runtime.rebuild_arguments(
+                        (loop.agent, loop.subagent),
+                        loop.messages,
+                        loop.model,
+                        context_tokens=measured_tokens(loop.live, loop.context_tokens),
+                        prompt_window=loop.prompt_window,
+                    )
                     return AutoCall(CONTEXT_REBUILD, arguments=selection)
                 # A hub that does not advertise the tool is a build that
                 # predates it; the turn runs on the context it has instead of
@@ -1292,37 +1238,32 @@ class AgentCore:
                         channel=waiting.channel,
                         receipt=waiting.receipt,
                     )
-            if self._compact_due(loop, agent_loop):
-                view = compact.view(loop.messages, loop.hidden)
-                at_view = compact.opening(view)
-                opening_mid = view[at_view].mid if at_view is not None else ""
-                selectable = compact.selectable(view, opening_mid)
-                try:
-                    choice = await self.runtime.select_live(
-                        (loop.agent, loop.subagent),
-                        view,
-                        selectable,
-                        loop.model,
-                        loop.prompt_window,
-                        context_tokens=(
-                            loop.live.last_usage.total_tokens
-                            if loop.live is not None
-                            else 0
-                        ),
-                    )
-                    selection = (
-                        selection_from_arguments(choice.arguments, "compact")
-                        if not choice.decision
-                        else {
-                            "compact": "the selector did not answer: "
-                            + (choice.decision or "no answer")
-                        }
-                    )
-                except Exception as exc:  # noqa: BLE001 - a fallback, not a failure mode
-                    logger.info("turn_compact_skipped reason=%s", failure_text(exc))
-                    selection = {
-                        "compact": "the selector call failed: " + failure_text(exc)
-                    }
+            # **The same threshold rule as a task's**, and the same guard on the
+            # tool being declared: a hub from a build that predates it would
+            # otherwise pay a decision call and write an error pair at every
+            # boundary.
+            asked = (
+                compact.due(
+                    loop.messages,
+                    loop.hidden,
+                    last_tokens=agent_loop.last_usage.total_tokens,
+                    prompt_window=loop.prompt_window,
+                    compact_at=loop.compact_at,
+                    held=loop.compact_hold,
+                )
+                if agent_loop is not None and agent_loop.declares(TURN_COMPACT)
+                else None
+            )
+            if asked is not None:
+                view, selectable = asked
+                selection = await self.runtime.compact_arguments(
+                    (loop.agent, loop.subagent),
+                    view,
+                    selectable,
+                    loop.model,
+                    context_tokens=measured_tokens(loop.live, loop.context_tokens),
+                    prompt_window=loop.prompt_window,
+                )
                 return AutoCall(TURN_COMPACT, arguments=selection)
             return None
 
@@ -2721,11 +2662,7 @@ class AgentCore:
             # **The last LLM call's figure.**  A completed call of this turn is
             # newer than the previous turn's last call; before the first call —
             # where the automatic rebuild runs — the saved call stands.
-            context_tokens=(
-                loop.live.last_usage.total_tokens
-                if loop.live is not None and loop.live.last_usage.total_tokens
-                else loop.context_tokens
-            ),
+            context_tokens=measured_tokens(loop.live, loop.context_tokens),
             prompt_window=loop.prompt_window,
         )
         # **The prefix moves; the suffix does not.**  `carried` re-appended every
@@ -2766,6 +2703,7 @@ class AgentCore:
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,
             fitted=rebuilt.fitted,
+            reason=rebuilt.reason,
             tokens=tokens,
         )
 
@@ -2783,10 +2721,10 @@ class AgentCore:
         measured context crosses `agent.compact_at`, and the model may call it
         itself — the call does the same thing either way.
 
-        **The record is untouched, and the view is the whole list.**  Every
-        message the turn is sent is a candidate except the system prompt and the
-        turn's opening message; a historical turn's messages are hidden the same
-        transient way a spent tool result is.  Hidden messages stay in
+        **The record is untouched, and the view is the whole list.**  A
+        historical turn's messages are hidden the same transient way a spent
+        tool result is; the candidates are the person's messages and the tool
+        results, which are the ones carrying an id.  Hidden messages stay in
         `loop.messages`, the turn's saved row and the store's live-context list;
         only the list the model is sent shrinks (`slife2.libs.turn.compact`).
         The next turn starts from the full conversation; `_context_rebuild` is
@@ -2797,11 +2735,11 @@ class AgentCore:
         the ids its selector returned.  A call without `compact` is refused —
         the selector is asked by the harness before the call, never by an empty
         call's body.  An id is written exactly as its `[MESSAGE:{"id": …}]`
-        annotation shows it; the system prompt and the turn's opening message
-        are the fixed two, and a tool call goes together with its results —
-        both are the schema's rules.  A selection that cannot be applied is
-        refused with a tool error naming why, so it can be corrected while the
-        view stays whole.
+        annotation shows it; the schema states the fixed two and the exchange
+        rule, and the harness completes a selection that named one member of an
+        exchange.  A selection naming an id the view did not offer is refused
+        with a tool error naming why, so it can be corrected while the view
+        stays whole.
         """
         # The parameter shadows the module for this body; the view helpers are
         # this alias, and `compact` is the selection the model named.
@@ -2830,23 +2768,27 @@ class AgentCore:
         if isinstance(compact, str):
             # **A string is the harness's failure selection**, carrying why the
             # selector could not answer.  The tool result names it; the parser
-            # would only say "not an array", which loses the reason.
+            # would only say "not an array", which loses the reason.  It stops
+            # the automatic pass, exactly as a keep-all does: an unreadable
+            # selection is a decision about the whole view, and re-asking it at
+            # every boundary would pay for the same failure.
+            loop.compact_hold = True
             raise ToolError(f"the compaction selection could not be read: {compact}")
         result = await self.runtime.compact_turn(
             conversation_id,
             loop.messages,
             loop.hidden,
             loop.model,
-            context_tokens=(
-                loop.live.last_usage.total_tokens if loop.live is not None else 0
-            ),
+            context_tokens=measured_tokens(loop.live, loop.context_tokens),
             prompt_window=loop.prompt_window,
             selection=compact,
         )
-        # **A split selection is refused, not applied.**  The model's own call
-        # gets a tool error it can correct; the automatic one gets a report and
-        # stops asking for the turn (a selection about the whole view, like a
-        # keep-all or a failed selector).
+        # **An unreadable selection is refused, not applied.**  The model's own
+        # call gets a tool error it can correct; the automatic one gets a report
+        # and stops asking for the turn (a selection about the whole view, like
+        # a keep-all or a failed selector).  A split exchange is not a refusal:
+        # the schema says an exchange moves as one, and `whole_exchanges`
+        # completes a selection that named one member.
         if result.refused:
             loop.compact_hold = True
             raise ToolError(result.refused)

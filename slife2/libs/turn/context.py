@@ -78,8 +78,8 @@ LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "description": (
         "The live messages this turn's later calls no longer need. `compact` "
-        "is required; [] means drop nothing. Nothing is deleted — the named "
-        "messages are left out of this turn's view only."
+        "is required. The named messages leave this turn's view only; the "
+        "record keeps them."
     ),
     "additionalProperties": False,
     "required": ["compact"],
@@ -87,17 +87,15 @@ LIVE_REPLY: dict[str, Any] = {
         "compact": {
             "description": (
                 "The live message ids to drop — any message carrying a "
-                '`[MESSAGE:{"id": …}]` annotation except the system prompt and '
-                "the turn's opening message, historical or current. The opening "
-                "message is `cur.0` in this view: it is fixed and never a "
-                "candidate. Write the "
-                "ids exactly as the annotation shows them; a JSON array of "
-                "strings, never a string containing one. **Drop a tool exchange "
-                "as a whole**: an assistant message that asked for tools goes "
-                "together with all of its results, and a result goes together "
-                "with the assistant message that asked for it — a call without "
-                "its answer, or an answer without its call, is a history no "
-                "provider accepts."
+                '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
+                "person's messages and tool results carry one; the system "
+                "prompt, the turn's opening message and the assistant's own "
+                "messages carry no id. Write the ids exactly as the annotation "
+                "shows them, as a JSON array of strings; [] means drop "
+                "nothing. **An exchange goes as a whole**: name a tool result "
+                "and the assistant message that asked for it goes with all of "
+                "its results. Naming an id this turn already hid asks for the "
+                "same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -117,7 +115,7 @@ RECALL_REPLY: dict[str, Any] = {
         "The selection. `mode` says what happens to the turns in hand: keep "
         "all, clear all, or keep exactly `turn_ids`. `recall` adds turns from "
         "the turn log. A call without `mode` is refused. The turn running is "
-        'never part of the selection — it has no turn id and is carried '
+        "never part of the selection — it has no turn id and is carried "
         'verbatim. A turn is named by the id its `[TURN:{"turn_id": …}]` '
         "footnote carries."
     ),
@@ -129,21 +127,25 @@ RECALL_REPLY: dict[str, Any] = {
             "enum": ["keep", "clear", "ids"],
             "description": (
                 '"keep" keeps every turn in hand; "clear" keeps none of them; '
-                '"ids" keeps exactly the turns in `turn_ids`. "clear" only '
-                "when the input stands on its own: a turn dropped here cannot "
-                "be recalled back — the recall searches only the turn log "
-                "outside the turns in hand, not merely outside the turns kept."
+                '"ids" keeps exactly the turns in `turn_ids` — at least one, '
+                "and only the ones still in hand. An id no longer in hand is "
+                "ignored, and a keep-list naming none of the turns in hand "
+                'keeps the context as it is; say "clear" to empty it. "clear" '
+                "only when the input stands on its own: a turn dropped here "
+                "cannot be recalled back — the recall searches only the turn "
+                "log outside the turns in hand, not merely outside the turns "
+                "kept."
             ),
         },
         "turn_ids": {
             "type": "array",
             "items": {"type": "integer"},
             "description": (
-                'The turns to keep when `mode` is "ids". A JSON array of '
-                "integers — for example [14, 15] — never a string containing "
-                'one (`"[14, 15]"` is refused). A follow-up keeps the turn it '
-                "continues, even when the input brings a new word and does not "
-                "name it."
+                'The turns to keep when `mode` is "ids"; read for that mode '
+                "only. A non-empty JSON array of integers — for example "
+                '[14, 15] — never a string containing one (`"[14, 15]"` is '
+                "refused). A follow-up keeps the turn it continues, even when "
+                "the input brings a new word and does not name it."
             ),
         },
         "recall": {
@@ -177,7 +179,9 @@ RECALL_REPLY: dict[str, Any] = {
                     "description": (
                         "Words the keyword leg should find — names, paths, "
                         "exact strings. The fallback when no sentence names the "
-                        "subject; without a sentence it is also read by meaning."
+                        "subject; without a sentence it is also read by "
+                        "meaning. A query with no word in it is dropped, and "
+                        "without a sentence that drops the recall."
                     ),
                     "type": "string",
                 },
@@ -193,9 +197,10 @@ RECALL_REPLY: dict[str, Any] = {
                     "description": (
                         "Which end of a period to recall from; omit for the "
                         "newest end. A period recall may truncate as the context "
-                        "is bounded, and the anchor chooses which end survives; a "
-                        "query recall is bounded by a narrower period instead. "
-                        "Alone, it reads the whole log from that end."
+                        "is bounded, and this chooses which end survives. A "
+                        "question recall ignores it: relevance decides which end "
+                        "the budget spends from. Alone, it reads the whole log "
+                        "from that end."
                     ),
                     "enum": ["newest", "oldest"],
                 },
@@ -308,22 +313,6 @@ class Decision:
         rather than re-deriving a list that is already in hand.
         """
         return self.keep is None and self.recall is None
-
-    def arguments(self) -> dict[str, Any]:
-        """The decision as the tool arguments that express it.
-
-        The pair `_context_rebuild` writes carries the decision's own
-        arguments, so a model reading its history sees the selection rather
-        than an empty call.  The mapping is the one `parse_with_reason` reads:
-        `context` (a list, `"clear"`, or absent for all) and `recall` (a
-        condition, or absent for none).
-        """
-        out: dict[str, Any] = {}
-        if self.keep is not None:
-            out["context"] = "clear" if not self.keep else list(self.keep)
-        if self.recall is not None:
-            out["recall"] = dict(self.recall)
-        return out
 
 
 def rebuild_selection(
@@ -634,9 +623,7 @@ def decision_instruction(usage: str, tool: str, no_op: str) -> str:
     the context is could not weigh keeping against recalling — or what to give
     up.
     """
-    return render_instruction(
-        DECISION_TEMPLATE, usage=usage, tool=tool, no_op=no_op
-    )
+    return render_instruction(DECISION_TEMPLATE, usage=usage, tool=tool, no_op=no_op)
 
 
 def parse_live(text: str) -> tuple[list[str] | None, str]:
@@ -927,6 +914,7 @@ def rebuild_report(
     decision: str,
     tokens: str,
     fitted: int = 0,
+    reason: str = "",
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
 
@@ -939,8 +927,16 @@ def rebuild_report(
     is what the caller held; `kept 0 of 5 turn(s) in hand` says a clear, where
     `kept 0` alone reads as an empty history.  `outside` is the whole log beyond
     the context — the set a recall condition filters — and `recalled 0 of 90
-    outside` says the search had 90 turns to draw from.  The no-op and failed
-    branches already have their own sentences, so they do not need the figures.
+    outside` says the search had 90 turns to draw from.
+
+    **A no-op names which no-op it was.**  `reason` is the exit that produced
+    it, and the four are different facts the model acts on differently:
+    `"asked"` is a decision that asked for exactly what is in hand (the ordinary
+    answer); `"recalled"` is one whose recall ran and brought nothing back, so
+    the figures are printed rather than left to read as a search never made;
+    `"unknown"` is a keep-list naming no turn in hand, which the model can
+    correct; `"unfetchable"` is the store disagreeing with its own list.  A
+    sentence that said only "unchanged" left all four indistinguishable.
 
     **`fitted` is the harness's, and named.**  A selection heavier than the
     prompt budget is cut from its oldest end to fit, and the count says so:
@@ -950,8 +946,7 @@ def rebuild_report(
     `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
     made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
-    the fused order stands and the report says so.  `changed` false is the
-    ordinary no-op: the decision asked for exactly what was in hand.
+    the fused order stands and the report says so.
     """
     if decision:
         return (
@@ -963,6 +958,26 @@ def rebuild_report(
     # lost, and "unchanged" alone would hide the stage that said so.
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
+        if reason == "unknown":
+            return (
+                "No rebuild: the keep-list named no turn in hand; the turn "
+                f"continues on the context it had{tail}; context ~{tokens}."
+            )
+        if reason == "unfetchable":
+            return (
+                "No rebuild: the selected turns could not be fetched; the turn "
+                f"continues on the context it had{tail}; context ~{tokens}."
+            )
+        if reason == "recalled":
+            return (
+                f"No rebuild: the context is unchanged{tail}; recalled "
+                f"{recalled} of {outside} outside; context ~{tokens}."
+            )
+        if reason == "asked":
+            return (
+                "No rebuild: the decision asked for exactly what is in hand"
+                f"{tail}; context ~{tokens}."
+            )
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
     fit = f" ({fitted} dropped to fit the window)" if fitted else ""
     return (

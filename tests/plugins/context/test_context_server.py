@@ -1377,7 +1377,37 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
     assert answer.data["decision"] == "", "the model answered"
+    assert answer.data["reason"] == "asked", (
+        "the report says which no-op this was, not merely that nothing moved"
+    )
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_that_finds_nothing_says_which_no_op_it_was() -> None:
+    """**A search that ran and found nothing is not a search nobody made.**
+
+    The counts cannot tell the two apart — both are `changed: false,
+    recalled: 0` — so the answer carries the exit, and the report can say the
+    recall ran rather than leave the model to read silence as a refusal.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "工具"}]
+    reply = '{"mode": "keep", "recall": {"sentences": ["计算"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[0]]},
+        )
+
+    assert answer.data["changed"] is False
+    assert answer.data["decision"] == "", "the decision answered"
+    assert answer.data["reason"] == "recalled"
+    assert answer.data["recalled"] == 0
+    assert answer.data["outside"] == 1, "the search had a turn to draw from"
 
 
 @pytest.mark.asyncio
@@ -1411,6 +1441,7 @@ async def test_a_keep_list_that_names_no_known_turn_keeps_the_context() -> None:
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == ids
     assert answer.data["decision"] == "", "the model answered"
+    assert answer.data["reason"] == "unknown", "the ids named no turn in hand"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == ids
 
 
@@ -2623,7 +2654,7 @@ async def test_the_decisions_fields_are_logged(caplog) -> None:
     recall = json.loads(decided.partition("recall=")[2])
     assert recall["sentences"] == ["the code review prompt"]
     assert any(
-        line.startswith("recall_decision_reply attempt=first ") for line in said
+        line.startswith("recall_decision_reply ") for line in said
     ), "the raw reply is kept for the shape the parser read"
 
 

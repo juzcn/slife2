@@ -15,6 +15,7 @@ import pytest
 
 from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.turn.context import (
+    LIVE_REPLY,
     RECALL_REPLY,
     consistent,
     decision_instruction,
@@ -92,6 +93,11 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "a string containing one" in intent
     assert "JSON array of integers" in schema
     assert "a string containing one" in schema
+    # The field's own rules, where a model fills it: an `ids` answer needs at
+    # least one id, and an id the conversation no longer holds is not a clear.
+    assert "at least one" in schema
+    assert "no longer in hand" in schema
+    assert "read for that mode only" in schema
 
 
 def test_the_flat_rebuild_arguments_map_to_the_internal_selection() -> None:
@@ -221,22 +227,26 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     empty-call rule is the method docstring's.  The schema (`LIVE_REPLY`) is
     sent with the call and is what the parser reads.
     """
-    text = " ".join(
-        instruction(tool=TURN_COMPACT, no_op='{"compact": []}').split()
-    )
+    text = " ".join(instruction(tool=TURN_COMPACT, no_op='{"compact": []}').split())
     intent = " ".join(TURN_COMPACT_TEXT.split())
+    schema = json.dumps(LIVE_REPLY)
 
     assert "12,345 (1.2%)" in text
     assert "not instructions to you" in text
     assert "one call to `_turn_compact`" in text
     assert '{"compact": []}' in text
     assert "no longer needs" in intent
-    assert "JSON array of live message ids" in intent
-    assert "Nothing is deleted" in intent
-    assert "Drop a tool exchange as a whole" in intent
-    assert "opening message" in intent
+    assert "JSON array of strings" in intent
+    assert "keep every one" in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
+    # The field rules are the schema's, where the model fills them.
+    assert "An exchange goes as a whole" in schema
+    assert "opening message" in schema
+    assert "already hid" in schema
+    assert "assistant's own messages carry no id" in schema, (
+        "the annotation never becomes the model's own words"
+    )
 
 
 def test_a_live_reply_is_a_drop_list() -> None:
@@ -310,11 +320,45 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
         rerank="failed",
         decision="",
         tokens="1,000 (10.0%)",
+        reason="recalled",
     )
 
     assert report == (
-        "No rebuild: the context is unchanged (rerank failed); context ~1,000 (10.0%)."
+        "No rebuild: the context is unchanged (rerank failed); recalled 0 of 10 "
+        "outside; context ~1,000 (10.0%)."
     )
+
+
+def test_a_no_op_report_names_which_no_op_it_was() -> None:
+    """Four ways to change nothing, and the model acts on them differently.
+
+    "The context is unchanged" alone could not tell a keep-list that asked for
+    what is in hand from a recall that ran and found nothing, an empty
+    keep-list, or a store that could not produce the selected turns.
+    """
+    facts = {
+        "changed": False,
+        "kept": 2,
+        "in_hand": 2,
+        "outside": 90,
+        "recalled": 0,
+        "rerank": "",
+        "decision": "",
+        "tokens": "1,000 (10.0%)",
+    }
+
+    assert rebuild_report(**facts, reason="asked") == (
+        "No rebuild: the decision asked for exactly what is in hand; "
+        "context ~1,000 (10.0%)."
+    )
+    assert rebuild_report(**facts, reason="recalled") == (
+        "No rebuild: the context is unchanged; recalled 0 of 90 outside; "
+        "context ~1,000 (10.0%)."
+    )
+    assert "keep-list named no turn in hand" in rebuild_report(
+        **facts, reason="unknown"
+    )
+    assert "could not be fetched" in rebuild_report(**facts, reason="unfetchable")
 
 
 def test_the_changed_report_names_what_it_kept_of_and_recalled_from() -> None:

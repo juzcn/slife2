@@ -88,11 +88,12 @@ def drop_echo(messages: list[dict], selectable: list[str]) -> list[str]:
         text = content if isinstance(content, str) else ""
         if message.get("role") != "tool" or OLD not in text:
             continue
-        if ids[index] in selectable:
+        if ids[index] and ids[index] in selectable:
             wanted.append(ids[index])
         if (
             index
             and messages[index - 1].get("role") == "assistant"
+            and ids[index - 1]
             and ids[index - 1] in selectable
         ):
             wanted.append(ids[index - 1])
@@ -240,7 +241,7 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     cfg = config_over()
     backend = FakeBackend(
         calling("fake__echo", {"text": OLD}, "c1"),
-        calling("_turn_compact", {"compact": ["cur.3", "cur.4"]}, "c2"),
+        calling("_turn_compact", {"compact": ["cur.4"]}, "c2"),
         answered("done"),
     )
     seen: list[list[dict]] = []
@@ -289,7 +290,14 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
         for message in final
     ), "the turn's opening message is fixed"
 
+    assert not any(
+        message.role == "assistant" and "[MESSAGE:" in str(message.content)
+        for message in final
+    ), "an annotation is never written into the model's own words"
     rows = stored_messages()
+    assert "[MESSAGE:" not in json.dumps(rows), (
+        "the record is the conversation, not the view"
+    )
     assert any(
         message.get("role") == "tool" and without_id(message.get("content")) == OLD
         for message in rows
@@ -402,11 +410,16 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_split_selection_is_a_tool_error_not_a_failed_turn(
+async def test_a_selection_of_one_result_takes_its_whole_exchange(
     tmp_path, monkeypatch
 ) -> None:
-    """Dropping half an exchange is refused before the next call, so the turn
-    continues on its full view and the model can correct."""
+    """**The model names what it can see; the harness completes the exchange.**
+
+    A tool-call-only assistant message carries no annotation, so the model's
+    natural selection is the result.  The schema says an exchange goes as one,
+    and the call follows the result instead of leaving a split the next request
+    would reject.
+    """
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over()
 
@@ -439,22 +452,27 @@ async def test_a_split_selection_is_a_tool_error_not_a_failed_turn(
     assert answer.data["text"] == "done"
     assert selected == [], "the model's own call does not ask the selector"
     final = backend.calls[-1][0]
-    assert any(
+    assert not any(
         message.role == "tool" and without_id(message.content) == OLD
         for message in final
-    ), "the split was refused; the exchange is still in the view"
+    ), "the exchange left the view with its result"
+    assert not any(
+        message.role == "assistant"
+        and any(call.name == "fake__echo" for call in message.tool_calls)
+        for message in final
+    ), "the call went with it"
     rows = stored_messages()
     assert any(
-        message.get("role") == "tool" and "split" in str(message.get("content"))
+        message.get("role") == "tool" and without_id(message.get("content")) == OLD
         for message in rows
-    ), "the tool error names the split"
+    ), "the record keeps every message"
 
 
 @pytest.mark.asyncio
-async def test_an_automatic_selection_that_splits_is_reported_not_applied(
+async def test_an_automatic_selection_of_one_result_takes_the_exchange(
     tmp_path, monkeypatch
 ) -> None:
-    """The automatic compaction's split is a tool error and a hold, not a 400."""
+    """The automatic pass names a result; the exchange completes with it."""
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(compact_at=0.0005)
     base_turn = calling("fake__echo", {"text": OLD}, "c1")
@@ -467,7 +485,7 @@ async def test_an_automatic_selection_that_splits_is_reported_not_applied(
     )
     backend = FakeBackend(first, answered("done"))
 
-    async def split(
+    async def one_result(
         agent: str,
         subagent: str,
         model: str,
@@ -485,20 +503,23 @@ async def test_an_automatic_selection_that_splits_is_reported_not_applied(
         ]
         return json.dumps({"compact": ids})
 
-    answer = await run_turn(cfg, backend, split)
+    answer = await run_turn(cfg, backend, one_result)
 
     assert answer.data["text"] == "done", "the turn continues"
     final = backend.calls[-1][0]
-    assert any(
+    assert not any(
         message.role == "tool" and without_id(message.content) == OLD
         for message in final
-    ), "nothing was applied"
+    ), "the exchange left the view"
     rows = stored_messages()
-    assert any(
-        message.get("role") == "tool"
-        and "split a tool exchange" in str(message.get("content"))
+    report = [
+        message.get("content")
         for message in rows
-    ), "the tool error names the refusal"
+        if message.get("role") == "tool" and "Dropped" in str(message.get("content"))
+    ]
+    assert report and report[0].startswith("Dropped 2 message(s)"), (
+        "the result and the call that asked for it"
+    )
 
 
 @pytest.mark.asyncio
@@ -874,3 +895,47 @@ async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) 
         message.role == "tool" and without_id(message.content) == OLD
         for message in final
     )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_selector_is_not_asked_again_this_turn(
+    tmp_path, monkeypatch
+) -> None:
+    """**A failure is a decision about the whole view, like a keep-all.**
+
+    The threshold stays crossed and the turn keeps running tools, so a pass
+    that did not stop would pay for the same failing provider at every
+    boundary.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over(compact_at=0.0005)
+    backend = FakeBackend(high(OLD, "c1"), high(OLD, "c2"), answered("done"))
+    asked: list[str] = []
+
+    async def broken(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict],
+        selectable: list[str],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        asked.append(usage)
+        raise RuntimeError("the provider is down")
+
+    answer = await run_turn(cfg, backend, broken)
+
+    assert answer.data["text"] == "done"
+    assert len(asked) == 1, "the failed provider was not asked again"
+    rows = stored_messages()
+    pairs = [
+        call
+        for message in rows
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if call["function"]["name"] == TURN_COMPACT
+    ]
+    assert len(pairs) == 1, "one pair, carrying the failure"

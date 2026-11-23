@@ -13,12 +13,13 @@ import pytest
 
 from slife2.libs.turn.compact import (
     Compacted,
+    due,
     opening,
     report,
     selectable,
-    split_exchange,
     unknown_ids,
     view,
+    whole_exchanges,
 )
 from slife2.libs.turn.messages import Message, ToolCall
 
@@ -59,9 +60,16 @@ def test_a_conversation_with_no_user_message_has_no_opening() -> None:
     assert opening([system()]) is None
 
 
-def test_the_view_annotates_every_addressable_message_with_its_live_id() -> None:
-    """The id is in the view, like the `[TURN:]` footnote — not in a copy a
-    selector adds for itself, and never in the record the list came from."""
+def test_the_view_annotates_the_messages_the_model_did_not_write() -> None:
+    """The id is in the view, like the `[TURN:]` footnote — and only on what the
+    model is reading.
+
+    **An assistant message never gets one.**  Its content is what the model
+    said, and a marker written there is a sentence it never wrote: the model
+    copies it into the next answer, once per call (the `cur.N` chain a live
+    session showed).  The id itself is still kept on the view's copy, for the
+    exchange rule; the opening is fixed and carries neither text nor id.
+    """
     first = Message(role="user", content="a", mid="7.0")
     second = Message(role="assistant", content="b", mid="7.1")
     third = user("c")
@@ -70,8 +78,27 @@ def test_the_view_annotates_every_addressable_message_with_its_live_id() -> None
 
     assert [m.mid for m in got] == ["7.0", "7.1", "cur.0"]
     assert got[0].content == 'a [MESSAGE:{"id": "7.0"}]'
-    assert got[2].content == 'c [MESSAGE:{"id": "cur.0"}]'
+    assert got[1].content == "b", "the model's own words, untouched"
+    assert got[2].content == "c", "the opening is fixed and needs no id"
     assert first.content == "a", "the view is a copy"
+
+
+def test_a_message_with_no_text_is_not_given_one() -> None:
+    """A tool-call-only assistant message has nothing to write an annotation in.
+
+    Writing one there made the model believe it had said it, and its next
+    answer repeated it — the reported `slife2> [MESSAGE:…]` line.
+    """
+    tool_call = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="c1", name="fake__echo")],
+        mid="cur.1",
+    )
+    got = view([system(), user("now"), tool_call, result("c1")], [])
+
+    assert got[2].content is None
+    assert got[3].content == 'ok [MESSAGE:{"id": "cur.2"}]'
 
 
 def test_the_view_drops_hidden_ids_and_keeps_order() -> None:
@@ -82,10 +109,7 @@ def test_the_view_drops_hidden_ids_and_keeps_order() -> None:
     got = view([first, second, third], ["7.1"])
 
     assert [m.mid for m in got] == ["7.0", "cur.0"]
-    assert [m.content for m in got] == [
-        'a [MESSAGE:{"id": "7.0"}]',
-        'c [MESSAGE:{"id": "cur.0"}]',
-    ]
+    assert [m.content for m in got] == ['a [MESSAGE:{"id": "7.0"}]', "c"]
 
 
 def test_the_system_and_the_opening_are_not_selectable() -> None:
@@ -102,8 +126,12 @@ def test_the_system_and_the_opening_are_not_selectable() -> None:
     assert selectable(got, opening_mid) == ["7.0", "cur.1"]
 
 
-def test_a_selection_cannot_split_a_tool_exchange() -> None:
-    """The provider's rule, refused before the next request rather than by it."""
+def test_a_selection_of_one_message_of_an_exchange_takes_the_whole_exchange() -> None:
+    """The provider's rule, applied before the next request rather than by it.
+
+    A tool-call-only assistant message carries no annotation, so the model's
+    ordinary move is to name a result; the call goes with it.
+    """
     exchange = Message(
         role="assistant",
         content=None,
@@ -114,10 +142,11 @@ def test_a_selection_cannot_split_a_tool_exchange() -> None:
     later = Message(role="assistant", content="done", mid="cur.3")
     got = [system(), user("now"), exchange, result, later]
 
-    assert split_exchange(got, ["cur.1", "cur.2"]) is None, "the whole exchange"
-    assert "split" in (split_exchange(got, ["cur.1"]) or ""), "the call alone"
-    assert "split" in (split_exchange(got, ["cur.2"]) or ""), "the result alone"
-    assert split_exchange(got, ["cur.3"]) is None, "a plain message"
+    assert whole_exchanges(got, ["cur.2"]) == {"cur.1", "cur.2"}, "the result names it"
+    assert whole_exchanges(got, ["cur.1"]) == {"cur.1", "cur.2"}, "the call names it"
+    assert whole_exchanges(got, ["cur.1", "cur.2"]) == {"cur.1", "cur.2"}
+    assert whole_exchanges(got, ["cur.3"]) == {"cur.3"}, "a plain message is alone"
+    assert whole_exchanges(got, []) == set()
 
 
 def test_an_id_the_view_did_not_offer_is_named() -> None:
@@ -132,11 +161,66 @@ def test_an_id_the_view_did_not_offer_is_named() -> None:
     assert unknown_ids(["cur.1"], ["7.0"], {"7.0"}) == []
 
 
+def test_a_due_compaction_answers_the_view_and_its_candidates() -> None:
+    """**The threshold check and the ask are one projection.**
+
+    The caller that finds a compaction due is handed the view the selector reads
+    and the ids it may name, so the two servers build no second copy of either.
+    """
+    messages = [
+        system(),
+        Message(role="user", content="old", mid="7.0"),
+        user("now"),
+        result("c1"),
+    ]
+
+    asked = due(
+        messages,
+        set(),
+        last_tokens=900,
+        prompt_window=1000,
+        compact_at=0.9,
+        held=False,
+    )
+
+    assert asked is not None
+    got, candidates = asked
+    assert [m.mid for m in got] == ["", "7.0", "cur.0", "cur.1"]
+    assert candidates == ["7.0", "cur.1"]
+
+
+def test_a_compaction_is_not_due_below_the_fraction_or_while_held() -> None:
+    messages = [system(), user("now"), answer("x")]
+
+    for facts in (
+        {"last_tokens": 899, "compact_at": 0.9, "held": False},
+        {"last_tokens": 900, "compact_at": 0.0, "held": False},
+        {"last_tokens": 900, "compact_at": 0.9, "held": True},
+    ):
+        assert due(messages, set(), prompt_window=1000, **facts) is None, facts
+
+
+def test_a_turn_with_nothing_to_drop_is_not_due() -> None:
+    """The system prompt and the opening are the fixed two; a turn made of them
+    has no selection to ask for."""
+    assert (
+        due(
+            [system(), user("now")],
+            set(),
+            last_tokens=900,
+            prompt_window=1000,
+            compact_at=0.9,
+            held=False,
+        )
+        is None
+    )
+
+
 def test_the_report_names_the_record() -> None:
     assert "turn log keeps every one" in report(Compacted(seen=5, dropped=2))
     assert "did not answer" in report(Compacted(seen=4, dropped=0, decision="failed"))
-    assert "split" in report(
-        Compacted(seen=4, dropped=0, refused="the selection would split")
+    assert "does not offer" in report(
+        Compacted(seen=4, dropped=0, refused="the view does not offer '9.9'")
     )
     assert "Nothing dropped" in report(Compacted(seen=4, dropped=0))
 

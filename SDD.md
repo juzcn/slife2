@@ -1219,9 +1219,10 @@ Rules:
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
-  that names no turn in hand is not a clear**: the explicit clear is the string
-  (or the empty list), and a selection with no known turn to keep leaves the
-  context in hand.
+  that names no turn in hand is not a clear**: the explicit clear is `"clear"`
+  (or, for the internal parser, an empty list; `mode: "ids"` requires at least
+  one id), and a selection with no known turn to keep leaves the context in
+  hand.
 - **A question has two spellings.** `sentences` are read by meaning, one question
   per entry; `query` is the words the keyword leg requires and the meaning
   fallback. The keyword leg is fused into each sentence's list, and a later
@@ -1268,14 +1269,15 @@ Rules:
   no prompt-cache miss is paid on rebuild.
 - **Every addressable message carries a live id**, derived like the turn
   footnote: `{turn_id}.{index}` for a historical turn's message, `cur.{index}`
-  for one of the running turn. The view annotates it as
-  `[MESSAGE:{"id": …}]`; the builder sets the historical one, the view derives
-  the running turn's. It is never stored. A turn's ids are written into the live
-  list when its id arrives (`address_turn`), with the same spelling a rebuild
-  derives from the row, and the rebuild hop carries them plus `channel` so a
-  no-op echo hands the list back addressable. The selector and the model read
-  the same annotation, and a compaction's ids are the ones `_turn_compact`
-  accepts.
+  for one of the running turn. The view writes it into the content as
+  `[MESSAGE:{"id": …}]` on the messages the model did not write — the person's
+  and the tool's — and keeps it on the others for the exchange rule; the builder
+  sets the historical one, the view derives the running turn's. It is never
+  stored. A turn's ids are written into the live list when its id arrives
+  (`address_turn`), with the same spelling a rebuild derives from the row, and
+  the rebuild hop carries them plus `channel` so a no-op echo hands the list
+  back addressable. The selector and the model read the same annotation, and a
+  compaction's ids are the ones `_turn_compact` accepts.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added before the turn and removed before it is saved
   (`without_lead`), so it never reaches the row or the index; a list rebuilt
@@ -1293,35 +1295,40 @@ Rules:
 
 **The turn's own compaction is a view, not an edit.** `_turn_compact` takes the
 live ids this turn no longer needs and hides them from the list the rest of the
-turn is sent (`libs/turn/compact.py`). A call with `compact` is the model's own
-selection, read by the same parser as the selector's answer and checked against
-the view before it is applied; a call with none runs the live selection
-decision — a forced `_turn_compact` call under §5.3's contract — over the same
-view. **The ids are on the messages**: the view annotates each addressable
-message `[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
-numbered copy, and the pair the harness writes carries the ids it chose. The
+turn is sent (`libs/turn/compact.py`). A call with `compact` is a selection,
+read by the same parser as the selector's answer and checked against the view
+before it is applied; a call with no `compact` is refused, and the harness's
+automatic call asks `select_live` for the selection first — a forced
+`_turn_compact` call under §5.3's contract over the same view. **The ids are on
+the messages**: the view annotates each addressable message
+`[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
+numbered copy, and the pair the harness writes carries the ids it chose. **The
+annotation goes on the messages the model did not write** — the person's and the
+tool's; an assistant message's content is what the model said, and a marker
+written there is a sentence it never wrote that it copies into the next answer
+(a live session showed the `cur.N` chain growing once per call). A
+tool-call-only assistant message has no text and carries no id of its own. The
 selection is shown the last measured call and the conversation's window, through
 the same `context_usage` the status bar uses, so the model and the person read
 one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
 the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the
-only fixed messages; every other message, historical or current, is the model's
-to drop. The legality of a tool exchange is the *schema's* rule — a call and its
-results go together — and the harness checks it before applying a selection: a
-split answer is refused, as a tool error for the model's own call and as a
-report for the automatic one, so the next request stays legal and the turn
-continues on its full view. **A selection naming an id the view does not offer
-is refused the same way** — the fixed two, or no id at all — and the whole
-selection is refused rather than filtered, because applying the part that
-resolves would be a decision the model did not make. An id an earlier
+fixed two; the annotated messages, historical or current, are the model's to
+drop. The legality of a tool exchange is the *schema's* rule — a call and its
+results go together — and the harness **completes a selection that names one
+member to the whole exchange** (`whole_exchanges`), so the next request stays
+legal and the model does not have to list a call whose message carries no id.
+**A selection naming an id the view does not offer is refused whole** — the
+fixed two, or no id at all — rather than filtered, because applying the part
+that resolves would be a decision the model did not make. An id an earlier
 compaction already hid is not an error: it is already applied, and a model
 repeating a cumulative list is asking for the same view. A
 selection decision that fails or cannot be read
 compacts nothing and the turn continues (Appendix C); a selection decision that
-keeps everything, or is refused, stops the automated pass for the rest of the
-turn, because that is a decision about the whole context rather than something
-the harness should ask again at every boundary. The model can still call
-`_turn_compact` itself.
+keeps everything, fails, or is refused, stops the automated pass for the rest of
+the turn, because that is a decision about the whole context rather than
+something the harness should ask again at every boundary. The model can still
+call `_turn_compact` itself, and a later successful call resumes the pass.
 
 **The rebuild is the durable edit; the compaction is the transient view.**
 A `_context_rebuild` call with `mode`/`turn_ids`/`recall` is a selection,
@@ -2389,9 +2396,12 @@ description, so the picture is on the task's next model call, `_turn_compact`
 compacts the task's own view (its `turn.hidden`) and never the agent server's
 loop, and `_context_rebuild` edits the task's clone with `publish=False`. The
 task also runs the same automatic passes as an agent server turn — the rebuild
-at its first boundary, and its own `compact_due` against
+at its first boundary, and its own `compact.due` against
 `turn.live.last_usage` and the task's window — because a task is one turn and
-records nothing: a turn that overflows has no next turn to recover on. The agent
+records nothing: a turn that overflows has no next turn to recover on. Both
+servers reach the same rule and the same failure sentences through
+`TurnRuntime.rebuild_arguments` / `compact_arguments`; only the state they adopt
+the answer into is theirs. The agent
 server refuses a call that names a turn other than the loop's running one, and
 the hub forwards the caller's turn token so that is decidable.
 

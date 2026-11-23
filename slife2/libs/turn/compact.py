@@ -10,13 +10,22 @@ turn's saved row is unchanged, and the next rebuild starts from the full list.
 **A `_context_rebuild` resets the view**: hiding is per-turn, and a history edit
 starts it over (`loop.hidden` is cleared).
 
+**An annotation belongs to a message the model did not write.**  The live id is
+a marginal note on what the model is *reading* — a person's message, a tool's
+result — and never on its own words: an assistant message's content is what the
+model said, and a marker written there is a sentence it never wrote that it will
+copy into the next answer.  A tool-call-only assistant message has no text at
+all, so it carries no annotation; a selection reaches it through its exchange
+(see :func:`whole_exchanges`).
+
 **The selection is the model's; the harness checks it against the view.**  The
-selector is asked which live messages this turn no longer needs, and its schema
-says a tool exchange goes as a whole.  The harness checks both rules before
-applying a selection: an id the view did not offer, and a split tool exchange,
-are refused — a tool error for the model's own call, a report for the automatic
-one — so the turn continues on its full view instead of failing the next
-request.  Being wrong costs a call, not a turn.
+selector is asked which live messages this turn no longer needs.  The harness
+checks the id against the view; a tool exchange named in part is *completed* to
+the whole exchange, because a call without its answer — or an answer without its
+call — is a history no provider accepts.  An id the view did not offer is
+refused whole — a tool error for the model's own call, a report for the
+automatic one — so the turn continues on its full view instead of failing the
+next request.  Being wrong costs a call, not a turn.
 
 **A selection is read by one parser.**  The model's own `_turn_compact` call
 writes the same `compact` list the selector writes, so it is read by
@@ -28,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 from slife2.libs.turn.context import with_note
 from slife2.libs.turn.messages import Message
@@ -44,15 +54,11 @@ class Compacted:
     #: `""` for a decision, otherwise why there was none — the provider's
     #: failure text (`failure_text`) or the parser's refusal.
     decision: str = ""
-    #: Why the selection was refused before it was applied (a split tool
-    #: exchange, an unreadable selection, or an id this view did not offer), or
-    #: `""`.  The selection could not be carried by the next request as it was
-    #: written, so nothing was hidden.
+    #: Why the selection was refused before it was applied (an unreadable
+    #: selection or an id this view did not offer), or `""`.  The selection
+    #: could not be carried by the next request as it was written, so nothing
+    #: was hidden.
     refused: str = ""
-    #: The live ids the drop named, in the order they were written.  Kept for
-    #: the automatic call's pair — the arguments the harness writes into it —
-    #: not for the report: the report is the count, and the pair is the call.
-    ids: tuple[str, ...] = ()
 
 
 def opening(messages: Sequence[Message]) -> int | None:
@@ -74,16 +80,45 @@ def _id_note(mid: str) -> str:
     return f'[MESSAGE:{{"id": "{mid}"}}]'
 
 
+def _has_text(content: Any) -> bool:
+    """Whether a message carries anything to write an annotation into."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return bool(content)
+    return False
+
+
+def _annotated(message: Message, index: int, at: int | None) -> bool:
+    """Whether the view writes this message's live id into its content.
+
+    **A message the model did not write, and one with room for the note.**  The
+    annotation is a marginal note on what the model is *reading*: a person's
+    message or a tool's result.  An assistant message is what the model said,
+    and a marker written into its content is a sentence it never wrote — the
+    model copies it into the next answer, once per call.  A tool-call-only
+    assistant message has no text at all, so it is reached through its exchange
+    (`whole_exchanges`).  The turn's opening is fixed and carries no id either.
+    """
+    if message.role not in ("user", "tool"):
+        return False
+    if index == at:
+        return False
+    return _has_text(message.content)
+
+
 def view(messages: Sequence[Message], hidden: Collection[str]) -> list[Message]:
     """The list the model is sent: the conversation minus what was hidden.
 
-    **Every addressable message carries its live id in the view**, like the
-    `[TURN:]` footnote a rebuilt turn carries: `{turn_id}.{index}` for a
-    historical message (set by `messages_from_turns`), `cur.{index}` for one of
-    the turn running, counted from its opening.  The annotation is a copy and
-    never reaches the record; `hidden` holds the same ids, so hiding a message
-    does not renumber the ones around it.  The system prompt is not addressable
-    and passes through untouched.
+    **Every addressable message gains its live id here**, like the `[TURN:]`
+    footnote a rebuilt turn carries: `{turn_id}.{index}` for a historical
+    message (set by `messages_from_turns`), `cur.{index}` for one of the turn
+    running, counted from its opening.  The *annotation* — the
+    `[MESSAGE:{"id": …}]` text — goes on the messages the model did not write,
+    and the id itself is kept on all of them for `whole_exchanges`.  Both are
+    copies and never reach the record; `hidden` holds the same ids, so hiding a
+    message does not renumber the ones around it.  The system prompt is not
+    addressable and passes through untouched.
     """
     at = opening(messages)
     hidden_ids = set(hidden)
@@ -100,6 +135,9 @@ def view(messages: Sequence[Message], hidden: Collection[str]) -> list[Message]:
         if not mid:
             out.append(message)
             continue
+        if not _annotated(message, index, at):
+            out.append(replace(message, mid=mid))
+            continue
         out.append(
             replace(
                 message,
@@ -111,20 +149,81 @@ def view(messages: Sequence[Message], hidden: Collection[str]) -> list[Message]:
 
 
 def selectable(view: Sequence[Message], opening_mid: str) -> list[str]:
-    """The view's ids a selector may drop: everything but the fixed two.
+    """The view's ids a selector may drop: the annotated messages but the opening.
 
-    The system prompt and the turn's opening message are not candidates.  The
-    first is the conversation's instructions rather than its history; the second
-    is what the turn *is* — hiding it would leave the model answering nothing.
-    Every other message, historical or current, is the model's to drop.  A
-    historical one hidden here is a view edit for this turn only; the
-    conversation's durable shape is `_context_rebuild`'s.
+    An annotation is what makes an id readable, so the candidates are the user
+    and tool messages that carry one.  The turn's opening message is fixed —
+    hiding it would leave the model answering nothing — and the system prompt
+    is the conversation's instructions rather than its history.  Assistant
+    messages are what the model said and carry no id, so they are not named
+    alone; a selection reaches one through its tool exchange
+    (`whole_exchanges`).  A historical message hidden here is a view edit for
+    this turn only; the conversation's durable shape is `_context_rebuild`'s.
     """
     return [
         message.mid
         for message in view
-        if message.mid and message.role != "system" and message.mid != opening_mid
+        if message.mid
+        and message.role in ("user", "tool")
+        and message.mid != opening_mid
+        and _has_text(message.content)
     ]
+
+
+def projection(
+    messages: Sequence[Message], hidden: Collection[str]
+) -> tuple[list[Message], list[str]]:
+    """The view a selector reads and the ids it may drop, or two empty lists.
+
+    **The one answer to "what would a compaction be asked about."**  The view is
+    what the model is sent (`view`), and the ids are the ones a selection may
+    name (`selectable`) — the system prompt and the turn's opening message are
+    the fixed two.  Two empty lists mean the turn has no opening, or nothing
+    left to drop; both callers read that as "not due" and "nothing to ask".
+    """
+    at = opening(messages)
+    if at is None:
+        return [], []
+    projected = view(messages, hidden)
+    at_view = opening(projected)
+    opening_mid = projected[at_view].mid if at_view is not None else ""
+    return projected, selectable(projected, opening_mid)
+
+
+def due(
+    messages: Sequence[Message],
+    hidden: Collection[str],
+    *,
+    last_tokens: int,
+    prompt_window: int,
+    compact_at: float,
+    held: bool,
+) -> tuple[list[Message], list[str]] | None:
+    """The view a due compaction asks over, or `None` when none is due.
+
+    **One rule for the agent, its subagents and an agent task.**  The
+    measurement is the last completed call's own, and the fraction is
+    `agent.compact_at` of the prompt budget the conversation started on.  A turn
+    that began near its ceiling crosses it after one large batch; the
+    just-appended batch is not in the measurement yet, and the fraction is below
+    the window by enough to cover one.
+
+    **Re-asked whenever the threshold is crossed again.**  A compaction that
+    dropped something leaves the pass live, so a turn that grows back over the
+    fraction is asked again at the next boundary.  A compaction that kept
+    everything or failed is a decision about the whole context and stops the
+    automatic pass for the turn (`held`); the model can still call the tool
+    itself, and a later successful call resumes the pass.
+
+    The answer is the projection the caller then asks its selector over, so the
+    view and the candidate set are built once.
+    """
+    if compact_at <= 0 or held:
+        return None
+    if last_tokens < prompt_window * compact_at:
+        return None
+    projected, candidates = projection(messages, hidden)
+    return (projected, candidates) if candidates else None
 
 
 def unknown_ids(
@@ -134,11 +233,12 @@ def unknown_ids(
 ) -> list[str]:
     """The selected ids this view does not offer, in selection order.
 
-    **`selectable` is `selectable()`'s answer** — every addressable message but
-    the fixed two — and `hidden` is what this turn has already dropped.  Any id
-    outside both is a message the model cannot name: the system prompt, the
-    opening message, or an id no build wrote.  An id it already hid is not an
-    error: a model that repeats a cumulative list is asking for the same view.
+    **`selectable` is `selectable()`'s answer** — the annotated messages but the
+    opening — and `hidden` is what this turn has already dropped.  Any id outside
+    both is a message the model cannot name: the system prompt, the opening
+    message, an assistant message, or an id no build wrote.  An id it already hid
+    is not an error: a model that repeats a cumulative list is asking for the
+    same view.
 
     The caller refuses the whole selection rather than applying the part of it
     that resolves, because the rest would be a decision the model did not make
@@ -148,36 +248,32 @@ def unknown_ids(
     return [mid for mid in ids if mid not in offered]
 
 
-def split_exchange(view: Sequence[Message], ids: Collection[str]) -> str | None:
-    """Why a selection would split a tool exchange, or `None` if it does not.
+def whole_exchanges(view: Sequence[Message], ids: Collection[str]) -> set[str]:
+    """The selection with every named tool exchange completed to the whole.
 
-    **The provider's rule, checked before the next call rather than after it.**
+    **The provider's rule, applied before the next call rather than after it.**
     An assistant message with `tool_calls` must be followed by a tool message
-    for every call, so a selection is all-or-none over such an exchange.  The
-    schema states the rule to the model; the harness is the party that knows
-    the view, and a split applied here is a 400 on the next request — a failed
-    turn for a mistake the tool call can refuse instead.
+    for every call, so an exchange moves as one.  The schema states the rule to
+    the model, and this is what makes it true when a selection names one member
+    — the ordinary case, because a tool-call-only assistant message has no text
+    and so carries no annotation of its own.  Naming any member asks for the
+    exchange, which is why completing it is the decision the model made rather
+    than one made for it.
     """
-    selected = set(ids)
+    chosen = set(ids)
     for index, message in enumerate(view):
         if message.role != "assistant" or not message.tool_calls:
             continue
         calls = {call.id for call in message.tool_calls}
-        results: list[Message] = []
+        group = {message.mid} if message.mid else set()
         for other in view[index + 1 :]:
             if other.role != "tool" or other.tool_call_id not in calls:
                 break
-            results.append(other)
-        group = {
-            mid for mid in [message.mid, *(result.mid for result in results)] if mid
-        }
-        picked = group & selected
-        if picked and picked != group:
-            return (
-                "the selection would split a tool exchange — name the assistant "
-                "call and all of its results together"
-            )
-    return None
+            if other.mid:
+                group.add(other.mid)
+        if group & chosen:
+            chosen |= group
+    return chosen
 
 
 def report(result: Compacted, *, recorded: bool = True) -> str:
