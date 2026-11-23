@@ -757,9 +757,15 @@ def build_server(
                 context_window=turn.context_window,
                 selection=arguments.get("compact"),
             )
-            # **The same rule as the agent server's**: a decision to keep
-            # everything, or a failed selector, stops the automatic pass; a
-            # drop leaves it live for the next crossing.
+            # **The same rule as the agent server's**: a split selection is
+            # refused (a tool error for the model's own call, a report for the
+            # automatic one), and a decision to keep everything or a failed
+            # selector stops the automatic pass; a drop leaves it live.
+            if result.refused:
+                turn.compact_hold = True
+                if arguments.get("compact") is not None:
+                    raise ToolFailed(result.refused)
+                return compact.report(result, recorded=False)
             turn.compact_hold = result.dropped == 0 or bool(result.decision)
             turn.last_decision = (
                 {} if result.decision else {"compact": list(result.ids)}
@@ -842,7 +848,6 @@ def build_server(
                 rerank=rebuilt.rerank,
                 decision=rebuilt.decision,
                 tokens=tokens,
-                ids=rebuilt.turn_ids,
             )
 
         return {

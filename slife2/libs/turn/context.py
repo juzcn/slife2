@@ -853,7 +853,6 @@ def rebuild_report(
     rerank: str,
     decision: str,
     tokens: str,
-    ids: Sequence[int] = (),
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
 
@@ -886,14 +885,9 @@ def rebuild_report(
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
-    # **The ids, because the counts are not the choice.**  A model that reads
-    # "kept 3 of 5" knows the shape of the selection but not which turns it
-    # runs on; the ids are the same ones its `[TURN:]` footnotes carry.
-    turns = ", ".join(str(turn_id) for turn_id in ids)
-    named = f" turns: {turns};" if turns else ""
     return (
         f"kept {kept} of {in_hand} turn(s) in hand, "
-        f"recalled {recalled} of {outside} outside{tail};{named} context ~{tokens}."
+        f"recalled {recalled} of {outside} outside{tail}; context ~{tokens}."
     )
 
 

@@ -613,8 +613,7 @@ which to recall from the turn log; the turn runs on the two selections in time
 order, followed by the turn itself. The turn running is never part of the
 selection. The model can call `_context_rebuild` itself with `context`/`recall`
 of its own — the same schema, applied as it came, with no decision call — and
-the answer carries the turn ids it runs on and an estimate of the context the
-turn runs on from there. If a recall matches more than fits, only what fits is
+the answer carries an estimate of the context the turn runs on from there. If a recall matches more than fits, only what fits is
 returned. A failed decision keeps the context in hand; a missing turn store
 fails the turn.
 
@@ -627,7 +626,7 @@ A turn that grows past `agent.compact_at` of the model's window (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`
 is a view, not an edit: the live view annotates each message with its id
 (`[MESSAGE:{"id": …}]`), so the model can name the ids to drop itself or leave
-the choice to the selector, and the answer names what left. The turn log keeps
+the choice to the selector, and the answer says how many left. The turn log keeps
 every message, the next turn starts from the full conversation, and a
 `_context_rebuild` starts the view over.
 

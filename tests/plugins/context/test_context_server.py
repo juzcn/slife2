@@ -278,10 +278,11 @@ async def test_the_model_tools_name_no_agent() -> None:
 async def test_none_of_the_harness_tools_is_the_models() -> None:
     """The audience mark, and which side of it each tool is on.
 
-    A model may read its own history and may not decide what its context is: the
-    footnote on each rebuilt turn is how it says what it wants kept, and nothing
-    it can call changes the selection.  That is a claim about the marks rather
-    than about the code, so it is asserted here.
+    A model may read its own history; the context plugin's own selection tools
+    are the harness's, not the model's — a model's selection reaches it through
+    the agent server's `_context_rebuild`/`_turn_compact`, which carry the
+    decision schema.  That is a claim about the marks rather than about the
+    code, so it is asserted here.
     """
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
@@ -1960,6 +1961,74 @@ async def test_a_failed_call_is_not_asked_again() -> None:
 
     assert calls == [""], "one ask, and the repair never ran"
     assert answer.data["decision"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_another_tool_is_repaired_once() -> None:
+    """The provider answered, with the wrong call: hand it back with the reason."""
+    calls: list[tuple[str, str]] = []
+
+    async def ask(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list,
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        calls.append((previous, repair))
+        if len(calls) == 1:
+            raise context_server.Unanswered(
+                "the reply called '_turn_compact', not 'decide_context'",
+                previous='{"compact": []}',
+                answered_with="_turn_compact",
+            )
+        return '{"context": "clear"}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=ask)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await _rebuild(client, "")
+
+    assert len(calls) == 2, "one call and its one repair"
+    assert calls[1][0] == '{"compact": []}', "the reply is handed back"
+    assert "not 'decide_context'" in calls[1][1], "the reason names the wrong call"
+    assert answer.data["changed"] is True, "the corrected selection ran"
+    assert answer.data["kept"] == 0, "the clear"
+
+
+@pytest.mark.asyncio
+async def test_a_second_answer_without_the_forced_call_is_unparsed() -> None:
+    """One repair, then the turn keeps the context; the call is not repeated."""
+    calls: list[int] = []
+
+    async def ask(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list,
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        calls.append(1)
+        raise context_server.Unanswered(
+            "the reply held no tool call", previous="I will not decide"
+        )
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=ask)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        answer = await _rebuild(client, "")
+
+    assert len(calls) == 2, "one call and its one repair"
+    assert answer.data["decision"] == "unparsed"
+    assert answer.data["changed"] is False, "the context is kept"
 
 
 @pytest.mark.asyncio

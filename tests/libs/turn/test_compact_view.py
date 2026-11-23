@@ -16,6 +16,7 @@ from slife2.libs.turn.compact import (
     opening,
     report,
     selectable,
+    split_exchange,
     view,
 )
 from slife2.libs.turn.messages import Message, ToolCall
@@ -100,17 +101,36 @@ def test_the_system_and_the_opening_are_not_selectable() -> None:
     assert selectable(got, opening_mid) == ["7.0", "cur.1"]
 
 
-def test_the_report_names_the_record_and_the_ids() -> None:
+def test_a_selection_cannot_split_a_tool_exchange() -> None:
+    """The provider's rule, refused before the next request rather than by it."""
+    exchange = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="c1", name="fake__echo")],
+        mid="cur.1",
+    )
+    result = Message(role="tool", content="ok", tool_call_id="c1", mid="cur.2")
+    later = Message(role="assistant", content="done", mid="cur.3")
+    got = [system(), user("now"), exchange, result, later]
+
+    assert split_exchange(got, ["cur.1", "cur.2"]) is None, "the whole exchange"
+    assert "split" in (split_exchange(got, ["cur.1"]) or ""), "the call alone"
+    assert "split" in (split_exchange(got, ["cur.2"]) or ""), "the result alone"
+    assert split_exchange(got, ["cur.3"]) is None, "a plain message"
+
+
+def test_the_report_names_the_record() -> None:
     assert "turn log keeps every one" in report(Compacted(seen=5, dropped=2))
-    assert "12.1, 12.2" in report(Compacted(seen=5, dropped=2, ids=("12.1", "12.2")))
     assert "did not answer" in report(Compacted(seen=4, dropped=0, decision="failed"))
+    assert "split" in report(
+        Compacted(seen=4, dropped=0, refused="the selection would split")
+    )
     assert "Nothing dropped" in report(Compacted(seen=4, dropped=0))
 
 
 def test_a_task_report_claims_no_record() -> None:
     """A task records no turn; a report that named a log would be a false fact."""
-    text = report(Compacted(seen=5, dropped=2, ids=("12.1", "12.2")), recorded=False)
+    text = report(Compacted(seen=5, dropped=2), recorded=False)
 
     assert "Dropped 2 message(s)" in text
-    assert "12.1" in text
     assert "turn log" not in text

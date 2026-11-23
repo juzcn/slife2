@@ -470,26 +470,59 @@ async def _stream_chat(
         ) from exc
 
 
+class Unanswered(RuntimeError):
+    """A decision reply that is not the forced call: the provider answered,
+    but not with the call this decision can read.
+
+    **An answer, not a provider failure.**  The one-repair rule is for an answer
+    already in hand, and this is one: no tool call at all, or a call to another
+    tool — the continuation a tool-heavy conversation falls into, which is the
+    failure the forced choice exists to prevent.  Reading the other call's
+    arguments as a decision would attribute a `{}` or an empty selection to the
+    model; the repair hands the reply back with the reason instead, and a second
+    one ends the decision.
+
+    `previous` is the text to show the model in the repair exchange — its own
+    arguments, or the prose it answered with when it called nothing — and
+    `answered_with` is the tool it called, when it called one.
+    """
+
+    def __init__(
+        self, reason: str, *, previous: str = "", answered_with: str = ""
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.previous = previous
+        self.answered_with = answered_with
+
+
 def decision_arguments(result: StreamChatResult, expected: str) -> str:
     """The decision tool's arguments, as the text the parser reads.
 
-    **A call is the decision, and it has to be the forced tool's.**  A response
-    with no call is a provider that ignored a forced `tool_choice`; it has no
-    answer to correct, so it is raised and `_decide`'s or `_select_live`'s
-    handler logs it as a failed call.  A call to *another* tool is the same
-    kind of no-answer — a model that continued the conversation instead of
-    deciding, which is the failure the forced choice exists to prevent — and
-    reading its arguments as a decision would attribute a `{}` (keep
-    everything) or an empty list to the decision model.  A damaged call keeps
-    the model's own argument text (`raw_arguments`) so the parser can name what
-    was wrong with it.
+    **A call is the decision, and it has to be the forced tool's.**  A reply
+    that is not that call is an `Unanswered`: no call is a model that answered
+    in prose, and another tool is the continuation the forced choice exists to
+    prevent.  Both are answers, so `_ask_with_repair` gets the one repair round
+    with the reason; a provider failure has no answer and is not re-asked.  A
+    damaged call (the expected tool, unreadable arguments) keeps the model's own
+    argument text (`raw_arguments`) so the parser can name what was wrong.
     """
     if not result.tool_calls:
-        raise RuntimeError("the decision call returned no tool call")
+        raise Unanswered(
+            "the reply held no tool call",
+            previous=str(result.text or ""),
+        )
     call = result.tool_calls[0]
     if call.name != expected:
-        raise RuntimeError(
-            f"the decision call answered with {call.name!r}, not {expected!r}"
+        previous = (
+            call.raw_arguments
+            if call.raw_arguments is not None
+            else json.dumps(call.arguments, ensure_ascii=False)
+        )
+        raise Unanswered(
+            f"the reply called {call.name!r}, not {expected!r}",
+            previous=previous,
+            answered_with=call.name,
         )
     if call.raw_arguments is not None:
         return call.raw_arguments
@@ -508,10 +541,13 @@ async def _ask_with_repair[T](
     **Never raises, and the one retry is a repair.**  A provider failure and a
     reply that is not the requested shape both return `None`, and the caller's
     fallback is perfectly good.  A provider failure is *not* asked again: there
-    is no answer to correct.  An unreadable reply is different — the provider
-    answered, the answer is in hand, and the refusal names the field — so the
-    model is asked once more with its own reply and that reason.  A second
-    refusal ends it; the repair is one round, not a loop.
+    is no answer to correct.  An answer that cannot be used is different — the
+    provider answered, the answer is in hand, and the reason names what is
+    wrong with it — so the model is asked once more with its own reply and that
+    reason.  That covers both an unreadable argument shape (`parse`'s refusal)
+    and a reply that is not the forced call (`Unanswered`: no tool call, or
+    another tool).  A second refusal ends it; the repair is one round, not a
+    loop.
 
     **No clock of its own.**  The waits are the model service's, exactly as for
     the turn's own calls: a slow provider makes the turn late, which the design
@@ -524,28 +560,37 @@ async def _ask_with_repair[T](
     """
     try:
         text = await ask()
+    except Unanswered as exc:
+        # The provider answered, with the wrong thing: the reply and the reason
+        # are what the repair hands back.
+        logger.info("%s_unparsed reason=%s", label, exc.reason)
+        previous, refusal = exc.previous, exc.reason
     except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
         logger.info("%s_failed reason=%s", label, type(exc).__name__)
         logger.debug("the %s call raised", subject, exc_info=True)
         return None, "failed"
-    # **The raw arguments, for the one question the parsed answer cannot
-    # answer**: *why* a model that filled the tool a certain way did so.
-    # DEBUG because it is the model's text and this line is for whoever is
-    # already looking at the protocol; the parsed fields are the INFO line
-    # the caller writes.
-    logger.debug("%s_reply attempt=first %r", label, text)
-    value, refusal = parse(text)
-    if value is not None:
-        return value, ""
-    logger.info("%s_unparsed reason=%s", label, refusal)
+    else:
+        # **The raw arguments, for the one question the parsed answer cannot
+        # answer**: *why* a model that filled the tool a certain way did so.
+        # DEBUG because it is the model's text and this line is for whoever is
+        # already looking at the protocol; the parsed fields are the INFO line
+        # the caller writes.
+        logger.debug("%s_reply attempt=first %r", label, text)
+        value, refusal = parse(text)
+        if value is not None:
+            return value, ""
+        logger.info("%s_unparsed reason=%s", label, refusal)
+        previous = text
     # **The one retry, and it is not the same bet as asking again.**  The model
     # has already answered, so the provider works and the round trip is priced;
-    # what failed is the shape, and the shape is what the refusal names.  Asking
+    # what failed is the shape, or the call, and the reason names it.  Asking
     # once more with the answer and the reason is a correction, not a blind
-    # retry — and a model that cannot write the object twice falls back exactly
-    # as before.
+    # retry — and a model that cannot answer twice falls back exactly as before.
     try:
-        corrected = await ask(previous=text, repair=refusal)
+        corrected = await ask(previous=previous, repair=refusal)
+    except Unanswered as exc:
+        logger.info("%s_unparsed reason=%s attempt=repair", label, exc.reason)
+        return None, "unparsed"
     except Exception as exc:  # noqa: BLE001 — the same fallback as above
         logger.info("%s_repair_failed reason=%s", label, type(exc).__name__)
         logger.debug("the repair call raised", exc_info=True)

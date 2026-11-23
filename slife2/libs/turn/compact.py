@@ -10,13 +10,13 @@ turn's saved row is unchanged, and the next rebuild starts from the full list.
 **A `_context_rebuild` resets the view**: hiding is per-turn, and a history edit
 starts it over (`loop.hidden` is cleared).
 
-**The selection is the model's, and so is legality.**  The selector is asked
-which live messages this turn no longer needs; its schema says a tool exchange
-goes as a whole, and the harness applies the answer as it came.  A model that
-splits a call from its result writes a history the next call refuses — the turn
-fails, the record is intact, and the next turn runs on the full list.  That is
-the trust the harness already gives the model's own tool calls: being wrong
-costs one turn, not the conversation.
+**The selection is the model's; the tool-exchange rule is the harness's.**  The
+selector is asked which live messages this turn no longer needs, and its schema
+says a tool exchange goes as a whole.  The harness checks that rule against the
+view before applying a selection: a split answer is refused — a tool error for
+the model's own call, a report for the automatic one — so the turn continues on
+its full view instead of failing the next request.  Being wrong costs a call,
+not a turn.
 """
 
 from __future__ import annotations
@@ -38,9 +38,13 @@ class Compacted:
     dropped: int
     #: `""` for a decision, otherwise why there was none (`failed`/`unparsed`).
     decision: str = ""
-    #: The live ids the drop named, in the order they were written.  Kept so the
-    #: report can say *which* messages left rather than only how many: the id is
-    #: the one thing the model and the transcript can both address a message by.
+    #: Why the selection was refused before it was applied (a split tool
+    #: exchange), or `""`.  The selection named something the next request could
+    #: not carry, so nothing was hidden.
+    refused: str = ""
+    #: The live ids the drop named, in the order they were written.  Kept for
+    #: the automatic call's pair — the arguments the harness writes into it —
+    #: not for the report: the report is the count, and the pair is the call.
     ids: tuple[str, ...] = ()
 
 
@@ -116,6 +120,38 @@ def selectable(view: Sequence[Message], opening_mid: str) -> list[str]:
     ]
 
 
+def split_exchange(view: Sequence[Message], ids: Collection[str]) -> str | None:
+    """Why a selection would split a tool exchange, or `None` if it does not.
+
+    **The provider's rule, checked before the next call rather than after it.**
+    An assistant message with `tool_calls` must be followed by a tool message
+    for every call, so a selection is all-or-none over such an exchange.  The
+    schema states the rule to the model; the harness is the party that knows
+    the view, and a split applied here is a 400 on the next request — a failed
+    turn for a mistake the tool call can refuse instead.
+    """
+    selected = set(ids)
+    for index, message in enumerate(view):
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        calls = {call.id for call in message.tool_calls}
+        results: list[Message] = []
+        for other in view[index + 1 :]:
+            if other.role != "tool" or other.tool_call_id not in calls:
+                break
+            results.append(other)
+        group = {
+            mid for mid in [message.mid, *(result.mid for result in results)] if mid
+        }
+        picked = group & selected
+        if picked and picked != group:
+            return (
+                "the selection would split a tool exchange — name the assistant "
+                "call and all of its results together"
+            )
+    return None
+
+
 def report(result: Compacted, *, recorded: bool = True) -> str:
     """What the tool tells the model, in the transcript and the row.
 
@@ -126,6 +162,11 @@ def report(result: Compacted, *, recorded: bool = True) -> str:
     the view — claiming a log it does not have would be a false fact.
     """
     subject = "turn" if recorded else "task"
+    if result.refused:
+        return (
+            f"No compaction: {result.refused}. The {subject} continues on its "
+            "full view."
+        )
     if result.decision:
         return (
             f"No compaction: the selector did not answer ({result.decision}). "
@@ -133,14 +174,10 @@ def report(result: Compacted, *, recorded: bool = True) -> str:
         )
     if not result.dropped:
         return f"Nothing dropped: the {subject} keeps all {result.seen} messages."
-    named = f": {', '.join(result.ids)}" if result.ids else ""
     if not recorded:
-        return (
-            f"Dropped {result.dropped} message(s){named} from this task's "
-            "model context."
-        )
+        return f"Dropped {result.dropped} message(s) from this task's model context."
     return (
-        f"Dropped {result.dropped} message(s){named} from this turn's model "
+        f"Dropped {result.dropped} message(s) from this turn's model "
         "context; the turn log keeps every one of them, and the next turn "
         "starts from the full conversation."
     )

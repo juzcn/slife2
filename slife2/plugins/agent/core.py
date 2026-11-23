@@ -2720,7 +2720,6 @@ class AgentCore:
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,
             tokens=tokens,
-            ids=rebuilt.turn_ids,
         )
 
     async def turn_compact(self, ctx: Context, compact: Any = None) -> str:
@@ -2775,6 +2774,15 @@ class AgentCore:
             context_window=loop.context_window,
             selection=compact,
         )
+        # **A split selection is refused, not applied.**  The model's own call
+        # gets a tool error it can correct; the automatic one gets a report and
+        # stops asking for the turn (a selection about the whole view, like a
+        # keep-all or a failed selector).
+        if result.refused:
+            loop.compact_hold = True
+            if compact is not None:
+                raise ToolError(result.refused)
+            return compact_view.report(result)
         # **A decision to keep everything stops the automatic pass**, exactly as
         # a failure does: re-asking the same context every iteration would be
         # paying for a decision already made.  A drop leaves the pass live.

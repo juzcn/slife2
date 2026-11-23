@@ -650,12 +650,14 @@ class TurnRuntime:
     ) -> compact.Compacted:
         """Run one live compaction: ask, then hide what the answer names.
 
-        **The answer is applied as it came.**  The selection tool's schema asks
-        the model to drop a tool exchange as a whole; the harness does not close
-        a split one, because repairing the answer would be the harness making a
-        decision the model was asked to make.  A model that splits a pair writes
-        a history the next call refuses — one failed turn, with the record
-        intact and the next turn on the full list.
+        **The answer is applied as it came, and the exchange rule is checked
+        first.**  The selection's schema asks for a tool exchange as a whole;
+        a selection that splits a call from its results is refused
+        (`Compacted.refused`) rather than applied, so the caller can turn it
+        into a tool error (the model's own call) or a report (the automatic
+        one) and the next request stays legal.  The harness does not *repair* a
+        split — that would be making a decision the model was asked to make —
+        it refuses it.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.
@@ -688,9 +690,13 @@ class TurnRuntime:
             # The model's own call: it named the ids, and the harness applies
             # them as they came (the allowed set is the view it saw).
             drop = selection
+        applied = [mid for mid in drop if mid in allowed]
+        refused = compact.split_exchange(view, applied)
+        if refused:
+            return compact.Compacted(seen=len(view), dropped=0, refused=refused)
         added: list[str] = []
-        for mid in drop:
-            if mid not in allowed or mid in hidden:
+        for mid in applied:
+            if mid in hidden:
                 continue
             hidden.add(mid)
             added.append(mid)

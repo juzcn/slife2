@@ -406,6 +406,106 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_a_split_selection_is_a_tool_error_not_a_failed_turn(
+    tmp_path, monkeypatch
+) -> None:
+    """Dropping half an exchange is refused before the next call, so the turn
+    continues on its full view and the model can correct."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+
+    class Splits(FakeBackend):
+        def stream(self, messages: list[Any], tools: list[Any]) -> Any:
+            if len(self.calls) == 1:
+                view = [message.to_wire() for message in messages]
+                tool_id = next(
+                    view_id(message)
+                    for message in view
+                    if message.get("role") == "tool"
+                    and OLD in str(message.get("content"))
+                )
+                self._turns[0] = calling(TURN_COMPACT, {"compact": [tool_id]}, "c2")
+            return super().stream(messages, tools)
+
+    backend = Splits(
+        calling("fake__echo", {"text": OLD}, "c1"),
+        answered("unused"),
+        answered("done"),
+    )
+    selected: list[Any] = []
+
+    async def selector(*args: Any, **kwargs: Any) -> str:
+        selected.append(1)
+        return json.dumps({"compact": []})
+
+    answer = await run_turn(cfg, backend, selector)
+
+    assert answer.data["text"] == "done"
+    assert selected == [], "the model's own call does not ask the selector"
+    final = backend.calls[-1][0]
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "the split was refused; the exchange is still in the view"
+    rows = stored_messages()
+    assert any(
+        message.get("role") == "tool" and "split" in str(message.get("content"))
+        for message in rows
+    ), "the tool error names the split"
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_selection_that_splits_is_reported_not_applied(
+    tmp_path, monkeypatch
+) -> None:
+    """The automatic compaction's split is a report and a hold, not a 400."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over(compact_at=0.0005)
+    base_turn = calling("fake__echo", {"text": OLD}, "c1")
+    first = replace(
+        base_turn,
+        result=replace(
+            base_turn.result,
+            usage=Usage(prompt_tokens=500, completion_tokens=100),
+        ),
+    )
+    backend = FakeBackend(first, answered("done"))
+
+    async def split(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict],
+        selectable: list[str],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        ids = [
+            view_id(message)
+            for message in messages
+            if message.get("role") == "tool" and OLD in str(message.get("content"))
+        ]
+        return json.dumps({"compact": ids})
+
+    answer = await run_turn(cfg, backend, split)
+
+    assert answer.data["text"] == "done", "the turn continues"
+    final = backend.calls[-1][0]
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "nothing was applied"
+    rows = stored_messages()
+    assert any(
+        message.get("role") == "tool"
+        and "No compaction: the selection would split" in str(message.get("content"))
+        for message in rows
+    ), "the report names the refusal"
+
+
+@pytest.mark.asyncio
 async def test_the_harness_asks_at_the_measured_threshold(
     tmp_path, monkeypatch
 ) -> None:

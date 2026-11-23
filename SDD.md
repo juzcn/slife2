@@ -1039,10 +1039,11 @@ contract:
 4. **It has no clock of its own.** The waits are the model service's, as for the
    turn's own calls; a slow provider makes the turn late, and a failed call is
    no decision rather than a failed turn.
-5. **One repair, never a retry.** An answer that cannot be read is handed back
-   as the model's own tool call with a tool result naming the reason; a second
-   refusal is no decision. A provider failure has no answer to correct and is
-   not asked again.
+5. **One repair, never a retry.** An answer that cannot be used — an unreadable
+   argument shape, or no call / a call to another tool — is handed back as the
+   model's own tool call with a tool result naming the reason; a second refusal
+   is no decision. A provider failure has no answer to correct and is not asked
+   again.
 6. **A failure keeps what is in hand.** A rebuild with no decision keeps the
    context it had; a compaction with no decision hides nothing; the turn
    continues either way.
@@ -1195,10 +1196,10 @@ Rules:
   The rebuild reports the decision model's status in its answer, and a failed
   call answers `No rebuild: the decision model did not answer (…)` — a recall
   nobody asked for is not a recall that found nothing.
-- **The answer names the turns, not only the count.** The rebuild report carries
-  the ids it runs on (`context turns: …`) — the ids its `[TURN:]` footnotes
-  carry — so the model can see the selection, not just its size. A compaction's
-  report names the dropped ids the same way.
+- **The reports are counts; the ids are the pair's arguments.** The rebuild
+  reports kept of the turns in hand, recalled of the log outside it, the rerank
+  status and the estimate; the compaction reports how many messages left. A
+  selection's ids are the tool call's arguments, not a list in the answer.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
@@ -1285,13 +1286,15 @@ the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the
 only fixed messages; every other message, historical or current, is the model's
 to drop. The legality of a tool exchange is the *schema's* rule — a call and its
-results go together — and the harness applies the answer as it came: a split
-pair is a failed next call, one turn, not a repaired answer. A selection
-decision that fails or cannot be read compacts nothing and the turn continues
-(Appendix C); a selection decision that keeps everything stops the automated
-pass for the rest of the turn, because that is a decision about the whole
-context rather than something the harness should ask again at every boundary.
-The model can still call `_turn_compact` itself.
+results go together — and the harness checks it before applying a selection: a
+split answer is refused, as a tool error for the model's own call and as a
+report for the automatic one, so the next request stays legal and the turn
+continues on its full view. A selection decision that fails or cannot be read
+compacts nothing and the turn continues (Appendix C); a selection decision that
+keeps everything, or is refused, stops the automated pass for the rest of the
+turn, because that is a decision about the whole context rather than something
+the harness should ask again at every boundary. The model can still call
+`_turn_compact` itself.
 
 **The rebuild is the durable edit; the compaction is the transient view.**
 A `_context_rebuild` call with `context`/`recall` is the model's own selection,
@@ -1300,9 +1303,9 @@ turns to keep and which to recall from the turn log. The turn running has no id
 yet and is carried verbatim, so the selection is the history alone. It is a
 harness tool under §5.3's contract: the harness calls it at the first boundary,
 the model may call it when the work has moved, and its pair is the visibility —
-the automatic pair carries the decision's arguments, the answer reports kept of
-the turns in hand, recalled of the log outside it, the ids it runs on, and an
-estimate of the context the turn runs on from there (`estimate_turn_tokens` plus
+the automatic pair carries the decision's arguments, and the answer reports kept
+of the turns in hand, recalled of the log outside it, and an estimate of the
+context the turn runs on from there (`estimate_turn_tokens` plus
 `context_usage`), never a provider measurement. The turn log keeps every turn; a
 dropped one can be recalled by a later rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
