@@ -626,9 +626,11 @@ A turn that grows past `agent.compact_at` of the model's window (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`
 is a view, not an edit: the live view annotates each message with its id
 (`[MESSAGE:{"id": …}]`), so the model can name the ids to drop itself or leave
-the choice to the selector, and the answer says how many left. The turn log keeps
-every message, the next turn starts from the full conversation, and a
-`_context_rebuild` starts the view over.
+the choice to the selector, and the answer says how many left. A selection that
+names an id the view does not offer or splits a tool call from its results is
+refused with the reason, so the model can correct it while the view stays
+whole. The turn log keeps every message, the next turn starts from the full
+conversation, and a `_context_rebuild` starts the view over.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary

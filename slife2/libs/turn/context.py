@@ -30,9 +30,9 @@ alone.  Clearing is only ever the explicit clear.
 
 **The live selection is the same decision, one question later.**  `_turn_compact`
 asks which of the running turn's messages it no longer needs; `parse_live` reads
-that answer into message positions, and `LIVE_REPLY` is its schema.  The same
-call, repair and failure rules apply (`slife2.plugins.context.server`; SDD §5.3).
-Its answer edits a view, never the history.
+that answer into the live message ids to drop, and `LIVE_REPLY` is its schema.
+The same call, repair and failure rules apply (`slife2.plugins.context.server`;
+SDD §5.3).  Its answer edits a view, never the history.
 
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
@@ -506,20 +506,15 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     return condition if asked else None
 
 
-def parse_with_reason(text: str) -> tuple[Decision | None, str]:
-    """The decision in the model's reply, and why there is none if there isn't.
+def _one_object(text: str) -> tuple[dict[str, Any] | None, str]:
+    """The one JSON object a reply holds, or why there is none.
 
-    **The reason is for the model, not the log.**  A refusal names the field and
-    the shape it takes (`_Refused`), which is what the caller hands back with the
-    reply it refused so the model can write the object it was asked for.  `""`
-    with a decision, and no decision with a reason — never both, never neither.
-
-    The outer braces are taken rather than the whole text parsed, because a
+    **The outer braces are taken rather than the whole text parsed**, because a
     model that wraps its JSON in a sentence has still written the JSON; `find`
     and `rfind` are what make that tolerant without accepting a reply with two
-    objects in it.  Every other malformation is refused, including a top-level
-    key that is neither of the two fields — a reply that says something this
-    build does not understand is not a reply it should half-obey.
+    objects in it — that span is not one object and is refused.  Both decision
+    replies are read here, because both are the same forced tool call: two
+    spellings of "is this one object" would be two answers to one question.
     """
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end < start:
@@ -530,6 +525,24 @@ def parse_with_reason(text: str) -> tuple[Decision | None, str]:
         return None, "the reply is not one JSON object"
     if not isinstance(raw, dict):
         return None, "the reply is not one JSON object"
+    return raw, ""
+
+
+def parse_with_reason(text: str) -> tuple[Decision | None, str]:
+    """The decision in the model's reply, and why there is none if there isn't.
+
+    **The reason is for the model, not the log.**  A refusal names the field and
+    the shape it takes (`_Refused`), which is what the caller hands back with the
+    reply it refused so the model can write the object it was asked for.  `""`
+    with a decision, and no decision with a reason — never both, never neither.
+
+    Every malformation is refused, including a top-level key that is neither of
+    the two fields — a reply that says something this build does not understand
+    is not a reply it should half-obey.
+    """
+    raw, reason = _one_object(text)
+    if raw is None:
+        return None, reason
     unknown = set(raw) - {"context", "recall"}
     if unknown:
         names = ", ".join(
@@ -602,7 +615,9 @@ def parse_live(text: str) -> tuple[list[str] | None, str]:
     all: the first is the model saying the turn needs everything, the second is
     an answer asked to correct itself.  An empty object and an absent `compact`
     are both "drop nothing" — the ordinary answer, and the one a model with
-    nothing to drop writes.
+    nothing to drop writes.  The text is read by `_one_object`, the same reader
+    the rebuild's reply is: the two answers are the same forced call, so they
+    are not read to two different standards.
 
     **An id is the live view's id, not a position.**  The view annotates each
     message with `[MESSAGE:{"id": "12.3"}]` (or `cur.3` for the turn running),
@@ -610,12 +625,9 @@ def parse_live(text: str) -> tuple[list[str] | None, str]:
     caller sent is the caller's to check — this module never sees the list — so
     a well-formed id this build does not know is left for the caller to refuse.
     """
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return None, f"the reply is not JSON ({exc})"
-    if not isinstance(raw, dict):
-        return None, "the reply is not a JSON object"
+    raw, reason = _one_object(text)
+    if raw is None:
+        return None, reason
     unknown = set(raw) - {"compact"}
     if unknown:
         names = ", ".join(

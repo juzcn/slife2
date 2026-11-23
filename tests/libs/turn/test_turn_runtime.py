@@ -245,6 +245,65 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
     }
 
 
+async def test_rebuild_carries_the_live_ids_and_channels_back_unchanged() -> None:
+    """**The hop's two derived fields survive the no-op echo.**
+
+    `_mid` is the id a compaction names and `channel` is the bubble a folded
+    cut-in draws; neither is stored and neither goes to a provider, so both are
+    added to the rebuild's messages explicitly and `Message.from_wire` reads
+    them back.  A hop that dropped them left the live list with no historical
+    ids — a compaction could not name a saved turn — and with a cut-in's
+    channel gone from the row that was next written.
+    """
+    echoed = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello", "_mid": "7.0"},
+        {
+            "role": "tool",
+            "content": "cut in",
+            "tool_call_id": "c1",
+            "channel": "tui",
+            "_mid": "7.1",
+        },
+    ]
+    store = Store(
+        rebuild={
+            "messages": echoed,
+            "turn_ids": [7],
+            "changed": False,
+            "kept": 1,
+            "in_hand": 1,
+            "outside": 0,
+            "recalled": 0,
+            "rerank": "",
+            "decision": "",
+        }
+    )
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hello", mid="7.0"),
+        Message(
+            role="tool",
+            content="cut in",
+            tool_call_id="c1",
+            channel="tui",
+            mid="7.1",
+        ),
+    ]
+
+    rebuilt = await wired(store).rebuild(
+        IDENTITY, messages, [7], 3, REF.reference, publish=False
+    )
+
+    _name, arguments = store.calls[0]
+    sent = arguments["messages"]
+    assert sent[1]["_mid"] == "7.0"
+    assert sent[2]["channel"] == "tui", "the record's display metadata"
+    assert sent[2]["_mid"] == "7.1"
+    assert [message.mid for message in rebuilt.messages] == ["", "7.0", "7.1"]
+    assert rebuilt.messages[2].channel == "tui"
+
+
 async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -> None:
     """An agent task decides on a clone: it publishes nothing.
 
@@ -440,6 +499,93 @@ async def test_a_malformed_rebuild_leaves_the_callers_list_alone() -> None:
         await wired(store).rebuild(IDENTITY, messages, [], 0, REF.reference)
 
     assert messages == [Message(role="system", content="sys")]
+
+
+# ── the live compaction ──────────────────────────────────────────────────────
+
+
+def a_view() -> list[Message]:
+    """A conversation with one saved turn behind the turn running."""
+    return [
+        Message(role="system", content="sys"),
+        Message(role="user", content="old question", mid="6.0"),
+        Message(role="assistant", content="old answer", mid="6.1"),
+        Message(role="user", content="now"),
+        Message(role="assistant", content="still here"),
+    ]
+
+
+async def test_a_model_selection_is_read_by_the_selector_parser() -> None:
+    """The model's own call and the selector's answer are one shape, one read."""
+    hidden: set[str] = set()
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        a_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection=["6.1"],
+    )
+
+    assert (result.dropped, result.refused) == (1, "")
+    assert hidden == {"6.1"}
+
+
+async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused() -> None:
+    """Filtering would apply half a selection; the whole answer is refused.
+
+    The fixed two and an id no build wrote are ids the view did not offer; the
+    caller turns the refusal into a tool error for the model's own call.
+    """
+    hidden: set[str] = set()
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        a_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection=["6.1", "9.9"],
+    )
+
+    assert result.dropped == 0
+    assert "does not offer" in result.refused
+    assert hidden == set(), "nothing named is applied when part cannot be"
+
+
+async def test_an_already_hidden_id_is_not_an_error() -> None:
+    """A model repeating a cumulative list is asking for the same view."""
+    hidden = {"6.1"}
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        a_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection=["6.1"],
+    )
+
+    assert (result.dropped, result.refused) == (0, "")
+
+
+async def test_a_malformed_model_selection_is_refused_as_unreadable() -> None:
+    """A string is iterable; reading it as ids would hide the wrong messages."""
+    hidden: set[str] = set()
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        a_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection="6.1",
+    )
+
+    assert result.dropped == 0
+    assert "could not be read" in result.refused
+    assert hidden == set()
 
 
 # ── trim ─────────────────────────────────────────────────────────────────────

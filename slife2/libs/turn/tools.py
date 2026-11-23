@@ -59,10 +59,11 @@ no boundary the harness alone knows better, and each edits a view the record
 keeps.  The compaction hides messages from the rest of the turn; the rebuild
 changes only the historical selection, never the turn running (it has no id
 yet), and a dropped turn is still in the log for a later rebuild to recall.
-The decision model makes the selection — the model supplies an intent, not a
-list — which is what keeps the call an edit rather than a deletion.  A tool
-that *would* do damage there is not protected from being one; it is simply not
-one — it stays undeclared, which is what the audience gate is for.
+The decision model makes the selection when the call carries none, and a model
+that writes its own selection is filling the same schema — which is what keeps
+either call an edit rather than a deletion.  A tool that *would* do damage
+there is not protected from being one; it is simply not one — it stays
+undeclared, which is what the audience gate is for.
 
 A leading `_` is the mark on those two names (:data:`HARNESS_PREFIX`) and, more
 widely, on any name that is the machinery's rather than the model's — it is a
@@ -244,7 +245,7 @@ ATTACH_IMAGE = "attach_image"
 #:
 #: **And one of the two tools whose bodies call a model.**  `_turn_compact` runs
 #: the context plugin's selection decision — a forced `select_messages` tool
-#: call over the numbered view — so a call costs a second model call.  Its
+#: call over the live view — so a call costs a second model call.  Its
 #: tokens are logged by the model server under `kind=compactor` and are not
 #: added to the turn's own bill; `_context_rebuild`'s decision is the same
 #: arrangement under `kind=decision`.

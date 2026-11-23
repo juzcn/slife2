@@ -17,6 +17,7 @@ from slife2.libs.turn.compact import (
     report,
     selectable,
     split_exchange,
+    unknown_ids,
     view,
 )
 from slife2.libs.turn.messages import Message, ToolCall
@@ -117,6 +118,18 @@ def test_a_selection_cannot_split_a_tool_exchange() -> None:
     assert "split" in (split_exchange(got, ["cur.1"]) or ""), "the call alone"
     assert "split" in (split_exchange(got, ["cur.2"]) or ""), "the result alone"
     assert split_exchange(got, ["cur.3"]) is None, "a plain message"
+
+
+def test_an_id_the_view_did_not_offer_is_named() -> None:
+    """The selection's membership rule, beside the shape rule `parse_live` holds.
+
+    An already-hidden id is not unknown — a model that repeats a cumulative
+    list is asking for the same view — but a fixed message or an id no build
+    wrote leaves the whole selection refused by the caller.
+    """
+    assert unknown_ids(["cur.1", "7.0"], ["7.0", "cur.1"]) == []
+    assert unknown_ids(["cur.1"], ["7.0", "cur.1"]) == ["7.0"]
+    assert unknown_ids(["cur.1"], ["7.0"], {"7.0"}) == []
 
 
 def test_the_report_names_the_record() -> None:

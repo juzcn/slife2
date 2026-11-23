@@ -27,6 +27,7 @@ callers argue for themselves.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ from slife2.libs.plugin.protocol import (
     unreadable,
 )
 from slife2.libs.turn import compact
+from slife2.libs.turn import context as decisions
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
     ToolCallFinished,
@@ -135,10 +137,10 @@ class Rebuilt:
     recalled: int
     rerank: str
     decision: str
-    #: The tool arguments the decision used: `{}` for "nothing to change",
-    #: otherwise `context`/`recall` as the model would have written them.  The
-    #: pair `_context_rebuild` writes carries these, so the model reads the
-    #: selection rather than an empty call.
+    #: The tool arguments the decision used: `{}` when there was no decision
+    #: or it asked for nothing, otherwise `context`/`recall` as the model would
+    #: have written them.  The pair `_context_rebuild` writes carries these, so
+    #: the model reads the selection rather than an empty call.
     selection: dict[str, Any] | None = None
 
 
@@ -174,6 +176,26 @@ def _message_list(payload: dict[str, Any]) -> list[Message]:
         # A mapping whose own fields are the wrong shape is the same damage
         # one level down: the type name is a traceback, not an answer.
         raise unreadable("the context store", "return a message list", payload) from exc
+
+
+def _context_message(message: Message) -> dict[str, Any]:
+    """One message as the context plugin's `rebuild` hop carries it.
+
+    **The wire plus the two derived fields a rebuild must hand back unchanged.**
+    `channel` is the display metadata a cut-in pair's tool message carries and a
+    rebuilt transcript draws its bubble from; `_mid` is the live id the view
+    annotates and a selection names.  Neither is stored and neither goes to a
+    provider, so `Message.to_wire` omits them and `to_record` keeps only the
+    first.  The rebuild's no-op answer echoes the caller's own messages and its
+    changed one re-appends the carried tail, so a hop that dropped them stripped
+    the live list of its history's ids — a compaction could no longer name a
+    historical message — and of a folded cut-in's channel, which its saved row
+    then lost.
+    """
+    payload = message.to_record()
+    if message.mid:
+        payload["_mid"] = message.mid
+    return payload
 
 
 def _turn_id_list(payload: dict[str, Any]) -> list[int]:
@@ -524,7 +546,7 @@ class TurnRuntime:
         arguments: dict[str, Any] = {
             "agent": identity[0],
             "subagent": identity[1],
-            "messages": [message.to_wire() for message in messages],
+            "messages": [_context_message(message) for message in messages],
             "turn_ids": list(turn_ids),
             "model": model,
             "carried": carried,
@@ -646,18 +668,23 @@ class TurnRuntime:
         model: str,
         context_window: int,
         context_tokens: int = 0,
-        selection: list[str] | None = None,
+        selection: Any = None,
     ) -> compact.Compacted:
         """Run one live compaction: ask, then hide what the answer names.
 
-        **The answer is applied as it came, and the exchange rule is checked
-        first.**  The selection's schema asks for a tool exchange as a whole;
-        a selection that splits a call from its results is refused
-        (`Compacted.refused`) rather than applied, so the caller can turn it
-        into a tool error (the model's own call) or a report (the automatic
-        one) and the next request stays legal.  The harness does not *repair* a
-        split — that would be making a decision the model was asked to make —
-        it refuses it.
+        **A selection is read before it is applied, and the exchange rule after
+        that.**  The model's own call writes the same `compact` list the
+        selector writes, so it is read by the same parser
+        (`context.parse_live`); a value of another shape is a refusal the model
+        can correct, not a list to guess at — a string is iterable, so `"12.3"`
+        would otherwise be read as four ids.  An id the view did not offer is
+        refused whole rather than filtered out, because the rest would be a
+        selection the model did not make.  And a selection that splits a call
+        from its results is refused (`Compacted.refused`) rather than applied,
+        so the caller can turn it into a tool error for the model's own call or
+        a report for the automatic one and the next request stays legal.  The
+        harness does not *repair* any of them — that would be making a decision
+        the model was asked to make.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.
@@ -671,7 +698,6 @@ class TurnRuntime:
         candidates = compact.selectable(view, opening_mid)
         if not candidates:
             return compact.Compacted(seen=len(view), dropped=0)
-        allowed = set(candidates)
         if selection is None:
             choice = await self.select_live(
                 identity,
@@ -687,17 +713,37 @@ class TurnRuntime:
                 )
             drop = choice.drop
         else:
-            # The model's own call: it named the ids, and the harness applies
-            # them as they came (the allowed set is the view it saw).
-            drop = selection
-        applied = [mid for mid in drop if mid in allowed]
+            # **The model's own call: the same parser the selector's answer
+            # gets.**  The `compact` field this call carries is read as the
+            # selector's reply is, so one shape answers for both.
+            drop, refusal = decisions.parse_live(
+                json.dumps({"compact": selection}, ensure_ascii=False)
+            )
+            if drop is None:
+                return compact.Compacted(
+                    seen=len(view),
+                    dropped=0,
+                    refused=f"the selection could not be read: {refusal}",
+                )
+        unknown = compact.unknown_ids(candidates, drop, hidden)
+        if unknown:
+            return compact.Compacted(
+                seen=len(view),
+                dropped=0,
+                refused=(
+                    "the selection named "
+                    + ", ".join(repr(mid) for mid in unknown)
+                    + ", which this turn's view does not offer — the system "
+                    "prompt and the opening message are fixed, and every other "
+                    "id is the one its [MESSAGE:…] annotation shows"
+                ),
+            )
+        applied = [mid for mid in drop if mid not in hidden]
         refused = compact.split_exchange(view, applied)
         if refused:
             return compact.Compacted(seen=len(view), dropped=0, refused=refused)
         added: list[str] = []
         for mid in applied:
-            if mid in hidden:
-                continue
             hidden.add(mid)
             added.append(mid)
         return compact.Compacted(seen=len(view), dropped=len(added), ids=tuple(added))

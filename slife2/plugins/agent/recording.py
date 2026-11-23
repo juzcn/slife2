@@ -395,7 +395,7 @@ class Recorder:
     def address_turn(
         self, loop: Loop, outcome: Outcome, item: Pending, turn_id: int
     ) -> None:
-        """Make one recorded turn addressable — its id and its footnote as one act.
+        """Make one recorded turn addressable — its id, footnote and live ids as one act.
 
         **They are one act, and separating them fails in both directions.**  An
         id in `turn_ids` that no message carries is a turn the decision
@@ -406,9 +406,20 @@ class Recorder:
         The success path and `settle_record` are the two moments a turn becomes
         addressable, and this is the one place both halves are written so they
         cannot drift apart.
+
+        **The live ids go with them**, because the two readers answer the same
+        question from two sides: the decision model names a turn by its
+        `[TURN:…]` footnote, and a compaction names one message by its
+        `[MESSAGE:{"id": …}]` annotation.  The ids are what
+        `messages_from_turns` derives from a row, assigned here in the same
+        order and with the same `{turn_id}.{index}` spelling, so the live list
+        and a rebuilt one address every message identically — without this the
+        newest turns were the only ones a compaction could not reach.
         """
         loop.turn_ids.append(turn_id)
         annotate_turn(outcome, item, turn_id)
+        for index, message in enumerate(outcome.messages):
+            message.mid = f"{turn_id}.{index}"
 
 
 def unanswer_folded(outcome: Outcome) -> None:

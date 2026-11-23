@@ -1009,10 +1009,10 @@ to.
 
 **Both carry the decision's schema.** `_context_rebuild`'s `parameters` are
 `RECALL_REPLY` and `_turn_compact`'s are `LIVE_REPLY`: a call with those
-arguments is the model's own selection and is applied as it came; a call with
-none is the automatic one, its body runs the decision model, and the pair the
-loop writes carries the arguments it chose. The model reads one shape either
-way.
+arguments is the model's own selection, checked against the view before it is
+applied (§5.5); a call with none is the automatic one, its body runs the
+decision model, and the pair the loop writes carries the arguments it chose.
+The model reads one shape either way.
 
 **Decision tools are LLM-backed harness tools under one contract.** A decision
 tool is a harness tool whose body, given no selection, runs exactly one decision
@@ -1052,14 +1052,14 @@ Both instances are the same call, and they share one instruction template
 (`decision.j2`): the guard and the figure are generic, the intent is the tool's
 description, and the rules are its schema. `_ask_tool` builds the forced request
 and the repair exchange, `_ask_with_repair` holds the one-retry rule, and
-`_ask_model` and `_ask_selector` keep only their tool spec and parser. The
-private reply names (`decide_context`, `select_messages`) are what the forced
-call names; the model never sees them — it sees `_context_rebuild` and
-`_turn_compact` with the same schemas. The three wire adapters share
-`forced_tool` — a forced choice naming a tool the call does not send is refused,
-not sent — and `call_options`, which forwards the two per-call options only when
-set. The model chooses; the harness applies. No other harness tool calls a
-model.
+`_ask_model` and `_ask_selector` keep only their tool, schema, instruction and
+log subject. The private reply names (`decide_context`, `select_messages`) are
+what the forced call names; the model never sees them — it sees
+`_context_rebuild` and `_turn_compact` with the same schemas. The three wire
+adapters share `forced_tool` — a forced choice naming a tool the call does not
+send is refused, not sent — and `call_options`, which forwards the two per-call
+options only when set. The model chooses; the harness applies. No other harness
+tool calls a model.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -1254,8 +1254,12 @@ Rules:
   footnote: `{turn_id}.{index}` for a historical turn's message, `cur.{index}`
   for one of the running turn. The view annotates it as
   `[MESSAGE:{"id": …}]`; the builder sets the historical one, the view derives
-  the running turn's. It is never stored. The selector and the model read the
-  same annotation, and a compaction's ids are the ones `_turn_compact` accepts.
+  the running turn's. It is never stored. A turn's ids are written into the live
+  list when its id arrives (`address_turn`), with the same spelling a rebuild
+  derives from the row, and the rebuild hop carries them plus `channel` so a
+  no-op echo hands the list back addressable. The selector and the model read
+  the same annotation, and a compaction's ids are the ones `_turn_compact`
+  accepts.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added before the turn and removed before it is saved
   (`without_lead`), so it never reaches the row or the index; a list rebuilt
@@ -1274,7 +1278,8 @@ Rules:
 **The turn's own compaction is a view, not an edit.** `_turn_compact` takes the
 live ids this turn no longer needs and hides them from the list the rest of the
 turn is sent (`libs/turn/compact.py`). A call with `compact` is the model's own
-selection and is applied as it came; a call with none runs the live selection
+selection, read by the same parser as the selector's answer and checked against
+the view before it is applied; a call with none runs the live selection
 decision — a forced `select_messages` tool call under §5.3's contract — over the
 same view. **The ids are on the messages**: the view annotates each addressable
 message `[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
@@ -1289,7 +1294,13 @@ to drop. The legality of a tool exchange is the *schema's* rule — a call and i
 results go together — and the harness checks it before applying a selection: a
 split answer is refused, as a tool error for the model's own call and as a
 report for the automatic one, so the next request stays legal and the turn
-continues on its full view. A selection decision that fails or cannot be read
+continues on its full view. **A selection naming an id the view does not offer
+is refused the same way** — the fixed two, or no id at all — and the whole
+selection is refused rather than filtered, because applying the part that
+resolves would be a decision the model did not make. An id an earlier
+compaction already hid is not an error: it is already applied, and a model
+repeating a cumulative list is asking for the same view. A
+selection decision that fails or cannot be read
 compacts nothing and the turn continues (Appendix C); a selection decision that
 keeps everything, or is refused, stops the automated pass for the rest of the
 turn, because that is a decision about the whole context rather than something
@@ -3226,7 +3237,7 @@ The four shapes an undeclared fallback takes:
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked at restore (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
-| The selection decision fails or answers unreadably | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
+| The selection decision fails, answers unreadably, or names an id the view does not offer | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
 | A catalogue hint cannot be asked (the hub's answer is unreadable) | The call keeps its generic "unknown tool" sentence | The catalogue's explanation and next step | A readable answer | An INFO line naming the name |

@@ -1240,8 +1240,8 @@ def build_server(
             "recalled": 0,
             "rerank": rerank,
             "decision": decision,
-            # What the pair records as the call's arguments: the decision that
-            # asked for exactly this, or `{}` when there was none.
+            # What the pair records as the call's arguments: the decision's own,
+            # or `{}` when there was none.
             "selection": selection or {},
         }
 
@@ -1429,9 +1429,12 @@ def build_server(
 
         The answer is `compact` (the live ids to drop, as the model named them)
         and `decision` (`""` for an answer, otherwise `failed` or `unparsed`).
-        The caller applies the ids as they came: the legality of a tool
-        exchange is a prompt rule, and a harness that repaired a split one would
-        be making a decision the model was asked to make.
+        The answer is read strictly here — a drop that is not a whole id, or a
+        status that is not text, is a build this one cannot read — and the
+        caller checks it against the view before applying it: an id the view
+        did not offer and a split tool exchange are refused, so the next
+        request stays legal.  The harness never repairs a selection, because
+        that would be making a decision the model was asked to make.
 
         Args:
             agent: Whose conversation.
@@ -1624,7 +1627,7 @@ def build_server(
             # that cannot be acted on keeps the context the turn had
             # (SDD §5.5, Appendix C).
             logger.info("recall_kept_nothing_known ids=%s", decision.keep)
-            return _in_hand(messages, turn_ids, outside)
+            return _in_hand(messages, turn_ids, outside, selection=used)
 
         recalled: list[int] = []
         rerank = ""
@@ -1639,7 +1642,7 @@ def build_server(
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids, outside, rerank=rerank)
+            return _in_hand(messages, turn_ids, outside, rerank=rerank, selection=used)
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
@@ -1648,7 +1651,7 @@ def build_server(
             # is the answer, because a context assembled from part of a selection
             # is neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids, outside, rerank=rerank)
+            return _in_hand(messages, turn_ids, outside, rerank=rerank, selection=used)
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))

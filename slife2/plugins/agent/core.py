@@ -1262,6 +1262,14 @@ class AgentCore:
                 # call the tool itself.
                 loop.rebuilt = True
                 if agent_loop.declares(CONTEXT_REBUILD):
+                    # **The pair records this call's decision, not the last
+                    # one's.**  The body sets `last_decision` once it runs; a
+                    # hop that fails never reaches it, and the field would still
+                    # hold the previous turn's `_turn_compact` ids — a
+                    # `_context_rebuild` call carrying an argument its schema
+                    # does not have.  Cleared before every automatic call, so
+                    # the fallback is an empty call rather than a stale one.
+                    loop.last_decision = {}
                     return AutoCall(CONTEXT_REBUILD)
                 # A hub that does not advertise the tool is a build that
                 # predates it; the turn runs on the context it has instead of
@@ -1275,6 +1283,7 @@ class AgentCore:
                         receipt=waiting.receipt,
                     )
             if self._compact_due(loop, agent_loop):
+                loop.last_decision = {}
                 return AutoCall(TURN_COMPACT)
             return None
 
@@ -1331,6 +1340,12 @@ class AgentCore:
         loop.hidden.clear()
         loop.compact_hold = False
         loop.rebuilt = False
+        # **The last turn's selection does not outlive it.**  The field is what
+        # the automatic pair is written from, and a turn that begins with a
+        # stale value would write another turn's decision into its own call
+        # (`auto_invoke` also clears it per call, for a body a failed hop never
+        # reached).
+        loop.last_decision = {}
         outcome.started_at = now()
         # **The model is taken here, and that is a turn boundary.**  `loop_for`
         # below resolves the backend once for this turn, so this is what will
@@ -2644,6 +2659,11 @@ class AgentCore:
         is applied as it came; an empty call is the harness's, and the decision
         model fills the selection.  The two produce the same pair — the harness
         writes the chosen arguments into it either way.
+
+        **A turn is named by the id its footnote carries.**  Every turn in the
+        conversation opens with `[TURN:{"turn_id": …}]`, and a keep-list is
+        those ids; kept and recalled turns are joined, so naming a turn on both
+        sides is still one turn.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:
@@ -2744,6 +2764,11 @@ class AgentCore:
         **The arguments are the selection; omitting them asks the selector.**
         A call with `compact` names the live ids to drop and is applied as it
         came; an empty call is the harness's, and the selector fills the ids.
+        An id is written exactly as its `[MESSAGE:{"id": …}]` annotation shows
+        it; the system prompt and the turn's opening message are the fixed two,
+        and a tool call goes together with its results — both are the schema's
+        rules.  A selection that cannot be applied is refused with a tool error
+        naming why, so it can be corrected while the view stays whole.
         """
         # The parameter shadows the module for this body; the view helpers are
         # this alias, and `compact` is the selection the model named.

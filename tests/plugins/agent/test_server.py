@@ -1718,7 +1718,7 @@ async def test_an_interrupted_turn_keeps_the_tool_batch_it_finished(
 
     sent = [m for m in backend.calls[2][0] if m.role != "system"]
     assert [m.role for m in sent] == ["user", "assistant", "tool", "user"]
-    assert sent[1].content == "checking"
+    assert without_id(sent[1].content) == "checking"
     assert sent[1].tool_calls[0].id == "c1"
     assert sent[1].tool_calls[0].name == "skill_list"
     assert sent[2].tool_call_id == "c1"
@@ -2096,7 +2096,9 @@ async def test_a_turn_that_could_not_go_on_ends_with_the_harness_saying_so(
     seen = [m for m in backend.calls[0][0] if m.role != "system"]
     assert [m.role for m in seen] == ["user", "assistant", "user"]
     assert without_footnote(seen[0].content) == "one"
-    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
+    assert (
+        turn_failed_error(without_id(seen[1].content)) == f"RuntimeError: {DEAD_PLUGIN}"
+    )
 
 
 @pytest.mark.asyncio(loop_scope="function")

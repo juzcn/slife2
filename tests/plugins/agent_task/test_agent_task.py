@@ -151,7 +151,7 @@ class Selector:
         subagent: str,
         model: str,
         messages: Any,
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",

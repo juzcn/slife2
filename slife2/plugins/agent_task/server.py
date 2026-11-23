@@ -1036,8 +1036,16 @@ def build_server(
                 # is the same fall-through: the task runs on what it has.
                 turn.rebuilt = True
                 if turn.live.declares(CONTEXT_REBUILD):
+                    # The pair carries this call's decision: cleared first, so a
+                    # hop that never reaches the body writes an empty call
+                    # instead of the previous call's selection (the agent
+                    # server's `auto_invoke` says why).
+                    turn.last_decision = {}
                     return AutoCall(CONTEXT_REBUILD)
-            return AutoCall(TURN_COMPACT) if compact_due() else None
+            if compact_due():
+                turn.last_decision = {}
+                return AutoCall(TURN_COMPACT)
+            return None
 
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so

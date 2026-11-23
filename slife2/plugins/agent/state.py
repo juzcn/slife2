@@ -347,7 +347,9 @@ class Loop:
     #: tool arguments that express it.  The automatic call's pair is written by
     #: `AgentLoop.run_turn` *after* the tool answered, and this is how the
     #: decision's arguments reach that pair; the model's own call carries its
-    #: arguments already.
+    #: arguments already.  **Cleared when a turn starts and before each
+    #: automatic call**, so a body a failed hop never reached writes an empty
+    #: call rather than the previous decision.
     last_decision: dict[str, Any] = field(default_factory=dict)
     #: The last turn's last model call, in tokens — the figure the status bar
     #: shows.  Set from the restored last turn and after every turn; 0 for a

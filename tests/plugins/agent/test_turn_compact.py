@@ -257,7 +257,7 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -532,7 +532,7 @@ async def test_the_harness_asks_at_the_measured_threshold(
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -599,7 +599,7 @@ async def test_a_successful_compaction_can_be_asked_again(
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -642,7 +642,7 @@ async def test_a_keep_all_decision_stops_the_automatic_pass(
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -689,7 +689,7 @@ async def test_a_selector_that_keeps_everything_drops_nothing(
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -716,6 +716,129 @@ async def test_a_selector_that_keeps_everything_drops_nothing(
 
 
 @pytest.mark.asyncio
+async def test_a_later_turn_can_drop_a_historical_exchange(
+    tmp_path, monkeypatch
+) -> None:
+    """**The history stays addressable across turns.**
+
+    A turn's live ids are written when its id arrives, and the rebuild hop
+    carries them back unchanged — the automatic rebuild of the next turn is a
+    no-op that echoes the caller's own list.  Without both halves the view
+    offered only the messages of the turn running, so a compaction could never
+    name a turn that had already been saved.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+    first = await run_turn(
+        cfg,
+        FakeBackend(calling("fake__echo", {"text": OLD}, "c1"), answered("first")),
+        no_drop,
+    )
+    assert first.data["text"] == "first"
+
+    class DropsHistory(FakeBackend):
+        """Names the historical echo exchange by the ids its own view shows."""
+
+        def stream(self, messages: list[Any], tools: list[Any]) -> Any:
+            if len(self.calls) == 0:
+                view = [message.to_wire() for message in messages]
+                ids = [view_id(message) for message in view]
+                self._turns[0] = calling(
+                    TURN_COMPACT,
+                    {"compact": drop_echo(view, [mid for mid in ids if mid])},
+                    "c2",
+                )
+            return super().stream(messages, tools)
+
+    backend = DropsHistory(answered("unused"), answered("done"))
+    answer = await run_turn(cfg, backend, no_drop)
+
+    assert answer.data["text"] == "done"
+    final = backend.calls[-1][0]
+    assert not any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "the historical exchange left this turn's view"
+    report = [
+        message.get("content")
+        for message in stored_messages()
+        if message.get("role") == "tool" and "Dropped" in str(message.get("content"))
+    ]
+    assert report and report[0].startswith("Dropped 2 message(s)"), (
+        "the id the view showed was the one the selection applied"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused(
+    tmp_path, monkeypatch
+) -> None:
+    """The model's own call is read strictly, not filtered.
+
+    An id the view did not offer is a message the model cannot name — the fixed
+    two, something an earlier compaction hid, or no id at all.  Applying the
+    part that resolves would make half a selection the model did not make, so
+    the whole answer is a tool error it can correct.
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+    backend = FakeBackend(
+        calling("fake__echo", {"text": OLD}, "c1"),
+        calling(TURN_COMPACT, {"compact": ["99.9"]}, "c2"),
+        answered("done"),
+    )
+
+    answer = await run_turn(cfg, backend, no_drop)
+
+    assert answer.data["text"] == "done", "a refusal is a tool error, not a turn"
+    final = backend.calls[-1][0]
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "nothing was hidden"
+    rows = stored_messages()
+    assert any(
+        message.get("role") == "tool"
+        and "does not offer" in str(message.get("content"))
+        for message in rows
+    ), "the tool error names the id the view never showed"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_selection_is_a_tool_error_not_a_silent_no_op(
+    tmp_path, monkeypatch
+) -> None:
+    """A string is iterable, and reading it as ids would hide the wrong messages.
+
+    The schema says the field is an array, but a provider that ignores the
+    schema can still hand the body a string; the answer is the one the model
+    can act on, not "nothing dropped".
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+    backend = FakeBackend(
+        calling("fake__echo", {"text": OLD}, "c1"),
+        calling(TURN_COMPACT, {"compact": "cur.1"}, "c2"),
+        answered("done"),
+    )
+
+    answer = await run_turn(cfg, backend, no_drop)
+
+    assert answer.data["text"] == "done"
+    final = backend.calls[-1][0]
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "nothing was hidden"
+    rows = stored_messages()
+    assert any(
+        message.get("role") == "tool"
+        and "could not be read" in str(message.get("content"))
+        for message in rows
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) -> None:
     """A provider failure is a fallback, not a failure mode: the turn goes on."""
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
@@ -731,7 +854,7 @@ async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) 
         subagent: str,
         model: str,
         messages: list[dict],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",

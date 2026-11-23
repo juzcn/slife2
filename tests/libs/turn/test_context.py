@@ -191,6 +191,22 @@ def test_a_live_reply_is_a_drop_list() -> None:
     assert parse_live('{"compact": [""]}')[0] is None
 
 
+def test_both_decision_replies_are_read_by_the_same_json_reader() -> None:
+    """A model that wraps its object in a sentence has still written the object.
+
+    The rebuild's reply and the live selection are the same forced call, so a
+    tolerance the one has the other must have too — and two spellings of "is
+    this one object" would drift.
+    """
+    assert parse_live('The decision: {"compact": ["cur.1"]} — done.') == (
+        ["cur.1"],
+        "",
+    )
+    assert parse_live('{"compact": ["a"]} and {"compact": ["b"]}')[0] is None, (
+        "two objects are not one decision"
+    )
+
+
 def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
     """A recall that ran and chose nothing still lost its cross-encoder.
 

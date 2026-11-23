@@ -10,13 +10,18 @@ turn's saved row is unchanged, and the next rebuild starts from the full list.
 **A `_context_rebuild` resets the view**: hiding is per-turn, and a history edit
 starts it over (`loop.hidden` is cleared).
 
-**The selection is the model's; the tool-exchange rule is the harness's.**  The
+**The selection is the model's; the harness checks it against the view.**  The
 selector is asked which live messages this turn no longer needs, and its schema
-says a tool exchange goes as a whole.  The harness checks that rule against the
-view before applying a selection: a split answer is refused — a tool error for
-the model's own call, a report for the automatic one — so the turn continues on
-its full view instead of failing the next request.  Being wrong costs a call,
-not a turn.
+says a tool exchange goes as a whole.  The harness checks both rules before
+applying a selection: an id the view did not offer, and a split tool exchange,
+are refused — a tool error for the model's own call, a report for the automatic
+one — so the turn continues on its full view instead of failing the next
+request.  Being wrong costs a call, not a turn.
+
+**A selection is read by one parser.**  The model's own `_turn_compact` call
+writes the same `compact` list the selector writes, so it is read by
+`slife2.libs.turn.context.parse_live` and checked here — the shape and the ids
+answer to one rule, whichever party wrote the list.
 """
 
 from __future__ import annotations
@@ -39,8 +44,9 @@ class Compacted:
     #: `""` for a decision, otherwise why there was none (`failed`/`unparsed`).
     decision: str = ""
     #: Why the selection was refused before it was applied (a split tool
-    #: exchange), or `""`.  The selection named something the next request could
-    #: not carry, so nothing was hidden.
+    #: exchange, an unreadable selection, or an id this view did not offer), or
+    #: `""`.  The selection could not be carried by the next request as it was
+    #: written, so nothing was hidden.
     refused: str = ""
     #: The live ids the drop named, in the order they were written.  Kept for
     #: the automatic call's pair — the arguments the harness writes into it —
@@ -118,6 +124,27 @@ def selectable(view: Sequence[Message], opening_mid: str) -> list[str]:
         for message in view
         if message.mid and message.role != "system" and message.mid != opening_mid
     ]
+
+
+def unknown_ids(
+    selectable: Collection[str],
+    ids: Collection[str],
+    hidden: Collection[str] = (),
+) -> list[str]:
+    """The selected ids this view does not offer, in selection order.
+
+    **`selectable` is `selectable()`'s answer** — every addressable message but
+    the fixed two — and `hidden` is what this turn has already dropped.  Any id
+    outside both is a message the model cannot name: the system prompt, the
+    opening message, or an id no build wrote.  An id it already hid is not an
+    error: a model that repeats a cumulative list is asking for the same view.
+
+    The caller refuses the whole selection rather than applying the part of it
+    that resolves, because the rest would be a decision the model did not make
+    (`slife2.libs.turn.runtime.compact_turn`).
+    """
+    offered = set(selectable) | set(hidden)
+    return [mid for mid in ids if mid not in offered]
 
 
 def split_exchange(view: Sequence[Message], ids: Collection[str]) -> str | None:
