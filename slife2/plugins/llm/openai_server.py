@@ -146,6 +146,7 @@ def build_request(
     *,
     tool_choice: str = "",
     thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
@@ -178,6 +179,8 @@ def build_request(
         and (settings.reasoning or settings.thinking == "enabled")
     ):
         settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
     forced_tool(tools, tool_choice)
     request: dict[str, Any] = {
         "model": settings.model,

@@ -12,16 +12,12 @@ one is load-bearing:
 
 **The context is chosen, not accumulated.**  At each turn's first boundary the
 agent says what to keep of the turns in hand and what to *recall* from the turn
-log, and the turn runs on the two together.  One model call decides it — the
-*decision model* — and it is the single most expensive thing here, which is why
-a failure ends in "keep the context" rather than in a retry.  The exception is
-an answer this build cannot read: the refusal names the field
-(`parse_with_reason`) and the model is asked once more with that reason, because
-correcting an answer already in hand is not the same bet as asking a silent
-provider again.  **That one round stands in for the loop the decision call does
-not have**: the turn's own model sees a bad tool call as an ordinary tool error
-and tries again in its next iteration, while a decision call has no next
-iteration — so its correction is the harness handing the answer back once.
+log, and the turn runs on the two together.  One model call produces the
+arguments of `_context_rebuild` — the *decision model* — and the harness
+executes that tool with them.  **The tool is the one check**: a selection it
+cannot read is a tool error, which the agent reads and can correct itself.
+There is no repair round in the decision call; its only failure is the model
+call itself, and a failure keeps the context in hand.
 
 **The union is what makes "keep this and add that" expressible.**  Kept and
 recalled are joined by id and never reconciled: a turn both kept and recalled is
@@ -34,8 +30,9 @@ alone.  Clearing is only ever the explicit clear.
 **The live selection is the same decision, one question later.**  `_turn_compact`
 asks which of the running turn's messages it no longer needs; `parse_live` reads
 that answer into the live message ids to drop, and `LIVE_REPLY` is its schema.
-The same call, repair and failure rules apply (`slife2.plugins.context.server`;
-SDD §5.3).  Its answer edits a view, never the history.
+The same call and failure rules apply (`slife2.plugins.context.server`; SDD
+§5.3): the harness calls the tool with the selector's raw arguments, and the
+tool checks them.  Its answer edits a view, never the history.
 
 **Two annotations, one for a turn that ran and one for the turn running.**
 `turn_note` is the `[TURN:{…}]` footnote rebuilt turns carry: it is derived from
@@ -68,29 +65,9 @@ from slife2.libs.turn.tools import INTERRUPTED
 #: system prompt is: it is text with holes in it, and a template says where they
 #: are.  Beside `system.j2` so both are found the same way.  **One template for
 #: every decision**: the guard, the figure and the "record it by calling this
-#: tool" are the same call; what differs is the tool's description (the intent)
-#: and its schema (the rules).
+#: tool" are the same call; what differs is the tool the forced call names —
+#: `_context_rebuild` or `_turn_compact` — and that tool's schema.
 DECISION_TEMPLATE = "decision.j2"
-
-#: The two decision tools, and the intent each says about itself.  The generic
-#: instruction carries the guard and the figure; the per-decision intent is the
-#: tool's description; the reply schema is its `parameters`.  Neither name is
-#: ever advertised in a turn — only in the decision request whose `tool_choice`
-#: names it.
-DECISION_TOOL = "decide_context"
-SELECTION_TOOL = "select_messages"
-DECISION_TOOL_TEXT = (
-    "Decide which historical turns to keep and which turns to recall from the "
-    "turn log, so this turn runs on a chosen context rather than on everything "
-    "accumulated above. Keep what the work still depends on and let go of what "
-    "it does not."
-)
-SELECTION_TOOL_TEXT = (
-    "Decide which messages this turn's later calls no longer need, so the rest "
-    "of this turn has room in the window and sees only what it still needs. "
-    "Each message carries the id to write back; the system leaves the named "
-    "messages out for the rest of this turn, and nothing is deleted."
-)
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
@@ -99,20 +76,26 @@ SELECTION_TOOL_TEXT = (
 #: answer are what the model fills, so the schema says them once (SDD §2.3).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "The live messages this turn's later calls no longer need. `compact` "
+        "is required. The named messages leave this turn's view only; the "
+        "record keeps them."
+    ),
     "additionalProperties": False,
+    "required": ["compact"],
     "properties": {
         "compact": {
             "description": (
-                "The live message ids whose content this turn no longer needs "
-                '— any message carrying a `[MESSAGE:{"id": …}]` annotation '
-                "except the system prompt and the turn's opening message, "
-                "historical or current. Omit for none. Write the ids exactly as "
-                "the annotation shows them. **Drop a tool exchange as a "
-                "whole**: an assistant message that asked for tools goes "
-                "together with all of its results, and a result goes together "
-                "with the assistant message that asked for it — a call without "
-                "its answer, or an answer without its call, is a history no "
-                "provider accepts."
+                "The live message ids to drop — any message carrying a "
+                '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
+                "person's messages and tool results carry one; the system "
+                "prompt, the turn's opening message and the assistant's own "
+                "messages carry no id. Write the ids exactly as the annotation "
+                "shows them, as a JSON array of strings; [] means drop "
+                "nothing. **An exchange goes as a whole**: name a tool result "
+                "and the assistant message that asked for it goes with all of "
+                "its results. Naming an id this turn already hid asks for the "
+                "same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -128,32 +111,48 @@ LIVE_REPLY: dict[str, Any] = {
 #: the instruction.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "The selection. `mode` says what happens to the turns in hand: keep "
+        "all, clear all, or keep exactly `turn_ids`. `recall` adds turns from "
+        "the turn log. A call without `mode` is refused. The turn running is "
+        "never part of the selection — it has no turn id and is carried "
+        'verbatim. A turn is named by the id its `[TURN:{"turn_id": …}]` '
+        "footnote carries."
+    ),
     "additionalProperties": False,
+    "required": ["mode"],
     "properties": {
-        "context": {
+        "mode": {
+            "type": "string",
+            "enum": ["keep", "clear", "ids"],
             "description": (
-                "The turns in hand this decision is answered from — never the "
-                "turn running, which has no turn id and is carried verbatim. "
-                "Omit for all of them. A follow-up keeps the turn it continues, "
-                "even when the input brings a new word and does not name it. "
-                '"clear" only when the input stands on its own: a turn dropped '
-                "here cannot be recalled back — the recall searches only the "
-                "turn log outside the turns in hand, not merely outside the "
-                "turns kept."
+                '"keep" keeps every turn in hand; "clear" keeps none of them; '
+                '"ids" keeps exactly the turns in `turn_ids` — at least one, '
+                "and only the ones still in hand. An id no longer in hand is "
+                "ignored, and a keep-list naming none of the turns in hand "
+                'keeps the context as it is; say "clear" to empty it. "clear" '
+                "only when the input stands on its own: a turn dropped here "
+                "cannot be recalled back — the recall searches only the turn "
+                "log outside the turns in hand, not merely outside the turns "
+                "kept."
             ),
-            "oneOf": [
-                {"const": "keep", "title": "all of them"},
-                {"const": "clear", "title": "none of them"},
-                {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "title": "these turn_ids",
-                },
-            ],
+        },
+        "turn_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                'The turns to keep when `mode` is "ids"; read for that mode '
+                "only. A non-empty JSON array of integers — for example "
+                '[14, 15] — never a string containing one (`"[14, 15]"` is '
+                "refused). A follow-up keeps the turn it continues, even when "
+                "the input brings a new word and does not name it."
+            ),
         },
         "recall": {
             "description": (
-                "One condition: a period, a question, or both. Omit for no recall."
+                "A recall condition: questions (`sentences`), words (`query`), "
+                "a period (`since`/`until`), and which end survives (`anchor`). "
+                "Omit for no recall."
             ),
             "type": "object",
             "anyOf": [
@@ -175,16 +174,16 @@ RECALL_REPLY: dict[str, Any] = {
                     ),
                     "type": "array",
                     "items": {"type": "string"},
-                    "minItems": 1,
                 },
                 "query": {
                     "description": (
                         "Words the keyword leg should find — names, paths, "
                         "exact strings. The fallback when no sentence names the "
-                        "subject; without a sentence it is also read by meaning."
+                        "subject; without a sentence it is also read by "
+                        "meaning. A query with no word in it is dropped, and "
+                        "without a sentence that drops the recall."
                     ),
                     "type": "string",
-                    "minLength": 1,
                 },
                 "since": {
                     "description": f"Start of a period. Takes {BOUND_GRAMMAR}.",
@@ -198,9 +197,10 @@ RECALL_REPLY: dict[str, Any] = {
                     "description": (
                         "Which end of a period to recall from; omit for the "
                         "newest end. A period recall may truncate as the context "
-                        "is bounded, and the anchor chooses which end survives; a "
-                        "query recall is bounded by a narrower period instead. "
-                        "Alone, it reads the whole log from that end."
+                        "is bounded, and this chooses which end survives. A "
+                        "question recall ignores it: relevance decides which end "
+                        "the budget spends from. Alone, it reads the whole log "
+                        "from that end."
                     ),
                     "enum": ["newest", "oldest"],
                 },
@@ -284,8 +284,9 @@ class _Refused:
     the other is the ordinary case.
 
     `reason` names the field and the shape it takes, because its reader is the
-    decision model: `parse_with_reason` hands it back for the one repair round,
-    and a reason the model cannot act on would be a retry with no point.
+    agent: the tool's error result carries it, and the agent is the party that
+    corrects the call.  A reason it cannot act on would be a failure with no
+    next step.
     """
 
     reason: str
@@ -313,21 +314,44 @@ class Decision:
         """
         return self.keep is None and self.recall is None
 
-    def arguments(self) -> dict[str, Any]:
-        """The decision as the tool arguments that express it.
 
-        The pair `_context_rebuild` writes carries the decision's own
-        arguments, so a model reading its history sees the selection rather
-        than an empty call.  The mapping is the one `parse_with_reason` reads:
-        `context` (a list, `"clear"`, or absent for all) and `recall` (a
-        condition, or absent for none).
-        """
-        out: dict[str, Any] = {}
-        if self.keep is not None:
-            out["context"] = "clear" if not self.keep else list(self.keep)
-        if self.recall is not None:
-            out["recall"] = dict(self.recall)
-        return out
+def rebuild_selection(
+    mode: Any, turn_ids: Any = None, recall: Any = None
+) -> dict[str, Any]:
+    """The internal selection described by `_context_rebuild`'s flat arguments.
+
+    **One mapping, used by both servers and by anything that checks a decision
+    the way the tool does.**  The model-facing schema is `mode` + `turn_ids` +
+    `recall`; the parser and the store speak `context` + `recall`.  A missing
+    or unknown mode, `"ids"` without a non-empty array of whole numbers, or a
+    `recall` that is not one object is a `ValueError` the tool turns into its
+    error result.
+    """
+    if not mode:
+        raise ValueError('a rebuild needs `mode`: "keep", "clear" or "ids"')
+    selection: dict[str, Any] = {}
+    if mode == KEEP_ALL:
+        selection["context"] = KEEP_ALL
+    elif mode == KEEP_NONE:
+        selection["context"] = KEEP_NONE
+    elif mode == "ids":
+        if not isinstance(turn_ids, list) or not turn_ids:
+            raise ValueError(
+                'mode "ids" needs `turn_ids`: a non-empty JSON array of turn ids'
+            )
+        if not all(
+            isinstance(turn_id, int) and not isinstance(turn_id, bool)
+            for turn_id in turn_ids
+        ):
+            raise ValueError("`turn_ids` is a JSON array of whole numbers")
+        selection["context"] = normalise_ids(turn_ids)
+    else:
+        raise ValueError(f'mode {mode!r} is not one of "keep", "clear" or "ids"')
+    if recall is not None:
+        if not isinstance(recall, dict):
+            raise ValueError("`recall` is one object holding the condition")
+        selection["recall"] = dict(recall)
+    return selection
 
 
 def normalise_ids(values: Iterable[Any]) -> list[int]:
@@ -428,12 +452,20 @@ def _keep(raw: Any) -> list[int] | _Refused | None:
             return None
         if raw.strip() == KEEP_NONE:
             return []
-        return _Refused('"context" is omitted, "keep", "clear", or a list of turn ids')
+        return _Refused(
+            '"context" is a JSON array of turn ids — [14, 15] — or one of '
+            '"keep" / "clear"; a string containing an array is refused'
+        )
     if isinstance(raw, list):
         if not all(_is_id(item) for item in raw):
-            return _Refused('"context" holds turn ids only — whole numbers')
+            return _Refused(
+                '"context" is a JSON array of whole-number turn ids — [14, 15]'
+            )
         return normalise_ids(raw)
-    return _Refused('"context" is omitted, "keep", "clear", or a list of turn ids')
+    return _Refused(
+        '"context" is a JSON array of turn ids — [14, 15] — or one of '
+        '"keep" / "clear"; a string containing an array is refused'
+    )
 
 
 def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | None:
@@ -454,8 +486,7 @@ def _recall(raw: Any) -> dict[str, str | list[str] | bool | None] | _Refused | N
     its own has still answered the question that was asked.  A *value* of the
     wrong type is different — that is a reply whose condition cannot be read, and
     acting on half of it would be worse than keeping the context.  Each refusal
-    names the field, because the reason is fed back to the model for the one
-    repair round.
+    names the field, because its reader is the agent the tool error reaches.
 
     A value of the right type in a grammar this build does not speak is the same
     thing as a wrong type, and refused the same way.  `anchor` has always been
@@ -564,39 +595,23 @@ def parse_with_reason(text: str) -> tuple[Decision | None, str]:
     return Decision(keep=keep, recall=recall), ""
 
 
-def repair_note(reason: str, reply: str = "") -> str:
-    """What a refused reply is answered with, before the one correction round.
+def decision_instruction(usage: str, tool: str, no_op: str) -> str:
+    """What a decision model is told: the guard, the figure and the one call.
 
-    **One round, not a loop.**  The schema the correction refers to is the
-    instruction already in the conversation, so the note does not repeat it; the
-    reply that was refused is there too, sent beside it.  A second refusal is
-    where the repair stops and the turn keeps the context it has.
-
-    **The text is repeated in the result as well.**  The assistant call beside
-    this note is the model's own reply on the wires that can replay one, but
-    not every wire can carry a malformed one: Anthropic's `tool_use.input` is
-    an object by protocol, so a reply that was not an object arrives there as
-    `{}`.  A tool result is text on every wire, and it is the one channel that
-    shows the model what it actually wrote.
-    """
-    shown = f" It was: {reply}" if reply else ""
-    return (
-        f"That reply could not be read: {reason}.{shown} "
-        "Reply again with ONE JSON object holding the fields asked for, and "
-        "nothing else."
-    )
-
-
-def decision_instruction(usage: str) -> str:
-    """What a decision model is told: the guard, the figure and the call.
-
-    **One template for every decision.**  The task's intent is the tool's
-    description (`DECISION_TOOL_TEXT`/`SELECTION_TOOL_TEXT`), the answer's
-    shape is its schema (`RECALL_REPLY`/`LIVE_REPLY`), and what the template
-    carries is what a schema cannot: the anti-injection guard, the context
-    figure, and "record the decision by calling this tool".  The rebuild and the
+    **One template for every decision.**  The task's intent is the description
+    of the tool the forced call names (`CONTEXT_REBUILD_TEXT`/`TURN_COMPACT_TEXT`
+    in `slife2.libs.turn.tools`), the answer's shape is its schema
+    (`RECALL_REPLY`/`LIVE_REPLY`), and what the template carries is what a
+    schema cannot: the anti-injection guard, the context figure, the forced
+    tool's name and its explicit no-change answer.  The rebuild and the
     compaction were two copies of this envelope, and a change to either drifted
     from the other.
+
+    **The call is the whole answer.**  The model must not continue the
+    conversation's own tool calls or answer in prose; it names `tool` and
+    nothing else.  `no_op` is the schema's explicit "nothing changes" value
+    (`{"mode": "keep"}` / `{"compact": []}`), because an empty object is not a
+    selection any more.
 
     **No input is passed beside the messages.**  A decision runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
@@ -608,7 +623,7 @@ def decision_instruction(usage: str) -> str:
     the context is could not weigh keeping against recalling — or what to give
     up.
     """
-    return render_instruction(DECISION_TEMPLATE, usage=usage)
+    return render_instruction(DECISION_TEMPLATE, usage=usage, tool=tool, no_op=no_op)
 
 
 def parse_live(text: str) -> tuple[list[str] | None, str]:
@@ -899,6 +914,7 @@ def rebuild_report(
     decision: str,
     tokens: str,
     fitted: int = 0,
+    reason: str = "",
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
 
@@ -911,8 +927,16 @@ def rebuild_report(
     is what the caller held; `kept 0 of 5 turn(s) in hand` says a clear, where
     `kept 0` alone reads as an empty history.  `outside` is the whole log beyond
     the context — the set a recall condition filters — and `recalled 0 of 90
-    outside` says the search had 90 turns to draw from.  The no-op and failed
-    branches already have their own sentences, so they do not need the figures.
+    outside` says the search had 90 turns to draw from.
+
+    **A no-op names which no-op it was.**  `reason` is the exit that produced
+    it, and the four are different facts the model acts on differently:
+    `"asked"` is a decision that asked for exactly what is in hand (the ordinary
+    answer); `"recalled"` is one whose recall ran and brought nothing back, so
+    the figures are printed rather than left to read as a search never made;
+    `"unknown"` is a keep-list naming no turn in hand, which the model can
+    correct; `"unfetchable"` is the store disagreeing with its own list.  A
+    sentence that said only "unchanged" left all four indistinguishable.
 
     **`fitted` is the harness's, and named.**  A selection heavier than the
     prompt budget is cut from its oldest end to fit, and the count says so:
@@ -922,8 +946,7 @@ def rebuild_report(
     `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
     made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
-    the fused order stands and the report says so.  `changed` false is the
-    ordinary no-op: the decision asked for exactly what was in hand.
+    the fused order stands and the report says so.
     """
     if decision:
         return (
@@ -935,6 +958,26 @@ def rebuild_report(
     # lost, and "unchanged" alone would hide the stage that said so.
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
+        if reason == "unknown":
+            return (
+                "No rebuild: the keep-list named no turn in hand; the turn "
+                f"continues on the context it had{tail}; context ~{tokens}."
+            )
+        if reason == "unfetchable":
+            return (
+                "No rebuild: the selected turns could not be fetched; the turn "
+                f"continues on the context it had{tail}; context ~{tokens}."
+            )
+        if reason == "recalled":
+            return (
+                f"No rebuild: the context is unchanged{tail}; recalled "
+                f"{recalled} of {outside} outside; context ~{tokens}."
+            )
+        if reason == "asked":
+            return (
+                "No rebuild: the decision asked for exactly what is in hand"
+                f"{tail}; context ~{tokens}."
+            )
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
     fit = f" ({fitted} dropped to fit the window)" if fitted else ""
     return (

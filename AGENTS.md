@@ -53,7 +53,7 @@ The shipped `slife2.yaml` configures these:
 - `_turn_compact` — drop messages this turn no longer needs. Automatic at `agent.compact_at`.
 - `_context_rebuild` — keep some historical turns and recall others from the turn log. Automatic at the first boundary; the running turn is never selected.
 
-A failed `_turn_compact` or `_context_rebuild` leaves the turn on its current context.
+A failed `_turn_compact` or `_context_rebuild` leaves the turn on its current context, and the automatic compaction stops asking for the rest of the turn.
 
 ## Who you are talking to
 

@@ -243,13 +243,26 @@ ATTACH_IMAGE = "attach_image"
 #: agent server serves it, the task serves its own body, and the loop writes the
 #: pair under it.
 #:
-#: **And one of the two tools whose bodies call a model.**  `_turn_compact` runs
-#: the context plugin's selection decision — a forced `select_messages` tool
-#: call over the live view — so a call costs a second model call.  Its
-#: tokens are logged by the model server under `kind=compactor` and are not
-#: added to the turn's own bill; `_context_rebuild`'s decision is the same
-#: arrangement under `kind=decision`.
+#: **And one of the two tools a decision call is made for.**  The harness asks
+#: the context plugin's `select_live` for the selection — the same tool, forced,
+#: over the live view — and calls `_turn_compact` with it; the tool body asks
+#: nothing.  The decision call costs a second model call, logged by the model
+#: server under `kind=compactor` and not added to the turn's own bill;
+#: `_context_rebuild`'s decision is the same arrangement under `kind=decision`.
 TURN_COMPACT = "_turn_compact"
+
+#: The model-facing description of `_turn_compact`, and the decision call's
+#: tool description — **one text for both callers**, for `CONTEXT_REBUILD_TEXT`'s
+#: reason.  The field rules are the schema's (`slife2.libs.turn.context.LIVE_REPLY`).
+TURN_COMPACT_TEXT = (
+    "Drop what this turn no longer needs from the view it is running on. Call "
+    "it with `compact` — the live message ids to drop, a JSON array of strings "
+    'such as ["cur.1"], never a string containing one; [] means drop '
+    "nothing. The answer says how many messages left the view; the turn's "
+    "record and the conversation's live list keep every one, and the next turn "
+    "starts from the full conversation. `_context_rebuild` is the tool that "
+    "edits the durable context."
+)
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the
 #: **historical turns** the conversation is made of.  `_turn_compact` hides
@@ -259,6 +272,23 @@ TURN_COMPACT = "_turn_compact"
 #: never touched — it has no id yet — so it is carried verbatim while the
 #: history is rebuilt.
 CONTEXT_REBUILD = "_context_rebuild"
+
+#: The model-facing description of `_context_rebuild`, **one text for both
+#: callers**: the model in a turn (which may call it with a selection of its
+#: own) and the decision call (which is forced to fill the same selection).
+#: A call with no selection is refused in both cases; the field rules are the
+#: schema's (`slife2.libs.turn.context.RECALL_REPLY`).
+CONTEXT_REBUILD_TEXT = (
+    "Rebuild the conversation's live context — the historical turns this turn "
+    'runs on. Call it with `mode`: "keep", "clear", or "ids" with '
+    "`turn_ids` — a JSON array of integers such as [14, 15], never a string "
+    "containing one. `recall` adds turns from the turn log by meaning, by "
+    "words, or by a period; kept and recalled turns are joined by id. The turn "
+    "running has no turn id and is carried verbatim. A turn is named by the id "
+    'its `[TURN:{"turn_id": …}]` footnote carries. The answer reports what was '
+    "kept of the turns in hand, what was recalled of the log outside it, and "
+    "the context this turn runs on from here."
+)
 
 #: **The tools that act on a live turn's own message list.**  They are the four
 #: the agent server serves against its loop: the cut-in takes a queued message,

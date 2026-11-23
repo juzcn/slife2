@@ -140,7 +140,7 @@ def decision(arguments: str = "{}") -> ChatAnswer:
     return ChatAnswer(
         tool=ToolAsk(
             id="call_e2e_decision",
-            name="decide_context",
+            name="_context_rebuild",
             arguments=arguments,
         )
     )

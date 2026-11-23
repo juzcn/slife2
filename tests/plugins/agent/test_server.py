@@ -307,16 +307,18 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
-#: The live-id footnote the view appends to every addressable message.
+#: The live-id footnote the view writes on the messages the model did not write.
 LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
 
 
 def without_id(content: Any) -> Any:
     """One message's content with the live-id footnote taken off.
 
-    The view appends it to every message it addresses (`[MESSAGE:{"id": …}]`),
-    the same way a rebuilt turn carries its `[TURN:]` footnote.  An assertion
-    about what a message *says* strips it: it is the id, not the words.
+    The view writes it on the person's messages and the tool results
+    (`[MESSAGE:{"id": …}]`) — never on an assistant message, whose content is
+    what the model said — the same way a rebuilt turn carries its `[TURN:]`
+    footnote.  An assertion about what a message *says* strips it: it is the
+    id, not the words.
     """
     if isinstance(content, str):
         return LIVE_ID_RE.sub("", content)
@@ -465,8 +467,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # automatic decision answers to the same `parameters`; one shape, both
     # paths.
     by_name = {tool.name: tool for tool in tools}
-    assert by_name["_context_rebuild"].inputSchema == RECALL_REPLY
-    assert by_name["_turn_compact"].inputSchema == LIVE_REPLY
+    assert by_name["_context_rebuild"].input_schema == RECALL_REPLY
+    assert by_name["_turn_compact"].input_schema == LIVE_REPLY
 
 
 @pytest.mark.asyncio
@@ -3732,7 +3734,12 @@ def failing_rebuild_agent(reached: list[str]) -> FastMCP:
     mcp = FastMCP("agent")
 
     @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
-    async def context_rebuild(ctx: Context) -> str:
+    async def context_rebuild(
+        ctx: Context,
+        mode: str = "",
+        turn_ids: list[int] | None = None,
+        recall: dict[str, Any] | None = None,
+    ) -> str:
         reached.append(CONTEXT_REBUILD)
         raise ToolError("the context server is down")
 
@@ -3782,7 +3789,7 @@ async def test_a_rebuild_hop_that_fails_is_not_asked_again(context) -> None:
         result = await send(server, "one")
 
     assert result.data["text"] == "done"
-    assert reached == [CONTEXT_REBUILD], "one attempt for the turn"
+    assert reached == [CONTEXT_REBUILD], f"one attempt for the turn (reached={reached})"
 
 
 @pytest.mark.asyncio

@@ -238,9 +238,8 @@ def to_anthropic_messages(
                 # wire's `input` is an object by protocol, so a call whose
                 # arguments were not one replays as `{}` — the regression the
                 # chat and Responses wires avoid by sending `raw_arguments`.
-                # The decision tools' repair round repeats the refused text in
-                # its tool result (`slife2.libs.turn.context.repair_note`),
-                # which is the channel this wire does carry as text.
+                # A tool's error result is text on this wire too, which is the
+                # channel a refusal reaches the agent through.
                 blocks.append(
                     {
                         "type": "tool_use",
@@ -353,6 +352,7 @@ def build_request(
     *,
     tool_choice: str = "",
     thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
@@ -362,6 +362,8 @@ def build_request(
     """
     if thinking and settings.reasoning:
         settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
     forced_tool(tools, tool_choice)
     max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
     thinking_block = thinking_parameter(settings, max_tokens)

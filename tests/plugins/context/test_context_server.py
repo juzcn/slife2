@@ -31,17 +31,18 @@ from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
 from slife2.libs.turn.context import (
-    DECISION_TOOL,
-    DECISION_TOOL_TEXT,
     LIVE_REPLY,
     RECALL_REPLY,
-    SELECTION_TOOL,
-    SELECTION_TOOL_TEXT,
     turn_footnote,
     turn_note,
 )
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import CONTEXT_REBUILD
+from slife2.libs.turn.tools import (
+    CONTEXT_REBUILD,
+    CONTEXT_REBUILD_TEXT,
+    TURN_COMPACT,
+    TURN_COMPACT_TEXT,
+)
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -121,14 +122,13 @@ class Replies:
     """A decision model that answers with whatever it was told to.
 
     The seam is the *decision*, not the transport, so what a test varies is what
-    the model said — which is the only thing a rebuild does with the answer.
-    Each call is recorded as `(prompt, previous, repair)`, so a test can read the
-    correction a refused answer was asked to make.
+    the model said.  There is one call and no repair: an answer the tool cannot
+    use is the tool's error result, which the agent reads.
     """
 
     def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
-        self.asked: list[tuple[str, str, str]] = []
+        self.asked: list[str] = []
 
     async def __call__(
         self,
@@ -138,11 +138,9 @@ class Replies:
         messages: list,
         *,
         usage: str = "",
-        previous: str = "",
-        repair: str = "",
     ) -> str:
-        self.asked.append(("", previous, repair))
-        return self.replies.pop(0) if self.replies else "{}"
+        self.asked.append(usage)
+        return self.replies.pop(0) if self.replies else '{"mode": "keep"}'
 
 
 async def _seed(client: Client, agent: str, *exchanges: tuple[str, str]) -> list[int]:
@@ -1032,7 +1030,7 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
         mine,
         embedder=RerankingEmbedder(),
         source=lambda: callers,
-        ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
     )
 
     async with Client(server) as client:
@@ -1085,7 +1083,7 @@ async def test_the_recall_budget_is_the_headroom_below_the_ceiling() -> None:
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "trump"}}'),
+            ask=Replies('{"mode": "keep", "recall": {"query": "trump"}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump " + "word " * 10, "1"), (candidate, "2"))
@@ -1112,7 +1110,7 @@ async def test_a_context_over_the_ceiling_is_fitted_and_the_recall_spends_it() -
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "trump"}}'),
+            ask=Replies('{"mode": "keep", "recall": {"query": "trump"}}'),
         )
     ) as client:
         await _seed(client, "jack", (kept, "1"), (candidate, "2"))
@@ -1138,7 +1136,7 @@ async def test_a_kept_context_over_the_budget_is_fitted_and_published() -> None:
     config = _config_with_window(1000)
 
     async with Client(
-        build_server(config, embedder=EMBEDDER, ask=Replies("{}"))
+        build_server(config, embedder=EMBEDDER, ask=Replies('{"mode": "keep"}'))
     ) as client:
         ids = await _seed(client, "jack", ("word " * 1200, "1"), ("trump " * 10, "2"))
         answer = await _rebuild(client, "", turn_ids=ids, messages=[SYSTEM])
@@ -1172,7 +1170,7 @@ async def test_a_candidate_below_the_rerank_floor_is_not_recalled() -> None:
         build_server(
             config,
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
@@ -1200,7 +1198,7 @@ async def test_a_failing_reranker_keeps_the_fused_order() -> None:
         build_server(
             config,
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
@@ -1226,7 +1224,7 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
         build_server(
             default_config(),
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump real", "1"), ("trump noise", "2"))
@@ -1249,7 +1247,7 @@ async def test_a_recall_has_no_count_cap() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         ids = await _seed(
@@ -1277,7 +1275,7 @@ async def test_the_similarity_floor_drops_a_diluted_candidate() -> None:
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"query": "trump"}}'),
+            ask=Replies('{"mode": "clear", "recall": {"query": "trump"}}'),
         )
     ) as client:
         await client.call_tool(
@@ -1342,7 +1340,7 @@ async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> 
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies('{"mode": "clear", "recall": {"sentences": ["trump"]}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump one", "1"))
@@ -1356,14 +1354,14 @@ async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> 
 async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     """The common case, and the one that keeps a costly call from being free.
 
-    `{}` means the turns in hand are enough, so nothing is fetched, nothing is
-    rendered and nothing is written — the answer is the caller's own list,
-    handed back.
+    `mode: keep` means the turns in hand are enough, so nothing is fetched,
+    nothing is rendered and nothing is written — the answer is the caller's own
+    list, handed back.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
     async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=Replies("{}"))
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies('{"mode": "keep"}'))
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
@@ -1379,7 +1377,37 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
     assert answer.data["decision"] == "", "the model answered"
+    assert answer.data["reason"] == "asked", (
+        "the report says which no-op this was, not merely that nothing moved"
+    )
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_that_finds_nothing_says_which_no_op_it_was() -> None:
+    """**A search that ran and found nothing is not a search nobody made.**
+
+    The counts cannot tell the two apart — both are `changed: false,
+    recalled: 0` — so the answer carries the exit, and the report can say the
+    recall ran rather than leave the model to read silence as a refusal.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "工具"}]
+    reply = '{"mode": "keep", "recall": {"sentences": ["计算"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[0]]},
+        )
+
+    assert answer.data["changed"] is False
+    assert answer.data["decision"] == "", "the decision answered"
+    assert answer.data["reason"] == "recalled"
+    assert answer.data["recalled"] == 0
+    assert answer.data["outside"] == 1, "the search had a turn to draw from"
 
 
 @pytest.mark.asyncio
@@ -1403,7 +1431,7 @@ async def test_a_keep_list_that_names_no_known_turn_keeps_the_context() -> None:
 
     async with Client(
         build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies('{"context": [99]}')
+            default_config(), embedder=EMBEDDER, ask=Replies('{"mode": "ids", "turn_ids": [99]}')
         )
     ) as client:
         ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
@@ -1413,6 +1441,7 @@ async def test_a_keep_list_that_names_no_known_turn_keeps_the_context() -> None:
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == ids
     assert answer.data["decision"] == "", "the model answered"
+    assert answer.data["reason"] == "unknown", "the ids named no turn in hand"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == ids
 
 
@@ -1426,7 +1455,7 @@ async def _down(*arguments: Any, **keywords: Any) -> str:
     [
         (_down, "RuntimeError: the model server is down"),
         (
-            Replies("a reply this build cannot read", "and still not one"),
+            Replies("a reply this build cannot read"),
             "the reply is not one JSON object",
         ),
     ],
@@ -1441,8 +1470,7 @@ async def test_a_decision_that_decided_nothing_says_the_recall_failed(
     never arrived, so the two were one line on screen.  The answer carries the
     reason now — the provider's own failure text, or the parser's refusal — in
     the one spelling the turn's own failed-call line uses (`failure_text`).  The
-    turn still runs on the context in hand; an unreadable reply gets its one
-    repair first (hence the two scripted answers).
+    turn still runs on the context in hand; there is one ask and no repair.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
@@ -1479,7 +1507,7 @@ async def test_a_clear_empties_the_context_and_is_published() -> None:
 
     async with Client(
         build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies('{"context": "clear"}')
+            default_config(), embedder=EMBEDDER, ask=Replies('{"mode": "clear"}')
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"), ("two", "2"))
@@ -1514,7 +1542,7 @@ async def test_a_keep_list_intersects_with_what_is_in_hand() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": [2, 99]}'),
+            ask=Replies('{"mode": "ids", "turn_ids": [2, 99]}'),
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"), ("two", "2"))
@@ -1549,7 +1577,7 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "the very first"}}'),
+            ask=Replies('{"mode": "keep", "recall": {"query": "the very first"}}'),
         )
     ) as client:
         ids = await _seed(
@@ -1585,7 +1613,7 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
     config = _config_with_window(1000)
     kept = "工具 工具 " + "word " * 240
     wanted = "工具 trump " + "word " * 280
-    reply = '{"context": [1], "recall": {"query": "工具"}}'
+    reply = '{"mode": "ids", "turn_ids": [1], "recall": {"query": "工具"}}'
 
     async with Client(
         build_server(config, embedder=EMBEDDER, ask=Replies(reply))
@@ -1623,7 +1651,7 @@ async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> Non
     would overturn the decision it was made in.  The turn outside the
     conversation is still recalled — that is what the recall is for.
     """
-    reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
+    reply = '{"mode": "clear", "recall": {"sentences": ["trump"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1653,7 +1681,7 @@ async def test_a_sentence_recall_reads_the_decisions_sentences() -> None:
     There is no separate input to add: the decision model read the conversation,
     and a sentence it wrote is the subject it chose to ask the log for.
     """
-    reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
+    reply = '{"mode": "clear", "recall": {"sentences": ["trump"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1679,7 +1707,7 @@ async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() ->
     A query is already the meaning fallback; the keyword phrase is the
     deliberate question, and the decision's sentences would be a second one.
     """
-    reply = '{"context": "clear", "recall": {"query": "trump"}}'
+    reply = '{"mode": "clear", "recall": {"query": "trump"}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1701,7 +1729,7 @@ async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() ->
 @pytest.mark.asyncio
 async def test_a_period_recall_is_not_narrowed_by_the_input() -> None:
     """A period asks for a time, not a subject; the input does not filter it."""
-    reply = '{"context": "clear", "recall": {"since": "yesterday"}}'
+    reply = '{"mode": "clear", "recall": {"since": "yesterday"}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1729,7 +1757,7 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
     have run as a period recall.  A sentence is a question of its own, so only
     the unusable words are dropped and the meaning half is answered.
     """
-    reply = '{"recall": {"query": "***", "sentences": ["the very first thing"]}}'
+    reply = '{"mode": "keep", "recall": {"query": "***", "sentences": ["the very first thing"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1778,7 +1806,7 @@ async def test_a_context_list_that_cannot_be_written_fails_the_rebuild(
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear"}'),
+            ask=Replies('{"mode": "clear"}'),
         )
     ) as client:
         ids = await _seed(client, "jack", ("one", "1"))
@@ -1815,7 +1843,7 @@ async def test_a_private_rebuild_decides_without_moving_the_conversation() -> No
     ) -> str:
         parked.set()
         await release.wait()
-        return '{"context": "clear"}'
+        return '{"mode": "clear"}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=deciding)
@@ -1865,7 +1893,7 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> N
     the decision's keep-list runs on its own and the context it had stands.
     """
     hold = [SYSTEM, {"role": "user", "content": "two"}]
-    reply = '{"recall": {"query": "***", "anchor": "oldest"}}'
+    reply = '{"mode": "keep", "recall": {"query": "***", "anchor": "oldest"}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1900,7 +1928,7 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "one"}}'),
+            ask=Replies('{"mode": "keep", "recall": {"query": "one"}}'),
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"))
@@ -1918,15 +1946,14 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
 
 @pytest.mark.asyncio
 async def test_an_unreadable_reply_keeps_the_context() -> None:
-    """**One repair, then degrade.**  The fallback is perfectly good.
+    """**One call, then the fallback.**  There is no repair.
 
-    A reply refused twice is where the repair stops: the model was shown its own
-    answer and the reason, and a third ask would spend a call on a shape the
-    model has now missed twice.  The turn runs on the context in hand, and the
-    price of guessing wrong is a context nobody decided on.
+    The decision model is asked once; an answer that is not the forced call is
+    reported, and the turn runs on the context in hand.  The agent can call the
+    tool itself with a selection, which is where a correction belongs now.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    replies = Replies("I could not decide.", "still not the object")
+    replies = Replies("I could not decide.")
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=replies)
@@ -1937,56 +1964,9 @@ async def test_an_unreadable_reply_keeps_the_context() -> None:
             {"agent": "jack", "messages": hold, "turn_ids": [1]},
         )
 
-    assert len(replies.asked) == 2, "one ask, one repair, and no third"
+    assert len(replies.asked) == 1, "the decision is asked once; the failure is reported"
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
-
-
-@pytest.mark.asyncio
-async def test_a_refused_reply_is_asked_again_with_the_reason() -> None:
-    """**The correction is to an answer already in hand.**  The model sees what
-    it said and what was wrong with it, and the corrected decision is what the
-    turn runs on — where an unreadable answer used to end the recall."""
-    replies = Replies("I could not decide.", '{"context": "clear"}')
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=replies)
-    ) as client:
-        await _seed(client, "jack", ("one", "1"))
-        answer = await _rebuild(client, "")
-
-    assert len(replies.asked) == 2, "the refused answer was asked again"
-    _prompt, previous, repair = replies.asked[1]
-    assert previous == "I could not decide.", "the model sees what it said"
-    assert "not one JSON object" in repair, "and what was wrong with it"
-    assert answer.data["changed"] is True, "the corrected decision was acted on"
-    assert answer.data["decision"] == "", "a repaired reply is a decision"
-    assert answer.data["turn_ids"] == []
-
-
-@pytest.mark.asyncio
-async def test_the_repair_tells_the_model_the_bound_grammar() -> None:
-    """A refusal is a sentence the model can act on, not the word "unparsed".
-
-    `since` in no grammar this build speaks used to end the recall for the turn;
-    now the model is told the grammar and can write the bound it meant.
-    """
-    replies = Replies(
-        '{"recall": {"since": "whenever"}}',
-        '{"recall": {"since": "yesterday"}}',
-    )
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=replies)
-    ) as client:
-        await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        answer = await _rebuild(client, "")
-
-    assert len(replies.asked) == 2
-    _prompt, _previous, repair = replies.asked[1]
-    assert BOUND_GRAMMAR in repair, "the model is told the grammar it missed"
-    assert answer.data["changed"] is True, "the corrected bound ran"
-    assert answer.data["recalled"] == 1, "the turn outside the context came back"
 
 
 @pytest.mark.asyncio
@@ -2022,74 +2002,6 @@ async def test_a_failed_call_is_not_asked_again(
         == "recall_decision_failed reason=RuntimeError: the model server is down"
         for record in caplog.records
     ), "the provider's own message is in the line"
-
-
-@pytest.mark.asyncio
-async def test_an_answer_with_another_tool_is_repaired_once() -> None:
-    """The provider answered, with the wrong call: hand it back with the reason."""
-    calls: list[tuple[str, str]] = []
-
-    async def ask(
-        agent: str,
-        subagent: str,
-        model: str,
-        messages: list,
-        *,
-        usage: str = "",
-        previous: str = "",
-        repair: str = "",
-    ) -> str:
-        calls.append((previous, repair))
-        if len(calls) == 1:
-            raise context_server.Unanswered(
-                "the reply called '_turn_compact', not 'decide_context'",
-                previous='{"compact": []}',
-                answered_with="_turn_compact",
-            )
-        return '{"context": "clear"}'
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=ask)
-    ) as client:
-        await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        answer = await _rebuild(client, "")
-
-    assert len(calls) == 2, "one call and its one repair"
-    assert calls[1][0] == '{"compact": []}', "the reply is handed back"
-    assert "not 'decide_context'" in calls[1][1], "the reason names the wrong call"
-    assert answer.data["changed"] is True, "the corrected selection ran"
-    assert answer.data["kept"] == 0, "the clear"
-
-
-@pytest.mark.asyncio
-async def test_a_second_answer_without_the_forced_call_is_no_decision() -> None:
-    """One repair, then the turn keeps the context; the call is not repeated."""
-    calls: list[int] = []
-
-    async def ask(
-        agent: str,
-        subagent: str,
-        model: str,
-        messages: list,
-        *,
-        usage: str = "",
-        previous: str = "",
-        repair: str = "",
-    ) -> str:
-        calls.append(1)
-        raise context_server.Unanswered(
-            "the reply held no tool call", previous="I will not decide"
-        )
-
-    async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=ask)
-    ) as client:
-        await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        answer = await _rebuild(client, "")
-
-    assert len(calls) == 2, "one call and its one repair"
-    assert answer.data["decision"] == "the reply held no tool call"
-    assert answer.data["changed"] is False, "the context is kept"
 
 
 @pytest.mark.asyncio
@@ -2129,7 +2041,7 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
             tool_calls=(
                 ToolCall(
                     id="call_1",
-                    name=DECISION_TOOL,
+                    name=CONTEXT_REBUILD,
                     arguments={"context": "clear"},
                 ),
             ),
@@ -2150,32 +2062,11 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     assert "Decision" in call["asked"][-1]["content"]
     assert "12,345 (1.2%)" in call["asked"][-1]["content"], "the status bar's figure"
     tool = call["tools"][0]["function"]
-    assert tool["name"] == DECISION_TOOL
-    assert tool["description"] == DECISION_TOOL_TEXT
+    assert tool["name"] == CONTEXT_REBUILD
+    assert tool["description"] == CONTEXT_REBUILD_TEXT
     assert tool["parameters"] == RECALL_REPLY
-    assert call["tool_choice"] == DECISION_TOOL
+    assert call["tool_choice"] == CONTEXT_REBUILD
     assert call["thinking"] == "disabled"
-
-    await _ask_model(
-        object(),
-        {},
-        asyncio.Lock(),
-        "jack",
-        "",
-        "m",
-        hold,
-        usage="12,345 (1.2%)",
-        previous='{"context": "bad"}',
-        repair="the reply could not be read",
-    )
-    asked = seen[1]["asked"]
-    assert asked[:-2] == call["asked"], "only the refused call and its result are added"
-    assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"context": "bad"}'
-    assert asked[-2]["tool_calls"][0]["id"] == asked[-1]["tool_call_id"]
-    assert "could not be read" in asked[-1]["content"]
-    # The refused text is in the result too: a wire that cannot replay a
-    # malformed call still has to show the model what it wrote.
-    assert '{"context": "bad"}' in asked[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -2191,13 +2082,13 @@ async def test_a_call_to_another_tool_is_not_a_decision(monkeypatch) -> None:
 
     async def capture(*_args: Any, **_kwargs: Any) -> StreamChatResult:
         return StreamChatResult(
-            tool_calls=(ToolCall(id="c1", name=CONTEXT_REBUILD, arguments={}),),
+            tool_calls=(ToolCall(id="c1", name=TURN_COMPACT, arguments={}),),
             stop_reason="tool_calls",
         )
 
     monkeypatch.setattr(context_server, "_stream_chat", capture)
 
-    with pytest.raises(RuntimeError, match="not 'decide_context'"):
+    with pytest.raises(RuntimeError, match="not '_context_rebuild'"):
         await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", [SYSTEM])
 
 
@@ -2233,7 +2124,7 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
             tool_calls=(
                 ToolCall(
                     id="call_2",
-                    name=SELECTION_TOOL,
+                    name=TURN_COMPACT,
                     arguments={"compact": [1]},
                 ),
             ),
@@ -2261,47 +2152,28 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
     assert call["asked"][-1]["role"] == "system"
     assert "Decision" in call["asked"][-1]["content"]
     tool = call["tools"][0]["function"]
-    assert tool["name"] == SELECTION_TOOL
-    assert tool["description"] == SELECTION_TOOL_TEXT
+    assert tool["name"] == TURN_COMPACT
+    assert tool["description"] == TURN_COMPACT_TEXT
     assert tool["parameters"] == LIVE_REPLY
-    assert call["tool_choice"] == SELECTION_TOOL
+    assert call["tool_choice"] == TURN_COMPACT
     assert call["thinking"] == "disabled"
-
-    await context_server._ask_selector(
-        object(),
-        {},
-        asyncio.Lock(),
-        "jack",
-        "",
-        "m",
-        hold,
-        ["cur.0"],
-        previous='{"compact": "all"}',
-        repair="the reply is not a JSON object",
-    )
-    asked = seen[1]["asked"]
-    assert asked[-2]["tool_calls"][0]["function"]["arguments"] == '{"compact": "all"}'
-    assert '{"compact": "all"}' in asked[-1]["content"], "the refused text is shown"
 
 
 @pytest.mark.asyncio
 async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
     """The same fallback as an unreadable reply, and for the same reason.
 
-    A reply of the right *shape* whose `since` is in no grammar this build speaks
-    — `whenever`, `sometime last year` — is a boundary case the two halves of the
-    system answer differently: a bound the *model* passes to `turn_list` is a
-    `ToolError` it reads and corrects, while a bound the *decision model* writes is
-    refused with the grammar and asked once more (the repair above).  Handed to
-    the store it would raise from inside a query and fail the turn, so the reply
-    is dropped where dropping is still something a caller can decide — and a
-    second bad bound ends in the same perfectly good fallback.
+    A reply of the right *shape* whose `since` is in no grammar this build
+    speaks — `whenever`, `sometime last year` — is refused before the store sees
+    it.  Handed to the store it would raise from inside a query and fail the
+    turn, so the reply is dropped where dropping is still something a caller
+    can decide; the tool error names the grammar, and the agent can correct it.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    reply = '{"context": "clear", "recall": {"query": "one", "since": "whenever"}}'
+    reply = '{"mode": "clear", "recall": {"query": "one", "since": "whenever"}}'
 
     async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply, reply))
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
@@ -2325,7 +2197,7 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
 
     async with Client(
         build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies('{"context": "clear"}')
+            default_config(), embedder=EMBEDDER, ask=Replies('{"mode": "clear"}')
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"))
@@ -2676,16 +2548,14 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
     """
     caplog.set_level(logging.INFO, logger=CONTEXT_LOGGER)
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # One server, one scripted decision model, four calls: an unreadable reply
-    # (and its repair, also unreadable), a decision that asks for nothing, a
-    # decision equal to what is held, and a keep-list naming a turn the log does
-    # not have.
+    # One server, one scripted decision model, four calls: an unreadable reply,
+    # a decision that asks for nothing, a decision equal to what is held, and a
+    # keep-list naming a turn the log does not have.
     replies = Replies(
         "I could not decide.",
-        "still not an object",
-        "{}",
-        '{"context": [1]}',
-        '{"context": [99]}',
+        '{"mode": "keep"}',
+        '{"mode": "ids", "turn_ids": [1]}',
+        '{"mode": "ids", "turn_ids": [99]}',
     )
     answers = []
     async with Client(
@@ -2727,8 +2597,8 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
         assert answer.data["changed"] is False, "nothing was fetched or written"
         assert answer.data["recalled"] == 0
     said = [record.getMessage() for record in caplog.records]
-    assert any(line.startswith("recall_decision_unparsed") for line in said), (
-        "the failure is named, and twice: the repair was refused too"
+    assert any(line.startswith("recall_decision_unreadable") for line in said), (
+        "the failure is named, on the one ask the decision call makes"
     )
     assert "recall_not_needed reason=no_decision" in said, "and it is not a decision"
     assert "recall_not_needed reason=context_sufficient" in said
@@ -2762,7 +2632,7 @@ async def test_the_decisions_fields_are_logged(caplog) -> None:
     looking at the protocol.
     """
     caplog.set_level(logging.DEBUG, logger=CONTEXT_LOGGER)
-    reply = '{"context": "clear", "recall": {"sentences": ["the code review prompt"]}}'
+    reply = '{"mode": "clear", "recall": {"sentences": ["the code review prompt"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -2784,7 +2654,7 @@ async def test_the_decisions_fields_are_logged(caplog) -> None:
     recall = json.loads(decided.partition("recall=")[2])
     assert recall["sentences"] == ["the code review prompt"]
     assert any(
-        line.startswith("recall_decision_reply attempt=first ") for line in said
+        line.startswith("recall_decision_reply ") for line in said
     ), "the raw reply is kept for the shape the parser read"
 
 

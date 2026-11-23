@@ -148,6 +148,7 @@ from slife2.libs.turn.context import (
     context_usage,
     failure_text,
     rebuild_report,
+    rebuild_selection,
     turn_prompt_lead,
     with_lead,
 )
@@ -159,7 +160,11 @@ from slife2.libs.turn.prompt import (
     render_instruction,
     render_system_prompt,
 )
-from slife2.libs.turn.runtime import ModelRef, TurnRuntime
+from slife2.libs.turn.runtime import (
+    ModelRef,
+    TurnRuntime,
+    measured_tokens,
+)
 from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
@@ -417,10 +422,6 @@ class TaskTurn:
     #: `run_turn` advances is the task's whole exchange, and only the view the
     #: model is sent shrinks (`slife2.libs.turn.compact`).
     hidden: set[str] = field(default_factory=set)
-    #: What the last `_context_rebuild`/`_turn_compact` body decided, as the
-    #: tool arguments that express it; the automatic call's pair is written
-    #: from here, the same field the agent server's loop keeps.
-    last_decision: dict[str, Any] = field(default_factory=dict)
     #: The fraction at which this task's own turn compacts itself, read from the
     #: live config when the task starts — the same `agent.compact_at` the agent
     #: server's conversations use.  A task is one turn and records nothing, so a
@@ -748,30 +749,39 @@ def build_server(
             compaction here is a projection of `turn.messages` and touches no
             record at all.
             """
+            if arguments.get("compact") is None:
+                raise ToolFailed(
+                    "a compaction needs a selection: pass `compact` (the live "
+                    "message ids to drop, or [] for none). An empty call is not "
+                    "a decision."
+                )
+            if isinstance(arguments.get("compact"), str):
+                # **The automatic pass stops, exactly as it does on a
+                # keep-all**: an unreadable selection is a decision about the
+                # whole view, and re-asking it at every boundary would pay for
+                # the same failure.
+                turn.compact_hold = True
+                raise ToolFailed(
+                    "the compaction selection could not be read: "
+                    + str(arguments["compact"])
+                )
             result = await runtime.compact_turn(
                 task.identity,
                 turn.messages,
                 turn.hidden,
                 turn.model,
-                context_tokens=(
-                    turn.live.last_usage.total_tokens if turn.live is not None else 0
-                ),
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
                 prompt_window=turn.prompt_window,
-                selection=arguments.get("compact"),
+                selection=arguments["compact"],
             )
-            # **The same rule as the agent server's**: a split selection is
-            # refused (a tool error for the model's own call, a report for the
-            # automatic one), and a decision to keep everything or a failed
-            # selector stops the automatic pass; a drop leaves it live.
+            # **The same rule as the agent server's**: an unreadable selection
+            # is a tool error, a split exchange is completed (`whole_exchanges`),
+            # and a decision to keep everything or a failed selector stops the
+            # automatic pass; a drop leaves it live.
             if result.refused:
                 turn.compact_hold = True
-                if arguments.get("compact") is not None:
-                    raise ToolFailed(result.refused)
-                return compact.report(result, recorded=False)
+                raise ToolFailed(result.refused)
             turn.compact_hold = result.dropped == 0 or bool(result.decision)
-            turn.last_decision = (
-                {} if result.decision else {"compact": list(result.ids)}
-            )
             logger.info(
                 "agent task %s: turn_compact seen=%d dropped=%d decision=%s hold=%s",
                 task.name,
@@ -795,11 +805,14 @@ def build_server(
             at = compact.opening(turn.messages)
             if at is None:
                 return "This task has no opening message; nothing to rebuild."
-            selection: dict[str, Any] = {}
-            if arguments.get("context") is not None:
-                selection["context"] = arguments["context"]
-            if arguments.get("recall") is not None:
-                selection["recall"] = arguments["recall"]
+            try:
+                selection = rebuild_selection(
+                    arguments.get("mode"),
+                    arguments.get("turn_ids"),
+                    arguments.get("recall"),
+                )
+            except ValueError as exc:
+                raise ToolFailed(str(exc)) from None
             rebuilt = await runtime.rebuild(
                 task.identity,
                 turn.messages,
@@ -809,20 +822,15 @@ def build_server(
                 publish=False,
                 # The last LLM call: this task's own completed call when one
                 # returned, otherwise the restored turn's last call.
-                context_tokens=(
-                    turn.live.last_usage.total_tokens
-                    if turn.live is not None and turn.live.last_usage.total_tokens
-                    else turn.context_tokens
-                ),
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
                 prompt_window=turn.prompt_window,
-                selection=selection or None,
+                selection=selection,
             )
             turn.messages[:] = rebuilt.messages
             turn.turn_ids = rebuilt.turn_ids
             turn.covered = rebuilt.covered
             turn.hidden.clear()
             turn.compact_hold = False
-            turn.last_decision = rebuilt.selection or {}
             logger.info(
                 "agent task %s: context_rebuild changed=%s kept=%d in_hand=%d "
                 "outside=%d recalled=%d rerank=%s decision=%s",
@@ -850,6 +858,7 @@ def build_server(
                 rerank=rebuilt.rerank,
                 decision=rebuilt.decision,
                 fitted=rebuilt.fitted,
+                reason=rebuilt.reason,
                 tokens=tokens,
             )
 
@@ -1000,54 +1009,55 @@ def build_server(
         # `_turn_compact` call arrives.
         turn.live = loop
 
-        def compact_due() -> bool:
-            """Whether this task's one turn should compact itself now.
-
-            **A task is one turn and records nothing**, so a turn that overflows
-            has no next turn to recover on: this is the bound that keeps it
-            alive.  The rules are the agent server's (`AgentCore._compact_due`):
-            the last call's measured total against `agent.compact_at` of the
-            model's window; a keep-all or a failed selector stops the pass; a
-            drop leaves it live for the next crossing.
-            """
-            if turn.live is None or turn.compact_at <= 0:
-                return False
-            if turn.live.last_usage.total_tokens < (
-                turn.prompt_window * turn.compact_at
-            ):
-                return False
-            if turn.compact_hold:
-                return False
-            if compact.opening(turn.messages) is None:
-                return False
-            view = compact.view(turn.messages, turn.hidden)
-            at_view = compact.opening(view)
-            opening_mid = view[at_view].mid if at_view is not None else ""
-            return bool(compact.selectable(view, opening_mid))
-
-        def auto_invoke() -> AutoCall | None:
+        async def auto_invoke() -> AutoCall | None:
             """The harness's own move at an iteration boundary.
 
             **The rebuild first, once** — the task's clone gets the same
             historical selection the agent server's turn gets, with
-            `publish=False` and no record — then the compaction when due.
+            `publish=False` and no record — then the compaction when due.  The
+            decision is asked here, before the call: the selection is the
+            call's arguments, so the pair never starts as an empty call.  The
+            threshold rule and the two failure sentences are the agent server's
+            (`slife2.libs.turn.compact.due`, `TurnRuntime.compact_arguments`):
+            a task is one turn, so the same rule has to keep it alive.
             """
             if not turn.rebuilt and turn.live is not None:
-                # **Set before the call, not by its body** — a failed hub hop
-                # never reaches the body (`slife2.plugins.agent.core` says why
-                # for the agent server's turn).  A hub that predates the tool
-                # is the same fall-through: the task runs on what it has.
                 turn.rebuilt = True
                 if turn.live.declares(CONTEXT_REBUILD):
-                    # The pair carries this call's decision: cleared first, so a
-                    # hop that never reaches the body writes an empty call
-                    # instead of the previous call's selection (the agent
-                    # server's `auto_invoke` says why).
-                    turn.last_decision = {}
-                    return AutoCall(CONTEXT_REBUILD)
-            if compact_due():
-                turn.last_decision = {}
-                return AutoCall(TURN_COMPACT)
+                    selection = await runtime.rebuild_arguments(
+                        task.identity,
+                        turn.messages,
+                        turn.model,
+                        context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                        prompt_window=turn.prompt_window,
+                    )
+                    return AutoCall(CONTEXT_REBUILD, arguments=selection)
+            # **A task is one turn and records nothing**, so a turn that
+            # overflows has no next turn to recover on: this is the bound that
+            # keeps it alive, and it is the agent server's rule.
+            asked = (
+                compact.due(
+                    turn.messages,
+                    turn.hidden,
+                    last_tokens=turn.live.last_usage.total_tokens,
+                    prompt_window=turn.prompt_window,
+                    compact_at=turn.compact_at,
+                    held=turn.compact_hold,
+                )
+                if turn.live is not None and turn.live.declares(TURN_COMPACT)
+                else None
+            )
+            if asked is not None:
+                view, selectable = asked
+                selection = await runtime.compact_arguments(
+                    task.identity,
+                    view,
+                    selectable,
+                    turn.model,
+                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                    prompt_window=turn.prompt_window,
+                )
+                return AutoCall(TURN_COMPACT, arguments=selection)
             return None
 
         # **The task's prompt marker, and no strip after it.**  A task's messages
@@ -1069,9 +1079,6 @@ def build_server(
             opening,
             observer,
             auto=auto_invoke,
-            pair_arguments=lambda name: (
-                turn.last_decision if name in (CONTEXT_REBUILD, TURN_COMPACT) else None
-            ),
         )
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the

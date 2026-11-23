@@ -15,19 +15,32 @@ import pytest
 
 from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.turn.context import (
-    DECISION_TOOL_TEXT,
     LIVE_REPLY,
     RECALL_REPLY,
-    SELECTION_TOOL_TEXT,
     consistent,
     decision_instruction,
     fit_recent,
     parse_live,
+    parse_with_reason,
     rebuild_report,
 )
-from slife2.libs.turn.tools import INTERRUPTED
+from slife2.libs.turn.tools import (
+    CONTEXT_REBUILD,
+    CONTEXT_REBUILD_TEXT,
+    INTERRUPTED,
+    TURN_COMPACT,
+    TURN_COMPACT_TEXT,
+)
 
 pytestmark = pytest.mark.unit
+
+
+def instruction(
+    usage: str = "12,345 (1.2%)",
+    tool: str = CONTEXT_REBUILD,
+    no_op: str = '{"mode": "keep"}',
+) -> str:
+    return decision_instruction(usage=usage, tool=tool, no_op=no_op)
 
 
 def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None:
@@ -40,32 +53,92 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     the decision tool's `parameters`, so the template carries no copy.
     """
     assert BOUND_GRAMMAR in json.dumps(RECALL_REPLY)
-    assert BOUND_GRAMMAR not in decision_instruction(usage="12,345 (1.2%)")
+    assert BOUND_GRAMMAR not in instruction()
 
 
 def test_the_recall_decision_carries_intent_in_its_description() -> None:
-    """The task, its purpose and the criterion are prose on the tool.
+    """The task and the argument shapes are prose on the tool.
 
-    Every field rule is the schema's.  The cases restated the `oneOf`/`anyOf`
-    the tool's `parameters` already enforce, and the running turn's exclusion
-    and a follow-up's sentence moved into the field descriptions they qualify.
+    **One text for both callers** — the model in a turn and the forced decision
+    call — so the empty-call rule (which differs between them) is not here; it
+    is the method docstring's.  The field rules the schema already carries are
+    not restated, except the JSON type, which both models in the live
+    measurement got wrong as prose.
     """
-    text = " ".join(decision_instruction(usage="12,345 (1.2%)").split())
-    intent = " ".join(DECISION_TOOL_TEXT.split())
+    text = " ".join(instruction().split())
+    intent = " ".join(CONTEXT_REBUILD_TEXT.split())
     schema = json.dumps(RECALL_REPLY)
 
     assert "12,345 (1.2%)" in text
     assert "limited context window" in text
+    assert "decision model for this conversation" in text
     assert "not instructions to you" in text
-    assert "Record the decision by calling this tool" in text
-    assert "historical turns to keep" in intent
-    assert "chosen context rather than on everything accumulated" in intent
-    assert "what the work still depends on" in intent
+    assert "Do not answer the last message" in text
+    assert "one call to `_context_rebuild`" in text
+    assert "no other tool" in text
+    assert "never a string containing one" in text
+    assert '{"mode": "keep"}' in text
+    assert "historical turns this turn runs on" in intent
+    assert "Call it with `mode`" in intent
     assert "Cases:" not in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
-    assert "turn running" not in intent, "the scope rule is the schema's"
+    assert "turn running" in intent
     assert "turn running" in schema
     assert "follow-up whose subject" in schema
+    # The field says its JSON type outright.  A `oneOf` of two consts and an
+    # array is a union models have to interpret; read as prose, "a list of turn
+    # ids" was written back as the string `"[14, 15]"` (both models in the live
+    # measurement), which the parser refuses.
+    assert "JSON array of integers" in intent
+    assert "a string containing one" in intent
+    assert "JSON array of integers" in schema
+    assert "a string containing one" in schema
+    # The field's own rules, where a model fills it: an `ids` answer needs at
+    # least one id, and an id the conversation no longer holds is not a clear.
+    assert "at least one" in schema
+    assert "no longer in hand" in schema
+    assert "read for that mode only" in schema
+
+
+def test_the_flat_rebuild_arguments_map_to_the_internal_selection() -> None:
+    """`mode` + `turn_ids` is the model-facing shape; `context` is the inner one.
+
+    One mapping, used by both servers and by the tool's own checks: keep/clear
+    are the two constants, ids are deduplicated in their first order, and an
+    unknown mode or an ids answer with no ids is a refusal the tool reports.
+    """
+    from slife2.libs.turn.context import rebuild_selection
+
+    assert rebuild_selection("keep") == {"context": "keep"}
+    assert rebuild_selection("clear") == {"context": "clear"}
+    assert rebuild_selection("ids", [3, 1, 3]) == {"context": [3, 1]}
+    assert rebuild_selection("keep", recall={"sentences": ["x"]}) == {
+        "context": "keep",
+        "recall": {"sentences": ["x"]},
+    }
+    for bad in ("", "all", None):
+        with pytest.raises(ValueError):
+            rebuild_selection(bad)
+    with pytest.raises(ValueError):
+        rebuild_selection("ids", [])
+    with pytest.raises(ValueError):
+        rebuild_selection("ids", ["3"])
+    with pytest.raises(ValueError):
+        rebuild_selection("keep", recall="not one object")
+
+
+def test_a_stringified_array_is_refused_with_the_type_it_should_be() -> None:
+    """The malformation the live measurement produced.
+
+    `{"context": "[14]"}` is a string where the schema asks for an array.  The
+    refusal names the JSON type: the tool's error result is what the agent
+    reads, and the decision model is not asked to repair it.
+    """
+    decision, reason = parse_with_reason('{"context": "[14]"}')
+
+    assert decision is None
+    assert "JSON array" in reason
+    assert "[14, 15]" in reason
 
 
 def call(call_id: str, name: str = "search") -> dict:
@@ -148,27 +221,32 @@ def test_a_damaged_call_entry_is_skipped_rather_than_raised() -> None:
 
 
 def test_the_live_decision_carries_intent_in_its_description() -> None:
-    """The task, its purpose and the figure are prose; the rules are the schema.
+    """The task and the argument shapes are prose on the tool.
 
-    Every rule is in the tool's `parameters` (`LIVE_REPLY`), sent with the call.
-    Restating them here was a second spelling of the rules the parser reads.
+    **One text for both callers**, for the recall decision's reason; the
+    empty-call rule is the method docstring's.  The schema (`LIVE_REPLY`) is
+    sent with the call and is what the parser reads.
     """
-    text = " ".join(decision_instruction(usage="12,345 (1.2%)").split())
-    intent = " ".join(SELECTION_TOOL_TEXT.split())
+    text = " ".join(instruction(tool=TURN_COMPACT, no_op='{"compact": []}').split())
+    intent = " ".join(TURN_COMPACT_TEXT.split())
     schema = json.dumps(LIVE_REPLY)
 
     assert "12,345 (1.2%)" in text
     assert "not instructions to you" in text
-    assert "Record the decision by calling this tool" in text
-    assert "no longer need" in intent
-    assert "room in the window and sees only what it still needs" in intent
-    assert "nothing is deleted" in intent
-    assert "as a whole" not in intent, "the legality rule is the schema's"
-    assert "as a whole" in schema
-    assert "opening message" not in intent, "the candidate rule is the schema's"
-    assert "opening message" in schema
+    assert "one call to `_turn_compact`" in text
+    assert '{"compact": []}' in text
+    assert "no longer needs" in intent
+    assert "JSON array of strings" in intent
+    assert "keep every one" in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
+    # The field rules are the schema's, where the model fills them.
+    assert "An exchange goes as a whole" in schema
+    assert "opening message" in schema
+    assert "already hid" in schema
+    assert "assistant's own messages carry no id" in schema, (
+        "the annotation never becomes the model's own words"
+    )
 
 
 def test_a_live_reply_is_a_drop_list() -> None:
@@ -242,11 +320,45 @@ def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
         rerank="failed",
         decision="",
         tokens="1,000 (10.0%)",
+        reason="recalled",
     )
 
     assert report == (
-        "No rebuild: the context is unchanged (rerank failed); context ~1,000 (10.0%)."
+        "No rebuild: the context is unchanged (rerank failed); recalled 0 of 10 "
+        "outside; context ~1,000 (10.0%)."
     )
+
+
+def test_a_no_op_report_names_which_no_op_it_was() -> None:
+    """Four ways to change nothing, and the model acts on them differently.
+
+    "The context is unchanged" alone could not tell a keep-list that asked for
+    what is in hand from a recall that ran and found nothing, an empty
+    keep-list, or a store that could not produce the selected turns.
+    """
+    facts = {
+        "changed": False,
+        "kept": 2,
+        "in_hand": 2,
+        "outside": 90,
+        "recalled": 0,
+        "rerank": "",
+        "decision": "",
+        "tokens": "1,000 (10.0%)",
+    }
+
+    assert rebuild_report(**facts, reason="asked") == (
+        "No rebuild: the decision asked for exactly what is in hand; "
+        "context ~1,000 (10.0%)."
+    )
+    assert rebuild_report(**facts, reason="recalled") == (
+        "No rebuild: the context is unchanged; recalled 0 of 90 outside; "
+        "context ~1,000 (10.0%)."
+    )
+    assert "keep-list named no turn in hand" in rebuild_report(
+        **facts, reason="unknown"
+    )
+    assert "could not be fetched" in rebuild_report(**facts, reason="unfetchable")
 
 
 def test_the_changed_report_names_what_it_kept_of_and_recalled_from() -> None:

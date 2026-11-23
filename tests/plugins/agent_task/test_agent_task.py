@@ -113,12 +113,13 @@ def config(**task_overrides: Any) -> Config:
 class DecisionModel:
     """The context plugin's one model call, scripted — and counted.
 
-    `{}` is SDD §5.5's common answer: what is in hand is the answer, so nothing is
-    fetched and nothing is written.  Counting the calls is how "one turn, one
-    rebuild" is asserted rather than assumed, and the two are the same fact.
+    `mode: keep` is SDD §5.5's common answer: what is in hand is the answer, so
+    nothing is fetched and nothing is written.  Counting the calls is how "one
+    turn, one rebuild" is asserted rather than assumed, and the two are the
+    same fact.
     """
 
-    answer: str = "{}"
+    answer: str = '{"mode": "keep"}'
     calls: list[Any] = field(default_factory=list)
 
     async def __call__(
@@ -1100,7 +1101,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
             await gate.wait()
             return keep_one
         second_in.set()
-        return '{"context": "clear"}'
+        return '{"mode": "clear"}'
 
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=deciding)
@@ -1123,7 +1124,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
                 )
                 ids.append(stored.data["turn_id"])
         # The first task's own decision keeps one of the two turns.
-        keep_one = json.dumps({"context": [ids[0]]})
+        keep_one = json.dumps({"mode": "ids", "turn_ids": [ids[0]]})
 
         built = build(
             text_turn("one answered"),
@@ -1986,7 +1987,73 @@ async def test_a_task_compacts_itself_at_the_threshold(
     assert not any(call.id in {"c1", "c2"} for call in calls), (
         "the dropped exchanges are out of the view the last call ran on"
     )
+    assert not any(
+        message.role == "assistant" and "[MESSAGE:" in str(message.content)
+        for message in built.messages()
+    ), "an annotation is never written into the model's own words"
     assert window.handed and "done" in window.handed[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_task_stops_asking_a_failed_selector(hub, window) -> None:
+    """**A task is one turn, so a failing selector must not be asked again.**
+
+    The threshold stays crossed after the first failure; without the hold the
+    task would pay for the same failing provider at every iteration it has
+    left.  The rule is the agent server's, reached through the same helper.
+    """
+    from slife2.plugins.context.server import build_server as build_context
+
+    asked: list[str] = []
+
+    async def broken(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        selectable: list[str],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        asked.append(usage)
+        raise RuntimeError("the provider is down")
+
+    high = Usage(prompt_tokens=500, completion_tokens=100)
+    decision = DecisionModel()
+    async with Client(
+        build_context(
+            default_config(), embedder=StubEmbedder(), ask=decision, select=broken
+        )
+    ) as client:
+        context = Store(client=client, ask=decision, select=None)
+        async with hub:
+            built = build(
+                tool_turn(
+                    ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}), usage=high
+                ),
+                tool_turn(
+                    ToolCall(id="c2", name=CHECK_NEW_INPUT, arguments={}), usage=high
+                ),
+                text_turn("done"),
+                hub=hub,
+                context=context,
+                window=window,
+                compact_at=0.0005,
+            )
+            await start(built)
+            await settle(built)
+
+    assert len(asked) == 1, "the failed selector was not asked again"
+    pairs = [
+        message
+        for message in built.messages()
+        if message.role == "assistant"
+        for call in message.tool_calls
+        if call.name == TURN_COMPACT
+    ]
+    assert len(pairs) == 1, "one pair, carrying the failure"
 
 
 async def test_a_tasks_attach_image_lands_on_its_own_next_call(
