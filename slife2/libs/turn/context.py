@@ -123,7 +123,7 @@ RECALL_REPLY: dict[str, Any] = {
                 "The turns in hand this decision is answered from — never the "
                 "turn running, which has no turn id and is carried verbatim. "
                 "Omit for all of them. A follow-up keeps the turn it continues, "
-                'even when the input brings a new word and does not name it. '
+                "even when the input brings a new word and does not name it. "
                 '"clear" only when the input stands on its own: a turn dropped '
                 "here cannot be recalled back — the recall searches only the "
                 "turn log outside the turns in hand, not merely outside the "

@@ -229,6 +229,5 @@ def test_the_changed_report_names_what_it_kept_of_and_recalled_from() -> None:
     )
 
     assert report == (
-        "kept 0 of 5 turn(s) in hand, recalled 0 of 90 outside; "
-        "context ~1,653 (0.2%)."
+        "kept 0 of 5 turn(s) in hand, recalled 0 of 90 outside; context ~1,653 (0.2%)."
     )
