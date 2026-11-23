@@ -849,7 +849,9 @@ before a model call, or a model call that failed.
 loop is handed a `present` callback with the list it advances; the model is sent
 `present(messages)` and the record is `messages`. `_turn_compact` (§5.3) is
 called by the harness when the last call's `total_tokens` crosses
-`agent.compact_at` of the conversation's window — or by the model itself — and
+`agent.compact_at` of the conversation's **prompt budget** — the model's window
+minus the completion request it carries (`max_tokens`), because a provider
+counts both against one window — or by the model itself — and
 its selection decision hides the messages the turn no longer needs from the view
 for the rest of the turn. A compaction that dropped something leaves the
 automated pass live: a context that grows back over the fraction is asked about
@@ -1047,7 +1049,10 @@ contract:
    decision call runs outside the turn's agent loop, so it has no next iteration
    in which to correct itself; the turn's own model does, and a bad
    `_context_rebuild`/`_turn_compact` selection there is an ordinary tool error
-   it retries.
+   it retries. **A provider failure's reason is `failure_text`'s words** — the
+   one spelling the turn's `turn_done` line and `[TURN-FAILED:…]` message use —
+   and the same text rides the rebuild/compaction answer, so the log and the
+   pair say what the provider said rather than a status word.
 6. **A failure keeps what is in hand.** A rebuild with no decision keeps the
    context it had; a compaction with no decision hides nothing; the turn
    continues either way.
@@ -1194,16 +1199,18 @@ not a decision, whatever its arguments happen to parse to.
 
 Rules:
 
-- **A `failed` or `unparsed` decision is reported, not hidden.** The refusal
-  names the field (`parse_with_reason`) and the one repair is §5.3's; a second
-  refusal ends it and the turn runs on the context it already has (Appendix C).
-  The rebuild reports the decision model's status in its answer, and a failed
-  call answers `No rebuild: the decision model did not answer (…)` — a recall
-  nobody asked for is not a recall that found nothing.
+- **A decision that did not happen is reported with its reason, not hidden.**
+  The one repair is §5.3's; a second refusal ends it and the turn runs on the
+  context it already has (Appendix C). The answer's `decision` field is `""` for
+  a decision, otherwise the reason — the provider's failure text
+  (`failure_text`) or the parser's refusal — so the rebuild/compaction pair says
+  `No rebuild/No compaction: … did not answer (…)` with the words the log
+  carries. A recall nobody asked for is not a recall that found nothing.
 - **The reports are counts; the ids are the pair's arguments.** The rebuild
-  reports kept of the turns in hand, recalled of the log outside it, the rerank
-  status and the estimate; the compaction reports how many messages left. A
-  selection's ids are the tool call's arguments, not a list in the answer.
+  reports kept of the turns in hand, recalled of the log outside it, `fitted`
+  when the prompt budget cut the selection's oldest turns, the rerank status and
+  the estimate; the compaction reports how many messages left. A selection's
+  ids are the tool call's arguments, not a list in the answer.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
@@ -1324,9 +1331,10 @@ context the turn runs on from there (`estimate_turn_tokens` plus
 `context_usage`), never a provider measurement. The turn log keeps every turn; a
 dropped one can be recalled by a later rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
-over. The two tools share the pair and the failure rules: a decision that cannot
-be read is `failed`/`unparsed` and the turn continues on the context it had; a
-model's own selection that cannot be read is a tool error it corrects.
+over. The two tools share the pair and the failure rules: a decision whose answer
+cannot be used — or whose provider failed, with `failure_text`'s words in the
+report — leaves the turn on the context it had; a model's own selection that
+cannot be read is a tool error it corrects.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
 query fired on 0 of 16 queries; a word-shaped query fired on 10 of 15 and found
@@ -1338,7 +1346,7 @@ The context parameters are in `context:`:
 
 | Key | Meaning |
 |---|---|
-| `ceiling` | Fraction of the model's window the live context is topped up to; a recall spends what the kept turns leave below it. |
+| `ceiling` | Fraction of the **prompt budget** (`context_window - max_tokens`) the live context is topped up to. It is a hard bound: a kept selection heavier than it is cut from its oldest end, and a recall spends what the rest leaves below it. |
 | `recall_page_limit` | Candidates each leg retrieves; fusion returns their union uncut, and the floors and the token budget decide membership from there. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
@@ -1347,7 +1355,15 @@ The context parameters are in `context:`:
 **One budget, and it is the ceiling's.** The kept turns are estimated first;
 a recall may spend what they leave below `ceiling`, so keeping less leaves it
 more and a kept context at the ceiling leaves it nothing. There is no separate
-per-recall fraction. `min_similarity` and `rerank_min_score` are floors whose
+per-recall fraction. **The bound is the prompt's, not the window's**: a provider
+counts the prompt and the requested completion against one window, so a budget
+sized against the full window fills the request past what any call can send —
+on the 2026-11 live log a 772k selection beside a 384k completion request was a
+400 from a 1.05M window. **And it binds the kept turns too**: a selection
+heavier than the ceiling is cut from its oldest end, and the answer's `fitted`
+count says so, because a recall cannot repair a base that is already too large
+and only the window's bound can. `min_similarity` and `rerank_min_score` are
+floors whose
 scale belongs to the model in use (bge-m3 scores unrelated same-domain text
 near 0.5), so both are calibrated per home: the shipped 0.52 and 0.3 are those
 calibrations. **Both are filters, not ranking rules**: they decide whether a
@@ -1521,12 +1537,13 @@ A model entry declares its capabilities in its own configuration row:
 | Field | Meaning |
 |---|---|
 | `input` | Modalities the model accepts; `text` and `image`. |
-| `context_window` | The model's window, used for context fractions and status display. **Required**: the loader refuses an entry that omits it or states a number that is not positive. |
+| `context_window` | The model's window. **Required**: the loader refuses an entry that omits it or states a number that is not positive. A request's prompt and its completion request share it, so the prompt's own space is `context_window - max_tokens` (`ModelSettings.prompt_window`), and every context fraction and status percentage is measured against that. |
 | `reasoning` | Whether the model exposes reasoning. |
 | `compat.thinking` | Provider-specific thinking setting. |
 | `compat.store` | Provider-specific persistence setting. |
 | `compat.cache_control` | Anthropic's top-level automatic prompt cache: `ephemeral`, `5m` or `1h`; absent or `omit` sends nothing. |
-| `max_tokens`, `temperature`, `top_p` | Generation parameters. |
+| `max_tokens` | The completion request, sent as the call's `max_tokens`. A provider counts it against the window with the prompt, so it is reserved from the context budget rather than being a free parameter. |
+| `temperature`, `top_p` | Generation parameters. |
 | `compat.stream_usage` | Whether the provider reports usage in the stream. |
 
 The `compat.*` keys are written under the model's own `compat:` mapping; the
@@ -3241,6 +3258,7 @@ The four shapes an undeclared fallback takes:
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
 | The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked at restore (fails the turn) | The `_context_rebuild` pair, saying no rebuild |
+| A selection is heavier than the prompt budget (`ceiling × (window - max_tokens)`) | Cut the oldest turns until it fits; a keep-all decision is not a no-op then | The turns the window cut | A single newest turn larger than the whole budget, which is also cut — the turn runs on its opening alone | The `_context_rebuild` pair's `fitted` count and `kept N of M` |
 | The selection decision fails, answers unreadably, or names an id the view does not offer | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, naming the failure |
 | Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |

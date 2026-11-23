@@ -725,6 +725,36 @@ def fit_window(
     return sorted(kept)
 
 
+def fit_recent(
+    ids: Sequence[int], costs: Mapping[int, int], budget: int
+) -> tuple[list[int], int]:
+    """The newest run of a time-ordered selection that fits, and what fell out.
+
+    **The window is a hard bound, so recency decides what survives it.**  A
+    selection can exceed the prompt budget before any recall runs: a restore
+    of a list chosen under another model's window, or one turn that grew past
+    it.  The list is time-ordered and the newest turns are the ones the work
+    still depends on, so the fit walks from the end and stops at the first
+    turn that does not fit — the contiguous rule `fit_window` applies from the
+    other end, for the same reason.  A single newest turn larger than the whole
+    budget keeps nothing; the turn running is carried separately, and the turn
+    still runs.
+
+    The count is returned so the report can say the harness dropped those
+    turns: the fit is the window's doing, not a selection the model made.
+    """
+    kept: list[int] = []
+    spent = 0
+    for turn_id in reversed(ids):
+        cost = costs.get(turn_id, 0)
+        if spent + cost > budget:
+            break
+        kept.append(turn_id)
+        spent += cost
+    kept.reverse()
+    return kept, len(ids) - len(kept)
+
+
 def _format_moment(value: str) -> str:
     """An ISO timestamp as `YYYY-MM-DD HH:MM`; anything else, unchanged.
 
@@ -868,6 +898,7 @@ def rebuild_report(
     rerank: str,
     decision: str,
     tokens: str,
+    fitted: int = 0,
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
 
@@ -882,6 +913,11 @@ def rebuild_report(
     the context — the set a recall condition filters — and `recalled 0 of 90
     outside` says the search had 90 turns to draw from.  The no-op and failed
     branches already have their own sentences, so they do not need the figures.
+
+    **`fitted` is the harness's, and named.**  A selection heavier than the
+    prompt budget is cut from its oldest end to fit, and the count says so:
+    otherwise a `kept N of M` smaller than the decision's keep-list would read
+    as the model's own choice.
 
     `decision` non-empty names why no decision was made at all: the turn keeps
     the context it had, and `recalled 0` would be the count of a search nobody
@@ -900,8 +936,9 @@ def rebuild_report(
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
+    fit = f" ({fitted} dropped to fit the window)" if fitted else ""
     return (
-        f"kept {kept} of {in_hand} turn(s) in hand, "
+        f"kept {kept} of {in_hand} turn(s) in hand{fit}, "
         f"recalled {recalled} of {outside} outside{tail}; context ~{tokens}."
     )
 
@@ -922,6 +959,22 @@ def turn_note(
     without the marker, for the reader that is a screen.
     """
     return wrap(TURN_PREFIX, turn_footnote(turn_id, created_at, completed_at, channel))
+
+
+def failure_text(failure: BaseException) -> str:
+    """One failure, in the words every reader of it shares.
+
+    **One spelling for the three places a failure is written down.**  The
+    operator's `turn_done` line says what a turn died of, the `[TURN-FAILED:…]`
+    message the turn ends with tells the model the same thing, and a context
+    decision's answer names why it did not happen — so a second spelling would
+    let the log, the conversation and the report describe one failure three
+    ways, and no reader could tell which is the account.
+
+    **The detail is the point.**  The type alone is the same line for a dead
+    endpoint, a 400 and a timeout; the exception's own message names which.
+    """
+    return f"{type(failure).__name__}: {failure}"
 
 
 def turn_failed_note(error: str) -> str:

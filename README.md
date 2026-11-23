@@ -419,7 +419,8 @@ not start a new conversation. The transcript is restored with its timestamps,
 tool calls, and results; reasoning is folded where it was folded live.
 
 The status bar reports the context size left by the last model call and its
-fraction of the model's window. At the start of each turn, `_context_rebuild`'s
+fraction of the **prompt budget** (the model's window minus its `max_tokens`,
+which the provider counts against the same window). At the start of each turn, `_context_rebuild`'s
 answer names what the context decision kept and what it recalled. It also
 reports `tools 26/358`: the hub's loaded set, then the catalogue's size. Skills,
 jobs, and CLI entries count in the total, and so do the tools of a server that
@@ -520,7 +521,7 @@ policy decides: some servers run keyless, others refuse in their own words.
 ```yaml
 agent:
   max_iterations: 0          # 0 or absent means no cap
-  compact_at: 0.9            # of the model's window; 0 disables the automatic pass
+  compact_at: 0.9            # of the prompt budget (window - max_tokens); 0 disables
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -532,7 +533,7 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # total the kept + recalled context is topped to
+  ceiling: 0.8               # of the prompt budget (window - max_tokens)
   recall_page_limit: 80       # candidates per recall leg; fusion is uncut
   min_similarity: 0.52       # above the embedding model's noise floor
   keyword_weight: 1.0        # weighted RRF; the meaning leg is always 1.0
@@ -614,7 +615,12 @@ order, followed by the turn itself. The turn running is never part of the
 selection. The model can call `_context_rebuild` itself with `context`/`recall`
 of its own — the same schema, applied as it came, with no decision call — and
 the answer carries an estimate of the context the turn runs on from there. If a recall matches more than fits, only what fits is
-returned. A failed decision keeps the context in hand; a missing turn store
+returned. **The budget is the prompt's, not the window's**: a provider counts
+the prompt and the request's `max_tokens` against one window, so the cap is
+`context.ceiling` of the window minus that completion request. A selection
+heavier than the cap — including one a collapse or restart restored — is cut
+from its oldest turns until it fits, and the answer's `fitted` count says how
+many. A failed decision keeps the context in hand; a missing turn store
 fails the turn.
 
 `_context_rebuild` and `_turn_compact` are the two decision tools: a call with
@@ -622,7 +628,7 @@ no selection runs one decision-model call, forced to a structured answer; a call
 with one is the model's own. A decision that fails or cannot be read leaves the
 turn on the context it has.
 
-A turn that grows past `agent.compact_at` of the model's window (default 0.9)
+A turn that grows past `agent.compact_at` of the prompt budget (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`
 is a view, not an edit: the live view annotates each message with its id
 (`[MESSAGE:{"id": …}]`), so the model can name the ids to drop itself or leave

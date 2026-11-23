@@ -1097,7 +1097,9 @@ class ModelSettings:
     #: The model's context window, in tokens.  The config entry states it and
     #: `_model_settings` carries it over, so a conversation never runs on a
     #: model without one; zero is the absent default for a `ModelSettings` built
-    #: directly by a test that never asks the window.
+    #: directly by a test that never asks the window.  **A request also carries
+    #: `max_tokens`, and the provider counts both against this window** —
+    #: `prompt_window` is the space the prompt actually has.
     context_window: int = 0
     #: What to show a person.  Falls back to `model` when absent.
     name: str = ""
@@ -1162,6 +1164,26 @@ class ModelSettings:
     @property
     def accepts_images(self) -> bool:
         return "image" in self.input
+
+    @property
+    def prompt_window(self) -> int:
+        """The tokens a request's messages may occupy: the window minus the
+        completion request.
+
+        **A provider counts the prompt and the requested completion against one
+        window.**  DeepSeek rejects a request whose `messages + max_tokens`
+        exceeds the window — a 798k prompt beside a 384k completion is 1.18M
+        against a 1.05M window — so a context sized against the full window is
+        un-sendable however it was estimated.  Every budget, threshold and
+        percentage that asks "will this request fit?" is measured against this
+        number instead.
+
+        A model that states no `max_tokens` has the whole window; an entry whose
+        completion request is wider than its window has none (`0`), which is a
+        config mistake the budgets answer as "nothing fits" rather than by
+        inventing a fraction.
+        """
+        return max(0, int(self.context_window) - (self.max_tokens or 0))
 
 
 @dataclass(frozen=True)
@@ -1300,13 +1322,15 @@ class AgentSettings:
     #: bound nobody chose.  `AgentLoop` reads the same rule off the number it is
     #: handed, so "is there a cap" is decided in exactly one place.
     max_iterations: int = 0
-    #: The fraction of the conversation's model window at which a turn compacts
-    #: its own live context, or **0 for a manual-only `_turn_compact`**.  Read by
-    #: the agent server when the conversation starts — the same moment as
-    #: `max_iterations` — which is why it is here rather than in `context:`: the
-    #: section a key lives in is the plugin that reads it, and `context:`'s
-    #: numbers are the context plugin's.  The window is the conversation's own,
-    #: resolved when it started, so a `model_switch` moves both together.
+    #: The fraction of the **prompt budget** (`ModelSettings.prompt_window` —
+    #: the window minus the completion the request asks for) at which a turn
+    #: compacts its own live context, or **0 for a manual-only
+    #: `_turn_compact`**.  Read by the agent server when the conversation
+    #: starts — the same moment as `max_iterations` — which is why it is here
+    #: rather than in `context:`: the section a key lives in is the plugin that
+    #: reads it, and `context:`'s numbers are the context plugin's.  The budget
+    #: is the conversation's own, resolved when it started, so a `model_switch`
+    #: moves both together.
     compact_at: float = 0.9
     #: A Jinja2 template for the system prompt — an absolute path by the time
     #: this is built, or "" for the one the distribution ships.  A template
@@ -1414,12 +1438,13 @@ class ContextSettings:
     section is how a setting comes to mean two things.
     """
 
-    #: The fraction of the model's own context window the live context is topped
-    #: up to, and therefore the **one total budget the keep and the recall
-    #: share**: the kept turns are estimated first, and a recall may spend what
-    #: they leave below it.  Keeping less leaves the recall more; a context at
-    #: the ceiling leaves it nothing.  There is no separate per-recall floor —
-    #: one would give the two halves two budgets for one window.
+    #: The fraction of the model's **prompt budget** (`prompt_window` — the
+    #: window minus the completion request) the live context is topped up to,
+    #: and therefore the **one total budget the keep and the recall share**: the
+    #: kept turns are estimated first, and a recall may spend what they leave
+    #: below it.  Keeping less leaves the recall more; a context at the ceiling
+    #: leaves it nothing.  There is no separate per-recall floor — one would give
+    #: the two halves two budgets for one window.
     ceiling: float = 0.8
     #: How many candidates **each leg of the rebuild's recall** retrieves.  The
     #: fused pool is their union — twice this for one question, more for

@@ -308,7 +308,7 @@ def register_tools(
                             live_loop.api = provider.api
                             live_loop.model_id = settings.model
                             live_loop.accepts_images = settings.accepts_images
-                            live_loop.context_window = settings.context_window
+                            live_loop.prompt_window = settings.prompt_window
                             head = opening_messages(
                                 maker, directory.name, core.current(), spec
                             )

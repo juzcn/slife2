@@ -537,6 +537,6 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
             loop.api = endpoint.api
             loop.model_id = settings.model
             loop.accepts_images = settings.accepts_images
-            loop.context_window = settings.context_window
+            loop.prompt_window = settings.prompt_window
 
         return {"default": reference, "previous": old or None, "moved": len(mine)}

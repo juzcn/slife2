@@ -3205,11 +3205,13 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
         agent: str,
         messages: list[dict],
         turn_ids: list[int],
-        prompt: str,
         model: str,
         carried: int = 0,
         subagent: str = "",
         publish: bool = True,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+        selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "messages": messages,
@@ -3219,6 +3221,7 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
             "in_hand": len(turn_ids),
             "outside": 0,
             "recalled": 0,
+            "fitted": 0,
             "rerank": "",
             "decision": "",
         }

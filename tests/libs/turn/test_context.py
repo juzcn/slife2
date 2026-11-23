@@ -21,6 +21,7 @@ from slife2.libs.turn.context import (
     SELECTION_TOOL_TEXT,
     consistent,
     decision_instruction,
+    fit_recent,
     parse_live,
     rebuild_report,
 )
@@ -205,6 +206,23 @@ def test_both_decision_replies_are_read_by_the_same_json_reader() -> None:
     assert parse_live('{"compact": ["a"]} and {"compact": ["b"]}')[0] is None, (
         "two objects are not one decision"
     )
+
+
+def test_a_selection_over_the_budget_keeps_its_newest_turns() -> None:
+    """**The prompt budget is a hard bound, and recency decides what survives.**
+
+    A kept selection can exceed the budget before any recall runs.  The fit
+    walks from the newest end and stops at the first turn that does not fit, so
+    the result is the newest contiguous run — the same rule `fit_window` uses,
+    from the other end — and the count says what the window cut.
+    """
+    ids = [1, 2, 3, 4]
+    costs = {1: 100, 2: 150, 3: 200, 4: 25}
+
+    assert fit_recent(ids, costs, 300) == ([3, 4], 2)
+    assert fit_recent(ids, costs, 10_000) == (ids, 0), "the whole selection fits"
+    assert fit_recent(ids, costs, 10) == ([], 4), "a newest turn larger than all"
+    assert fit_recent(ids, costs, 0) == ([], 4)
 
 
 def test_a_rerank_status_rides_the_unchanged_report_too() -> None:

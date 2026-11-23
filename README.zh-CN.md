@@ -373,7 +373,8 @@ subagent 的消息显示为 `Subagent(<name>)>`；task 的话显示为 `AsyncTas
 关闭再打开窗口、重启 server、或经过空闲清理，都不会开始新对话。对话按原始时间戳、
 工具调用和结果恢复；推理折叠在它原来折叠的位置。
 
-状态栏报告上一次模型调用留下的上下文大小及其占模型窗口的比例。每一轮开始时，
+状态栏报告上一次模型调用留下的上下文大小及其占 **prompt 预算**（模型窗口减去 `max_tokens`，
+provider 把两者算在同一个窗口里）的比例。每一轮开始时，
 `_context_rebuild` 的回答会说明上下文决策保留了什么、召回了什么。它还显示
 `tools 26/358`：hub 已加载的清单，以及目录的总量。skill、job、CLI 条目都计入总量，
 已下线 server 的工具也计入；前半部分是下一次请求实际携带的。两个数字来自同一次询问。
@@ -459,7 +460,7 @@ agent 目录下。文件柜、调度器和终端收件箱由各自的 server 及
 ```yaml
 agent:
   max_iterations: 0          # 0 或缺省表示不设上限
-  compact_at: 0.9            # 占模型窗口的比例；0 关闭自动压缩
+  compact_at: 0.9            # 占 prompt 预算（窗口 − max_tokens）的比例；0 关闭自动压缩
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -471,7 +472,7 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # keep + 召回合计顶到的总量上限
+  ceiling: 0.8               # 占 prompt 预算（窗口 − max_tokens）的比例
   recall_page_limit: 80       # 每路召回的候选数；融合结果不再截断
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
@@ -545,14 +546,17 @@ schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有�
 由一次模型调用填出选择：保留哪些历史轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的
 结果上按时间顺序运行，当前轮跟在最后。当前轮永远不在选择范围内。当工作已经转向时，
 模型也可以自己调用 `_context_rebuild`，带上自己的 `context`/`recall` —— 同一份 schema，
-按原样应用，不再发决策调用；回答会带上这一轮从那儿开始运行所需的上下文估算。如果召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的上下文；
+按原样应用，不再发决策调用；回答会带上这一轮从那儿开始运行所需的上下文估算。如果召回匹配到的内容超过容量，只返回放得下的部分。**预算按 prompt 算，不按窗口算**：
+provider 把 prompt 和请求里的 `max_tokens` 算在同一个窗口里，所以上限是 `context.ceiling`
+乘以「窗口 − `max_tokens`」。选择超过上限时——包括折叠或重启恢复出来的旧列表——会从最旧的
+轮次开始裁到预算内，回答里的 `fitted` 说明裁掉了几轮。决策失败时保留手头的上下文；
 轮次存储缺失则使该轮失败。
 
 `_context_rebuild` 和 `_turn_compact` 是两个决策工具：不带选择时只做一次决策模型调用，
 以强制工具调用取得结构化答案；带选择时就是模型自己的调用。决策失败或无法读取时，这一轮
 继续使用手头的上下文。
 
-一轮的内容超过模型窗口的 `agent.compact_at`（默认 0.9）时，该轮还会从自己的模型
+一轮的内容超过 prompt 预算（窗口 − `max_tokens`）的 `agent.compact_at`（默认 0.9）时，该轮还会从自己的模型
 上下文中丢掉不再需要的消息。`_turn_compact` 是视图，不是编辑：live view 给每条消息标注
 它的 id（`[MESSAGE:{"id": …}]`），模型可以自己指定要丢掉的 id，或把选择交给 selector，
 回答会报告有多少条离开。选择里出现视图没有提供的 id，或把一次工具调用与它的结果拆开，

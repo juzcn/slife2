@@ -41,7 +41,8 @@ class Compacted:
     seen: int
     #: How many it dropped.
     dropped: int
-    #: `""` for a decision, otherwise why there was none (`failed`/`unparsed`).
+    #: `""` for a decision, otherwise why there was none — the provider's
+    #: failure text (`failure_text`) or the parser's refusal.
     decision: str = ""
     #: Why the selection was refused before it was applied (a split tool
     #: exchange, an unreadable selection, or an id this view did not offer), or

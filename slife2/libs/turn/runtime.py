@@ -136,7 +136,15 @@ class Rebuilt:
     outside: int
     recalled: int
     rerank: str
+    #: Why there was no decision: `""` when the model answered, otherwise the
+    #: provider's failure text (`failure_text`) or the parser's refusal.  The
+    #: words ride the pair's report, so a person reads the same reason the log
+    #: carries.
     decision: str
+    #: How many turns the prompt budget cut from the selection's oldest end, or
+    #: 0.  The harness's edit, named by the report rather than folded into
+    #: `kept`: the window's bound is not a selection the model made.
+    fitted: int = 0
     #: The tool arguments the decision used: `{}` when there was no decision
     #: or it asked for nothing, otherwise `context`/`recall` as the model would
     #: have written them.  The pair `_context_rebuild` writes carries these, so
@@ -509,7 +517,7 @@ class TurnRuntime:
         *,
         publish: bool = True,
         context_tokens: int = 0,
-        context_window: int = 0,
+        prompt_window: int = 0,
         selection: dict[str, Any] | None = None,
     ) -> Rebuilt:
         """Decide what this turn runs on: keep ∪ recall.
@@ -519,9 +527,9 @@ class TurnRuntime:
         beside it: the conversation is the input, and the current turn is the
         `carried` tail.
 
-        `context_tokens` and `context_window` are the figure the status bar
-        shows — the last LLM call's size against the conversation's model
-        window — carried so the decision's instruction prints the same one.
+        `context_tokens` and `prompt_window` are the figure the status bar
+        shows — the last LLM call's size against the space the prompt has — and
+        are carried so the decision's instruction prints the same one.
 
         `carried` is what the message list holds beyond the turns in
         `turn_ids`: the **unbacked run at its end** — a cancelled turn's
@@ -552,7 +560,7 @@ class TurnRuntime:
             "carried": carried,
             "publish": publish,
             "context_tokens": context_tokens,
-            "context_window": context_window,
+            "prompt_window": prompt_window,
             # `None` is the decision ("choose for me"); a mapping is the
             # selection the caller already made (the model's own tool call).
             "selection": selection,
@@ -571,6 +579,7 @@ class TurnRuntime:
         in_hand = _count(payload, "in_hand")
         outside = _count(payload, "outside")
         recalled = _count(payload, "recalled")
+        fitted = _count(payload, "fitted")
         rerank = payload.get("rerank")
         if not isinstance(rerank, str):
             raise unreadable(
@@ -601,6 +610,7 @@ class TurnRuntime:
             recalled=recalled,
             rerank=rerank,
             decision=decision,
+            fitted=fitted,
             selection=used,
         )
 
@@ -612,7 +622,7 @@ class TurnRuntime:
         messages: list[Message],
         selectable: list[str],
         model: str,
-        context_window: int,
+        prompt_window: int,
         context_tokens: int = 0,
     ) -> LiveChoice:
         """Ask the live selector which of this turn's messages it no longer needs.
@@ -626,7 +636,7 @@ class TurnRuntime:
         The ids are the *live view's* ids — the `[MESSAGE:{"id": …}]` the caller
         wrote onto each message, not positions: hiding one message does not
         renumber the rest, and the same id addresses the same message across the
-        turn.  `context_tokens` and `context_window` are the figure the status
+        turn.  `context_tokens` and `prompt_window` are the figure the status
         bar shows, carried so the selector's instruction can print the same one.
         """
         payload = tool_payload(
@@ -639,7 +649,7 @@ class TurnRuntime:
                     "selectable": list(selectable),
                     "model": model,
                     "context_tokens": context_tokens,
-                    "context_window": context_window,
+                    "prompt_window": prompt_window,
                 },
             )
         )
@@ -666,7 +676,7 @@ class TurnRuntime:
         messages: list[Message],
         hidden: set[str],
         model: str,
-        context_window: int,
+        prompt_window: int,
         context_tokens: int = 0,
         selection: Any = None,
     ) -> compact.Compacted:
@@ -704,7 +714,7 @@ class TurnRuntime:
                 view,
                 candidates,
                 model,
-                context_window,
+                prompt_window,
                 context_tokens=context_tokens,
             )
             if choice.decision:

@@ -1472,7 +1472,13 @@ class ModelChoice:
     #: The config's `name:` where it wrote one, and empty where it did not: a
     #: row shows a name only for a model somebody took the trouble to name.
     label: str = ""
+    #: The model's declared window, which the picker's own line shows.
     context_window: int = 0
+    #: The space a prompt has (`window - max_tokens`), which is what the status
+    #: bar's percentage is measured against: a provider counts the requested
+    #: completion against the same window, so the full window is not available
+    #: to a request.
+    prompt_window: int = 0
     thinking: bool = False
     vision: bool = False
 

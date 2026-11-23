@@ -146,6 +146,7 @@ from slife2.libs.plugin.vocabulary import (
 from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import (
     context_usage,
+    failure_text,
     rebuild_report,
     turn_prompt_lead,
     with_lead,
@@ -398,10 +399,11 @@ class TaskTurn:
     #: built: a task's backend is fixed for its one turn, so a `model_switch`
     #: mid-task moves the agent server's loops and not this one.
     accepts_images: bool
-    #: The model's window, so the compaction's context figure is the one this
-    #: task's model is measured against.  Also the denominator of the automatic
-    #: threshold below.  Required: the config entry states it.
-    context_window: int
+    #: **The prompt budget**: the model's window minus the completion request,
+    #: so the compaction's figure and the automatic threshold are measured
+    #: against what a request can actually carry.  Required: the config entry
+    #: states a window.
+    prompt_window: int
     #: The turns `messages` is made of, and how many of them the prefix accounts
     #: for.  The restored live-context list; a private `_context_rebuild`
     #: replaces them, and the opening after `covered` is the carried tail.
@@ -754,7 +756,7 @@ def build_server(
                 context_tokens=(
                     turn.live.last_usage.total_tokens if turn.live is not None else 0
                 ),
-                context_window=turn.context_window,
+                prompt_window=turn.prompt_window,
                 selection=arguments.get("compact"),
             )
             # **The same rule as the agent server's**: a split selection is
@@ -812,7 +814,7 @@ def build_server(
                     if turn.live is not None and turn.live.last_usage.total_tokens
                     else turn.context_tokens
                 ),
-                context_window=turn.context_window,
+                prompt_window=turn.prompt_window,
                 selection=selection or None,
             )
             turn.messages[:] = rebuilt.messages
@@ -837,7 +839,7 @@ def build_server(
                 estimate_turn_tokens(
                     [message.to_record() for message in turn.messages]
                 ),
-                turn.context_window,
+                turn.prompt_window,
             )[0]
             return rebuild_report(
                 changed=rebuilt.changed,
@@ -847,6 +849,7 @@ def build_server(
                 recalled=rebuilt.recalled,
                 rerank=rebuilt.rerank,
                 decision=rebuilt.decision,
+                fitted=rebuilt.fitted,
                 tokens=tokens,
             )
 
@@ -957,7 +960,7 @@ def build_server(
             messages=restored.messages,
             model=model.reference,
             accepts_images=settings.accepts_images,
-            context_window=settings.context_window,
+            prompt_window=settings.prompt_window,
             compact_at=current.agent.compact_at,
             turn_ids=restored.turn_ids,
             covered=restored.covered,
@@ -1010,7 +1013,7 @@ def build_server(
             if turn.live is None or turn.compact_at <= 0:
                 return False
             if turn.live.last_usage.total_tokens < (
-                turn.context_window * turn.compact_at
+                turn.prompt_window * turn.compact_at
             ):
                 return False
             if turn.compact_hold:
@@ -1186,8 +1189,15 @@ def build_server(
                     task.finished_at = now()
                     raise
                 except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
-                    logger.warning("agent task %s failed: %s", task.name, exc)
-                    task.text = f"The agent task {task.name!r} failed: {exc}"
+                    # **The same words the agent server's failed turn uses**
+                    # (`failure_text`): a task reports a provider's failure with
+                    # the type and message, not the message alone.
+                    logger.warning(
+                        "agent task %s failed: %s", task.name, failure_text(exc)
+                    )
+                    task.text = (
+                        f"The agent task {task.name!r} failed: {failure_text(exc)}"
+                    )
                     task.status = FAILED
                     task.finished_at = now()
                     outcome = FAILED

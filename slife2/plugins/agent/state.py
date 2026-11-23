@@ -184,22 +184,27 @@ class Loop:
     agent: str
     subagent: str
     model: str
-    #: The model's token window, for the automatic compaction's threshold and
-    #: `_context_rebuild`'s estimate.  Required: a conversation is only
-    #: ever started on a model whose config entry states one.  Held with the rest
-    #: of how this conversation reaches its model (see `accepts_images`): a model
-    #: switch moves it, and a conversation whose model left the config keeps the
-    #: window it started on.
-    context_window: int
+    #: **The prompt budget**: the model's window minus the completion the
+    #: request asks for (`ModelSettings.prompt_window`).  The automatic
+    #: compaction's threshold and `_context_rebuild`'s estimate are sized
+    #: against it, because a provider counts the prompt and the requested
+    #: completion against one window — a context that fits the window but not
+    #: the reservation is a request the provider rejects with a 400.  Required:
+    #: a conversation is only ever started on a model whose config entry states
+    #: a window.  Held with the rest of how this conversation reaches its model
+    #: (see `accepts_images`): a model switch moves it, and a conversation whose
+    #: model left the config keeps the budget it started on.
+    prompt_window: int
     #: **The iteration cap this conversation started on**, read where the model is
     #: read — at the start, from the config as it was then — and not per turn.
     #: `AgentCore.loop_for` runs on every turn, so taking it from the live config
     #: would let an operator's edit change the terms of a turn already in flight.
     max_iterations: int
-    #: The fraction of the window at which this conversation's turns compact
-    #: themselves, or 0 for manual-only.  Read when the conversation starts —
-    #: the same moment and the same reason as `max_iterations`: an operator's
-    #: edit must not change the terms of a conversation already running.
+    #: The fraction of the **prompt budget** at which this conversation's turns
+    #: compact themselves, or 0 for manual-only.  Read when the conversation
+    #: starts — the same moment and the same reason as `max_iterations`: an
+    #: operator's edit must not change the terms of a conversation already
+    #: running.
     compact_at: float
     messages: list[Message]
     lock: asyncio.Lock

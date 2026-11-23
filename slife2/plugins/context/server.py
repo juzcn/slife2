@@ -547,15 +547,21 @@ async def _ask_with_repair[T](
     """One call — or two, when the first answer could not be read.
 
     **Never raises, and the one retry is a repair.**  A provider failure and a
-    reply that is not the requested shape both return `None`, and the caller's
-    fallback is perfectly good.  A provider failure is *not* asked again: there
-    is no answer to correct.  An answer that cannot be used is different — the
-    provider answered, the answer is in hand, and the reason names what is
-    wrong with it — so the model is asked once more with its own reply and that
-    reason.  That covers both an unreadable argument shape (`parse`'s refusal)
-    and a reply that is not the forced call (`Unanswered`: no tool call, or
-    another tool).  A second refusal ends it; the repair is one round, not a
-    loop.
+    reply that is not the requested shape both return no decision, and the
+    caller's fallback is perfectly good.  A provider failure is *not* asked
+    again — there is no answer to correct — and its reason is `failure_text`'s
+    words, the same spelling the turn's own failed-call line and
+    `[TURN-FAILED:…]` message use (SDD §5.3).  An answer that cannot be used is
+    different — the provider answered, the answer is in hand, and the reason
+    names what is wrong with it — so the model is asked once more with its own
+    reply and that reason.  That covers both an unreadable argument shape
+    (`parse`'s refusal) and a reply that is not the forced call (`Unanswered`:
+    no tool call, or another tool).  A second refusal ends it; the repair is one
+    round, not a loop.
+
+    **The second half of the answer is why there was none**, not a status: the
+    provider's own failure text or the parser's refusal.  It rides the caller's
+    report, so a person reading the pair has the same words the log does.
 
     **No clock of its own.**  The waits are the model service's, exactly as for
     the turn's own calls: a slow provider makes the turn late, which the design
@@ -574,9 +580,13 @@ async def _ask_with_repair[T](
         logger.info("%s_unparsed reason=%s", label, exc.reason)
         previous, refusal = exc.previous, exc.reason
     except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-        logger.info("%s_failed reason=%s", label, type(exc).__name__)
+        # **The provider failed, so there is nothing to repair.**  The reason is
+        # the exception's own words, in `failure_text`'s spelling: a status
+        # word would say less than the failure did and than the turn's own
+        # failed-call line does.
+        logger.info("%s_failed reason=%s", label, decisions.failure_text(exc))
         logger.debug("the %s call raised", subject, exc_info=True)
-        return None, "failed"
+        return None, decisions.failure_text(exc)
     else:
         # **The raw arguments, for the one question the parsed answer cannot
         # answer**: *why* a model that filled the tool a certain way did so.
@@ -598,18 +608,18 @@ async def _ask_with_repair[T](
         corrected = await ask(previous=previous, repair=refusal)
     except Unanswered as exc:
         logger.info("%s_unparsed reason=%s attempt=repair", label, exc.reason)
-        return None, "unparsed"
+        return None, exc.reason
     except Exception as exc:  # noqa: BLE001 — the same fallback as above
-        logger.info("%s_repair_failed reason=%s", label, type(exc).__name__)
+        logger.info("%s_repair_failed reason=%s", label, decisions.failure_text(exc))
         logger.debug("the repair call raised", exc_info=True)
-        return None, "failed"
+        return None, decisions.failure_text(exc)
     logger.debug("%s_reply attempt=repair %r", label, corrected)
     value, refusal = parse(corrected)
     if value is not None:
         logger.info("%s_repaired", label)
         return value, ""
     logger.info("%s_unparsed reason=%s attempt=repair", label, refusal)
-    return None, "unparsed"
+    return None, refusal
 
 
 def build_server(
@@ -1248,6 +1258,9 @@ def build_server(
             "recalled": 0,
             "rerank": rerank,
             "decision": decision,
+            # The no-decision and no-op answers cut nothing: the fit is the
+            # changed path's, and its count there is the harness's edit.
+            "fitted": 0,
             # What the pair records as the call's arguments: the decision's own,
             # or `{}` when there was none.
             "selection": selection or {},
@@ -1309,12 +1322,16 @@ def build_server(
         )
         return {"messages": rebuilt, "turn_ids": restored, "turns": rows}
 
-    def _window(model: str) -> int:
-        """How many tokens the model this conversation runs on can hold.
+    def _configured_prompt_window(model: str) -> int:
+        """The prompt budget the config gives *model*: window minus `max_tokens`.
 
-        The model entry states it, and the loader refuses an entry that does
-        not, so this is always a positive number — the recall's budget is a
-        fraction of it, and there is no second way to size a recall.
+        **The fallback for a caller that names none.**  The turn-running
+        callers pass the conversation's own budget (`prompt_window`), because
+        that is the number the conversation was started on and an edit must not
+        reach a turn already running.  A direct RPC caller — a test, a tool —
+        has no conversation, and `0` asks this plugin to resolve the model's
+        from the caller's home config.  The model entry states the window and
+        the loader refuses an entry that does not, so this is a real number.
 
         **A model the config cannot resolve is a failure, not a zero.**  A
         window that cannot be *asked for* fails the rebuild — its tool result
@@ -1323,7 +1340,7 @@ def build_server(
         token cap (SDD Appendix C: a weaker path is not a substitute for a
         missing capability).
         """
-        return int(current().resolve(model)[2].context_window)
+        return int(current().resolve(model)[2].prompt_window)
 
     async def _decide(
         agent: str,
@@ -1335,10 +1352,11 @@ def build_server(
         """The historical-turn decision, parsed and logged as this caller sees it.
 
         The second half is *why* there is no decision — `""` when the model
-        answered, otherwise `"failed"` or `"unparsed"`.  It rides the rebuild's
-        answer because `recalled: 0` is the same number for a recall that found
-        nothing and one nobody asked, and the person watching is owed the
-        difference.  The one-retry rule and the clock are `_ask_with_repair`'s.
+        answered, otherwise the provider's failure text or the parser's
+        refusal.  It rides the rebuild's answer because `recalled: 0` is the
+        same number for a recall that found nothing and one nobody asked, and
+        the person watching is owed the difference.  The one-retry rule and the
+        clock are `_ask_with_repair`'s.
         """
         return await _ask_with_repair(
             lambda **kw: ask_model(agent, subagent, model, messages, usage=usage, **kw),
@@ -1417,7 +1435,7 @@ def build_server(
         agent: str,
         messages: list[dict[str, Any]],
         selectable: list[str],
-        context_window: int,
+        prompt_window: int,
         model: str = "",
         subagent: str = "",
         context_tokens: int = 0,
@@ -1431,12 +1449,13 @@ def build_server(
         turn's record — and `selectable` names the ids that are candidates.
 
         `context_tokens` is the conversation's last measured call and
-        `context_window` its model's window: the same pair the status bar
+        `prompt_window` the space its prompt has: the same pair the status bar
         shows, rendered by the same `context_usage`, so the selector and the
         person read one figure.
 
         The answer is `compact` (the live ids to drop, as the model named them)
-        and `decision` (`""` for an answer, otherwise `failed` or `unparsed`).
+        and `decision` (`""` for an answer, otherwise why there was none — a
+        provider failure's own text or the parser's refusal).
         The answer is read strictly here — a drop that is not a whole id, or a
         status that is not text, is a build this one cannot read — and the
         caller checks it against the view before applying it: an id the view
@@ -1448,12 +1467,12 @@ def build_server(
             agent: Whose conversation.
             messages: The view the turn is running on, in order.
             selectable: The live ids the model may drop.
-            context_window: The conversation's model window, in tokens.
+            prompt_window: The space a request's prompt has, in tokens.
             model: Which model this conversation runs on, as `provider/model`.
             subagent: Which of that agent's conversations; empty for its own.
             context_tokens: The last call's measured size.
         """
-        usage, _used = decisions.context_usage(context_tokens, context_window)
+        usage, _used = decisions.context_usage(context_tokens, prompt_window)
         drop, decision = await _select_live(
             agent, subagent, model, messages, selectable, usage
         )
@@ -1469,7 +1488,7 @@ def build_server(
         carried: int = 0,
         publish: bool = True,
         context_tokens: int = 0,
-        context_window: int = 0,
+        prompt_window: int = 0,
         selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Decide what this turn runs on: keep ∪ recall.
@@ -1491,7 +1510,7 @@ def build_server(
         questions.
 
         **The decision is shown how full the context is.**  `context_tokens` is
-        the last LLM call's size and `context_window` the conversation's window:
+        the last LLM call's size and `prompt_window` the space the prompt has:
         the same pair the status bar shows, rendered by the same
         `context_usage`, so the decision model and the person read one figure.
 
@@ -1515,9 +1534,9 @@ def build_server(
                 left the context cannot be kept by naming it.
             subagent: Which of that agent's conversations; empty for its own.
             model: Which model this conversation runs on, as `provider/model`.
-                The window the selection is sized against is *this* model's, so
-                an empty reference is sized against the config's default and says
-                so in the log.
+                The budget the recall is sized against is the caller's
+                `prompt_window` — the conversation's own terms — and the model
+                reference is what the decision call and the log name.
             carried: How many messages at the **end** of `messages` no turn in
                 `turn_ids` accounts for.  They are re-appended verbatim after the
                 rebuilt turns, which is what keeps a cancelled turn's repair —
@@ -1533,7 +1552,7 @@ def build_server(
                 caller and nothing is written.
             context_tokens: The last LLM call's size, for the decision's own
                 figure.
-            context_window: The conversation's model window, in tokens.
+            prompt_window: The space a request's prompt has, in tokens.
             selection: A selection to apply as it came — the model's own
                 `_context_rebuild` arguments — or None to let the decision
                 model choose.  A selection this build cannot read is a tool
@@ -1550,9 +1569,12 @@ def build_server(
             `""` when the cross-encoder ran or no question was asked, otherwise
             `"unavailable"`, `"failed"` or `"empty"`: the recall kept its fused
             order and the caller shows that rather than swallowing it — and
-            `decision`, `""` when there was a decision, otherwise `"failed"` or
-            `"unparsed"`: the recall never ran, and `recalled: 0` would
-            otherwise read as one that found nothing.
+            `decision`, `""` when there was a decision, otherwise why there was
+            none (the provider's failure text or the parser's refusal): the
+            recall never ran, and `recalled: 0` would otherwise read as one
+            that found nothing.  `fitted` is how many of the selection's oldest
+            turns the prompt budget cut to make it sendable; it is the
+            harness's edit and the report names it.
         """
         store = await store_of(agent, subagent)
         # **The recall's domain is the whole log outside the context.**  Every
@@ -1562,10 +1584,35 @@ def build_server(
         # answer, because the same figure is what the model's "recalled 0 of N"
         # is read from.
         outside = max(await off_loop(store.count) - len(turn_ids), 0)
+        # **A caller that names no budget gets the model's.**  The turn-running
+        # servers pass the conversation's own; a direct RPC caller has none, and
+        # `0` asks for the config's — which is also the one path that must fail
+        # loudly when the model cannot be resolved.
+        if prompt_window <= 0:
+            if not model:
+                logger.info("recall_window_default_model")
+            prompt_window = _configured_prompt_window(model)
         # **The conversation is the input.**  The rebuild runs at the first
         # boundary, after the turn's message was appended (or mid-turn, after a
         # cut-in); there is no separate prompt to pass.
-        usage, _used = decisions.context_usage(context_tokens, context_window)
+        usage, _used = decisions.context_usage(context_tokens, prompt_window)
+        # **The budget is the prompt's, and it binds the kept turns too.**  A
+        # selection heavier than the ceiling is cut from its oldest end before
+        # the recall spends anything; a recall alone cannot repair a base that
+        # is already too large.  `0` is "the caller did not say" (a direct RPC
+        # caller): nothing is fitted and nothing is recalled rather than a
+        # context emptied against an unknown budget.
+        budget = (
+            int(prompt_window * current().context.ceiling) if prompt_window > 0 else 0
+        )
+
+        async def fitted(ids: list[int]) -> tuple[list[int], int]:
+            """One selection cut to the prompt budget, oldest end first."""
+            if budget <= 0:
+                return list(ids), 0
+            costs = await off_loop(_cost_of, store, ids)
+            return await off_loop(decisions.fit_recent, ids, costs, budget)
+
         status = ""
         if selection is not None:
             # **The model's own call.**  Its arguments are the selection, read
@@ -1599,53 +1646,59 @@ def build_server(
         # model that kept nothing and one that cleared what it had, which is the
         # question this line exists to answer without a replay.
         logger.info("recall_decided %s", _decision_words(decision))
-        if decision.asks_for_nothing:
-            # The ordinary case, and the one this fallback is for: the turns in
-            # hand are the answer.  Nothing is fetched, nothing is rendered,
-            # nothing is written — and the list already on disk still describes
-            # what the caller is holding, which is why it is read once before
-            # this answer counts.
-            logger.info("recall_not_needed reason=context_sufficient")
-            return _in_hand(messages, turn_ids, outside, selection=used)
-
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
         # about — there is no turn to refuse — so the id is dropped and the log
         # says so, which is where whoever has to explain a missing turn looks.
         in_hand = {int(turn_id) for turn_id in turn_ids}
-        base = (
-            list(turn_ids)
-            if decision.keep is None
-            else [turn_id for turn_id in decision.keep if turn_id in in_hand]
-        )
-        unknown = (
-            []
-            if decision.keep is None
-            else [turn_id for turn_id in decision.keep if turn_id not in in_hand]
-        )
-        if unknown:
-            logger.info("recall_kept_ids_unknown ids=%s", unknown)
-        if decision.keep is not None and decision.keep and not base:
-            # **A keep-list that named nothing in hand did not say "clear".**
-            # Every id was a turn this conversation no longer holds — a
-            # miscopied or hallucinated number — so the intersection is empty
-            # only because the ids were unknown.  Emptying a context nobody
-            # asked to empty is the one outcome this fallback refuses: the
-            # explicit clear is the string (or the empty list), and a decision
-            # that cannot be acted on keeps the context the turn had
-            # (SDD §5.5, Appendix C).
-            logger.info("recall_kept_nothing_known ids=%s", decision.keep)
-            return _in_hand(messages, turn_ids, outside, selection=used)
-
+        fitted_out = 0
         recalled: list[int] = []
         rerank = ""
-        if decision.recall is not None:
-            recalled, rerank = await _recall_into(
-                store, decision.recall, base, turn_ids, model
+        if decision.asks_for_nothing:
+            # The ordinary case, and the one this fallback is for: the turns in
+            # hand are the answer.  The one exception is a selection heavier
+            # than the prompt budget — a restore of a list chosen under a wider
+            # window, or one turn that grew past it — and then the window's
+            # bound wins: the oldest turns are cut and the answer says how many.
+            base, fitted_out = await fitted(list(turn_ids))
+            if not fitted_out:
+                logger.info("recall_not_needed reason=context_sufficient")
+                return _in_hand(messages, turn_ids, outside, selection=used)
+            logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
+        else:
+            base = (
+                list(turn_ids)
+                if decision.keep is None
+                else [turn_id for turn_id in decision.keep if turn_id in in_hand]
             )
+            unknown = (
+                []
+                if decision.keep is None
+                else [turn_id for turn_id in decision.keep if turn_id not in in_hand]
+            )
+            if unknown:
+                logger.info("recall_kept_ids_unknown ids=%s", unknown)
+            if decision.keep is not None and decision.keep and not base:
+                # **A keep-list that named nothing in hand did not say "clear".**
+                # Every id was a turn this conversation no longer holds — a
+                # miscopied or hallucinated number — so the intersection is empty
+                # only because the ids were unknown.  Emptying a context nobody
+                # asked to empty is the one outcome this fallback refuses: the
+                # explicit clear is the string (or the empty list), and a decision
+                # that cannot be acted on keeps the context the turn had
+                # (SDD §5.5, Appendix C).
+                logger.info("recall_kept_nothing_known ids=%s", decision.keep)
+                return _in_hand(messages, turn_ids, outside, selection=used)
+            base, fitted_out = await fitted(base)
+            if fitted_out:
+                logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
+            if decision.recall is not None:
+                recalled, rerank = await _recall_into(
+                    store, decision.recall, base, turn_ids, prompt_window
+                )
 
         target = decisions.union(base, recalled)
-        if target == sorted(in_hand):
+        if fitted_out == 0 and target == sorted(in_hand):
             # The decision happens to equal what is in hand even though it was
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
@@ -1697,9 +1750,10 @@ def build_server(
             # the next start.
             await off_loop(store.set_context_turns, target)
         logger.info(
-            "recall_rebuilt turns=%d recalled=%d published=%s",
+            "recall_rebuilt turns=%d recalled=%d fitted=%d published=%s",
             len(target),
             len(set(recalled) - set(base)),
+            fitted_out,
             publish,
         )
         return {
@@ -1726,6 +1780,10 @@ def build_server(
             # There *was* a decision — this path is only reached past the
             # `None` branch — so no failure is owed to the caller.
             "decision": "",
+            # How many turns the prompt budget cut from the selection's oldest
+            # end, or 0.  The harness's edit, named: it is the window's doing,
+            # not a selection the model made.
+            "fitted": fitted_out,
             # The arguments the pair records: the decision's own, or the
             # model's selection when it made one.
             "selection": used,
@@ -1736,7 +1794,7 @@ def build_server(
         condition: dict[str, Any],
         base: list[int],
         in_hand: Sequence[int],
-        model: str,
+        prompt_window: int,
     ) -> tuple[list[int], str]:
         """Run one recall condition, fit it, and report the rerank stage.
 
@@ -1752,8 +1810,8 @@ def build_server(
         their union (twice the configured width for one question, more for
         several); `min_similarity` drops measured noise; the cross-encoder
         reorders the survivors and drops those below `rerank_min_score`; the
-        kept turns' estimated cost is subtracted from `ceiling × window`, and
-        the budget spends what is left.  **No count cuts the selection**: a
+        kept turns' estimated cost is subtracted from
+        `ceiling × prompt_window`, and the budget spends what is left.  **No count cuts the selection**: a
         turn that passed both floors is a turn the budget may buy, and a count
         applied after the ranker would discard relevant turns on the strength
         of an order the chronological rebuild does not keep.
@@ -1765,15 +1823,18 @@ def build_server(
         before every turn.
 
         Every cap here is the caller's and not the store's, for the split of
-        duties: the store ranks, the policy caps, and the policy depends on a
-        model's window and on what the decision kept — neither of which the
-        store knows.
+        duties: the store ranks, the policy caps, and the policy depends on the
+        conversation's prompt budget and on what the decision kept — neither of
+        which the store knows.
 
         **One budget, and it is the ceiling's.**  The kept turns are estimated
         first, and the recall may spend what they leave below
-        `ceiling × window` — no second fraction of its own.  Keeping less
+        `ceiling × prompt_window` — no second fraction of its own.  Keeping less
         leaves the recall more; a kept context at the ceiling leaves it
-        nothing, so the two halves cannot overfill the window by construction.
+        nothing, so the two halves cannot overfill the prompt budget by
+        construction.  The window minus the completion request is what a
+        provider will accept: sizing against the full window is how a rebuild
+        once produced a request the next call could not send.
 
         **Every turn in hand is excluded from what is recalled.**  The
         decision model read the whole conversation, so a turn it left out of the
@@ -1826,18 +1887,12 @@ def build_server(
         # recall has no question, and a keyword-only recall has only its query.
         asker = await embedding.get() if (query or sentences) else None
 
-        # The policy is the caller's home's, like the window and the model:
-        # this daemon serves every home, and `context:` is a section of the
-        # caller's `slife2.yaml` (`current`).  Read from the config this process
-        # started on, an edit would reach the window and not the numbers sized
-        # against it, and a second home would be graded by the first home's
-        # ceiling.
+        # The policy is the caller's home's, like the prompt budget: this
+        # daemon serves every home, and `context:` is a section of the caller's
+        # `slife2.yaml` (`current`).  Read from the config this process started
+        # on, an edit would reach the budget and not the numbers sized against
+        # it, and a second home would be graded by the first home's ceiling.
         policy = current().context
-        if not model:
-            # The promise `rebuild`'s `model` argument makes: an empty reference
-            # is sized against the config's default, and says so.
-            logger.info("recall_window_default_model")
-        window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
         # the headroom *below*.  Summed here and not by the store: the store
         # ranks candidates, and how much room is left is a fact about a
@@ -1847,7 +1902,7 @@ def build_server(
         # A kept context at the ceiling leaves the recall nothing, and one
         # already over it is a negative budget — both answered by the
         # `budget <= 0` exit below rather than by a recall that overfills.
-        budget = int(window * policy.ceiling) - base_cost
+        budget = int(prompt_window * policy.ceiling) - base_cost
         if budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
             return [], ""
@@ -1932,7 +1987,7 @@ def build_server(
         try:
             scored = await embedding.rerank(ask, documents, top_n=len(documents))
         except Exception as exc:  # noqa: BLE001 — an optional stage's failure
-            logger.info("recall_rerank_failed reason=%s", type(exc).__name__)
+            logger.info("recall_rerank_failed reason=%s", decisions.failure_text(exc))
             logger.debug("the rerank call raised", exc_info=True)
             return order, "failed"
         if scored is None:

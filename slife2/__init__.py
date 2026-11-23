@@ -1188,8 +1188,11 @@ def main(argv: list[str] | None = None) -> int:
                     agent=args.agent,
                     model=model_reference,
                     # What this model is, from its own config entry: the status
-                    # bar renders each of these from what it is handed.
-                    context_window=model_settings.context_window,
+                    # bar renders each of these from what it is handed.  The
+                    # bar's percentage is against the **prompt budget** — the
+                    # window minus the completion request — because the
+                    # provider counts both against one window.
+                    context_window=model_settings.prompt_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
                     # What the model holds against what the catalogue holds,

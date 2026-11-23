@@ -1043,7 +1043,12 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
 
 
 def _config_with_window(window: int):
-    """`default_config()` with the shipped model's window set for a budget test."""
+    """`default_config()` with the shipped model's window set for a budget test.
+
+    `max_tokens` is cleared with it: the prompt budget is the window minus that
+    completion request, and the shipped 384k would leave a 1000-token test
+    window with no prompt space at all.
+    """
     config = default_config()
     provider = config.providers["deepseek"]
     shipped = provider.models["deepseek-flash"]
@@ -1052,7 +1057,11 @@ def _config_with_window(window: int):
         providers={
             "deepseek": replace(
                 provider,
-                models={"deepseek-flash": replace(shipped, context_window=window)},
+                models={
+                    "deepseek-flash": replace(
+                        shipped, context_window=window, max_tokens=None
+                    )
+                },
             )
         },
     )
@@ -1086,12 +1095,14 @@ async def test_the_recall_budget_is_the_headroom_below_the_ceiling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
-    """A kept context at the ceiling is the whole budget; a recall may not top it up.
+async def test_a_context_over_the_ceiling_is_fitted_and_the_recall_spends_it() -> None:
+    """**The ceiling is a hard bound, and it binds the kept turns too.**
 
-    The kept turn alone exceeds the ceiling, so the budget is negative and the
-    recall is abandoned rather than overfilling the window — which is the one
-    thing the old per-recall fraction could not guarantee.
+    A kept turn larger than the whole budget cannot be sent, so it is cut from
+    the selection's oldest end (`fitted`) and the freed budget is what the
+    recall may spend.  The old per-recall fraction could not guarantee this:
+    it only refused to *add* to an over-full context, so the over-full base
+    stayed and the next call was a provider 400.
     """
     config = _config_with_window(1000)
     kept = "trump " + "word " * 1200
@@ -1107,8 +1118,40 @@ async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
         await _seed(client, "jack", (kept, "1"), (candidate, "2"))
         answer = await _rebuild(client, "")
 
-    assert answer.data["changed"] is False
+    assert answer.data["changed"] is True
+    assert answer.data["fitted"] == 1, "the kept turn could not fit the budget"
+    assert answer.data["recalled"] == 1, "the recall spent what the fit freed"
+    assert answer.data["turn_ids"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_context_over_the_budget_is_fitted_and_published() -> None:
+    """**A no-op decision still fits a selection that cannot be sent.**
+
+    The live failure this rule exists for: a rebuild published a ~772k-token
+    selection beside a 384k completion request, and the turn's first call was a
+    provider 400.  A decision that keeps everything is no longer a no-op when
+    the list is over the prompt budget — the oldest turns are cut, the answer
+    says how many, and the live-context list is the fitted one so the next
+    start replays something a request can carry.
+    """
+    config = _config_with_window(1000)
+
+    async with Client(
+        build_server(config, embedder=EMBEDDER, ask=Replies("{}"))
+    ) as client:
+        ids = await _seed(client, "jack", ("word " * 1200, "1"), ("trump " * 10, "2"))
+        answer = await _rebuild(client, "", turn_ids=ids, messages=[SYSTEM])
+        restored = await client.call_tool(
+            "restore", {"agent": "jack", "messages": [SYSTEM]}
+        )
+
+    assert answer.data["changed"] is True
+    assert answer.data["fitted"] == 1, "the older turn cannot fit the budget"
+    assert answer.data["turn_ids"] == [ids[1]]
+    assert (answer.data["kept"], answer.data["in_hand"]) == (1, 2)
     assert answer.data["recalled"] == 0
+    assert restored.data["turn_ids"] == [ids[1]], "the fitted list is what persists"
 
 
 @pytest.mark.asyncio
@@ -1379,24 +1422,27 @@ async def _down(*arguments: Any, **keywords: Any) -> str:
 
 
 @pytest.mark.parametrize(
-    ("ask", "status"),
+    ("ask", "reason"),
     [
-        (_down, "failed"),
-        (Replies("a reply this build cannot read", "and still not one"), "unparsed"),
+        (_down, "RuntimeError: the model server is down"),
+        (
+            Replies("a reply this build cannot read", "and still not one"),
+            "the reply is not one JSON object",
+        ),
     ],
 )
 @pytest.mark.asyncio
 async def test_a_decision_that_decided_nothing_says_the_recall_failed(
-    ask: Any, status: str
+    ask: Any, reason: str
 ) -> None:
     """**A recall nobody asked for is not a recall that found nothing.**
 
     `recalled: 0` is the same count for an empty log and for a decision that
-    never arrived, so the two were one line on screen.  The reason was logged
-    and lost at the wire; the answer carries it now, and the window turns it
-    into `recall failed` where the count would be a lie.  The turn still runs
-    on the context in hand — the fallback is unchanged, and an unreadable reply
-    gets its one repair before it falls back (hence the two scripted answers).
+    never arrived, so the two were one line on screen.  The answer carries the
+    reason now — the provider's own failure text, or the parser's refusal — in
+    the one spelling the turn's own failed-call line uses (`failure_text`).  The
+    turn still runs on the context in hand; an unreadable reply gets its one
+    repair first (hence the two scripted answers).
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
@@ -1419,7 +1465,7 @@ async def test_a_decision_that_decided_nothing_says_the_recall_failed(
     assert answer.data["in_hand"] == 1
     assert answer.data["outside"] == 0, "the log holds nothing beyond the context"
     assert answer.data["recalled"] == 0
-    assert answer.data["decision"] == status
+    assert answer.data["decision"] == reason
 
 
 @pytest.mark.asyncio
@@ -1944,10 +1990,18 @@ async def test_the_repair_tells_the_model_the_bound_grammar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_call_is_not_asked_again() -> None:
+async def test_a_failed_call_is_not_asked_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Nothing to correct: no answer came back, and a second ask would only
-    spend a call on a provider that has already failed once."""
+    spend a call on a provider that has already failed once.
+
+    The failure line carries the provider's own words, not only the exception
+    class: `reason=RuntimeError` is the same line for a dead endpoint, a 400 and
+    a timeout, and the operator is owed the difference.
+    """
     calls: list[str] = []
+    caplog.set_level(logging.INFO, logger=context_server.logger.name)
 
     async def down(*arguments: Any, **keywords: Any) -> str:
         calls.append(keywords.get("repair", ""))
@@ -1960,7 +2014,14 @@ async def test_a_failed_call_is_not_asked_again() -> None:
         answer = await _rebuild(client, "")
 
     assert calls == [""], "one ask, and the repair never ran"
-    assert answer.data["decision"] == "failed"
+    assert answer.data["decision"] == "RuntimeError: the model server is down", (
+        "the answer carries the same words the log does"
+    )
+    assert any(
+        record.message
+        == "recall_decision_failed reason=RuntimeError: the model server is down"
+        for record in caplog.records
+    ), "the provider's own message is in the line"
 
 
 @pytest.mark.asyncio
@@ -2001,7 +2062,7 @@ async def test_an_answer_with_another_tool_is_repaired_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_second_answer_without_the_forced_call_is_unparsed() -> None:
+async def test_a_second_answer_without_the_forced_call_is_no_decision() -> None:
     """One repair, then the turn keeps the context; the call is not repeated."""
     calls: list[int] = []
 
@@ -2027,7 +2088,7 @@ async def test_a_second_answer_without_the_forced_call_is_unparsed() -> None:
         answer = await _rebuild(client, "")
 
     assert len(calls) == 2, "one call and its one repair"
-    assert answer.data["decision"] == "unparsed"
+    assert answer.data["decision"] == "the reply held no tool call"
     assert answer.data["changed"] is False, "the context is kept"
 
 

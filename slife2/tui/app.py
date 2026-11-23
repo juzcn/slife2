@@ -231,6 +231,11 @@ def model_choices(rows: Sequence[Mapping[str, Any]]) -> list[ModelChoice]:
                 ref=str(row.get("ref") or ""),
                 label="" if name == model else name,
                 context_window=int(row.get("context_window") or 0),
+                prompt_window=max(
+                    0,
+                    int(row.get("context_window") or 0)
+                    - int(row.get("max_tokens") or 0),
+                ),
                 thinking="reasoning" in marks,
                 vision="image" in marks,
             )
@@ -332,9 +337,11 @@ class SlifeApp(App[None]):
         self._agent = agent
         self._model = model
         self._model_label = model_label or model
-        #: The model's budget, from its config, for the percentage in the status
-        #: bar.  Zero when the config does not say, and then no percentage is
-        #: shown rather than one against a number somebody invented.
+        #: The model's **prompt budget**, from its config, for the percentage in
+        #: the status bar: the window minus the completion request, because a
+        #: provider counts both against one window.  Zero when the config does
+        #: not say, and then no percentage is shown rather than one against a
+        #: number somebody invented.
         self._context_window = context_window
         #: The model's own two capabilities, also from its config: it reasons
         #: natively, and it can be shown a picture.  Both are facts about the
@@ -1741,7 +1748,7 @@ class SlifeApp(App[None]):
         """
         self._model = choice.ref
         self._model_label = choice.ref
-        self._context_window = choice.context_window
+        self._context_window = choice.prompt_window
         self._thinking = choice.thinking
         self._vision = choice.vision
         self._refresh_status()

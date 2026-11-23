@@ -198,6 +198,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
             "in_hand": 2,
             "outside": 1,
             "recalled": 1,
+            "fitted": 0,
             "rerank": "unavailable",
             "decision": "",
         }
@@ -216,7 +217,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         2,
         REF.reference,
         context_tokens=1234,
-        context_window=8192,
+        prompt_window=8192,
     )
 
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
@@ -240,7 +241,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         "carried": 2,
         "publish": True,
         "context_tokens": 1234,
-        "context_window": 8192,
+        "prompt_window": 8192,
         "selection": None,
     }
 
@@ -275,6 +276,7 @@ async def test_rebuild_carries_the_live_ids_and_channels_back_unchanged() -> Non
             "in_hand": 1,
             "outside": 0,
             "recalled": 0,
+            "fitted": 0,
             "rerank": "",
             "decision": "",
         }
@@ -320,6 +322,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
             "in_hand": 0,
             "outside": 0,
             "recalled": 0,
+            "fitted": 0,
             "rerank": "",
             "decision": "",
         }
@@ -351,6 +354,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "in_hand": 0,
                 "outside": 0,
                 "recalled": 0,
+                "fitted": 0,
                 "rerank": "",
                 "decision": "",
             },
@@ -364,6 +368,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "in_hand": 0,
                 "outside": 0,
                 "recalled": 0,
+                "fitted": 0,
                 "rerank": "",
                 "decision": "",
             },
@@ -380,6 +385,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "changed": True,
                 "kept": 0,
                 "recalled": 0,
+                "fitted": 0,
                 "rerank": "",
                 "decision": "",
             },
@@ -393,6 +399,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "kept": 0,
                 "in_hand": 0,
                 "recalled": 0,
+                "fitted": 0,
                 "rerank": "",
                 "decision": "",
             },
@@ -407,6 +414,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "in_hand": 0,
                 "outside": 0,
                 "recalled": 0,
+                "fitted": 0,
             },
             "rerank status",
         ),
@@ -419,6 +427,7 @@ async def test_a_private_rebuild_asks_for_no_write_and_adopts_its_own_answer() -
                 "in_hand": 0,
                 "outside": 0,
                 "recalled": 0,
+                "fitted": 0,
                 "rerank": "",
             },
             "decision's status",
@@ -446,6 +455,7 @@ async def test_rebuild_refuses_a_turn_id_that_is_not_one(
         "in_hand": 0,
         "outside": 0,
         "recalled": 0,
+        "fitted": 0,
         "rerank": "",
         "decision": "",
     }
@@ -471,6 +481,7 @@ async def test_rebuild_refuses_counts_that_are_not_ints(
         "in_hand": 0,
         "outside": 0,
         "recalled": recalled,
+        "fitted": 0,
         "rerank": "",
         "decision": "",
     }

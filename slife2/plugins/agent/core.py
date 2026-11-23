@@ -87,6 +87,7 @@ from slife2.libs.turn.context import (
     LIVE_REPLY,
     RECALL_REPLY,
     context_usage,
+    failure_text,
     rebuild_report,
     turn_failed_note,
     turn_prompt_lead,
@@ -203,18 +204,6 @@ class ProgressObserver:
         # client that does not want a stream simply does not get one, and still
         # gets a correct result at the end.
         await self._ctx.report_progress(self._count, None, encode(event))
-
-
-def failure_text(failure: BaseException) -> str:
-    """One failure, in the words the log line and the turn's last message share.
-
-    **Two readers of one fact.**  The operator's `turn_done` line says what a
-    turn died of, and the `[TURN-FAILED:…]` message the turn ends with tells the
-    model the same thing — so a second spelling would let the log and the
-    conversation describe one failure two ways, and neither reader could tell
-    which is the account.
-    """
-    return f"{type(failure).__name__}: {failure}"
 
 
 def log_turn(
@@ -952,7 +941,7 @@ class AgentCore:
             api=provider.api,
             model_id=settings.model,
             accepts_images=settings.accepts_images,
-            context_window=settings.context_window,
+            prompt_window=settings.prompt_window,
             max_iterations=live.agent.max_iterations,
             # The compaction threshold is a term of the conversation in the same
             # sense: an edit reaches the next conversation, not a turn already
@@ -1172,7 +1161,7 @@ class AgentCore:
         fraction = loop.compact_at
         if fraction <= 0:
             return False
-        if agent_loop.last_usage.total_tokens < loop.context_window * fraction:
+        if agent_loop.last_usage.total_tokens < loop.prompt_window * fraction:
             return False
         if loop.compact_hold:
             return False
@@ -2696,7 +2685,7 @@ class AgentCore:
                 if loop.live is not None and loop.live.last_usage.total_tokens
                 else loop.context_tokens
             ),
-            context_window=loop.context_window,
+            prompt_window=loop.prompt_window,
         )
         # **The prefix moves; the suffix does not.**  `carried` re-appended every
         # message from the opening on, so the opening's new index is the old one
@@ -2729,7 +2718,7 @@ class AgentCore:
         )
         tokens = context_usage(
             estimate_turn_tokens([message.to_record() for message in loop.messages]),
-            loop.context_window,
+            loop.prompt_window,
         )[0]
         return rebuild_report(
             changed=rebuilt.changed,
@@ -2739,6 +2728,7 @@ class AgentCore:
             recalled=rebuilt.recalled,
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,
+            fitted=rebuilt.fitted,
             tokens=tokens,
         )
 
@@ -2799,7 +2789,7 @@ class AgentCore:
             context_tokens=(
                 loop.live.last_usage.total_tokens if loop.live is not None else 0
             ),
-            context_window=loop.context_window,
+            prompt_window=loop.prompt_window,
             selection=compact,
         )
         # **A split selection is refused, not applied.**  The model's own call

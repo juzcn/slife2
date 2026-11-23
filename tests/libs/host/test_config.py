@@ -22,6 +22,7 @@ from slife2.libs.host.config import (
     PLUGINS,
     REMOTE,
     ConfigError,
+    ModelSettings,
     default_config,
     find_config_path,
     first_reference,
@@ -2418,3 +2419,25 @@ def test_a_credential_reference_is_one_rule_across_get_and_set() -> None:
         with pytest.raises(ValueError) as refused:
             to_reference(bad)
         assert str(refused.value) == API_KEY_REFUSAL
+
+
+def test_the_prompt_budget_reserves_the_completion_request() -> None:
+    """**A provider counts prompt + requested completion against one window.**
+
+    The 2026-11 live failure: a 772k-token selection was sized against the full
+    1M window, the request then carried a 384k `max_tokens`, and DeepSeek
+    answered 400 (`1,182,471 > 1,048,576`).  The prompt budget is the window
+    minus that reservation, and it is the number every context budget and
+    percentage is measured against.
+    """
+    assert (
+        ModelSettings(
+            model="m", context_window=1_000_000, max_tokens=384_000
+        ).prompt_window
+        == 616_000
+    )
+    assert ModelSettings(model="m", context_window=1000).prompt_window == 1000
+    assert (
+        ModelSettings(model="m", context_window=100, max_tokens=200).prompt_window == 0
+    ), "a completion wider than the window leaves no prompt space"
+    assert ModelSettings(model="m").prompt_window == 0

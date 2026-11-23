@@ -550,9 +550,9 @@ async def test_the_harness_asks_at_the_measured_threshold(
         message.role == "tool" and without_id(message.content) == OLD
         for message in final
     )
-    window = cfg.resolve(cfg.default)[2].context_window
+    window = cfg.resolve(cfg.default)[2].prompt_window
     assert usages == [context_usage(600, window)[0]], (
-        "the selector reads the last measured call, not an estimate"
+        "the selector reads the last measured call against the prompt budget"
     )
 
     rows = stored_messages()
@@ -873,6 +873,9 @@ async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) 
         and "did not answer" in str(message.get("content"))
     ]
     assert report, "the pair names the failure rather than swallowing it"
+    assert "RuntimeError: the provider is down" in str(report[0]), (
+        "the provider's own words are in the report, as on a failed turn's line"
+    )
     # The repair call is not made for a provider failure — there is no answer
     # to correct — so the selector was asked once.
     final = backend.calls[-1][0]
