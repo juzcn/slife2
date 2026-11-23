@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -86,6 +87,15 @@ from slife2.plugins.agent_task.server import (
 from slife2.plugins.tui import server as control
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+
+#: The live-id footnote the view appends to every addressable message.
+LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
+
+
+def without_id(content: Any) -> str:
+    """A view message's text with the live-id footnote taken off."""
+    return LIVE_ID_RE.sub("", str(content or ""))
+
 
 AGENT = "jack"
 DESCRIPTION = "Find the retry policy."
@@ -1932,7 +1942,7 @@ async def test_a_task_has_no_cut_in_and_takes_nothing_from_the_maker(
 
     assert reached == [], "the task reached the agent server's cut-in"
     tool = tool_result(built.messages(), CHECK_NEW_INPUT)
-    assert tool.content == NOTHING_WAITING
+    assert NOTHING_WAITING in str(tool.content), "the view carries the id footnote"
 
 
 async def test_a_task_compacts_itself_at_the_threshold(
@@ -2016,7 +2026,10 @@ async def test_a_tasks_attach_image_lands_on_its_own_next_call(
     ]
     assert urls == [source]
     tool = tool_result(messages, ATTACH_IMAGE)
-    assert json.loads(tool.content) == {"attached": [source], "refused": []}
+    assert json.loads(without_id(tool.content)) == {
+        "attached": [source],
+        "refused": [],
+    }
 
 
 async def test_a_task_of_a_subagent_that_is_gone_does_not_recreate_the_name(

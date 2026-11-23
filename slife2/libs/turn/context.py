@@ -63,30 +63,37 @@ from slife2.libs.turn.tools import INTERRUPTED
 
 #: The decision model's instruction, shipped as a template for the reason the
 #: system prompt is: it is text with holes in it, and a template says where they
-#: are.  Beside `system.j2` so both are found the same way.
-INSTRUCTION_TEMPLATE = "recall.j2"
+#: are.  Beside `system.j2` so both are found the same way.  **One template for
+#: every decision**: the guard, the figure and the "record it by calling this
+#: tool" are the same call; what differs is the tool's description (the intent)
+#: and its schema (the rules).
+DECISION_TEMPLATE = "decision.j2"
 
-#: The live compaction selector's instruction — the same kind of template, and
-#: the same entry point, as `INSTRUCTION_TEMPLATE`.
-LIVE_TEMPLATE = "live.j2"
-
-#: The two decision tools, and the one line each tool says about itself.  The
-#: instruction travels as a system message appended to the live conversation;
-#: the tool description says only what the call records, and the reply schema is
-#: the tool's `parameters`.  Neither name is ever advertised in a turn — only in
-#: the decision request whose `tool_choice` names it.
+#: The two decision tools, and the intent each says about itself.  The generic
+#: instruction carries the guard and the figure; the per-decision intent is the
+#: tool's description; the reply schema is its `parameters`.  Neither name is
+#: ever advertised in a turn — only in the decision request whose `tool_choice`
+#: names it.
 DECISION_TOOL = "decide_context"
 SELECTION_TOOL = "select_messages"
-DECISION_TOOL_TEXT = "Record the context decision described by the system instruction."
+DECISION_TOOL_TEXT = (
+    "Decide which historical turns to keep and which turns to recall from the "
+    "turn log, so this turn runs on a chosen context rather than on everything "
+    "accumulated above. Keep what the work still depends on and let go of what "
+    "it does not."
+)
 SELECTION_TOOL_TEXT = (
-    "Record the live-message selection described by the system instruction."
+    "Decide which messages this turn's later calls no longer need, so the rest "
+    "of this turn has room in the window and sees only what it still needs. "
+    "Each message carries the id to write back; the system leaves the named "
+    "messages out for the rest of this turn, and nothing is deleted."
 )
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
 #: states the same for the decision model).  **The rules are here and not in
-#: `live.j2`** — the fixed two, the tool-exchange legality and the empty answer
-#: are what the model fills, so the schema says them once (SDD §2.3).
+#: the instruction** — the fixed two, the tool-exchange legality and the empty
+#: answer are what the model fills, so the schema says them once (SDD §2.3).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -94,16 +101,18 @@ LIVE_REPLY: dict[str, Any] = {
         "compact": {
             "description": (
                 "The live message ids whose content this turn no longer needs "
-                "— any numbered message except the system prompt and the "
-                "turn's opening message, historical or current. Omit for none. "
-                "**Drop a tool exchange as a whole**: an assistant message "
-                "that asked for tools goes together with all of its results, "
-                "and a result goes together with the assistant message that "
-                "asked for it — a call without its answer, or an answer "
-                "without its call, is a history no provider accepts."
+                '— any message carrying a `[MESSAGE:{"id": …}]` annotation '
+                "except the system prompt and the turn's opening message, "
+                "historical or current. Omit for none. Write the ids exactly as "
+                "the annotation shows them. **Drop a tool exchange as a "
+                "whole**: an assistant message that asked for tools goes "
+                "together with all of its results, and a result goes together "
+                "with the assistant message that asked for it — a call without "
+                "its answer, or an answer without its call, is a history no "
+                "provider accepts."
             ),
             "type": "array",
-            "items": {"type": "integer"},
+            "items": {"type": "string"},
         }
     },
 }
@@ -113,7 +122,7 @@ LIVE_REPLY: dict[str, Any] = {
 #: "Schema over prompt"): the schema is the tool's `parameters`, so the field's
 #: wording is what the model fills, not a sentence it copies — which is why the
 #: running turn's exclusion and a follow-up's sentence are here rather than in
-#: `recall.j2`.
+#: the instruction.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -301,6 +310,22 @@ class Decision:
         """
         return self.keep is None and self.recall is None
 
+    def arguments(self) -> dict[str, Any]:
+        """The decision as the tool arguments that express it.
+
+        The pair `_context_rebuild` writes carries the decision's own
+        arguments, so a model reading its history sees the selection rather
+        than an empty call.  The mapping is the one `parse_with_reason` reads:
+        `context` (a list, `"clear"`, or absent for all) and `recall` (a
+        condition, or absent for none).
+        """
+        out: dict[str, Any] = {}
+        if self.keep is not None:
+            out["context"] = "clear" if not self.keep else list(self.keep)
+        if self.recall is not None:
+            out["recall"] = dict(self.recall)
+        return out
+
 
 def normalise_ids(values: Iterable[Any]) -> list[int]:
     """An id list with duplicates collapsed to their **first** position.
@@ -328,6 +353,21 @@ def normalise_ids(values: Iterable[Any]) -> list[int]:
     seen: dict[int, None] = {}
     for value in values:
         seen.setdefault(int(value), None)
+    return list(seen)
+
+
+def normalise_mids(values: Iterable[Any]) -> list[str]:
+    """A live message id list with duplicates collapsed to their first position.
+
+    The same rule as `normalise_ids`, for the ids the live view carries
+    (`{turn_id}.{index}` and `cur.{index}`): those are strings, not row ids, so
+    the coercion is `str` rather than `int`.  The two live beside each other
+    because they are one convention — first mention wins, order is the content —
+    and the only difference is the id space the two selections address.
+    """
+    seen: dict[str, None] = {}
+    for value in values:
+        seen.setdefault(str(value), None)
     return list(seen)
 
 
@@ -531,82 +571,31 @@ def repair_note(reason: str, reply: str = "") -> str:
     )
 
 
-def instruction(usage: str) -> str:
-    """What the decision model is told: the task, the criterion, one guard.
+def decision_instruction(usage: str) -> str:
+    """What a decision model is told: the guard, the figure and the call.
 
-    **No input is passed beside the messages.**  The rebuild runs where the
+    **One template for every decision.**  The task's intent is the tool's
+    description (`DECISION_TOOL_TEXT`/`SELECTION_TOOL_TEXT`), the answer's
+    shape is its schema (`RECALL_REPLY`/`LIVE_REPLY`), and what the template
+    carries is what a schema cannot: the anti-injection guard, the context
+    figure, and "record the decision by calling this tool".  The rebuild and the
+    compaction were two copies of this envelope, and a change to either drifted
+    from the other.
+
+    **No input is passed beside the messages.**  A decision runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
     delivered), so the instruction is the same every time and the decision is
-    made from the conversation the call is made over.  A separate prompt would
-    be the previous design's — it existed only because the rebuild ran before the
-    message was appended.
+    made from the conversation the call is made over.
 
-    **The answer's shape is not restated here.**  Every field, allowed value and
-    coupling rule is `RECALL_REPLY`'s; the cases that used to demonstrate
-    combinations were a second spelling of the `oneOf`/`anyOf` the tool already
-    sends.
-
-    **The bound grammar is the module's one spelling.**  It is inside the tool
-    schema's `since`/`until` descriptions (`RECALL_REPLY`), so the template
-    carries no copy of it: the schema is the tool's `parameters` and the code
-    that decides reads it, and a copy in the template had fallen behind it — no
-    `tomorrow`, `now`, `quarter` or datetime.
-
-    `usage` is the same figure the status bar and the selector show: the last
-    LLM call's size against the conversation's window.  A rebuild decision that
-    did not know how full the context is could not weigh keeping against
-    recalling.
+    `usage` is the same figure the status bar shows: the last LLM call's size
+    against the conversation's window.  A decision that did not know how full
+    the context is could not weigh keeping against recalling — or what to give
+    up.
     """
-    return render_instruction(INSTRUCTION_TEMPLATE, usage=usage)
+    return render_instruction(DECISION_TEMPLATE, usage=usage)
 
 
-def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
-    """One message of the live selector's copy, prefixed with its live id.
-
-    **A copy, and the one place a live id is written.**  The list a turn runs on
-    is the record; stamping it would put a number into the row, the index and
-    every later request, and the number means nothing after this call.  A
-    part-list gains a text part rather than having its first part rewritten,
-    for `with_note`'s reason: replacing it would drop an attachment's note.
-
-    **The marker carries the number the model is asked to write back**, in the
-    turn footnote's shape: `[MESSAGE:{"id": 4}]`, not a label like `[M4]` that
-    hides the integer behind a letter.  The schema names integers, and a model
-    shown `M4` wrote `M4` back — a reply the parser refused for a reason that
-    said nothing about the wrong channel.
-    """
-    prefixed = dict(message)
-    prefix = f'[MESSAGE:{{"id": {index}}}] '
-    content = prefixed.get("content")
-    if isinstance(content, list):
-        prefixed["content"] = [{"type": "text", "text": prefix}, *content]
-    else:
-        prefixed["content"] = prefix + (content or "")
-    return prefixed
-
-
-def live_instruction(usage: str) -> str:
-    """What the live selector's tool says: the task, the figure and the marker.
-
-    **The ids are on the messages, not in the instruction.**  `with_message_id`
-    prefixes every message of the one request with its copy number, and the
-    template only points at that marker: a list of the candidates here would be
-    a second spelling of the same set, growing with the view on the call with
-    the least room to spare.  Every rule that fits the tool's parameters — the
-    fixed two, the tool-exchange legality, the empty answer — is `LIVE_REPLY`'s.
-
-    `usage` is the same figure the turn prompt and the status bar show, measured
-    against the view the selector is deciding about — the model needs to know
-    how full the window is to know how much it has to give up.  The legality
-    rule is the schema's rather than the harness's: a model that keeps calls
-    and results together writes a history every provider accepts, and a system
-    that repaired its answer would be making a decision the model was asked to
-    make.
-    """
-    return render_instruction(LIVE_TEMPLATE, usage=usage)
-
-
-def parse_live(text: str) -> tuple[list[int] | None, str]:
+def parse_live(text: str) -> tuple[list[str] | None, str]:
     """One live selector reply, as the message ids to drop — or why not.
 
     `[]` is a decision to drop nothing and `None` is no readable decision at
@@ -614,6 +603,12 @@ def parse_live(text: str) -> tuple[list[int] | None, str]:
     an answer asked to correct itself.  An empty object and an absent `compact`
     are both "drop nothing" — the ordinary answer, and the one a model with
     nothing to drop writes.
+
+    **An id is the live view's id, not a position.**  The view annotates each
+    message with `[MESSAGE:{"id": "12.3"}]` (or `cur.3` for the turn running),
+    and the model writes the string back.  Whether an id is in the view the
+    caller sent is the caller's to check — this module never sees the list — so
+    a well-formed id this build does not know is left for the caller to refuse.
     """
     try:
         raw = json.loads(text)
@@ -632,12 +627,12 @@ def parse_live(text: str) -> tuple[list[int] | None, str]:
         return [], ""
     if not isinstance(drop, list):
         return None, 'the "compact" field is not a JSON array of message ids'
-    ids: list[int] = []
+    ids: list[str] = []
     for value in drop:
-        if not _is_id(value):
+        if not isinstance(value, str) or not value.strip():
             return None, f"the compact list holds {value!r}, which is not a message id"
-        ids.append(int(value))
-    return normalise_ids(ids), ""
+        ids.append(value.strip())
+    return normalise_mids(ids), ""
 
 
 def union(base: Sequence[int], recalled: Sequence[int]) -> list[int]:
@@ -858,6 +853,7 @@ def rebuild_report(
     rerank: str,
     decision: str,
     tokens: str,
+    ids: Sequence[int] = (),
 ) -> str:
     """What `_context_rebuild` answers the model, in one line.
 
@@ -890,9 +886,14 @@ def rebuild_report(
     tail = f" (rerank {rerank})" if rerank else ""
     if not changed:
         return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
+    # **The ids, because the counts are not the choice.**  A model that reads
+    # "kept 3 of 5" knows the shape of the selection but not which turns it
+    # runs on; the ids are the same ones its `[TURN:]` footnotes carry.
+    turns = ", ".join(str(turn_id) for turn_id in ids)
+    named = f" turns: {turns};" if turns else ""
     return (
         f"kept {kept} of {in_hand} turn(s) in hand, "
-        f"recalled {recalled} of {outside} outside{tail}; context ~{tokens}."
+        f"recalled {recalled} of {outside} outside{tail};{named} context ~{tokens}."
     )
 
 
@@ -1056,7 +1057,9 @@ def messages_from_turns(
     it would be this module deciding something it was not asked about.
 
     Each turn contributes a footnote-carrying copy of its first message followed
-    by the rest of the row verbatim.  **The first message is copied and not
+    by the rest of the row verbatim, and every message carries its **live id**
+    (`_mid`) — `{turn_id}.{index}` — so the view can annotate it the way the
+    `[TURN:]` footnote annotates the turn.  **The first message is copied and not
     mutated**, because the row a caller handed in is the row as stored: a builder
     that wrote a footnote into it would corrupt the very thing it is reading, and
     the second turn of a rebuild would carry two.
@@ -1066,17 +1069,22 @@ def messages_from_turns(
         messages = list(turn.get("messages") or [])
         if not messages:
             continue
+        turn_id = int(turn.get("turn_id") or 0)
         note = turn_note(
-            int(turn.get("turn_id") or 0),
+            turn_id,
             str(turn.get("created_at") or ""),
             turn.get("completed_at"),
             str(turn.get("channel") or ""),
         )
         first = dict(messages[0])
+        first["_mid"] = f"{turn_id}.0"
         if note:
             first["content"] = with_note(first.get("content"), note)
         built.append(first)
-        built.extend(messages[1:])
+        for index, message in enumerate(messages[1:], start=1):
+            carried = dict(message)
+            carried["_mid"] = f"{turn_id}.{index}"
+            built.append(carried)
     return built
 
 

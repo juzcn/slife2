@@ -1003,18 +1003,29 @@ call is *wanted* as well as harmless: the harness calls them at their own
 moments, the model may call either itself, and both edit what the turn runs on
 without touching the record (`_turn_compact` hides from the view, §5.5;
 `_context_rebuild` chooses the historical turns). They are also **the two
-decision tools**: each body runs one decision model call over the live view,
-and the contract below is what that call answers to.
+decision tools**: each body, when called without a selection, runs one decision
+model call over the live view, and the contract below is what that call answers
+to.
+
+**Both carry the decision's schema.** `_context_rebuild`'s `parameters` are
+`RECALL_REPLY` and `_turn_compact`'s are `LIVE_REPLY`: a call with those
+arguments is the model's own selection and is applied as it came; a call with
+none is the automatic one, its body runs the decision model, and the pair the
+loop writes carries the arguments it chose. The model reads one shape either
+way.
 
 **Decision tools are LLM-backed harness tools under one contract.** A decision
-tool is a harness tool whose body runs exactly one decision model call and
-applies its answer; `_context_rebuild` (whose decision is `decide_context`) and
-`_turn_compact` (whose is `select_messages`) are its two instances today. The
+tool is a harness tool whose body, given no selection, runs exactly one decision
+model call and applies its answer; `_context_rebuild` and `_turn_compact` are
+its two instances today. The automatic call's pair records the decision's own
+arguments, so the pair and the model's own call answer to one shape. The
 contract:
 
 1. **The call is structured.** The live messages go out as the turn runs them,
-   followed by the decision instruction as a system message; one tool is
-   advertised, with the reply schema as its `parameters`, and `tool_choice`
+   followed by the generic decision instruction — the anti-injection guard, the
+   context figure, "record the decision by calling this tool" — as a system
+   message; one tool is advertised, with the per-decision intent as its
+   description and the reply schema as its `parameters`, and `tool_choice`
    forces it, so the answer is the tool's arguments and not prose. A reply with
    no call or a call to another tool is no answer — never a `{}` or an empty
    selection.
@@ -1036,13 +1047,18 @@ contract:
    context it had; a compaction with no decision hides nothing; the turn
    continues either way.
 
-Both instances are the same call. `_ask_tool` builds the forced request and the
-repair exchange, `_ask_with_repair` holds the one-retry rule, and `_ask_model`
-and `_ask_selector` keep only their schema, instruction and log subject. The
-three wire adapters share `forced_tool` — a forced choice naming a tool the call
-does not send is refused, not sent — and `call_options`, which forwards the two
-per-call options only when set. The model chooses; the harness applies. No other
-harness tool calls a model.
+Both instances are the same call, and they share one instruction template
+(`decision.j2`): the guard and the figure are generic, the intent is the tool's
+description, and the rules are its schema. `_ask_tool` builds the forced request
+and the repair exchange, `_ask_with_repair` holds the one-retry rule, and
+`_ask_model` and `_ask_selector` keep only their tool spec and parser. The
+private reply names (`decide_context`, `select_messages`) are what the forced
+call names; the model never sees them — it sees `_context_rebuild` and
+`_turn_compact` with the same schemas. The three wire adapters share
+`forced_tool` — a forced choice naming a tool the call does not send is refused,
+not sent — and `call_options`, which forwards the two per-call options only when
+set. The model chooses; the harness applies. No other harness tool calls a
+model.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -1141,28 +1157,35 @@ Each turn, the context plugin answers one question: what will this turn run on?
 
 1. **`restore`**, when a conversation starts. It replays the stored live-context
    list.
-2. **`_context_rebuild`**, at the first boundary of each turn — and whenever the
-   model calls it. Its decision model reads the conversation, the turn's own
-   message already in it, and answers what to keep of the historical turns in
-   hand and what to recall from the turn log. The turn running has no id yet and
-   is carried verbatim; the rebuild never touches it. The decision is shown the
-   last completed call's size against the conversation's window — the status
-   bar's figure, through the same `context_usage`.
+2. **`_context_rebuild`**, at the first boundary of each turn — when its body
+   has no selection, the decision model fills it — and whenever the model calls
+   it with `context`/`recall` of its own. The decision model reads the
+   conversation, the turn's own message already in it, and answers what to keep
+   of the historical turns in hand and what to recall from the turn log. The
+   turn running has no id yet and is carried verbatim; the rebuild never touches
+   it. The decision is shown the last completed call's size against the
+   conversation's window — the status bar's figure, through the same
+   `context_usage`.
 
 The decision model reads the whole conversation — a follow-up usually names its
 subject through the turns above it, and the turn's own message is in the list
 already. There is no separate input argument. Its answer is a selection, never a
 dump. The common answer is `{}`: a decision that asks for exactly what is in
-hand rebuilds nothing.
+hand rebuilds nothing. A call with `context`/`recall` is the model's own
+selection: the same schema, applied as it came, with no decision call; the pair
+the automatic call writes carries the arguments the decision chose, so the model
+reads the shape it wrote itself.
 
-The answer is the forced `decide_context` call under §5.3's contract. The
-conversation is the input, exactly as the turn runs it, and the instruction is
-the one system message appended to it. A model whose `compat.thinking: omit`
-says its endpoint refuses the thinking field is not overridden; a forced choice
-the endpoint still refuses fails the decision and keeps the context (Appendix
-C). A model left free in a tool-heavy conversation continues it instead of
-deciding, and a call naming any tool but the forced one is that same
-continuation: it is not a decision, whatever its arguments happen to parse to.
+The automatic answer is the forced `decide_context` call under §5.3's contract —
+the private reply name, never advertised in a turn; the model's own call is a
+normal `_context_rebuild` with the same schema. The conversation is the input,
+exactly as the turn runs it, and the generic decision instruction is the one
+system message appended to it. A model whose `compat.thinking: omit` says its
+endpoint refuses the thinking field is not overridden; a forced choice the
+endpoint still refuses fails the decision and keeps the context (Appendix C). A
+model left free in a tool-heavy conversation continues it instead of deciding,
+and a call naming any tool but the forced one is that same continuation: it is
+not a decision, whatever its arguments happen to parse to.
 
 Rules:
 
@@ -1172,6 +1195,10 @@ Rules:
   The rebuild reports the decision model's status in its answer, and a failed
   call answers `No rebuild: the decision model did not answer (…)` — a recall
   nobody asked for is not a recall that found nothing.
+- **The answer names the turns, not only the count.** The rebuild report carries
+  the ids it runs on (`context turns: …`) — the ids its `[TURN:]` footnotes
+  carry — so the model can see the selection, not just its size. A compaction's
+  report names the dropped ids the same way.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
@@ -1222,6 +1249,12 @@ Rules:
   (`turn_note`). The newest turn is annotated after saving with the same
   timestamps and channel, so the live and rebuilt spelling are byte-identical and
   no prompt-cache miss is paid on rebuild.
+- **Every addressable message carries a live id**, derived like the turn
+  footnote: `{turn_id}.{index}` for a historical turn's message, `cur.{index}`
+  for one of the running turn. The view annotates it as
+  `[MESSAGE:{"id": …}]`; the builder sets the historical one, the view derives
+  the running turn's. It is never stored. The selector and the model read the
+  same annotation, and a compaction's ids are the ones `_turn_compact` accepts.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added before the turn and removed before it is saved
   (`without_lead`), so it never reaches the row or the index; a list rebuilt
@@ -1237,42 +1270,45 @@ Rules:
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
 
-**The turn's own compaction is a view, not an edit.** `_turn_compact` asks the
-live selection decision — a forced `select_messages` tool call over the view,
-numbered `[MESSAGE:{"id": n}]` in its own copy and nowhere else — which messages
-this turn no longer needs, and hides them from the list the rest of the turn is
-sent (`libs/turn/compact.py`). The selection decision is a decision tool call
-under §5.3's contract. It is shown the last measured call and the
-conversation's window, through the same `context_usage` the status bar uses, so
-the model and the person read one figure. **Nothing is removed**: the live list,
-the turn's row, `covered` and the store's live-context list are the
-conversation, and the next turn starts from the full list. The system message
-and the turn's opening message are the only fixed messages; every other
-message, historical or current, is the model's to drop. The legality of a tool exchange is the *schema's* rule — a call and its
+**The turn's own compaction is a view, not an edit.** `_turn_compact` takes the
+live ids this turn no longer needs and hides them from the list the rest of the
+turn is sent (`libs/turn/compact.py`). A call with `compact` is the model's own
+selection and is applied as it came; a call with none runs the live selection
+decision — a forced `select_messages` tool call under §5.3's contract — over the
+same view. **The ids are on the messages**: the view annotates each addressable
+message `[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
+numbered copy, and the pair the harness writes carries the ids it chose. The
+selection is shown the last measured call and the conversation's window, through
+the same `context_usage` the status bar uses, so the model and the person read
+one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
+the store's live-context list are the conversation, and the next turn starts
+from the full list. The system message and the turn's opening message are the
+only fixed messages; every other message, historical or current, is the model's
+to drop. The legality of a tool exchange is the *schema's* rule — a call and its
 results go together — and the harness applies the answer as it came: a split
 pair is a failed next call, one turn, not a repaired answer. A selection
 decision that fails or cannot be read compacts nothing and the turn continues
 (Appendix C); a selection decision that keeps everything stops the automated
-pass for the rest of the
-turn, because that is a decision about the whole context rather than something
-the harness should ask again at every boundary. The model can still call
-`_turn_compact` itself.
+pass for the rest of the turn, because that is a decision about the whole
+context rather than something the harness should ask again at every boundary.
+The model can still call `_turn_compact` itself.
 
 **The rebuild is the durable edit; the compaction is the transient view.**
-`_context_rebuild` asks its decision model which historical turns to keep and
-which to recall from the turn log. The turn running has no id yet and is carried
-verbatim, so the selection is the history alone. It is a harness tool under
-§5.3's contract: the harness calls it at the first boundary, the model may call
-it when the work has moved, and its pair is the visibility — the answer reports
-kept of the turns in hand, recalled of the log outside it, and an estimate of
-the context the turn runs on from there (`estimate_turn_tokens` plus
-`context_usage`), never a provider measurement.
-The turn log keeps every turn; a dropped one can be recalled by a later
-rebuild. A rebuild resets the
+A `_context_rebuild` call with `context`/`recall` is the model's own selection,
+applied as it came; a call with neither asks the decision model which historical
+turns to keep and which to recall from the turn log. The turn running has no id
+yet and is carried verbatim, so the selection is the history alone. It is a
+harness tool under §5.3's contract: the harness calls it at the first boundary,
+the model may call it when the work has moved, and its pair is the visibility —
+the automatic pair carries the decision's arguments, the answer reports kept of
+the turns in hand, recalled of the log outside it, the ids it runs on, and an
+estimate of the context the turn runs on from there (`estimate_turn_tokens` plus
+`context_usage`), never a provider measurement. The turn log keeps every turn; a
+dropped one can be recalled by a later rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
-over. The two tools share the pair and the failure rules: an answer that cannot
-be read is the decision's `failed`/`unparsed` and the turn continues on the
-context it had.
+over. The two tools share the pair and the failure rules: a decision that cannot
+be read is `failed`/`unparsed` and the turn continues on the context it had; a
+model's own selection that cannot be read is a tool error it corrects.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
 query fired on 0 of 16 queries; a word-shaped query fired on 10 of 15 and found

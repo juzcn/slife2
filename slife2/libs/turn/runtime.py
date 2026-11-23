@@ -135,6 +135,11 @@ class Rebuilt:
     recalled: int
     rerank: str
     decision: str
+    #: The tool arguments the decision used: `{}` for "nothing to change",
+    #: otherwise `context`/`recall` as the model would have written them.  The
+    #: pair `_context_rebuild` writes carries these, so the model reads the
+    #: selection rather than an empty call.
+    selection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +151,7 @@ class LiveChoice:
     the rebuild.
     """
 
-    drop: list[int]
+    drop: list[str]
     decision: str = ""
 
 
@@ -483,6 +488,7 @@ class TurnRuntime:
         publish: bool = True,
         context_tokens: int = 0,
         context_window: int = 0,
+        selection: dict[str, Any] | None = None,
     ) -> Rebuilt:
         """Decide what this turn runs on: keep ∪ recall.
 
@@ -525,6 +531,9 @@ class TurnRuntime:
             "publish": publish,
             "context_tokens": context_tokens,
             "context_window": context_window,
+            # `None` is the decision ("choose for me"); a mapping is the
+            # selection the caller already made (the model's own tool call).
+            "selection": selection,
         }
         payload = tool_payload(
             await (await self.memory()).call_tool("rebuild", arguments)
@@ -552,6 +561,13 @@ class TurnRuntime:
                 "report the decision's status",
                 payload,
             )
+        used = payload.get("selection")
+        if used is None:
+            used = selection or {}
+        if not isinstance(used, dict):
+            raise unreadable(
+                "the context store", "return the selection it used", payload
+            )
         return Rebuilt(
             messages=rebuilt,
             turn_ids=rebuilt_ids,
@@ -563,6 +579,7 @@ class TurnRuntime:
             recalled=recalled,
             rerank=rerank,
             decision=decision,
+            selection=used,
         )
 
     # ── the turn's own compaction ────────────────────────────────────────
@@ -571,7 +588,7 @@ class TurnRuntime:
         self,
         identity: ConversationId,
         messages: list[Message],
-        selectable: list[int],
+        selectable: list[str],
         model: str,
         context_window: int,
         context_tokens: int = 0,
@@ -584,11 +601,11 @@ class TurnRuntime:
         that is not text, is a build this one cannot read rather than an empty
         selection (`slife2.libs.plugin.protocol.unreadable`).
 
-        The ids index the *view* the caller sent, which is the list the model
-        will run on: the selector has never seen the record, and an id means
-        nothing outside this call.  `context_tokens` and `context_window` are
-        the figure the status bar shows, carried so the selector's instruction
-        can print the same one.
+        The ids are the *live view's* ids — the `[MESSAGE:{"id": …}]` the caller
+        wrote onto each message, not positions: hiding one message does not
+        renumber the rest, and the same id addresses the same message across the
+        turn.  `context_tokens` and `context_window` are the figure the status
+        bar shows, carried so the selector's instruction can print the same one.
         """
         payload = tool_payload(
             await (await self.memory()).call_tool(
@@ -612,11 +629,11 @@ class TurnRuntime:
             raise unreadable(
                 "the context store", "report the selector's status", payload
             )
-        ids: list[int] = []
+        ids: list[str] = []
         for value in drop:
-            if isinstance(value, bool) or not isinstance(value, int):
+            if not isinstance(value, str) or not value:
                 raise unreadable(
-                    "the context store", "return whole message ids", payload
+                    "the context store", "return live message ids", payload
                 )
             ids.append(value)
         return LiveChoice(drop=ids, decision=decision)
@@ -625,10 +642,11 @@ class TurnRuntime:
         self,
         identity: ConversationId,
         messages: list[Message],
-        hidden: list[Message],
+        hidden: set[str],
         model: str,
         context_window: int,
         context_tokens: int = 0,
+        selection: list[str] | None = None,
     ) -> compact.Compacted:
         """Run one live compaction: ask, then hide what the answer names.
 
@@ -646,34 +664,37 @@ class TurnRuntime:
         if at is None:
             return compact.Compacted(seen=0, dropped=0)
         view = compact.view(messages, hidden)
-        candidates = compact.selectable(view, messages[at])
+        at_view = compact.opening(view)
+        opening_mid = view[at_view].mid if at_view is not None else ""
+        candidates = compact.selectable(view, opening_mid)
         if not candidates:
             return compact.Compacted(seen=len(view), dropped=0)
-        choice = await self.select_live(
-            identity,
-            view,
-            candidates,
-            model,
-            context_window,
-            context_tokens=context_tokens,
-        )
-        if choice.decision:
-            return compact.Compacted(
-                seen=len(view), dropped=0, decision=choice.decision
-            )
         allowed = set(candidates)
-        seen = {id(message) for message in hidden}
-        added: list[Message] = []
-        for index in choice.drop:
-            if index not in allowed:
+        if selection is None:
+            choice = await self.select_live(
+                identity,
+                view,
+                candidates,
+                model,
+                context_window,
+                context_tokens=context_tokens,
+            )
+            if choice.decision:
+                return compact.Compacted(
+                    seen=len(view), dropped=0, decision=choice.decision
+                )
+            drop = choice.drop
+        else:
+            # The model's own call: it named the ids, and the harness applies
+            # them as they came (the allowed set is the view it saw).
+            drop = selection
+        added: list[str] = []
+        for mid in drop:
+            if mid not in allowed or mid in hidden:
                 continue
-            message = view[index]
-            if id(message) in seen:
-                continue
-            seen.add(id(message))
-            added.append(message)
-        hidden.extend(added)
-        return compact.Compacted(seen=len(view), dropped=len(added))
+            hidden.add(mid)
+            added.append(mid)
+        return compact.Compacted(seen=len(view), dropped=len(added), ids=tuple(added))
 
     # ── the turn boundary ────────────────────────────────────────────────
 

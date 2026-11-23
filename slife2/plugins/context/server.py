@@ -210,7 +210,7 @@ class Selector(Protocol):
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
-        selectable: list[int],
+        selectable: list[str],
         *,
         usage: str = "",
         previous: str = "",
@@ -336,7 +336,7 @@ async def _ask_model(
         tool_name=decisions.DECISION_TOOL,
         tool_text=decisions.DECISION_TOOL_TEXT,
         parameters=decisions.RECALL_REPLY,
-        instruction=decisions.instruction(usage),
+        instruction=decisions.decision_instruction(usage),
         kind="decision",
         previous=previous,
         repair=repair,
@@ -351,30 +351,26 @@ async def _ask_selector(
     subagent: str,
     model: str,
     messages: list[dict[str, Any]],
-    selectable: list[int],
+    selectable: list[str],
     *,
     usage: str = "",
     previous: str = "",
     repair: str = "",
 ) -> str:
-    """The live selector's forced tool call, built from the numbered copy.
+    """The live selector's forced tool call, over the view the caller annotated.
 
-    **The ids are written here and nowhere else.**  `with_message_id` prefixes
-    each message of this request; the record, the turn's saved row and every
-    ordinary call keep the list they had.  The instruction states the task, the
-    id marker and the context figure the caller measured — the same figure the
-    status bar and the turn prompt show; the rules (the fixed two, the
-    tool-exchange legality) are the schema's, `decisions.LIVE_REPLY`.  The call
-    and repair rules are `_ask_tool`'s.
+    **The ids are already on the messages.**  The live view writes each
+    message's `[MESSAGE:{"id": …}]` annotation before the request, so this call
+    adds nothing: the selector reads the ids the turn's own model reads.  The
+    instruction states the task, the marker and the context figure the caller
+    measured — the same figure the status bar and the turn prompt show; the
+    rules (the fixed two, the tool-exchange legality) are the schema's,
+    `decisions.LIVE_REPLY`.  The call and repair rules are `_ask_tool`'s.
 
     `selectable` is the seam's candidate set, handed to an injected selector
     so a test can script an answer against it; the instruction does not list it,
     because every message already carries its id.
     """
-    numbered = [
-        decisions.with_message_id(message, index)
-        for index, message in enumerate(messages)
-    ]
     return await _ask_tool(
         config,
         clients,
@@ -382,11 +378,11 @@ async def _ask_selector(
         agent,
         subagent,
         model,
-        numbered,
+        messages,
         tool_name=decisions.SELECTION_TOOL,
         tool_text=decisions.SELECTION_TOOL_TEXT,
         parameters=decisions.LIVE_REPLY,
-        instruction=decisions.live_instruction(usage),
+        instruction=decisions.decision_instruction(usage),
         kind="compactor",
         previous=previous,
         repair=repair,
@@ -1154,6 +1150,7 @@ def build_server(
         outside: int,
         rerank: str = "",
         decision: str = "",
+        selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
@@ -1198,6 +1195,9 @@ def build_server(
             "recalled": 0,
             "rerank": rerank,
             "decision": decision,
+            # What the pair records as the call's arguments: the decision that
+            # asked for exactly this, or `{}` when there was none.
+            "selection": selection or {},
         }
 
     @mcp.tool
@@ -1341,9 +1341,9 @@ def build_server(
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
-        selectable: list[int],
+        selectable: list[str],
         usage: str = "",
-    ) -> tuple[list[int] | None, str]:
+    ) -> tuple[list[str] | None, str]:
         """The live selection, parsed and logged as the compactor sees it.
 
         A `None` means the caller compacts nothing: the turn continues and its
@@ -1363,7 +1363,7 @@ def build_server(
     async def select_live(
         agent: str,
         messages: list[dict[str, Any]],
-        selectable: list[int],
+        selectable: list[str],
         context_window: int,
         model: str = "",
         subagent: str = "",
@@ -1372,26 +1372,26 @@ def build_server(
         """Decide which of a running turn's live messages it no longer needs.
 
         Called by `_turn_compact`'s body — the agent server's and an agent
-        task's — **not by a model**: the ids are the caller's view numbering,
-        they mean nothing outside that call, and nothing is stored with them.
-        `messages` is the view — the list the model will run on, not the turn's
-        record — and `selectable` names the view positions that are candidates.
+        task's — **not by a model**: the ids are the live view's, each message
+        already carries its `[MESSAGE:{"id": …}]`, and nothing is stored with
+        them.  `messages` is the view — the list the model will run on, not the
+        turn's record — and `selectable` names the ids that are candidates.
 
         `context_tokens` is the conversation's last measured call and
         `context_window` its model's window: the same pair the status bar
         shows, rendered by the same `context_usage`, so the selector and the
         person read one figure.
 
-        The answer is `compact` (the positions to drop, as the model named them)
+        The answer is `compact` (the live ids to drop, as the model named them)
         and `decision` (`""` for an answer, otherwise `failed` or `unparsed`).
-        The caller applies the positions as they came: the legality of a tool
+        The caller applies the ids as they came: the legality of a tool
         exchange is a prompt rule, and a harness that repaired a split one would
         be making a decision the model was asked to make.
 
         Args:
             agent: Whose conversation.
             messages: The view the turn is running on, in order.
-            selectable: The view positions the model may drop.
+            selectable: The live ids the model may drop.
             context_window: The conversation's model window, in tokens.
             model: Which model this conversation runs on, as `provider/model`.
             subagent: Which of that agent's conversations; empty for its own.
@@ -1414,6 +1414,7 @@ def build_server(
         publish: bool = True,
         context_tokens: int = 0,
         context_window: int = 0,
+        selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Decide what this turn runs on: keep ∪ recall.
 
@@ -1477,6 +1478,10 @@ def build_server(
             context_tokens: The last LLM call's size, for the decision's own
                 figure.
             context_window: The conversation's model window, in tokens.
+            selection: A selection to apply as it came — the model's own
+                `_context_rebuild` arguments — or None to let the decision
+                model choose.  A selection this build cannot read is a tool
+                error the caller corrects, not a decision call.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
@@ -1505,7 +1510,20 @@ def build_server(
         # boundary, after the turn's message was appended (or mid-turn, after a
         # cut-in); there is no separate prompt to pass.
         usage, _used = decisions.context_usage(context_tokens, context_window)
-        decision, status = await _decide(agent, subagent, model, messages, usage)
+        status = ""
+        if selection is not None:
+            # **The model's own call.**  Its arguments are the selection, read
+            # with the same parser and applied as they came; a refusal is a
+            # tool error it corrects, not a decision the harness makes for it.
+            decision, refusal = decisions.parse_with_reason(
+                json.dumps(selection, ensure_ascii=False)
+            )
+            if decision is None:
+                raise ToolError(f"the selection could not be read: {refusal}")
+            used = dict(selection)
+        else:
+            decision, status = await _decide(agent, subagent, model, messages, usage)
+            used = decision.arguments() if decision is not None else {}
         # **Two ways to have no decision, and the log keeps them apart.**  Both
         # fall back to the turns in hand, and neither may be reported as the
         # other: this line is the only sight anybody gets of the decision model
@@ -1532,7 +1550,7 @@ def build_server(
             # what the caller is holding, which is why it is read once before
             # this answer counts.
             logger.info("recall_not_needed reason=context_sufficient")
-            return _in_hand(messages, turn_ids, outside)
+            return _in_hand(messages, turn_ids, outside, selection=used)
 
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
@@ -1652,6 +1670,9 @@ def build_server(
             # There *was* a decision — this path is only reached past the
             # `None` branch — so no failure is owed to the caller.
             "decision": "",
+            # The arguments the pair records: the decision's own, or the
+            # model's selection when it made one.
+            "selection": used,
         }
 
     async def _recall_into(

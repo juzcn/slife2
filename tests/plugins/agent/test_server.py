@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import socket
 import sqlite3
 from collections import deque
@@ -68,6 +69,8 @@ from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.store.db import TurnStore
 from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
+    LIVE_REPLY,
+    RECALL_REPLY,
     TURN_PREFIX,
     TURN_PROMPT_PREFIX,
     TURN_SUFFIX,
@@ -304,6 +307,33 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
+#: The live-id footnote the view appends to every addressable message.
+LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
+
+
+def without_id(content: Any) -> Any:
+    """One message's content with the live-id footnote taken off.
+
+    The view appends it to every message it addresses (`[MESSAGE:{"id": …}]`),
+    the same way a rebuilt turn carries its `[TURN:]` footnote.  An assertion
+    about what a message *says* strips it: it is the id, not the words.
+    """
+    if isinstance(content, str):
+        return LIVE_ID_RE.sub("", content)
+    if isinstance(content, list):
+        out: list[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = LIVE_ID_RE.sub("", str(part.get("text", "")))
+                if not text.strip():
+                    continue
+                out.append({**part, "text": text})
+            else:
+                out.append(part)
+        return out
+    return content
+
+
 def without_prompt(content: Any) -> Any:
     """One message's content with the per-turn prompt marker taken off the front.
 
@@ -317,17 +347,17 @@ def without_prompt(content: Any) -> Any:
     an attachment has.
     """
     if isinstance(content, str):
-        return strip_marker(content, TURN_PROMPT_PREFIX)
+        return without_id(strip_marker(content, TURN_PROMPT_PREFIX))
     if isinstance(content, list) and content and content[0].get("type") == "text":
         text = str(content[0].get("text", ""))
         stripped = strip_marker(text, TURN_PROMPT_PREFIX)
         if stripped != text:
-            return (
+            return without_id(
                 content[1:]
                 if not stripped
                 else [{**content[0], "text": stripped}, *content[1:]]
             )
-    return content
+    return without_id(content)
 
 
 def without_footnote(content: Any) -> Any:
@@ -430,6 +460,13 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "transcript",
         "watch",
     ]
+    # **The model's own call takes the decision's schema.**  The rebuild and
+    # the compaction are tools the model may call with a selection, and the
+    # automatic decision answers to the same `parameters`; one shape, both
+    # paths.
+    by_name = {tool.name: tool for tool in tools}
+    assert by_name["_context_rebuild"].inputSchema == RECALL_REPLY
+    assert by_name["_turn_compact"].inputSchema == LIVE_REPLY
 
 
 @pytest.mark.asyncio
@@ -613,7 +650,7 @@ async def test_each_turn_opens_with_its_own_clock_and_plan(context, hub) -> None
     facts = json.loads(first[len(TURN_PROMPT_PREFIX) : end])
     assert datetime.fromisoformat(facts["now"])  # a real clock reading
     assert "token-usage" not in facts, "the stale pre-rebuild figure is gone"
-    assert first[end + 2 :] == "one"
+    assert without_id(first[end + 2 :]) == "one"
 
     previous, current = as_sent[1]
     assert TURN_PROMPT_PREFIX not in previous
@@ -622,7 +659,7 @@ async def test_each_turn_opens_with_its_own_clock_and_plan(context, hub) -> None
     end = current.index("] ")
     second = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
     assert "token-usage" not in second
-    assert current[end + 2 :] == "two"
+    assert without_id(current[end + 2 :]) == "two"
 
     # ...and the record holds no marker.
     async with Client(server) as client:
@@ -737,7 +774,7 @@ async def test_a_plan_is_replayed_at_the_start_of_every_turn_and_never_stored(
         end = current.index("] ")
         facts = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
         assert facts["plan"] == PLAN_ITEMS
-        assert current[end + 2 :] == words
+        assert without_id(current[end + 2 :]) == words
     assert TURN_PROMPT_PREFIX not in as_sent[1][0], "the first turn's lead is gone"
 
     # The stored row is the person's words; the plan is the conversation's own

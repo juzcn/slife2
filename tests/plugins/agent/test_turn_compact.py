@@ -10,6 +10,7 @@ would write.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import replace
 from typing import Any
@@ -27,7 +28,7 @@ from slife2.libs.model.base import StreamChatResult
 from slife2.libs.turn.context import context_usage
 from slife2.libs.turn.events import ToolCallFinished, decode
 from slife2.libs.turn.messages import ToolCall, Usage
-from slife2.libs.turn.tools import TURN_COMPACT
+from slife2.libs.turn.tools import CONTEXT_REBUILD, TURN_COMPACT
 from slife2.plugins.agent.server import build_server
 from slife2.plugins.context.server import build_server as build_context
 from slife2.plugins.toolhub.server import build_server as build_hub
@@ -50,20 +51,57 @@ pytestmark = pytest.mark.unit
 OLD = "the old tool result"
 
 
-def drop_echo(messages: list[dict], selectable: list[int]) -> list[int]:
-    """The `fake__echo` exchange's view ids — the pair this test is about.
+LIVE_ID = re.compile(r' ?\[MESSAGE:\{"id": "([^"]+)"\}\]')
+
+
+def without_id(content: Any) -> str:
+    """A view message's text with the live-id footnote taken back off."""
+    return LIVE_ID.sub("", str(content or ""))
+
+
+def view_id(message: dict) -> str:
+    """The live id the view wrote onto a message, or `""` for the system prompt."""
+    content = message.get("content")
+    if isinstance(content, str):
+        found = LIVE_ID.search(content)
+        return found.group(1) if found else ""
+    if isinstance(content, list):
+        for part in reversed(content):
+            if isinstance(part, dict) and part.get("type") == "text":
+                found = LIVE_ID.search(str(part.get("text") or ""))
+                if found:
+                    return found.group(1)
+    return ""
+
+
+def drop_echo(messages: list[dict], selectable: list[str]) -> list[str]:
+    """The `fake__echo` exchange's live ids — the pair this test is about.
 
     The turn now opens with `_context_rebuild`'s harness pair, so "drop
     everything selectable" would take that too; the mechanism under test is the
     echo exchange and its result.
     """
-    wanted: set[int] = set()
+    ids = [view_id(message) for message in messages]
+    wanted: list[str] = []
     for index, message in enumerate(messages):
-        if message.get("role") == "tool" and message.get("content") == OLD:
-            wanted.add(index)
-            if index and messages[index - 1].get("role") == "assistant":
-                wanted.add(index - 1)
-    return sorted(wanted & set(selectable))
+        content = message.get("content")
+        text = content if isinstance(content, str) else ""
+        if message.get("role") != "tool" or OLD not in text:
+            continue
+        if ids[index] in selectable:
+            wanted.append(ids[index])
+        if (
+            index
+            and messages[index - 1].get("role") == "assistant"
+            and ids[index - 1] in selectable
+        ):
+            wanted.append(ids[index - 1])
+    return sorted(dict.fromkeys(wanted))
+
+
+async def no_drop(*_args: Any, **_kwargs: Any) -> str:
+    """A selector that keeps everything; tests that must not reach it use it."""
+    return json.dumps({"compact": []})
 
 
 def config_over(*, compact_at: float = 0.9):
@@ -126,15 +164,20 @@ def high(text: str, call_id: str) -> ScriptedTurn:
 
 
 def stored_messages() -> list[dict]:
+    """The latest turn's saved row: the turn whose view the test is about."""
     return json.loads(
         sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
-        .execute("SELECT messages FROM turn")
+        .execute("SELECT messages FROM turn ORDER BY rowid DESC LIMIT 1")
         .fetchone()[0]
     )
 
 
 async def run_turn(
-    cfg: Any, backend: FakeBackend, select: Any, on_progress: Any = None
+    cfg: Any,
+    backend: FakeBackend,
+    select: Any,
+    on_progress: Any = None,
+    ask: Any = keep_the_context,
 ) -> Any:
     """One turn over the in-memory transport, with the agent as a hub source.
 
@@ -159,7 +202,7 @@ async def run_turn(
         )
     )
     context_client = Client(
-        build_context(cfg, embedder=StubEmbedder(), ask=keep_the_context, select=select)
+        build_context(cfg, embedder=StubEmbedder(), ask=ask, select=select)
     )
     cabinet_client = Client(cabinet_stub())
     server = build_server(
@@ -236,13 +279,14 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
         if isinstance(event, ToolCallFinished) and event.name == TURN_COMPACT
     ]
     assert finished, "the tool's output reaches the turn's stream"
-    assert any(str(message.get("content")) == OLD for message in seen[0]), (
+    assert any(without_id(message.get("content")) == OLD for message in seen[0]), (
         "the selector read the view before the drop"
     )
 
     final = backend.calls[-1][0]
     assert not any(
-        message.role == "tool" and message.content == OLD for message in final
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
     ), "the model's later call is missing what it dropped"
     assert any(
         message.role == "user" and "look something up" in str(message.content)
@@ -251,7 +295,7 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
 
     rows = stored_messages()
     assert any(
-        message.get("role") == "tool" and message.get("content") == OLD
+        message.get("role") == "tool" and without_id(message.get("content")) == OLD
         for message in rows
     ), "the record kept the dropped result"
     assert any("_turn_compact" in json.dumps(message) for message in rows), (
@@ -268,6 +312,97 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     assert finished[0].result_preview == report[0], (
         "the note the person sees and the tool's output are one text"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_model_fills_the_compaction_itself(tmp_path, monkeypatch) -> None:
+    """One model call, no selector: the ids it read are the ids it writes."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+
+    class Fills(FakeBackend):
+        """Answers the second call with the ids its own view carried."""
+
+        def stream(self, messages: list[Any], tools: list[Any]) -> Any:
+            if len(self.calls) == 1:
+                view = [message.to_wire() for message in messages]
+                ids = [view_id(message) for message in view]
+                self._turns[0] = calling(
+                    TURN_COMPACT, {"compact": drop_echo(view, ids)}, "c2"
+                )
+            return super().stream(messages, tools)
+
+    backend = Fills(
+        calling("fake__echo", {"text": OLD}, "c1"),
+        answered("unused"),
+        answered("done"),
+    )
+    selected: list[Any] = []
+
+    async def selector(*args: Any, **kwargs: Any) -> str:
+        selected.append(1)
+        return json.dumps({"compact": []})
+
+    answer = await run_turn(cfg, backend, selector)
+
+    assert answer.data["text"] == "done"
+    assert selected == [], "the model's own call does not ask the selector"
+    final = backend.calls[-1][0]
+    assert not any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    ), "the view drops what the model named"
+    rows = stored_messages()
+    assert any(
+        message.get("role") == "tool" and without_id(message.get("content")) == OLD
+        for message in rows
+    ), "the record keeps it"
+    pair = [
+        message
+        for message in rows
+        if message.get("tool_calls")
+        and message["tool_calls"][0]["function"]["name"] == TURN_COMPACT
+    ]
+    assert pair, "the model's call is in the turn"
+    assert json.loads(pair[0]["tool_calls"][0]["function"]["arguments"]).get(
+        "compact"
+    ), "the pair carries the ids the model named"
+
+
+@pytest.mark.asyncio
+async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None:
+    """The automatic rebuild decides once; the model's own call carries its args."""
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+    cfg = config_over()
+    first = await run_turn(cfg, FakeBackend(answered("first")), no_drop)
+    assert first.data["text"] == "first"
+
+    asked: list[Any] = []
+
+    async def ask(*args: Any, **kwargs: Any) -> str:
+        asked.append(1)
+        return "{}"
+
+    backend = FakeBackend(
+        calling(CONTEXT_REBUILD, {"context": "clear"}, "c1"),
+        answered("second"),
+    )
+    answer = await run_turn(cfg, backend, no_drop, ask=ask)
+
+    assert answer.data["text"] == "second"
+    assert len(asked) == 1, "the automatic rebuild asked; the model's own call did not"
+    final = backend.calls[-1][0]
+    assert not any(
+        message.role == "assistant" and without_id(message.content) == "first"
+        for message in final
+    ), "the first turn is no longer in the view"
+    calls = [
+        json.loads(message["tool_calls"][0]["function"]["arguments"])
+        for message in stored_messages()
+        if message.get("tool_calls")
+        and message["tool_calls"][0]["function"]["name"] == CONTEXT_REBUILD
+    ]
+    assert {"context": "clear"} in calls, "the pair carries the selection"
 
 
 @pytest.mark.asyncio
@@ -312,7 +447,8 @@ async def test_the_harness_asks_at_the_measured_threshold(
     assert len(backend.calls) == 2, "the compaction call is the harness's"
     final = backend.calls[-1][0]
     assert not any(
-        message.role == "tool" and message.content == OLD for message in final
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
     )
     window = cfg.resolve(cfg.default)[2].context_window
     assert usages == [context_usage(600, window)[0]], (
@@ -331,6 +467,14 @@ async def test_the_harness_asks_at_the_measured_threshold(
         and call["id"].startswith("_harness_turn_compact_")
         for call in calls
     ), "the harness minted the pair, not the model"
+    arguments = [
+        json.loads(call["function"]["arguments"])
+        for call in calls
+        if call["function"]["name"] == "_turn_compact"
+    ]
+    assert arguments and arguments[0].get("compact"), (
+        "the harness pair carries the selector's ids"
+    )
     report = [
         message.get("content")
         for message in rows
@@ -457,7 +601,10 @@ async def test_a_selector_that_keeps_everything_drops_nothing(
 
     assert answer.data["text"] == "done"
     final = backend.calls[-1][0]
-    assert any(message.role == "tool" and message.content == OLD for message in final)
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    )
     rows = stored_messages()
     report = [
         message.get("content")
@@ -506,4 +653,7 @@ async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) 
     # The repair call is not made for a provider failure — there is no answer
     # to correct — so the selector was asked once.
     final = backend.calls[-1][0]
-    assert any(message.role == "tool" and message.content == OLD for message in final)
+    assert any(
+        message.role == "tool" and without_id(message.content) == OLD
+        for message in final
+    )

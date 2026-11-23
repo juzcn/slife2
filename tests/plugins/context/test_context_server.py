@@ -2017,7 +2017,7 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     assert call["kind"] == "decision"
     assert call["asked"][:-1] == hold, "the conversation is the input, unchanged"
     assert call["asked"][-1]["role"] == "system"
-    assert "Context rebuild" in call["asked"][-1]["content"]
+    assert "Decision" in call["asked"][-1]["content"]
     assert "12,345 (1.2%)" in call["asked"][-1]["content"], "the status bar's figure"
     tool = call["tools"][0]["function"]
     assert tool["name"] == DECISION_TOOL
@@ -2111,19 +2111,25 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(context_server, "_stream_chat", capture)
-    hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
+    hold = [
+        SYSTEM,
+        {
+            "role": "user",
+            "content": 'test the tools yourself [MESSAGE:{"id": "cur.0"}]',
+        },
+    ]
 
     answer = await context_server._ask_selector(
-        object(), {}, asyncio.Lock(), "jack", "", "m", hold, [1]
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, ["cur.0"]
     )
     assert answer == '{"compact": [1]}'
     call = seen[0]
     assert call["kind"] == "compactor"
-    assert call["asked"][0]["content"].startswith('[MESSAGE:{"id": 0}] '), (
-        "the view is numbered"
+    assert call["asked"][1]["content"].endswith('[MESSAGE:{"id": "cur.0"}]'), (
+        "the view is numbered by its caller"
     )
     assert call["asked"][-1]["role"] == "system"
-    assert "Turn compaction" in call["asked"][-1]["content"]
+    assert "Decision" in call["asked"][-1]["content"]
     tool = call["tools"][0]["function"]
     assert tool["name"] == SELECTION_TOOL
     assert tool["description"] == SELECTION_TOOL_TEXT
@@ -2139,7 +2145,7 @@ async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
         "",
         "m",
         hold,
-        [1],
+        ["cur.0"],
         previous='{"compact": "all"}',
         repair="the reply is not a JSON object",
     )

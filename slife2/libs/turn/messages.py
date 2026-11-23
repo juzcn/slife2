@@ -235,6 +235,15 @@ class Message:
     #: keeps it in the turn log.  Empty for every message that did not cut in,
     #: which is every message a model or a person wrote.
     channel: str = ""
+    #: The message's id in the live view: `{turn_id}.{index}` for a historical
+    #: turn's message, `cur.{index}` for one of the turn running.  **Derived and
+    #: never stored**, like the `[TURN:]` footnote: `messages_from_turns` sets it
+    #: from the row, `compact.view` derives the running turn's from its offset,
+    #: and the view that annotates a message recomputes it.  `to_wire` and
+    #: `to_record` both omit it; the model sees the `[MESSAGE:{"id": …}]` prefix
+    #: the view writes into the content, which is the same id in the one place
+    #: the model reads.  Empty for the system prompt, which is not addressable.
+    mid: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """Render as the message our own hop carries.
@@ -328,6 +337,7 @@ class Message:
             tool_calls=tool_calls,
             tool_call_id=raw.get("tool_call_id"),
             channel=str(raw.get("channel") or ""),
+            mid=str(raw.get("_mid") or ""),
         )
 
 

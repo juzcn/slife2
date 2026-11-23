@@ -305,6 +305,7 @@ class AgentLoop:
         folded: Callable[[], tuple[str, str] | None] | None = None,
         folded_commit: Callable[[int], None] | None = None,
         injected: Callable[[], int] | None = None,
+        pair_arguments: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
 
@@ -343,6 +344,14 @@ class AgentLoop:
         metadata and both halves are echoed on `MessageCutIn`, so there is one
         answer to "what arrived, and for whom" whether a reader looks at the
         live stream or at the turn log.
+
+        **`pair_arguments` fills the automatic call's arguments after it ran.**
+        A tool whose body decides — `_context_rebuild` and `_turn_compact` —
+        executes on the empty arguments the harness mints, and the selection it
+        chose is read back through this callback and written onto the same call
+        (the id does not move), so the pair a model reads carries the choice
+        rather than an empty call.  A caller with no such tool passes nothing,
+        and every pair is what it always was.
 
         **The model can make the same call itself**, because the tool is
         declared and a provider hands the loop whatever the model asked for.
@@ -453,14 +462,29 @@ class AgentLoop:
                 channel, receipt = (
                     found if found is not None else (wanted.channel, wanted.receipt)
                 )
+                # **The decision's arguments go into the pair; the id does
+                # not move.**  The tool ran on the empty call and decided
+                # inside its body; the body stored what it chose, and this is
+                # how the pair — written after the answer — carries the
+                # selection the model reads as its own.  The tool result's id
+                # is the same one the tool answered, so the exchange stays
+                # legal.
+                decided = (
+                    pair_arguments(wanted.name) if pair_arguments is not None else None
+                )
+                written = (
+                    replace(call, arguments=decided)
+                    if isinstance(decided, dict) and decided
+                    else call
+                )
                 messages.append(
-                    Message(role="assistant", content=None, tool_calls=[call])
+                    Message(role="assistant", content=None, tool_calls=[written])
                 )
                 messages.append(
                     Message(
                         role="tool",
                         content=fitted,
-                        tool_call_id=call.id,
+                        tool_call_id=written.id,
                         # Display metadata, persisted with the turn and never
                         # sent to a provider (`Message.to_record`): the line a
                         # rebuilt transcript draws for this pair wears the

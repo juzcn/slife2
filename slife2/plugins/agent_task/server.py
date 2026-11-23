@@ -410,11 +410,15 @@ class TaskTurn:
     #: Whether this task's one automatic `_context_rebuild` has been tried —
     #: set before the call, because a failed hub hop never reaches the body.
     rebuilt: bool = False
-    #: The messages this task's own compaction has hidden from its later model
+    #: The live ids this task's own compaction has hidden from its later model
     #: calls.  The same turn-scoped projection the agent server keeps: the list
     #: `run_turn` advances is the task's whole exchange, and only the view the
     #: model is sent shrinks (`slife2.libs.turn.compact`).
-    hidden: list[Message] = field(default_factory=list)
+    hidden: set[str] = field(default_factory=set)
+    #: What the last `_context_rebuild`/`_turn_compact` body decided, as the
+    #: tool arguments that express it; the automatic call's pair is written
+    #: from here, the same field the agent server's loop keeps.
+    last_decision: dict[str, Any] = field(default_factory=dict)
     #: The fraction at which this task's own turn compacts itself, read from the
     #: live config when the task starts — the same `agent.compact_at` the agent
     #: server's conversations use.  A task is one turn and records nothing, so a
@@ -731,7 +735,7 @@ def build_server(
                 "refused": refusals,
             }
 
-        async def turn_compact(_arguments: dict[str, Any]) -> str:
+        async def turn_compact(arguments: dict[str, Any]) -> str:
             """Drop what this task no longer needs from its own model context.
 
             **The task's own list and the task's own state.**  The agent
@@ -751,11 +755,15 @@ def build_server(
                     turn.live.last_usage.total_tokens if turn.live is not None else 0
                 ),
                 context_window=turn.context_window,
+                selection=arguments.get("compact"),
             )
             # **The same rule as the agent server's**: a decision to keep
             # everything, or a failed selector, stops the automatic pass; a
             # drop leaves it live for the next crossing.
             turn.compact_hold = result.dropped == 0 or bool(result.decision)
+            turn.last_decision = (
+                {} if result.decision else {"compact": list(result.ids)}
+            )
             logger.info(
                 "agent task %s: turn_compact seen=%d dropped=%d decision=%s hold=%s",
                 task.name,
@@ -766,7 +774,7 @@ def build_server(
             )
             return compact.report(result, recorded=False)
 
-        async def context_rebuild(_arguments: dict[str, Any]) -> str:
+        async def context_rebuild(arguments: dict[str, Any]) -> str:
             """Rebuild this task's own clone of the conversation's history.
 
             **The task's clone, and `publish=False`.**  The task records
@@ -779,6 +787,11 @@ def build_server(
             at = compact.opening(turn.messages)
             if at is None:
                 return "This task has no opening message; nothing to rebuild."
+            selection: dict[str, Any] = {}
+            if arguments.get("context") is not None:
+                selection["context"] = arguments["context"]
+            if arguments.get("recall") is not None:
+                selection["recall"] = arguments["recall"]
             rebuilt = await runtime.rebuild(
                 task.identity,
                 turn.messages,
@@ -794,12 +807,14 @@ def build_server(
                     else turn.context_tokens
                 ),
                 context_window=turn.context_window,
+                selection=selection or None,
             )
             turn.messages[:] = rebuilt.messages
             turn.turn_ids = rebuilt.turn_ids
             turn.covered = rebuilt.covered
             turn.hidden.clear()
             turn.compact_hold = False
+            turn.last_decision = rebuilt.selection or {}
             logger.info(
                 "agent task %s: context_rebuild changed=%s kept=%d in_hand=%d "
                 "outside=%d recalled=%d rerank=%s decision=%s",
@@ -827,6 +842,7 @@ def build_server(
                 rerank=rebuilt.rerank,
                 decision=rebuilt.decision,
                 tokens=tokens,
+                ids=rebuilt.turn_ids,
             )
 
         return {
@@ -994,11 +1010,12 @@ def build_server(
                 return False
             if turn.compact_hold:
                 return False
-            at = compact.opening(turn.messages)
-            if at is None:
+            if compact.opening(turn.messages) is None:
                 return False
             view = compact.view(turn.messages, turn.hidden)
-            return bool(compact.selectable(view, turn.messages[at]))
+            at_view = compact.opening(view)
+            opening_mid = view[at_view].mid if at_view is not None else ""
+            return bool(compact.selectable(view, opening_mid))
 
         def auto_invoke() -> AutoCall | None:
             """The harness's own move at an iteration boundary.
@@ -1031,7 +1048,15 @@ def build_server(
                 plan.read(*task.identity),
             ),
         )
-        result = await loop.run_turn(turn.messages, opening, observer, auto=auto_invoke)
+        result = await loop.run_turn(
+            turn.messages,
+            opening,
+            observer,
+            auto=auto_invoke,
+            pair_arguments=lambda name: (
+                turn.last_decision if name in (CONTEXT_REBUILD, TURN_COMPACT) else None
+            ),
+        )
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the
         # model had just loaded and was about to use.

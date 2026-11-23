@@ -21,9 +21,10 @@ costs one turn, not the conversation.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, replace
 
+from slife2.libs.turn.context import with_note
 from slife2.libs.turn.messages import Message
 
 
@@ -37,6 +38,10 @@ class Compacted:
     dropped: int
     #: `""` for a decision, otherwise why there was none (`failed`/`unparsed`).
     decision: str = ""
+    #: The live ids the drop named, in the order they were written.  Kept so the
+    #: report can say *which* messages left rather than only how many: the id is
+    #: the one thing the model and the transcript can both address a message by.
+    ids: tuple[str, ...] = ()
 
 
 def opening(messages: Sequence[Message]) -> int | None:
@@ -53,13 +58,48 @@ def opening(messages: Sequence[Message]) -> int | None:
     return None
 
 
-def view(messages: Sequence[Message], hidden: Sequence[Message]) -> list[Message]:
-    """The list the model is sent: the conversation minus what was hidden."""
-    hidden_ids = {id(message) for message in hidden}
-    return [message for message in messages if id(message) not in hidden_ids]
+def _id_note(mid: str) -> str:
+    """The annotation a live-id-bearing message gains in the view."""
+    return f'[MESSAGE:{{"id": "{mid}"}}]'
 
 
-def selectable(view: Sequence[Message], opening: Message) -> list[int]:
+def view(messages: Sequence[Message], hidden: Collection[str]) -> list[Message]:
+    """The list the model is sent: the conversation minus what was hidden.
+
+    **Every addressable message carries its live id in the view**, like the
+    `[TURN:]` footnote a rebuilt turn carries: `{turn_id}.{index}` for a
+    historical message (set by `messages_from_turns`), `cur.{index}` for one of
+    the turn running, counted from its opening.  The annotation is a copy and
+    never reaches the record; `hidden` holds the same ids, so hiding a message
+    does not renumber the ones around it.  The system prompt is not addressable
+    and passes through untouched.
+    """
+    at = opening(messages)
+    hidden_ids = set(hidden)
+    out: list[Message] = []
+    for index, message in enumerate(messages):
+        if message.role == "system":
+            out.append(message)
+            continue
+        mid = message.mid or (
+            f"cur.{index - at}" if at is not None and index >= at else ""
+        )
+        if mid and mid in hidden_ids:
+            continue
+        if not mid:
+            out.append(message)
+            continue
+        out.append(
+            replace(
+                message,
+                content=with_note(message.content, _id_note(mid)),
+                mid=mid,
+            )
+        )
+    return out
+
+
+def selectable(view: Sequence[Message], opening_mid: str) -> list[str]:
     """The view's ids a selector may drop: everything but the fixed two.
 
     The system prompt and the turn's opening message are not candidates.  The
@@ -70,9 +110,9 @@ def selectable(view: Sequence[Message], opening: Message) -> list[int]:
     conversation's durable shape is `_context_rebuild`'s.
     """
     return [
-        index
-        for index, message in enumerate(view)
-        if message.role != "system" and message is not opening
+        message.mid
+        for message in view
+        if message.mid and message.role != "system" and message.mid != opening_mid
     ]
 
 
@@ -93,10 +133,14 @@ def report(result: Compacted, *, recorded: bool = True) -> str:
         )
     if not result.dropped:
         return f"Nothing dropped: the {subject} keeps all {result.seen} messages."
+    named = f": {', '.join(result.ids)}" if result.ids else ""
     if not recorded:
-        return f"Dropped {result.dropped} message(s) from this task's model context."
+        return (
+            f"Dropped {result.dropped} message(s){named} from this task's "
+            "model context."
+        )
     return (
-        f"Dropped {result.dropped} message(s) from this turn's model context; "
-        "the turn log keeps every one of them, and the next turn starts from "
-        "the full conversation."
+        f"Dropped {result.dropped} message(s){named} from this turn's model "
+        "context; the turn log keeps every one of them, and the next turn "
+        "starts from the full conversation."
     )

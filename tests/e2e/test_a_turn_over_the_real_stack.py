@@ -26,6 +26,7 @@ than from whichever parts happened to be up.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -59,16 +60,27 @@ def _files(data: Path) -> list[str]:
     )
 
 
+#: The live-id footnote every addressable message carries in the view.
+LIVE_ID = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
+
+
+def _without_id(content: str) -> str:
+    """A view message's text with its live-id footnote taken off."""
+    return LIVE_ID.sub("", content)
+
+
 def _prompt_words(content: str) -> str:
     """A live user message as the person wrote it, the turn's prompt taken off.
 
     `[TURN-PROMPT:{…}]` — the clock and the plan — is added when the turn opens
-    and removed before it is saved.  Its readers are the model answering and
-    the context decision, which reads the live conversation, so a request read
-    back from the stub carries it while the row, the transcript and a list
-    rebuilt from them do not.  What the two agree on is the words underneath.
+    and removed before it is saved; the `[MESSAGE:…]` footnote is the live id
+    the view adds to every message it addresses.  Their readers are the model
+    answering and the context decision, which reads the live conversation, so a
+    request read back from the stub carries them while the row, the transcript
+    and a list rebuilt from them do not.  What the two agree on is the words
+    underneath.
     """
-    return strip_marker(content, TURN_PROMPT_PREFIX)
+    return _without_id(strip_marker(content, TURN_PROMPT_PREFIX))
 
 
 @pytest.mark.asyncio
@@ -260,7 +272,9 @@ async def test_a_turn_calls_a_tool_in_another_process_and_reads_its_answer(
     assert result[0]["tool_call_id"] == "call_e2e_note", result[0]
     # The cabinet's own JSON, rendered by `as_tool_text` on its way into the
     # request: the row it wrote, not a sentence about it.
-    assert json.loads(result[0]["content"])["key"] == "e2e verification", result[0]
+    assert json.loads(_without_id(result[0]["content"]))["key"] == "e2e verification", (
+        result[0]
+    )
 
     # **Written by the cabinet's process**, which is the half this one cannot
     # fake: nothing here holds that store.  The file is the mirror of the note

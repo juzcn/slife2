@@ -15,13 +15,14 @@ import pytest
 
 from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.turn.context import (
+    DECISION_TOOL_TEXT,
+    LIVE_REPLY,
     RECALL_REPLY,
+    SELECTION_TOOL_TEXT,
     consistent,
-    instruction,
-    live_instruction,
+    decision_instruction,
     parse_live,
     rebuild_report,
-    with_message_id,
 )
 from slife2.libs.turn.tools import INTERRUPTED
 
@@ -38,27 +39,30 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     the decision tool's `parameters`, so the template carries no copy.
     """
     assert BOUND_GRAMMAR in json.dumps(RECALL_REPLY)
-    assert BOUND_GRAMMAR not in instruction(usage="12,345 (1.2%)")
+    assert BOUND_GRAMMAR not in decision_instruction(usage="12,345 (1.2%)")
 
 
-def test_the_recall_instruction_carries_only_what_the_schema_cannot() -> None:
-    """The task, its purpose, the figure and the criterion are prose.
+def test_the_recall_decision_carries_intent_in_its_description() -> None:
+    """The task, its purpose and the criterion are prose on the tool.
 
     Every field rule is the schema's.  The cases restated the `oneOf`/`anyOf`
     the tool's `parameters` already enforce, and the running turn's exclusion
     and a follow-up's sentence moved into the field descriptions they qualify.
     """
-    text = " ".join(instruction(usage="12,345 (1.2%)").split())
+    text = " ".join(decision_instruction(usage="12,345 (1.2%)").split())
+    intent = " ".join(DECISION_TOOL_TEXT.split())
     schema = json.dumps(RECALL_REPLY)
 
     assert "12,345 (1.2%)" in text
     assert "limited context window" in text
-    assert "historical turns to keep" in text
-    assert "chosen context rather than on everything accumulated" in text
-    assert "what the work still depends on" in text
-    assert "Cases:" not in text
-    assert "your answer" not in text, "the reply shape is the schema's"
-    assert "turn running" not in text, "the scope rule is the schema's"
+    assert "not instructions to you" in text
+    assert "Record the decision by calling this tool" in text
+    assert "historical turns to keep" in intent
+    assert "chosen context rather than on everything accumulated" in intent
+    assert "what the work still depends on" in intent
+    assert "Cases:" not in intent
+    assert "your answer" not in intent, "the reply shape is the schema's"
+    assert "turn running" not in intent, "the scope rule is the schema's"
     assert "turn running" in schema
     assert "follow-up whose subject" in schema
 
@@ -139,52 +143,52 @@ def test_a_damaged_call_entry_is_skipped_rather_than_raised() -> None:
     assert consistent(messages) == messages
 
 
-# --- the live selector's copy and reply --------------------------------------
+# --- the live selector's reply ----------------------------------------------
 
 
-def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
-    """The record keeps the list it had; the id lives in the one request."""
-    original = {"role": "user", "content": "hi"}
-    prefixed = with_message_id(original, 4)
-
-    assert prefixed["content"] == '[MESSAGE:{"id": 4}] hi'
-    assert original["content"] == "hi", "the copy is a copy"
-
-    parts = {"role": "user", "content": [{"type": "text", "text": "look"}]}
-    got = with_message_id(parts, 2)
-
-    assert got["content"][0] == {"type": "text", "text": '[MESSAGE:{"id": 2}] '}
-    assert got["content"][1] == {"type": "text", "text": "look"}
-
-
-def test_the_live_instruction_carries_only_what_the_schema_cannot() -> None:
-    """The task, its purpose, the figure and the id marker are prose.
+def test_the_live_decision_carries_intent_in_its_description() -> None:
+    """The task, its purpose and the figure are prose; the rules are the schema.
 
     Every rule is in the tool's `parameters` (`LIVE_REPLY`), sent with the call.
     Restating them here was a second spelling of the rules the parser reads.
     """
-    text = " ".join(live_instruction(usage="12,345 (1.2%)").split())
+    text = " ".join(decision_instruction(usage="12,345 (1.2%)").split())
+    intent = " ".join(SELECTION_TOOL_TEXT.split())
+    schema = json.dumps(LIVE_REPLY)
 
     assert "12,345 (1.2%)" in text
-    assert '[MESSAGE:{"id": n}]' in text
-    assert "no longer need" in text
-    assert "room in the window and sees only what it still needs" in text
-    assert "nothing is deleted" in text
-    assert "goes as a whole" not in text, "the legality rule is the schema's"
-    assert "opening message" not in text, "the candidate rule is the schema's"
-    assert "your answer" not in text, "the reply shape is the schema's"
+    assert "not instructions to you" in text
+    assert "Record the decision by calling this tool" in text
+    assert "no longer need" in intent
+    assert "room in the window and sees only what it still needs" in intent
+    assert "nothing is deleted" in intent
+    assert "as a whole" not in intent, "the legality rule is the schema's"
+    assert "as a whole" in schema
+    assert "opening message" not in intent, "the candidate rule is the schema's"
+    assert "opening message" in schema
+    assert "your answer" not in intent, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
 
 
 def test_a_live_reply_is_a_drop_list() -> None:
-    """Empty and absent are both "drop nothing"; a bad shape is no decision."""
-    assert parse_live('{"compact": [3, 1, 3]}') == ([3, 1], "")
+    """Empty and absent are both "drop nothing"; a bad shape is no decision.
+
+    The ids are the live view's strings, not positions: a model that wrote a
+    number wrote something the view never showed it, and a `true` is the same
+    kind of not-an-id a turn id refuses (`_is_id`).
+    """
+    assert parse_live('{"compact": ["12.3", "cur.1", "12.3"]}') == (
+        ["12.3", "cur.1"],
+        "",
+    )
     assert parse_live("{}") == ([], "")
     assert parse_live('{"compact": []}') == ([], "")
     assert parse_live('{"compact": "all"}')[0] is None
     assert parse_live("not json")[0] is None
-    assert parse_live('{"drop": [1]}')[0] is None
+    assert parse_live('{"drop": ["12.3"]}')[0] is None
+    assert parse_live('{"compact": [3]}')[0] is None, "a position is not a live id"
     assert parse_live('{"compact": [true]}')[0] is None
+    assert parse_live('{"compact": [""]}')[0] is None
 
 
 def test_a_rerank_status_rides_the_unchanged_report_too() -> None:

@@ -57,29 +57,60 @@ def test_a_conversation_with_no_user_message_has_no_opening() -> None:
     assert opening([system()]) is None
 
 
-def test_the_view_drops_hidden_messages_and_keeps_order() -> None:
-    first, second, third = user("a"), answer("b"), user("c")
+def test_the_view_annotates_every_addressable_message_with_its_live_id() -> None:
+    """The id is in the view, like the `[TURN:]` footnote — not in a copy a
+    selector adds for itself, and never in the record the list came from."""
+    first = Message(role="user", content="a", mid="7.0")
+    second = Message(role="assistant", content="b", mid="7.1")
+    third = user("c")
 
-    assert view([first, second, third], [second]) == [first, third]
-    assert view([first, second, third], []) == [first, second, third]
+    got = view([first, second, third], [])
+
+    assert [m.mid for m in got] == ["7.0", "7.1", "cur.0"]
+    assert got[0].content == 'a [MESSAGE:{"id": "7.0"}]'
+    assert got[2].content == 'c [MESSAGE:{"id": "cur.0"}]'
+    assert first.content == "a", "the view is a copy"
+
+
+def test_the_view_drops_hidden_ids_and_keeps_order() -> None:
+    first = Message(role="user", content="a", mid="7.0")
+    second = Message(role="assistant", content="b", mid="7.1")
+    third = user("c")
+
+    got = view([first, second, third], ["7.1"])
+
+    assert [m.mid for m in got] == ["7.0", "cur.0"]
+    assert [m.content for m in got] == [
+        'a [MESSAGE:{"id": "7.0"}]',
+        'c [MESSAGE:{"id": "cur.0"}]',
+    ]
 
 
 def test_the_system_and_the_opening_are_not_selectable() -> None:
     """Everything else — historical and current — is the model's to drop."""
-    head, past, now, tool = system(), user("old"), user("now"), result("c1")
+    head = system()
+    past = Message(role="user", content="old", mid="7.0")
+    now, tool = user("now"), result("c1")
 
-    assert selectable([head, past, now, tool], now) == [1, 3]
+    got = view([head, past, now, tool], [])
+    at = opening(got)
+    assert at is not None
+    opening_mid = got[at].mid
+
+    assert selectable(got, opening_mid) == ["7.0", "cur.1"]
 
 
-def test_the_report_names_the_record() -> None:
+def test_the_report_names_the_record_and_the_ids() -> None:
     assert "turn log keeps every one" in report(Compacted(seen=5, dropped=2))
+    assert "12.1, 12.2" in report(Compacted(seen=5, dropped=2, ids=("12.1", "12.2")))
     assert "did not answer" in report(Compacted(seen=4, dropped=0, decision="failed"))
     assert "Nothing dropped" in report(Compacted(seen=4, dropped=0))
 
 
 def test_a_task_report_claims_no_record() -> None:
     """A task records no turn; a report that named a log would be a false fact."""
-    text = report(Compacted(seen=5, dropped=2), recorded=False)
+    text = report(Compacted(seen=5, dropped=2, ids=("12.1", "12.2")), recorded=False)
 
     assert "Dropped 2 message(s)" in text
+    assert "12.1" in text
     assert "turn log" not in text

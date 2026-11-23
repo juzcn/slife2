@@ -607,23 +607,29 @@ There is no approval gate before a write.
 ### Conversation and memory
 
 A conversation does not accumulate an unbounded context. At the first boundary
-of each turn, the harness calls `_context_rebuild`, which makes one model call
-that decides which historical turns to keep and which to recall from the turn
-log; the turn runs on the two selections in time order, followed by the turn
-itself. The turn running is never part of the selection. The model can call
-`_context_rebuild` itself when the work has moved, and its answer carries an
-estimate of the context the turn runs on from there. If a recall matches more
-than fits, only what fits is returned. A failed decision keeps the context in
-hand; a missing turn store fails the turn.
+of each turn, the harness calls `_context_rebuild` with no arguments, and one
+decision-model call fills the selection: which historical turns to keep and
+which to recall from the turn log; the turn runs on the two selections in time
+order, followed by the turn itself. The turn running is never part of the
+selection. The model can call `_context_rebuild` itself with `context`/`recall`
+of its own — the same schema, applied as it came, with no decision call — and
+the answer carries the turn ids it runs on and an estimate of the context the
+turn runs on from there. If a recall matches more than fits, only what fits is
+returned. A failed decision keeps the context in hand; a missing turn store
+fails the turn.
 
-`_context_rebuild` and `_turn_compact` are the two decision tools: each runs one
-decision-model call, forced to a structured answer, and a decision that fails or
-cannot be read leaves the turn on the context it has.
+`_context_rebuild` and `_turn_compact` are the two decision tools: a call with
+no selection runs one decision-model call, forced to a structured answer; a call
+with one is the model's own. A decision that fails or cannot be read leaves the
+turn on the context it has.
 
 A turn that grows past `agent.compact_at` of the model's window (default 0.9)
 also drops what it no longer needs from its own model context. `_turn_compact`
-is a view, not an edit: the turn log keeps every message, the next turn starts
-from the full conversation, and a `_context_rebuild` starts the view over.
+is a view, not an edit: the live view annotates each message with its id
+(`[MESSAGE:{"id": …}]`), so the model can name the ids to drop itself or leave
+the choice to the selector, and the answer names what left. The turn log keeps
+every message, the next turn starts from the full conversation, and a
+`_context_rebuild` starts the view over.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary

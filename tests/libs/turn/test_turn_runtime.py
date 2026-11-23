@@ -241,6 +241,7 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         "publish": True,
         "context_tokens": 1234,
         "context_window": 8192,
+        "selection": None,
     }
 
 

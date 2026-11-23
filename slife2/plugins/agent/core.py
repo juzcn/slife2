@@ -84,6 +84,8 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import (
+    LIVE_REPLY,
+    RECALL_REPLY,
     context_usage,
     rebuild_report,
     turn_failed_note,
@@ -1174,11 +1176,12 @@ class AgentCore:
             return False
         if loop.compact_hold:
             return False
-        at = compact.opening(loop.messages)
-        if at is None:
+        if compact.opening(loop.messages) is None:
             return False
         view = compact.view(loop.messages, loop.hidden)
-        return bool(compact.selectable(view, loop.messages[at]))
+        at_view = compact.opening(view)
+        opening_mid = view[at_view].mid if at_view is not None else ""
+        return bool(compact.selectable(view, opening_mid))
 
     async def run_turn_into(
         self, loop: Loop, item: Pending, observer: TurnObserver, outcome: Outcome
@@ -1545,6 +1548,13 @@ class AgentCore:
                 folded=folded_message,
                 folded_commit=folded_commit,
                 injected=injected_count,
+                # The automatic rebuild/compaction pair carries the selection
+                # the body chose; any other auto call keeps the empty call.
+                pair_arguments=lambda name: (
+                    loop.last_decision
+                    if name in (CONTEXT_REBUILD, TURN_COMPACT)
+                    else None
+                ),
             )
         except asyncio.CancelledError:
             # **The interruption is repaired in the loop.**  A batch the
@@ -2613,7 +2623,12 @@ class AgentCore:
             or NOTHING_WAITING
         )
 
-    async def context_rebuild(self, ctx: Context) -> str:
+    async def context_rebuild(
+        self,
+        ctx: Context,
+        context: Any = None,
+        recall: dict[str, Any] | None = None,
+    ) -> str:
         """Rebuild the conversation's live context — its historical turns.
 
         The tool edits the turns the conversation is made of: it may drop some
@@ -2623,6 +2638,12 @@ class AgentCore:
         context, including the turn's own message; the answer reports how many
         of the turns in hand it kept, how many turns outside the context it
         recalled, and an estimate of the context this turn runs on from here.
+
+        **The arguments are the selection; omitting both asks the system to
+        decide.**  A call with `context`/`recall` is the model's own choice and
+        is applied as it came; an empty call is the harness's, and the decision
+        model fills the selection.  The two produce the same pair — the harness
+        writes the chosen arguments into it either way.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:
@@ -2634,6 +2655,11 @@ class AgentCore:
         at = compact.opening(loop.messages)
         if at is None:
             return "This turn has no opening message; nothing to rebuild."
+        choice: dict[str, Any] = {}
+        if context is not None:
+            choice["context"] = context
+        if recall is not None:
+            choice["recall"] = recall
         rebuilt = await self.runtime.rebuild(
             (loop.agent, loop.subagent),
             loop.messages,
@@ -2641,6 +2667,7 @@ class AgentCore:
             loop.covered,
             loop.model,
             publish=True,
+            selection=choice or None,
             # **The last LLM call's figure.**  A completed call of this turn is
             # newer than the previous turn's last call; before the first call —
             # where the automatic rebuild runs — the saved call stands.
@@ -2664,6 +2691,10 @@ class AgentCore:
         # can compact again if it still needs to.
         loop.hidden.clear()
         loop.compact_hold = False
+        #: What this call decided, for the pair the harness writes when it made
+        #: the call.  The model's own call carries its arguments already; the
+        #: automatic one is written from here (`Loop.last_decision`).
+        loop.last_decision = rebuilt.selection or {}
         logger.info(
             "context_rebuilt %s changed=%s kept=%d in_hand=%d outside=%d "
             "recalled=%d rerank=%s decision=%s",
@@ -2689,9 +2720,10 @@ class AgentCore:
             rerank=rebuilt.rerank,
             decision=rebuilt.decision,
             tokens=tokens,
+            ids=rebuilt.turn_ids,
         )
 
-    async def turn_compact(self, ctx: Context) -> str:
+    async def turn_compact(self, ctx: Context, compact: Any = None) -> str:
         """Drop what this turn no longer needs from the view it is running on.
 
         **The tool, not the decision.**  The selector is the context plugin's
@@ -2709,7 +2741,15 @@ class AgentCore:
         only the list the model is sent shrinks (`slife2.libs.turn.compact`).
         The next turn starts from the full conversation; `_context_rebuild` is
         the tool that changes the durable live-context list.
+
+        **The arguments are the selection; omitting them asks the selector.**
+        A call with `compact` names the live ids to drop and is applied as it
+        came; an empty call is the harness's, and the selector fills the ids.
         """
+        # The parameter shadows the module for this body; the view helpers are
+        # this alias, and `compact` is the selection the model named.
+        from slife2.libs.turn import compact as compact_view
+
         conversation_id = request_conversation(ctx)
         if not conversation_id:
             return "No live conversation to compact."
@@ -2721,7 +2761,7 @@ class AgentCore:
         # an untokened call cannot be the other live turn's.
         if loop is None or (caller and caller != loop.turn_token):
             return "No live turn to compact."
-        at = compact.opening(loop.messages)
+        at = compact_view.opening(loop.messages)
         if at is None:
             return "This turn has no opening message; nothing to compact."
         result = await self.runtime.compact_turn(
@@ -2733,6 +2773,7 @@ class AgentCore:
                 loop.live.last_usage.total_tokens if loop.live is not None else 0
             ),
             context_window=loop.context_window,
+            selection=compact,
         )
         # **A decision to keep everything stops the automatic pass**, exactly as
         # a failure does: re-asking the same context every iteration would be
@@ -2746,7 +2787,8 @@ class AgentCore:
             result.decision or "ok",
             loop.compact_hold,
         )
-        return compact.report(result)
+        loop.last_decision = {} if result.decision else {"compact": list(result.ids)}
+        return compact_view.report(result)
 
     async def check_background_call(self, task_id: str, ctx: Context) -> dict[str, Any]:
         """Where one background call stands.
@@ -2856,12 +2898,16 @@ class AgentCore:
             FunctionTool.from_function(
                 self.check_new_input, name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL
             ),
+            # **The selection schemas, not the signatures.**  The methods take
+            # the fields so the call can carry them; the schema the model reads
+            # is the decision reply's (`RECALL_REPLY`/`LIVE_REPLY`), so the
+            # model's own call and the automatic decision answer to one shape.
             FunctionTool.from_function(
                 self.context_rebuild, name=CONTEXT_REBUILD, meta=FOR_THE_MODEL
-            ),
+            ).model_copy(update={"parameters": RECALL_REPLY}),
             FunctionTool.from_function(
                 self.turn_compact, name=TURN_COMPACT, meta=FOR_THE_MODEL
-            ),
+            ).model_copy(update={"parameters": LIVE_REPLY}),
             FunctionTool.from_function(
                 self.check_background_call, name=CHECK_ASYNC, meta=FOR_THE_MODEL
             ),

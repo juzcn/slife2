@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from slife2.libs.turn.loop import AgentLoop, TurnResult
 from slife2.libs.turn.messages import Message, Usage
@@ -219,13 +220,14 @@ class Loop:
     #: is set there), and it is cleared by the same `finally`, so a later turn can
     #: never answer for one this one took.
     injected: list[Pending] = field(default_factory=list)
-    #: The messages this turn's compaction has hidden from its own later model
+    #: The live ids this turn's compaction has hidden from its own later model
     #: calls.  **Turn-scoped, and never part of the record**: the loop's list,
     #: the saved row and the store's `covered` are the full conversation; this
     #: is only the projection the model runs on (`slife2.libs.turn.compact`).
-    #: Cleared when a turn starts, so a hidden message cannot outlive the turn
-    #: that hid it.
-    hidden: list[Message] = field(default_factory=list)
+    #: Ids rather than message objects, so hiding one does not renumber the rest
+    #: and a rebuilt list addresses the same messages.  Cleared when a turn
+    #: starts, so a hidden message cannot outlive the turn that hid it.
+    hidden: set[str] = field(default_factory=set)
     #: Whether this turn's automatic compaction has stopped asking.  Set when
     #: the selector keeps everything (`dropped == 0`) or fails: that is a
     #: decision about the whole context, not something to re-ask on every
@@ -341,6 +343,12 @@ class Loop:
     #: automatic rebuild, whether or not it ran, and after it the tool is the
     #: model's to call.  Reset with `hidden` when a turn starts.
     rebuilt: bool = False
+    #: What the last `_context_rebuild`/`_turn_compact` body decided, as the
+    #: tool arguments that express it.  The automatic call's pair is written by
+    #: `AgentLoop.run_turn` *after* the tool answered, and this is how the
+    #: decision's arguments reach that pair; the model's own call carries its
+    #: arguments already.
+    last_decision: dict[str, Any] = field(default_factory=dict)
     #: The last turn's last model call, in tokens — the figure the status bar
     #: shows.  Set from the restored last turn and after every turn; 0 for a
     #: conversation that has not run one.  Not estimated from `messages`: what
