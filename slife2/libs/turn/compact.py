@@ -11,7 +11,7 @@ turn's saved row is unchanged, and the next rebuild starts from the full list.
 starts it over (`loop.hidden` is cleared).
 
 **The selection is the model's, and so is legality.**  The selector is asked
-which live messages this turn no longer needs; the prompt says a tool exchange
+which live messages this turn no longer needs; its schema says a tool exchange
 goes as a whole, and the harness applies the answer as it came.  A model that
 splits a call from its result writes a history the next call refuses — the turn
 fails, the record is intact, and the next turn runs on the full list.  That is

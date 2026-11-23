@@ -41,6 +41,25 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     assert BOUND_GRAMMAR not in instruction()
 
 
+def test_the_recall_instruction_carries_only_what_the_schema_cannot() -> None:
+    """The task and the criterion are prose; every field rule is schema.
+
+    The cases restated the `oneOf`/`anyOf` the tool's `parameters` already
+    enforce, and the running turn's exclusion and a follow-up's sentence moved
+    into the field descriptions they qualify.
+    """
+    text = instruction()
+    schema = json.dumps(RECALL_REPLY)
+
+    assert "historical turns to keep" in text
+    assert "what the work still depends on" in text
+    assert "Cases:" not in text
+    assert "your answer" not in text, "the reply shape is the schema's"
+    assert "turn running" not in text, "the scope rule is the schema's"
+    assert "turn running" in schema
+    assert "follow-up whose subject" in schema
+
+
 def call(call_id: str, name: str = "search") -> dict:
     return {
         "role": "assistant",
@@ -135,21 +154,23 @@ def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
     assert got["content"][1] == {"type": "text", "text": "look"}
 
 
-def test_the_live_instruction_points_at_the_numbered_messages() -> None:
-    """The ids travel on the messages; the instruction names the fixed two.
+def test_the_live_instruction_carries_only_what_the_schema_cannot() -> None:
+    """The task, the figure and the id marker are prose; every rule is schema.
 
-    The candidate list was repeated here.  At a full window that is a second
-    spelling of the same ids, growing with the view on the call with the least
-    room to spare, so the numbered copy is the one place they are written.
+    The candidate set, the tool-exchange legality and the reply's shape are in
+    the tool's `parameters` (`LIVE_REPLY`), sent with the call.  Restating them
+    here was a second spelling of the rules the parser reads.
     """
     text = live_instruction(usage="12,345 (1.2%)")
 
     assert "12,345 (1.2%)" in text
-    assert "The system message and the turn's opening message are fixed" in text
-    assert "numbered message is one you may name" in text
-    assert "These are the ids you may name" not in text
+    assert '[MESSAGE:{"id": n}]' in text
+    assert "no longer need" in text
+    assert "nothing is deleted" in text
+    assert "goes as a whole" not in text, "the legality rule is the schema's"
+    assert "opening message" not in text, "the candidate rule is the schema's"
+    assert "your answer" not in text, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
-    assert "goes as a whole" in text, "the legality rule is in the prompt"
 
 
 def test_a_live_reply_is_a_drop_list() -> None:

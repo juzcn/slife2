@@ -84,7 +84,9 @@ SELECTION_TOOL_TEXT = (
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
-#: states the same for the decision model).
+#: states the same for the decision model).  **The rules are here and not in
+#: `live.j2`** — the fixed two, the tool-exchange legality and the empty answer
+#: are what the model fills, so the schema says them once (SDD §2.3).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -106,22 +108,26 @@ LIVE_REPLY: dict[str, Any] = {
     },
 }
 
-#: The decision model's tool schema: the types, the allowed values, and the one
-#: rule that couples the two fields.  The decision call is a forced tool call
-#: (SDD §2.3, "Schema over prompt"): the schema is the tool's `parameters`, so
-#: the field's wording is what the model fills, not a sentence it copies.
+#: The decision model's tool schema: the types, the allowed values, and the
+#: rules that couple them.  The decision call is a forced tool call (SDD §2.3,
+#: "Schema over prompt"): the schema is the tool's `parameters`, so the field's
+#: wording is what the model fills, not a sentence it copies — which is why the
+#: running turn's exclusion and a follow-up's sentence are here rather than in
+#: `recall.j2`.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "context": {
             "description": (
-                "The turns in hand this decision is answered from. Omit for all of "
-                "them. A follow-up keeps the turn it continues, even when the "
-                'input brings a new word and does not name it. "clear" only '
-                "when the input stands on its own: a turn dropped here cannot be "
-                "recalled back — the recall searches only the turn log outside "
-                "the turns in hand, not merely outside the turns kept."
+                "The turns in hand this decision is answered from — never the "
+                "turn running, which has no turn id and is carried verbatim. "
+                "Omit for all of them. A follow-up keeps the turn it continues, "
+                'even when the input brings a new word and does not name it. '
+                '"clear" only when the input stands on its own: a turn dropped '
+                "here cannot be recalled back — the recall searches only the "
+                "turn log outside the turns in hand, not merely outside the "
+                "turns kept."
             ),
             "oneOf": [
                 {"const": "keep", "title": "all of them"},
@@ -152,7 +158,8 @@ RECALL_REPLY: dict[str, Any] = {
                         "one sentence per idea. Read by meaning. Several "
                         "sentences are several questions: another question is "
                         "another chance to be found, and cannot cost a turn an "
-                        "earlier one found."
+                        "earlier one found. A follow-up whose subject is no "
+                        "longer in hand carries it into the sentence."
                     ),
                     "type": "array",
                     "items": {"type": "string"},
@@ -525,7 +532,7 @@ def repair_note(reason: str, reply: str = "") -> str:
 
 
 def instruction() -> str:
-    """What the decision model is told: the task, the cases, one guard.
+    """What the decision model is told: the task, the criterion, one guard.
 
     **No input is passed beside the messages.**  The rebuild runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
@@ -533,6 +540,11 @@ def instruction() -> str:
     made from the conversation the call is made over.  A separate prompt would
     be the previous design's — it existed only because the rebuild ran before the
     message was appended.
+
+    **The answer's shape is not restated here.**  Every field, allowed value and
+    coupling rule is `RECALL_REPLY`'s; the cases that used to demonstrate
+    combinations were a second spelling of the `oneOf`/`anyOf` the tool already
+    sends.
 
     **The bound grammar is the module's one spelling.**  It is inside the tool
     schema's `since`/`until` descriptions (`RECALL_REPLY`), so the template
@@ -569,21 +581,22 @@ def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:
 
 
 def live_instruction(usage: str) -> str:
-    """What the live selector's tool says: the figure and the candidate rule.
+    """What the live selector's tool says: the task, the figure and the marker.
 
     **The ids are on the messages, not in the instruction.**  `with_message_id`
     prefixes every message of the one request with its copy number, and the
-    template states the fixed two and the legality rule in prose.  A list of
-    the candidates here would be a second spelling of the same set, growing
-    with the view on the call with the least room to spare.
+    template only points at that marker: a list of the candidates here would be
+    a second spelling of the same set, growing with the view on the call with
+    the least room to spare.  Every rule that fits the tool's parameters — the
+    fixed two, the tool-exchange legality, the empty answer — is `LIVE_REPLY`'s.
 
     `usage` is the same figure the turn prompt and the status bar show, measured
     against the view the selector is deciding about — the model needs to know
     how full the window is to know how much it has to give up.  The legality
-    rule is in the tool text rather than in the harness: a model that keeps
-    calls and results together writes a history every provider accepts, and a
-    system that repaired its answer would be making a decision the model was
-    asked to make.
+    rule is the schema's rather than the harness's: a model that keeps calls
+    and results together writes a history every provider accepts, and a system
+    that repaired its answer would be making a decision the model was asked to
+    make.
     """
     return render_instruction(LIVE_TEMPLATE, usage=usage)
 

@@ -1246,7 +1246,7 @@ the model and the person read one figure. **Nothing is removed**: the live list,
 the turn's row, `covered` and the store's live-context list are the
 conversation, and the next turn starts from the full list. The system message
 and the turn's opening message are the only fixed messages; every other
-message, historical or current, is the model's to drop. The legality of a tool exchange is the *prompt's* rule — a call and its
+message, historical or current, is the model's to drop. The legality of a tool exchange is the *schema's* rule — a call and its
 results go together — and the harness applies the answer as it came: a split
 pair is a failed next call, one turn, not a repaired answer. A selection
 decision that fails or cannot be read compacts nothing and the turn continues

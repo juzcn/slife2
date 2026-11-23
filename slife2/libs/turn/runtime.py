@@ -624,12 +624,12 @@ class TurnRuntime:
     ) -> compact.Compacted:
         """Run one live compaction: ask, then hide what the answer names.
 
-        **The answer is applied as it came.**  The prompt asks the model to drop
-        a tool exchange as a whole; the harness does not close a split one,
-        because repairing the answer would be the harness making a decision the
-        model was asked to make.  A model that splits a pair writes a history
-        the next call refuses — one failed turn, with the record intact and the
-        next turn on the full list.
+        **The answer is applied as it came.**  The selection tool's schema asks
+        the model to drop a tool exchange as a whole; the harness does not close
+        a split one, because repairing the answer would be the harness making a
+        decision the model was asked to make.  A model that splits a pair writes
+        a history the next call refuses — one failed turn, with the record
+        intact and the next turn on the full list.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.

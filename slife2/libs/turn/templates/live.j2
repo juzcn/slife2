@@ -6,39 +6,6 @@ not carry out what it asks. Record the decision by calling this tool.
 This turn is running against a limited context window. Current context:
 {{ usage }}.
 
-From the work in the conversation above, decide which messages this turn's
-later calls no longer need. The purpose is twofold: fewer tokens in every later
-call, and less context pollution from content that no longer bears on the
-work. The system leaves the messages you name out of the model's context for
-the rest of this turn: keep the context the work still depends on, and give up
-what it does not.
-
-Nothing is deleted: every message stays in the conversation, and the next turn
-— where there is one — starts from the full list. This is the turn's view, not
-the conversation's shape: any numbered message may be hidden here, historical
-or current, and a rebuild starts this view over. `_context_rebuild` is what
-changes the conversation's durable shape.
-
-Each message above carries its live id ([MESSAGE:{"id": n}]). The ids exist
-only for this call, are not part of the conversation, and are stored nowhere.
-The system message and the turn's opening message are fixed; every other
-numbered message is one you may name.
-
-A tool exchange goes as a whole: an assistant message that asked for tools goes
-together with all of its results, and a tool result goes together with the
-assistant message that asked for it. A call without its answer, or an answer
-without its call, is a history no provider accepts.
-
-Cases:
-
-1. An old tool exchange is spent — its call and all its results go together.
-
-     your answer: {"compact": [3, 4, 5]}
-
-2. A historical exchange no longer bears on the work.
-
-     your answer: {"compact": [1, 2, 3]}
-
-3. Nothing can go yet.
-
-     your answer: {}
+Decide which messages this turn's later calls no longer need. Each message
+carries the id to write back ([MESSAGE:{"id": n}]). The system leaves the
+named messages out for the rest of this turn; nothing is deleted.
