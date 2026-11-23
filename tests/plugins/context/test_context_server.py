@@ -137,6 +137,7 @@ class Replies:
         model: str,
         messages: list,
         *,
+        usage: str = "",
         previous: str = "",
         repair: str = "",
     ) -> str:
@@ -1371,7 +1372,7 @@ async def test_a_keep_list_that_names_no_known_turn_keeps_the_context() -> None:
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == ids
 
 
-async def _down(*arguments: Any) -> str:
+async def _down(*arguments: Any, **keywords: Any) -> str:
     """A decision model whose model server never answers."""
     raise RuntimeError("the model server is down")
 
@@ -1762,7 +1763,9 @@ async def test_a_private_rebuild_decides_without_moving_the_conversation() -> No
     parked = asyncio.Event()
     release = asyncio.Event()
 
-    async def deciding(agent: str, subagent: str, model: str, messages: list) -> str:
+    async def deciding(
+        agent: str, subagent: str, model: str, messages: list, *, usage: str = ""
+    ) -> str:
         parked.set()
         await release.wait()
         return '{"context": "clear"}'
@@ -2006,13 +2009,16 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     monkeypatch.setattr(context_server, "_stream_chat", capture)
     hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
 
-    answer = await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", hold)
+    answer = await _ask_model(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, usage="12,345 (1.2%)"
+    )
     assert answer == '{"context": "clear"}', "the tool arguments are the decision"
     call = seen[0]
     assert call["kind"] == "decision"
     assert call["asked"][:-1] == hold, "the conversation is the input, unchanged"
     assert call["asked"][-1]["role"] == "system"
     assert "Context rebuild" in call["asked"][-1]["content"]
+    assert "12,345 (1.2%)" in call["asked"][-1]["content"], "the status bar's figure"
     tool = call["tools"][0]["function"]
     assert tool["name"] == DECISION_TOOL
     assert tool["description"] == DECISION_TOOL_TEXT
@@ -2028,6 +2034,7 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
         "",
         "m",
         hold,
+        usage="12,345 (1.2%)",
         previous='{"context": "bad"}',
         repair="the reply could not be read",
     )

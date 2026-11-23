@@ -529,7 +529,7 @@ class StubEmbedder:
 
 
 async def keep_the_context(
-    agent: str, subagent: str, model: str, messages: list[Any]
+    agent: str, subagent: str, model: str, messages: list[Any], *, usage: str = ""
 ) -> str:
     """A decision model that answers "keep what is in hand" — `{}`.
 

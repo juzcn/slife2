@@ -531,7 +531,7 @@ def repair_note(reason: str, reply: str = "") -> str:
     )
 
 
-def instruction() -> str:
+def instruction(usage: str) -> str:
     """What the decision model is told: the task, the criterion, one guard.
 
     **No input is passed beside the messages.**  The rebuild runs where the
@@ -551,8 +551,13 @@ def instruction() -> str:
     carries no copy of it: the schema is the tool's `parameters` and the code
     that decides reads it, and a copy in the template had fallen behind it — no
     `tomorrow`, `now`, `quarter` or datetime.
+
+    `usage` is the same figure the status bar and the selector show: the last
+    LLM call's size against the conversation's window.  A rebuild decision that
+    did not know how full the context is could not weigh keeping against
+    recalling.
     """
-    return render_instruction(INSTRUCTION_TEMPLATE)
+    return render_instruction(INSTRUCTION_TEMPLATE, usage=usage)
 
 
 def with_message_id(message: Mapping[str, Any], index: int) -> dict[str, Any]:

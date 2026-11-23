@@ -189,6 +189,7 @@ class DecisionModel(Protocol):
         model: str,
         messages: list[dict[str, Any]],
         *,
+        usage: str = "",
         previous: str = "",
         repair: str = "",
     ) -> Awaitable[str]: ...
@@ -313,14 +314,16 @@ async def _ask_model(
     model: str,
     messages: list[dict[str, Any]],
     *,
+    usage: str = "",
     previous: str = "",
     repair: str = "",
 ) -> str:
     """The historical-turn decision, as `decide_context`'s arguments.
 
     The conversation is the input, followed by the decision instruction as a
-    system message; the tool's schema is `decisions.RECALL_REPLY`.  The call and
-    repair rules are `_ask_tool`'s.
+    system message; the tool's schema is `decisions.RECALL_REPLY`.  `usage` is
+    the context figure the instruction prints — the same one the status bar and
+    the selector read.  The call and repair rules are `_ask_tool`'s.
     """
     return await _ask_tool(
         config,
@@ -333,7 +336,7 @@ async def _ask_model(
         tool_name=decisions.DECISION_TOOL,
         tool_text=decisions.DECISION_TOOL_TEXT,
         parameters=decisions.RECALL_REPLY,
-        instruction=decisions.instruction(),
+        instruction=decisions.instruction(usage),
         kind="decision",
         previous=previous,
         repair=repair,
@@ -1274,6 +1277,7 @@ def build_server(
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
+        usage: str = "",
     ) -> tuple[Decision | None, str]:
         """The historical-turn decision, parsed and logged as this caller sees it.
 
@@ -1284,7 +1288,7 @@ def build_server(
         difference.  The one-retry rule and the clock are `_ask_with_repair`'s.
         """
         return await _ask_with_repair(
-            lambda **kw: ask_model(agent, subagent, model, messages, **kw),
+            lambda **kw: ask_model(agent, subagent, model, messages, usage=usage, **kw),
             decisions.parse_with_reason,
             label="recall_decision",
             subject="decision",
@@ -1295,16 +1299,19 @@ def build_server(
     model_clients: dict[str, Client] = {}
     opening = asyncio.Lock()
     ask_model: DecisionModel = injected or (
-        lambda agent, subagent, model, messages, *, previous="", repair="": _ask_model(
-            current(),
-            model_clients,
-            opening,
-            agent,
-            subagent,
-            model,
-            messages,
-            previous=previous,
-            repair=repair,
+        lambda agent, subagent, model, messages, *, usage="", previous="", repair="": (
+            _ask_model(
+                current(),
+                model_clients,
+                opening,
+                agent,
+                subagent,
+                model,
+                messages,
+                usage=usage,
+                previous=previous,
+                repair=repair,
+            )
         )
     )
 
@@ -1405,6 +1412,8 @@ def build_server(
         model: str = "",
         carried: int = 0,
         publish: bool = True,
+        context_tokens: int = 0,
+        context_window: int = 0,
     ) -> dict[str, Any]:
         """Decide what this turn runs on: keep ∪ recall.
 
@@ -1423,6 +1432,11 @@ def build_server(
         the union would collapse anyway.  The conversation is the input; there is
         no separate prompt, and the decision's sentences are the recall's
         questions.
+
+        **The decision is shown how full the context is.**  `context_tokens` is
+        the last LLM call's size and `context_window` the conversation's window:
+        the same pair the status bar shows, rendered by the same
+        `context_usage`, so the decision model and the person read one figure.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
@@ -1460,6 +1474,9 @@ def build_server(
                 task records nothing, so its context selection must not move the
                 conversation it stands in for.  The selection is returned to the
                 caller and nothing is written.
+            context_tokens: The last LLM call's size, for the decision's own
+                figure.
+            context_window: The conversation's model window, in tokens.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
@@ -1487,7 +1504,8 @@ def build_server(
         # **The conversation is the input.**  The rebuild runs at the first
         # boundary, after the turn's message was appended (or mid-turn, after a
         # cut-in); there is no separate prompt to pass.
-        decision, status = await _decide(agent, subagent, model, messages)
+        usage, _used = decisions.context_usage(context_tokens, context_window)
+        decision, status = await _decide(agent, subagent, model, messages, usage)
         # **Two ways to have no decision, and the log keeps them apart.**  Both
         # fall back to the turns in hand, and neither may be reported as the
         # other: this line is the only sight anybody gets of the decision model

@@ -209,7 +209,15 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         Message(role="user", content="unbacked"),
     ]
 
-    rebuilt = await wired(store).rebuild(IDENTITY, messages, [7, 8], 2, REF.reference)
+    rebuilt = await wired(store).rebuild(
+        IDENTITY,
+        messages,
+        [7, 8],
+        2,
+        REF.reference,
+        context_tokens=1234,
+        context_window=8192,
+    )
 
     assert rebuilt.covered == 1, "three rebuilt messages minus the two carried"
     assert rebuilt.turn_ids == [7, 8]
@@ -231,6 +239,8 @@ async def test_rebuild_carries_the_unbacked_tail_and_reports_the_decision() -> N
         "model": REF.reference,
         "carried": 2,
         "publish": True,
+        "context_tokens": 1234,
+        "context_window": 8192,
     }
 
 

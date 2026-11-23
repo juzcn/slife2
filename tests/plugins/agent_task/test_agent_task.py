@@ -112,7 +112,13 @@ class DecisionModel:
     calls: list[Any] = field(default_factory=list)
 
     async def __call__(
-        self, agent: str, subagent: str, model: str, messages: Any
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        *,
+        usage: str = "",
     ) -> str:
         self.calls.append(messages)
         return self.answer
@@ -1074,7 +1080,9 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     gate = asyncio.Event()
     keep_one = ""
 
-    async def deciding(agent: str, subagent: str, model: str, messages: Any) -> str:
+    async def deciding(
+        agent: str, subagent: str, model: str, messages: Any, *, usage: str = ""
+    ) -> str:
         """The first task parks inside its rebuild; the second clears its own."""
         asked.append("")
         if len(asked) == 1:

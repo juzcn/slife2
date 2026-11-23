@@ -2144,7 +2144,9 @@ async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
     backend = RefusesOnce(text_turn("second answer"), text_turn("third answer"))
     answers = iter(["{}", "{}", '{"recall": {"query": "one"}}'])
 
-    async def ask(agent, subagent, model, messages, prompt) -> str:
+    async def ask(
+        agent, subagent, model, messages, *, usage="", previous="", repair=""
+    ) -> str:
         return next(answers)
 
     async with Client(

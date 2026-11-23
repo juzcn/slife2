@@ -38,19 +38,21 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     the decision tool's `parameters`, so the template carries no copy.
     """
     assert BOUND_GRAMMAR in json.dumps(RECALL_REPLY)
-    assert BOUND_GRAMMAR not in instruction()
+    assert BOUND_GRAMMAR not in instruction(usage="12,345 (1.2%)")
 
 
 def test_the_recall_instruction_carries_only_what_the_schema_cannot() -> None:
-    """The task, its purpose and the criterion are prose; every field rule is schema.
+    """The task, its purpose, the figure and the criterion are prose.
 
-    The cases restated the `oneOf`/`anyOf` the tool's `parameters` already
-    enforce, and the running turn's exclusion and a follow-up's sentence moved
-    into the field descriptions they qualify.
+    Every field rule is the schema's.  The cases restated the `oneOf`/`anyOf`
+    the tool's `parameters` already enforce, and the running turn's exclusion
+    and a follow-up's sentence moved into the field descriptions they qualify.
     """
-    text = " ".join(instruction().split())
+    text = " ".join(instruction(usage="12,345 (1.2%)").split())
     schema = json.dumps(RECALL_REPLY)
 
+    assert "12,345 (1.2%)" in text
+    assert "limited context window" in text
     assert "historical turns to keep" in text
     assert "chosen context rather than on everything accumulated" in text
     assert "what the work still depends on" in text

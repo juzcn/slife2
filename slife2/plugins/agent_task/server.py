@@ -425,6 +425,10 @@ class TaskTurn:
     #: everything or failed has made a decision about the whole context.  A
     #: later successful call — the model's own — resumes the pass.
     compact_hold: bool = False
+    #: The figure the last saved turn measured, read back with the list.  The
+    #: task's own rebuild runs before its first call, so this is the context
+    #: usage the decision is shown until one of the task's own calls completes.
+    context_tokens: int = 0
     #: The loop running this task's one turn, set once it is built; the
     #: compaction reads its last measured call, the same figure the agent
     #: server's own tool uses.
@@ -782,6 +786,14 @@ def build_server(
                 turn.covered,
                 turn.model,
                 publish=False,
+                # The last LLM call: this task's own completed call when one
+                # returned, otherwise the restored turn's last call.
+                context_tokens=(
+                    turn.live.last_usage.total_tokens
+                    if turn.live is not None and turn.live.last_usage.total_tokens
+                    else turn.context_tokens
+                ),
+                context_window=turn.context_window,
             )
             turn.messages[:] = rebuilt.messages
             turn.turn_ids = rebuilt.turn_ids
@@ -928,6 +940,7 @@ def build_server(
             compact_at=current.agent.compact_at,
             turn_ids=restored.turn_ids,
             covered=restored.covered,
+            context_tokens=restored.context_tokens,
         )
 
         loop = await runtime.make_loop(

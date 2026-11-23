@@ -2641,6 +2641,15 @@ class AgentCore:
             loop.covered,
             loop.model,
             publish=True,
+            # **The last LLM call's figure.**  A completed call of this turn is
+            # newer than the previous turn's last call; before the first call —
+            # where the automatic rebuild runs — the saved call stands.
+            context_tokens=(
+                loop.live.last_usage.total_tokens
+                if loop.live is not None and loop.live.last_usage.total_tokens
+                else loop.context_tokens
+            ),
+            context_window=loop.context_window,
         )
         # **The prefix moves; the suffix does not.**  `carried` re-appended every
         # message from the opening on, so the opening's new index is the old one

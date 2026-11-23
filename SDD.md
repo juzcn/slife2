@@ -1145,7 +1145,9 @@ Each turn, the context plugin answers one question: what will this turn run on?
    model calls it. Its decision model reads the conversation, the turn's own
    message already in it, and answers what to keep of the historical turns in
    hand and what to recall from the turn log. The turn running has no id yet and
-   is carried verbatim; the rebuild never touches it.
+   is carried verbatim; the rebuild never touches it. The decision is shown the
+   last completed call's size against the conversation's window — the status
+   bar's figure, through the same `context_usage`.
 
 The decision model reads the whole conversation — a follow-up usually names its
 subject through the turns above it, and the turn's own message is in the list

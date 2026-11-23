@@ -481,6 +481,8 @@ class TurnRuntime:
         model: str,
         *,
         publish: bool = True,
+        context_tokens: int = 0,
+        context_window: int = 0,
     ) -> Rebuilt:
         """Decide what this turn runs on: keep ∪ recall.
 
@@ -488,6 +490,10 @@ class TurnRuntime:
         boundary, or mid-turn after a cut-in — so there is no prompt to pass
         beside it: the conversation is the input, and the current turn is the
         `carried` tail.
+
+        `context_tokens` and `context_window` are the figure the status bar
+        shows — the last LLM call's size against the conversation's model
+        window — carried so the decision's instruction prints the same one.
 
         `carried` is what the message list holds beyond the turns in
         `turn_ids`: the **unbacked run at its end** — a cancelled turn's
@@ -517,6 +523,8 @@ class TurnRuntime:
             "model": model,
             "carried": carried,
             "publish": publish,
+            "context_tokens": context_tokens,
+            "context_window": context_window,
         }
         payload = tool_payload(
             await (await self.memory()).call_tool("rebuild", arguments)
