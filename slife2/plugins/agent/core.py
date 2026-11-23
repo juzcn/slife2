@@ -2764,11 +2764,14 @@ class AgentCore:
         **The arguments are the selection; omitting them asks the selector.**
         A call with `compact` names the live ids to drop and is applied as it
         came; an empty call is the harness's, and the selector fills the ids.
-        An id is written exactly as its `[MESSAGE:{"id": …}]` annotation shows
-        it; the system prompt and the turn's opening message are the fixed two,
-        and a tool call goes together with its results — both are the schema's
-        rules.  A selection that cannot be applied is refused with a tool error
-        naming why, so it can be corrected while the view stays whole.
+        Write the ids as this call's `compact` argument — an id written in your
+        reply is prose, not a selection, and the call then asks the selector
+        instead.  An id is written exactly as its `[MESSAGE:{"id": …}]`
+        annotation shows it; the system prompt and the turn's opening message
+        are the fixed two, and a tool call goes together with its results —
+        both are the schema's rules.  A selection that cannot be applied is
+        refused with a tool error naming why, so it can be corrected while the
+        view stays whole.
         """
         # The parameter shadows the module for this body; the view helpers are
         # this alias, and `compact` is the selection the model named.
