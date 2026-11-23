@@ -42,16 +42,17 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
 
 
 def test_the_recall_instruction_carries_only_what_the_schema_cannot() -> None:
-    """The task and the criterion are prose; every field rule is schema.
+    """The task, its purpose and the criterion are prose; every field rule is schema.
 
     The cases restated the `oneOf`/`anyOf` the tool's `parameters` already
     enforce, and the running turn's exclusion and a follow-up's sentence moved
     into the field descriptions they qualify.
     """
-    text = instruction()
+    text = " ".join(instruction().split())
     schema = json.dumps(RECALL_REPLY)
 
     assert "historical turns to keep" in text
+    assert "chosen context rather than on everything accumulated" in text
     assert "what the work still depends on" in text
     assert "Cases:" not in text
     assert "your answer" not in text, "the reply shape is the schema's"
