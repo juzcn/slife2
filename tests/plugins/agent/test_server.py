@@ -465,8 +465,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # automatic decision answers to the same `parameters`; one shape, both
     # paths.
     by_name = {tool.name: tool for tool in tools}
-    assert by_name["_context_rebuild"].inputSchema == RECALL_REPLY
-    assert by_name["_turn_compact"].inputSchema == LIVE_REPLY
+    assert by_name["_context_rebuild"].input_schema == RECALL_REPLY
+    assert by_name["_turn_compact"].input_schema == LIVE_REPLY
 
 
 @pytest.mark.asyncio
@@ -3732,7 +3732,12 @@ def failing_rebuild_agent(reached: list[str]) -> FastMCP:
     mcp = FastMCP("agent")
 
     @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
-    async def context_rebuild(ctx: Context) -> str:
+    async def context_rebuild(
+        ctx: Context,
+        mode: str = "",
+        turn_ids: list[int] | None = None,
+        recall: dict[str, Any] | None = None,
+    ) -> str:
         reached.append(CONTEXT_REBUILD)
         raise ToolError("the context server is down")
 
@@ -3782,7 +3787,7 @@ async def test_a_rebuild_hop_that_fails_is_not_asked_again(context) -> None:
         result = await send(server, "one")
 
     assert result.data["text"] == "done"
-    assert reached == [CONTEXT_REBUILD], "one attempt for the turn"
+    assert reached == [CONTEXT_REBUILD], f"one attempt for the turn (reached={reached})"
 
 
 @pytest.mark.asyncio

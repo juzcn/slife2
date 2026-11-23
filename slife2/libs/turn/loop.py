@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
@@ -75,7 +75,7 @@ def timed_out(name: str, bound: float) -> str:
     return f"Error: Tool '{name}' timed out ({bound}s)."
 
 
-def harness_call(name: str) -> ToolCall:
+def harness_call(name: str, arguments: dict[str, Any] | None = None) -> ToolCall:
     """A call the harness makes on the model's behalf, marked as one.
 
     **One builder, because there are two writers of these pairs and an id is a
@@ -102,7 +102,7 @@ def harness_call(name: str) -> ToolCall:
     return ToolCall(
         id=f"{HARNESS_CALL_PREFIX}{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
         name=name,
-        arguments={},
+        arguments=dict(arguments or {}),
     )
 
 
@@ -143,9 +143,13 @@ class AutoCall:
     """A tool the harness wants called at an iteration boundary, and its receipt.
 
     **The one thing `auto` returns**, so that the caller decides *whether*
-    something arrived (cheaply, without a call) and the loop decides how it is
-    written down.  `name` is the tool; the loop runs it out of the registry the
-    last request advertised, so the answer in the pair is the tool's own.
+    something arrived and what the call's arguments are, and the loop decides
+    how it is written down.  `name` is the tool; the loop runs it out of the
+    registry the last request advertised, so the answer in the pair is the
+    tool's own.  **`arguments` is the call's arguments, filled before it runs**:
+    a tool whose body decides (`_context_rebuild`, `_turn_compact`) asks its
+    decision model here, and the tool is executed with the selection the model
+    returned — never with an empty call that is rewritten afterwards.
 
     `channel` and `receipt` describe the *message* the call delivers rather than
     the tool: the loop writes the channel onto the pair's tool message (display
@@ -155,6 +159,7 @@ class AutoCall:
     """
 
     name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
     channel: str = ""
     receipt: str = ""
 
@@ -301,11 +306,10 @@ class AgentLoop:
         user: str | list[dict[str, Any]],
         observer: TurnObserver = NULL_OBSERVER,
         *,
-        auto: Callable[[], AutoCall | None] | None = None,
+        auto: Callable[[], Awaitable[AutoCall | None]] | None = None,
         folded: Callable[[], tuple[str, str] | None] | None = None,
         folded_commit: Callable[[int], None] | None = None,
         injected: Callable[[], int] | None = None,
-        pair_arguments: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
 
@@ -320,16 +324,24 @@ class AgentLoop:
         is what owns the shape of a turn, and a caller that appended its own user
         message would be a second place that knows it.
 
-        **The auto-invoke.**  `auto` is asked at the top of every iteration for
-        an `AutoCall` — the name of a tool the *harness* wants called, the
-        cut-in — and the call is then made the way the model's own calls are
-        made: through `self._tools`, the registry whose `specs` went out with the
-        last request.  So the name
+        **The auto-invoke.**  `auto` is awaited at the top of every iteration
+        for an `AutoCall` — the name of a tool the *harness* wants called, its
+        arguments, the cut-in — and the call is then made the way the model's
+        own calls are made: through `self._tools`, the registry whose `specs`
+        went out with the last request.  So the name
         routes the same way, the caller's identity rides the same way, and the
         text written into the pair is **the tool's own answer** rather than
         something written beside it.  `trim_tools` is the other half of this and
         does the same thing at a turn boundary; the two are the same mechanism
         and differ only in when the boundary is.
+
+        **The arguments are built before the call, and the pair is that call.**
+        A tool whose body would otherwise decide — `_context_rebuild`,
+        `_turn_compact` — asks its decision model inside `auto`, and the
+        `AutoCall` carries the selection.  The tool executes on those arguments,
+        and the pair carries the same arguments; there is no empty call to
+        rewrite after the fact.  A model's own call to the same tool is the
+        other parameter provider and writes the same shape.
 
         What lands in the list is a **harness tool pair**, not a user message,
         and that is the whole of why it is safe: the model reads it as something
@@ -337,21 +349,14 @@ class AgentLoop:
         sequence for every provider.  A bare user message in the middle of one is
         a 400 from several of them.
 
-        `auto` returns an `AutoCall` or `None`, and the split is deliberate: the
-        caller decides *whether* something arrived — cheaply, without a call —
-        and this decides nothing about tools at all.  The registry is what knows
-        a name.  The call's channel is written onto the pair as display
-        metadata and both halves are echoed on `MessageCutIn`, so there is one
-        answer to "what arrived, and for whom" whether a reader looks at the
-        live stream or at the turn log.
-
-        **`pair_arguments` fills the automatic call's arguments after it ran.**
-        A tool whose body decides — `_context_rebuild` and `_turn_compact` —
-        executes on the empty arguments the harness mints, and the selection it
-        chose is read back through this callback and written onto the same call
-        (the id does not move), so the pair a model reads carries the choice
-        rather than an empty call.  A caller with no such tool passes nothing,
-        and every pair is what it always was.
+        `auto` answers an `AutoCall` or `None`, and the split is deliberate: the
+        caller decides *whether* something is due and assembles the call's
+        arguments — the decision model's selection for a deciding tool — while
+        this decides nothing about tools at all.  The registry is what knows a
+        name.  The call's channel is written onto the pair as display metadata
+        and both halves are echoed on `MessageCutIn`, so there is one answer to
+        "what arrived, and for whom" whether a reader looks at the live stream
+        or at the turn log.
 
         **The model can make the same call itself**, because the tool is
         declared and a provider hands the loop whatever the model asked for.
@@ -430,8 +435,11 @@ class AgentLoop:
             # never raises), so there is no case where a failure has to be
             # *recorded* with the call it was written for: everything that can
             # come back is an answer.
-            if auto is not None and (wanted := auto()) is not None:
-                call = harness_call(wanted.name)
+            if auto is not None and (wanted := await auto()) is not None:
+                # **The call carries the arguments `auto` assembled** — for a
+                # deciding tool, the decision model's selection.  It is made
+                # with them, not with an empty call rewritten afterwards.
+                call = harness_call(wanted.name, wanted.arguments)
                 # **`auto()` says a message was waiting; the tool decides whether
                 # one was taken.**  A failed call answers with an error, and a
                 # queue that emptied between the two calls (or refused an image)
@@ -462,29 +470,14 @@ class AgentLoop:
                 channel, receipt = (
                     found if found is not None else (wanted.channel, wanted.receipt)
                 )
-                # **The decision's arguments go into the pair; the id does
-                # not move.**  The tool ran on the empty call and decided
-                # inside its body; the body stored what it chose, and this is
-                # how the pair — written after the answer — carries the
-                # selection the model reads as its own.  The tool result's id
-                # is the same one the tool answered, so the exchange stays
-                # legal.
-                decided = (
-                    pair_arguments(wanted.name) if pair_arguments is not None else None
-                )
-                written = (
-                    replace(call, arguments=decided)
-                    if isinstance(decided, dict) and decided
-                    else call
-                )
                 messages.append(
-                    Message(role="assistant", content=None, tool_calls=[written])
+                    Message(role="assistant", content=None, tool_calls=[call])
                 )
                 messages.append(
                     Message(
                         role="tool",
                         content=fitted,
-                        tool_call_id=written.id,
+                        tool_call_id=call.id,
                         # Display metadata, persisted with the turn and never
                         # sent to a provider (`Message.to_record`): the line a
                         # rebuilt transcript draws for this pair wears the

@@ -100,9 +100,11 @@ class Streamer(Protocol):
 
     `tool_choice` names the one tool this call must use; empty leaves the choice
     to the model.  `thinking` overrides the model's configured `thinking` for
-    this call only (`"enabled"` / `"disabled"`); empty uses the config.  Both
-    are per-call facts — the decision tools are the one caller that forces them
-    — and a wire that cannot express one raises rather than ignoring it.
+    this call only (`"enabled"` / `"disabled"`); empty uses the config.
+    `temperature` overrides the configured sampling for this call only; `None`
+    uses the config.  All three are per-call facts — the decision tools are the
+    one caller that sets them — and a wire that cannot express one raises rather
+    than ignoring it.
     """
 
     def __call__(
@@ -114,6 +116,7 @@ class Streamer(Protocol):
         *,
         tool_choice: str = "",
         thinking: str = "",
+        temperature: float | None = None,
     ) -> AsyncGenerator[ProviderEvent]: ...
 
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
 
 from slife2.libs.turn.loop import AgentLoop, TurnResult
 from slife2.libs.turn.messages import Message, Usage
@@ -348,14 +347,6 @@ class Loop:
     #: automatic rebuild, whether or not it ran, and after it the tool is the
     #: model's to call.  Reset with `hidden` when a turn starts.
     rebuilt: bool = False
-    #: What the last `_context_rebuild`/`_turn_compact` body decided, as the
-    #: tool arguments that express it.  The automatic call's pair is written by
-    #: `AgentLoop.run_turn` *after* the tool answered, and this is how the
-    #: decision's arguments reach that pair; the model's own call carries its
-    #: arguments already.  **Cleared when a turn starts and before each
-    #: automatic call**, so a body a failed hop never reached writes an empty
-    #: call rather than the previous decision.
-    last_decision: dict[str, Any] = field(default_factory=dict)
     #: The last turn's last model call, in tokens — the figure the status bar
     #: shows.  Set from the restored last turn and after every turn; 0 for a
     #: conversation that has not run one.  Not estimated from `messages`: what

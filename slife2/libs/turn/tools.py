@@ -244,12 +244,34 @@ ATTACH_IMAGE = "attach_image"
 #: pair under it.
 #:
 #: **And one of the two tools whose bodies call a model.**  `_turn_compact` runs
-#: the context plugin's selection decision — a forced `select_messages` tool
-#: call over the live view — so a call costs a second model call.  Its
+#: the context plugin's selection decision — the same tool, forced, over the
+#: live view — so a call costs a second model call.  Its
 #: tokens are logged by the model server under `kind=compactor` and are not
 #: added to the turn's own bill; `_context_rebuild`'s decision is the same
 #: arrangement under `kind=decision`.
 TURN_COMPACT = "_turn_compact"
+
+#: The model-facing description of `_turn_compact`, and the decision call's
+#: tool description — **one text for both callers**, for `CONTEXT_REBUILD_TEXT`'s
+#: reason.  The empty-call rule (a turn's call asks the selector; an empty
+#: decision reply drops nothing) is caller-specific and stays in the docstring.
+TURN_COMPACT_TEXT = (
+    "Drop what this turn no longer needs from the view it is running on. Call "
+    "it with `compact` — a JSON array of live message ids; the field is "
+    "required, and [] means drop nothing. Each id is written exactly as its "
+    '`[MESSAGE:{"id": …}]` annotation shows it; an array is a JSON array of '
+    "strings, never a string containing one. Every message is a candidate "
+    "except the system prompt and the turn's opening message; the opening is "
+    "`cur.0` and is never a candidate. Drop a tool "
+    "exchange as a whole: an assistant message that asked for tools goes "
+    "together with all of its results, and a result goes together with the "
+    "assistant message that asked for it. A selection that cannot be applied "
+    "is refused with a tool error naming why. Nothing is deleted: the hidden "
+    "messages stay in the turn's saved row and the conversation's live list, "
+    "and only this turn's view shrinks. The next turn starts from the full "
+    "conversation; `_context_rebuild` is the tool that edits the durable "
+    "context."
+)
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the
 #: **historical turns** the conversation is made of.  `_turn_compact` hides
@@ -259,6 +281,28 @@ TURN_COMPACT = "_turn_compact"
 #: never touched — it has no id yet — so it is carried verbatim while the
 #: history is rebuilt.
 CONTEXT_REBUILD = "_context_rebuild"
+
+#: The model-facing description of `_context_rebuild`, **one text for both
+#: callers**: the model in a turn (which may call it with a selection of its
+#: own) and the decision call (which is forced to fill the same selection).
+#: Written for both audiences, so it does not say what an empty call means —
+#: that depends on the caller: in a turn it asks the harness to decide, while a
+#: decision reply with no arguments keeps the context as it is.  The caller-
+#: specific rule stays in the code's docstring, not in this text.
+CONTEXT_REBUILD_TEXT = (
+    "Rebuild the conversation's live context — the historical turns this turn "
+    "runs on. Call it with `mode`: \"keep\" (every turn in hand), \"clear\" "
+    '(none of them), or "ids" (exactly the turns in `turn_ids`). `turn_ids` is '
+    "a JSON array of integers — for example [14, 15] — never a string "
+    "containing one. `recall` adds turns from the turn log by meaning "
+    "(`sentences`), by words (`query`), or by a period (`since`/`until`, with "
+    "`anchor` for which end survives). Kept and recalled turns are joined, so "
+    "naming a turn on both sides is still one turn. The turn running is never "
+    "part of the selection — it has no turn id and is carried verbatim. A turn "
+    'is named by the id its `[TURN:{"turn_id": …}]` footnote carries. The '
+    "answer reports how many turns in hand were kept, how many outside were "
+    "recalled, and the context this turn runs on from here."
+)
 
 #: **The tools that act on a live turn's own message list.**  They are the four
 #: the agent server serves against its loop: the cut-in takes a queued message,

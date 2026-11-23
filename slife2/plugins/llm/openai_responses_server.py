@@ -279,6 +279,7 @@ def build_request(
     *,
     tool_choice: str = "",
     thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
@@ -288,6 +289,8 @@ def build_request(
     """
     if thinking and settings.reasoning:
         settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
     forced_tool(tools, tool_choice)
     reasoning = reasoning_parameter(settings)
     # A model that did not ask for reasoning is a model to which another one's

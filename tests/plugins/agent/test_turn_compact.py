@@ -231,16 +231,16 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
 ) -> None:
     """**The whole mechanism, in one turn.**
 
-    The model reads a tool result, then asks to compact; the selector drops the
-    exchange that produced it; the model's next call is missing it.  The turn's
-    saved row has the user's message, both calls, both results and the answer —
-    the record is the conversation, not the view.
+    The model reads a tool result, then calls `_turn_compact` with the exchange
+    that produced it; the tool drops it from the view; the model's next call is
+    missing it.  The turn's saved row has the user's message, both calls, both
+    results and the answer — the record is the conversation, not the view.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over()
     backend = FakeBackend(
         calling("fake__echo", {"text": OLD}, "c1"),
-        calling("_turn_compact", {}, "c2"),
+        calling("_turn_compact", {"compact": ["cur.3", "cur.4"]}, "c2"),
         answered("done"),
     )
     seen: list[list[dict]] = []
@@ -271,17 +271,13 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
 
     assert answer.data["text"] == "done"
     assert len(backend.calls) == 3, "the model's own calls and no compaction call"
-    assert len(seen) == 1, "one selector call"
-    assert usages and usages[0], "the selector is told the context figure"
+    assert not seen, "the model's own selection does not ask the selector"
     finished = [
         event
         for event in events
         if isinstance(event, ToolCallFinished) and event.name == TURN_COMPACT
     ]
     assert finished, "the tool's output reaches the turn's stream"
-    assert any(without_id(message.get("content")) == OLD for message in seen[0]), (
-        "the selector read the view before the drop"
-    )
 
     final = backend.calls[-1][0]
     assert not any(
@@ -384,7 +380,7 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
         return "{}"
 
     backend = FakeBackend(
-        calling(CONTEXT_REBUILD, {"context": "clear"}, "c1"),
+        calling(CONTEXT_REBUILD, {"mode": "clear"}, "c1"),
         answered("second"),
     )
     answer = await run_turn(cfg, backend, no_drop, ask=ask)
@@ -402,7 +398,7 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
         if message.get("tool_calls")
         and message["tool_calls"][0]["function"]["name"] == CONTEXT_REBUILD
     ]
-    assert {"context": "clear"} in calls, "the pair carries the selection"
+    assert {"mode": "clear"} in calls, "the pair carries the selection"
 
 
 @pytest.mark.asyncio
@@ -458,7 +454,7 @@ async def test_a_split_selection_is_a_tool_error_not_a_failed_turn(
 async def test_an_automatic_selection_that_splits_is_reported_not_applied(
     tmp_path, monkeypatch
 ) -> None:
-    """The automatic compaction's split is a report and a hold, not a 400."""
+    """The automatic compaction's split is a tool error and a hold, not a 400."""
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(compact_at=0.0005)
     base_turn = calling("fake__echo", {"text": OLD}, "c1")
@@ -500,9 +496,9 @@ async def test_an_automatic_selection_that_splits_is_reported_not_applied(
     rows = stored_messages()
     assert any(
         message.get("role") == "tool"
-        and "No compaction: the selection would split" in str(message.get("content"))
+        and "split a tool exchange" in str(message.get("content"))
         for message in rows
-    ), "the report names the refusal"
+    ), "the tool error names the refusal"
 
 
 @pytest.mark.asyncio
@@ -649,7 +645,7 @@ async def test_a_keep_all_decision_stops_the_automatic_pass(
         repair: str = "",
     ) -> str:
         asked.append(usage)
-        return "{}"
+        return json.dumps({"compact": []})
 
     answer = await run_turn(cfg, backend, keep_all)
 
@@ -680,7 +676,7 @@ async def test_a_selector_that_keeps_everything_drops_nothing(
     cfg = config_over()
     backend = FakeBackend(
         calling("fake__echo", {"text": OLD}, "c1"),
-        calling("_turn_compact", {}, "c2"),
+        calling("_turn_compact", {"compact": []}, "c2"),
         answered("done"),
     )
 
@@ -695,7 +691,7 @@ async def test_a_selector_that_keeps_everything_drops_nothing(
         previous: str = "",
         repair: str = "",
     ) -> str:
-        return "{}"
+        return json.dumps({"compact": []})
 
     answer = await run_turn(cfg, backend, keep_all)
 
@@ -842,12 +838,8 @@ async def test_a_malformed_selection_is_a_tool_error_not_a_silent_no_op(
 async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) -> None:
     """A provider failure is a fallback, not a failure mode: the turn goes on."""
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
-    cfg = config_over()
-    backend = FakeBackend(
-        calling("fake__echo", {"text": OLD}, "c1"),
-        calling("_turn_compact", {}, "c2"),
-        answered("done"),
-    )
+    cfg = config_over(compact_at=0.0005)
+    backend = FakeBackend(high(OLD, "c1"), answered("done"))
 
     async def broken(
         agent: str,
@@ -876,8 +868,7 @@ async def test_a_selector_failure_does_not_fail_the_turn(tmp_path, monkeypatch) 
     assert "RuntimeError: the provider is down" in str(report[0]), (
         "the provider's own words are in the report, as on a failed turn's line"
     )
-    # The repair call is not made for a provider failure — there is no answer
-    # to correct — so the selector was asked once.
+    # One selector call, and no repair: the failure is the tool's result.
     final = backend.calls[-1][0]
     assert any(
         message.role == "tool" and without_id(message.content) == OLD

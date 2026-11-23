@@ -154,14 +154,30 @@ class Rebuilt:
 
 @dataclass(frozen=True)
 class LiveChoice:
-    """One live selector's answer: the view ids to drop, and why not if none.
+    """One live selector's raw answer, before `_turn_compact` checks it.
 
-    `drop` is empty for both "nothing worth dropping" and "no decision", and
-    `decision` tells the two apart the way `Rebuilt.decision` does for
-    the rebuild.
+    `arguments` is the forced call's raw argument text (or the mapping an
+    injected selector answered with); `decision` is `""` for an answer,
+    otherwise why there is none.  The caller builds the call's `compact`
+    argument from it; `compact_turn` checks the selection.
     """
 
-    drop: list[str]
+    arguments: Any = ""
+    decision: str = ""
+
+
+@dataclass(frozen=True)
+class Decided:
+    """The decision model's raw answer, before a tool executes it.
+
+    **The arguments the automatic call will carry.**  `arguments` is the forced
+    call's raw argument text (or the mapping an injected model answered with);
+    it is not parsed here.  `decision` is `""` for an answer, otherwise why
+    there is none.  The caller turns the text into a non-empty selection for the
+    tool call — the tool checks it and reports a failure if it is wrong.
+    """
+
+    arguments: Any = ""
     decision: str = ""
 
 
@@ -236,6 +252,49 @@ def _count(payload: dict[str, Any], key: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise unreadable("the context store", "report the rebuild's counts", payload)
     return value
+
+
+def _compact_value(arguments: Any) -> Any:
+    """The `compact` value in a raw selector answer, **without checking it**.
+
+    A transport conversion, not a legality check: a JSON-object text has its
+    `compact` field taken out, and anything else is handed on as it came.
+    `parse_live` is the one check, and it runs on the result of this for both
+    the selector's answer and the model's own call.
+    """
+    raw = arguments
+    if isinstance(raw, str) and raw:
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return raw
+    if isinstance(raw, dict):
+        return raw.get("compact", raw)
+    return raw
+
+
+def selection_from_arguments(arguments: Any, field: str) -> dict[str, Any]:
+    """A decision's raw arguments as a **non-empty** tool-call argument mapping.
+
+    A transport conversion, not a legality check.  A JSON-object text is passed
+    as the object; anything else is wrapped in `field`, so the tool sees the
+    value the decision model gave and answers with its own refusal.  The result
+    is never `{}`: the tool call must carry arguments, and a failure is one of
+    them.
+    """
+    if isinstance(arguments, dict):
+        return arguments if arguments else {field: "the decision returned an empty object"}
+    if isinstance(arguments, str) and arguments:
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed:
+            return parsed
+        if isinstance(parsed, dict):
+            return {field: "the decision returned an empty object"}
+        return {field: arguments}
+    return {field: "the decision returned no arguments"}
 
 
 class TurnRuntime:
@@ -507,6 +566,52 @@ class TurnRuntime:
             context_tokens=context_tokens,
         )
 
+    async def decide_context(
+        self,
+        identity: ConversationId,
+        messages: list[Message],
+        model: str,
+        *,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+    ) -> Decided:
+        """Ask the decision model for a selection without applying it.
+
+        **The first half of the automatic rebuild.**  The agent server's
+        boundary calls this, then calls `_context_rebuild` with the selection
+        it returned; that call carries the decision's arguments from the start,
+        so the pair is never an empty call.  No store is read and nothing is
+        written here.
+
+        `context_tokens` and `prompt_window` are the figure the instruction
+        prints — the same one the status bar shows.  An answer this build cannot
+        read is the context store's refusal (`unreadable`), not a decision.
+        """
+        payload = tool_payload(
+            await (await self.memory()).call_tool(
+                "decide",
+                {
+                    "agent": identity[0],
+                    "subagent": identity[1],
+                    "messages": [_context_message(message) for message in messages],
+                    "model": model,
+                    "context_tokens": context_tokens,
+                    "prompt_window": prompt_window,
+                },
+            )
+        )
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, (str, dict)):
+            raise unreadable(
+                "the context store", "return the decision's arguments", payload
+            )
+        decision = payload.get("decision")
+        if not isinstance(decision, str):
+            raise unreadable(
+                "the context store", "report the decision's status", payload
+            )
+        return Decided(arguments=arguments, decision=decision)
+
     async def rebuild(
         self,
         identity: ConversationId,
@@ -628,10 +733,12 @@ class TurnRuntime:
         """Ask the live selector which of this turn's messages it no longer needs.
 
         **A harness call, not a model tool**: the model reaches compaction
-        through `_turn_compact`, and this is the other half of that tool's body.
-        The answer is read strictly — a drop that is not a whole id, or a status
-        that is not text, is a build this one cannot read rather than an empty
-        selection (`slife2.libs.plugin.protocol.unreadable`).
+        through `_turn_compact`, and this is the call that asks the selector.
+        The answer is the forced tool's raw argument text, not a parsed list:
+        `_turn_compact` (here, `compact_turn`) checks it.  Only the payload's
+        own shapes are refused — `arguments` that is neither text nor a mapping,
+        or a status that is not text — as a build this one cannot read
+        (`slife2.libs.plugin.protocol.unreadable`).
 
         The ids are the *live view's* ids — the `[MESSAGE:{"id": …}]` the caller
         wrote onto each message, not positions: hiding one message does not
@@ -653,22 +760,17 @@ class TurnRuntime:
                 },
             )
         )
-        drop = payload.get("compact")
-        if not isinstance(drop, list):
-            raise unreadable("the context store", "return a live drop list", payload)
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, (str, dict)):
+            raise unreadable(
+                "the context store", "return the selector's arguments", payload
+            )
         decision = payload.get("decision")
         if not isinstance(decision, str):
             raise unreadable(
                 "the context store", "report the selector's status", payload
             )
-        ids: list[str] = []
-        for value in drop:
-            if not isinstance(value, str) or not value:
-                raise unreadable(
-                    "the context store", "return live message ids", payload
-                )
-            ids.append(value)
-        return LiveChoice(drop=ids, decision=decision)
+        return LiveChoice(arguments=arguments, decision=decision)
 
     async def compact_turn(
         self,
@@ -721,20 +823,19 @@ class TurnRuntime:
                 return compact.Compacted(
                     seen=len(view), dropped=0, decision=choice.decision
                 )
-            drop = choice.drop
-        else:
-            # **The model's own call: the same parser the selector's answer
-            # gets.**  The `compact` field this call carries is read as the
-            # selector's reply is, so one shape answers for both.
-            drop, refusal = decisions.parse_live(
-                json.dumps({"compact": selection}, ensure_ascii=False)
+            selection = _compact_value(choice.arguments)
+        # **One parser for both callers.**  The selector's raw answer and the
+        # model's own call go through the same `parse_live`; the tool reports a
+        # refusal as its error result, and no repair is attempted.
+        drop, refusal = decisions.parse_live(
+            json.dumps({"compact": selection}, ensure_ascii=False)
+        )
+        if drop is None:
+            return compact.Compacted(
+                seen=len(view),
+                dropped=0,
+                refused=f"the selection could not be read: {refusal}",
             )
-            if drop is None:
-                return compact.Compacted(
-                    seen=len(view),
-                    dropped=0,
-                    refused=f"the selection could not be read: {refusal}",
-                )
         unknown = compact.unknown_ids(candidates, drop, hidden)
         if unknown:
             return compact.Compacted(

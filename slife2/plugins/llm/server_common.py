@@ -248,18 +248,24 @@ class _TurnBuilder:
         )
 
 
-def call_options(tool_choice: str, thinking: str) -> dict[str, str]:
+def call_options(
+    tool_choice: str, thinking: str, temperature: float | None = None
+) -> dict[str, Any]:
     """The per-call options a streamer or request builder receives, when set.
 
     Empty is the wire's ordinary behaviour, and a scripted streamer in a test
-    keeps its four-argument call: two always-present keywords would break every
-    one of them for an option none of those tests set.
+    keeps its four-argument call: always-present keywords would break every one
+    of them for an option none of those tests set.  `temperature` is forwarded
+    only when the caller named one — the decision calls ask for 0 — so a call
+    with no override keeps the model's configured value (or its absence).
     """
-    options: dict[str, str] = {}
+    options: dict[str, Any] = {}
     if tool_choice:
         options["tool_choice"] = tool_choice
     if thinking:
         options["thinking"] = thinking
+    if temperature is not None:
+        options["temperature"] = temperature
     return options
 
 
@@ -286,6 +292,7 @@ async def stream_chat_impl(
     *,
     tool_choice: str = "",
     thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """Run one streamed model call and return the assembled result.
 
@@ -331,7 +338,7 @@ async def stream_chat_impl(
             [Message.from_wire(m) for m in messages],
             [ToolSpec.from_wire(t) for t in tools],
             model,
-            **call_options(tool_choice, thinking),
+            **call_options(tool_choice, thinking, temperature),
         )
     ) as events:
         async for event in events:
@@ -811,6 +818,7 @@ def sdk_streamer(
         *,
         tool_choice: str = "",
         thinking: str = "",
+        temperature: float | None = None,
     ) -> AsyncGenerator[ProviderEvent]:
         # Held for the whole stream, not just to look the provider up: the
         # client is what carries the response being read below, and a config
@@ -819,7 +827,10 @@ def sdk_streamer(
         async with pool.lease() as clients:
             settings = clients.provider(provider).model(model)
             request = build_request(
-                messages, tools, settings, **call_options(tool_choice, thinking)
+                messages,
+                tools,
+                settings,
+                **call_options(tool_choice, thinking, temperature),
             )
             response = await start(clients.client(provider), request)
             translate = translator()
@@ -875,6 +886,7 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         kind: str = "",
         tool_choice: str = "",
         thinking: str = "",
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         """Stream one chat completion.
 
@@ -917,6 +929,9 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 The decision calls disable it — a thinking endpoint rejects a
                 forced `tool_choice`, and the structured call is what makes the
                 decision readable.
+            temperature: A sampling temperature to use for this call only;
+                omitted uses the model's configured value. The decision calls
+                send 0, because a selection should not vary between runs.
         """
         who = f"{agent}/{subagent}" if subagent else agent or "(unstated)"
         what = kind or "(unstated)"
@@ -931,6 +946,7 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 ctx,
                 tool_choice=tool_choice,
                 thinking=thinking,
+                temperature=temperature,
             )
         except Exception as exc:
             # **A failed call carries the identity on the line**: FastMCP's own

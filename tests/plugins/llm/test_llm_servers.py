@@ -1520,7 +1520,7 @@ def test_responses_a_damaged_call_replays_its_own_arguments() -> None:
     """
     damaged = ToolCall(
         id="c1",
-        name="decide_context",
+        name="_context_rebuild",
         arguments={},
         error='the arguments are not JSON: "Expecting value"',
         raw_arguments='{"context": "keep"',
@@ -1753,18 +1753,18 @@ async def test_the_decision_options_reach_the_streamer() -> None:
             {
                 "type": "function",
                 "function": {
-                    "name": "decide_context",
+                    "name": "_context_rebuild",
                     "description": "d",
                     "parameters": {"type": "object"},
                 },
             }
         ],
         model="m",
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
 
-    assert seen == {"tool_choice": "decide_context", "thinking": "disabled"}
+    assert seen == {"tool_choice": "_context_rebuild", "thinking": "disabled"}
     assert result.data["text"] == "ok"
 
 
@@ -2053,6 +2053,37 @@ def test_openai_sends_only_what_was_configured() -> None:
     assert request["max_tokens"] == 100
 
 
+def test_a_call_can_override_the_configured_temperature() -> None:
+    """The decision calls send 0; the turn's own calls keep the config.
+
+    A decision is a selection, not prose, so sampling only adds variance to the
+    same answer.  The override is per call, so the model's configured
+    temperature still governs every ordinary turn.
+    """
+    tuned = ModelSettings(model="m", temperature=0.7)
+    assert openai_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
+    assert (
+        anthropic_build_request([], [], tuned, temperature=0.0)["extra_body"][
+            "temperature"
+        ]
+        == 0.0
+    )
+    assert (
+        responses_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
+    )
+
+    # No override: the configured value stands on every wire.
+    assert openai_build_request([], [], tuned)["temperature"] == 0.7
+    assert anthropic_build_request([], [], tuned)["extra_body"]["temperature"] == 0.7
+    assert responses_build_request([], [], tuned)["temperature"] == 0.7
+
+    # A model with no configured temperature gets the override, and nothing
+    # when no override is named.
+    bare = ModelSettings(model="m")
+    assert openai_build_request([], [], bare, temperature=0.0)["temperature"] == 0.0
+    assert "temperature" not in openai_build_request([], [], bare)
+
+
 def test_openai_thinking_is_opt_in() -> None:
     """The OpenAI-compatible wire has no standard thinking field.
 
@@ -2091,18 +2122,18 @@ def test_the_decision_options_are_per_call() -> None:
     that did not ask for it.
     """
     tool = ToolSpec(
-        name="decide_context", description="d", parameters={"type": "object"}
+        name="_context_rebuild", description="d", parameters={"type": "object"}
     )
     request = openai_build_request(
         [],
         [tool],
         ModelSettings(model="m", reasoning=True),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
     assert request["tool_choice"] == {
         "type": "function",
-        "function": {"name": "decide_context"},
+        "function": {"name": "_context_rebuild"},
     }
     assert request["extra_body"]["thinking"]["type"] == "disabled"
 
@@ -2112,7 +2143,7 @@ def test_the_decision_options_are_per_call() -> None:
 
     with pytest.raises(ValueError, match="sends no tools"):
         openai_build_request(
-            [], [], ModelSettings(model="m"), tool_choice="decide_context"
+            [], [], ModelSettings(model="m"), tool_choice="_context_rebuild"
         )
 
 
@@ -2127,13 +2158,13 @@ def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
     override must not open a hatch the operator left closed.
     """
     tool = ToolSpec(
-        name="decide_context", description="d", parameters={"type": "object"}
+        name="_context_rebuild", description="d", parameters={"type": "object"}
     )
     declared = openai_build_request(
         [],
         [tool],
         ModelSettings(model="m", reasoning=False, thinking="enabled", max_tokens=8000),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
     assert declared["extra_body"] == {"thinking": {"type": "disabled"}}
@@ -2142,7 +2173,7 @@ def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
         [],
         [tool],
         ModelSettings(model="m"),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
     assert "extra_body" not in silent, "an endpoint that was not asked to think"
@@ -2151,7 +2182,7 @@ def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
         [],
         [tool],
         ModelSettings(model="m", reasoning=True, thinking="omit"),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
     assert "extra_body" not in omitted, "the operator's `omit` is respected"
@@ -2160,28 +2191,28 @@ def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
 def test_anthropic_and_responses_map_the_forced_choice() -> None:
     """The same two options, in each wire's own spelling."""
     tool = ToolSpec(
-        name="decide_context", description="d", parameters={"type": "object"}
+        name="_context_rebuild", description="d", parameters={"type": "object"}
     )
     anthropic = anthropic_build_request(
         [],
         [tool],
         ModelSettings(model="m", reasoning=True, max_tokens=8000),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
-    assert anthropic["tool_choice"] == {"type": "tool", "name": "decide_context"}
+    assert anthropic["tool_choice"] == {"type": "tool", "name": "_context_rebuild"}
     assert "thinking" not in anthropic, "the override suppresses the configured block"
 
     responses = responses_build_request(
         [],
         [tool],
         ModelSettings(model="m", reasoning=True),
-        tool_choice="decide_context",
+        tool_choice="_context_rebuild",
         thinking="disabled",
     )
     assert responses["tool_choice"] == {
         "type": "function",
-        "name": "decide_context",
+        "name": "_context_rebuild",
     }
     assert "reasoning" not in responses
 

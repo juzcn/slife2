@@ -113,12 +113,13 @@ def config(**task_overrides: Any) -> Config:
 class DecisionModel:
     """The context plugin's one model call, scripted — and counted.
 
-    `{}` is SDD §5.5's common answer: what is in hand is the answer, so nothing is
-    fetched and nothing is written.  Counting the calls is how "one turn, one
-    rebuild" is asserted rather than assumed, and the two are the same fact.
+    `mode: keep` is SDD §5.5's common answer: what is in hand is the answer, so
+    nothing is fetched and nothing is written.  Counting the calls is how "one
+    turn, one rebuild" is asserted rather than assumed, and the two are the
+    same fact.
     """
 
-    answer: str = "{}"
+    answer: str = '{"mode": "keep"}'
     calls: list[Any] = field(default_factory=list)
 
     async def __call__(
@@ -1100,7 +1101,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
             await gate.wait()
             return keep_one
         second_in.set()
-        return '{"context": "clear"}'
+        return '{"mode": "clear"}'
 
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=deciding)
@@ -1123,7 +1124,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
                 )
                 ids.append(stored.data["turn_id"])
         # The first task's own decision keeps one of the two turns.
-        keep_one = json.dumps({"context": [ids[0]]})
+        keep_one = json.dumps({"mode": "ids", "turn_ids": [ids[0]]})
 
         built = build(
             text_turn("one answered"),

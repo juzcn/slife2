@@ -256,7 +256,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     )
     harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
 
-    def auto() -> AutoCall | None:
+    async def auto() -> AutoCall | None:
         """Asked at the top of *every* iteration; delivers once, on the second.
 
         The gate is the caller's, and it is the cheap half of the split: whether
@@ -342,7 +342,7 @@ async def test_a_large_cut_in_is_fitted_like_any_other_result() -> None:
     messages: list[Message] = []
     asked = 0
 
-    def auto() -> AutoCall | None:
+    async def auto() -> AutoCall | None:
         nonlocal asked
         asked += 1
         if asked == 1:
@@ -386,7 +386,7 @@ async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
     messages: list[Message] = []
     asked = 0
 
-    def auto() -> AutoCall | None:
+    async def auto() -> AutoCall | None:
         nonlocal asked
         asked += 1
         if asked == 1:
