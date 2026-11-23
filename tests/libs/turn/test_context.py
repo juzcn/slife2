@@ -156,17 +156,17 @@ def test_a_live_id_is_prefixed_into_a_copy_only() -> None:
 
 
 def test_the_live_instruction_carries_only_what_the_schema_cannot() -> None:
-    """The task, the figure and the id marker are prose; every rule is schema.
+    """The task, its purpose, the figure and the id marker are prose.
 
-    The candidate set, the tool-exchange legality and the reply's shape are in
-    the tool's `parameters` (`LIVE_REPLY`), sent with the call.  Restating them
-    here was a second spelling of the rules the parser reads.
+    Every rule is in the tool's `parameters` (`LIVE_REPLY`), sent with the call.
+    Restating them here was a second spelling of the rules the parser reads.
     """
-    text = live_instruction(usage="12,345 (1.2%)")
+    text = " ".join(live_instruction(usage="12,345 (1.2%)").split())
 
     assert "12,345 (1.2%)" in text
     assert '[MESSAGE:{"id": n}]' in text
     assert "no longer need" in text
+    assert "room in the window and sees only what it still needs" in text
     assert "nothing is deleted" in text
     assert "goes as a whole" not in text, "the legality rule is the schema's"
     assert "opening message" not in text, "the candidate rule is the schema's"
