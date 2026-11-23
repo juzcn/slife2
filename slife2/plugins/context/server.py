@@ -41,6 +41,14 @@ subject; SDD §5.3 states the contract both answer to.  A failed decision is not
 a failed turn: `rebuild` keeps the context in hand and `select_live` compacts
 nothing.
 
+**The repair is the decision call's own retry.**  A decision call is nested
+inside a tool body and has no agent loop around it, so it cannot see an error
+and try again the way the turn's model does.  `_ask_with_repair` is where that
+missing iteration lives: the refused answer and its reason go back as one tool
+exchange, and a second refusal ends the decision.  The turn's own
+`_context_rebuild`/`_turn_compact` call needs none of this — its error is an
+ordinary tool result and the model retries in its next iteration.
+
 **`restore` is the harness's API and not the model's.**  `rebuild` is this
 plugin's API and not the model's either — but it is reached through
 `_context_rebuild`, a *harness tool*: LLM-visible, auto-invoked at the first

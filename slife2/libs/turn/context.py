@@ -18,7 +18,10 @@ a failure ends in "keep the context" rather than in a retry.  The exception is
 an answer this build cannot read: the refusal names the field
 (`parse_with_reason`) and the model is asked once more with that reason, because
 correcting an answer already in hand is not the same bet as asking a silent
-provider again.
+provider again.  **That one round stands in for the loop the decision call does
+not have**: the turn's own model sees a bad tool call as an ordinary tool error
+and tries again in its next iteration, while a decision call has no next
+iteration — so its correction is the harness handing the answer back once.
 
 **The union is what makes "keep this and add that" expressible.**  Kept and
 recalled are joined by id and never reconciled: a turn both kept and recalled is

@@ -1043,7 +1043,11 @@ contract:
    argument shape, or no call / a call to another tool — is handed back as the
    model's own tool call with a tool result naming the reason; a second refusal
    is no decision. A provider failure has no answer to correct and is not asked
-   again.
+   again. **The repair is this call's equivalent of the tool-error retry**: a
+   decision call runs outside the turn's agent loop, so it has no next iteration
+   in which to correct itself; the turn's own model does, and a bad
+   `_context_rebuild`/`_turn_compact` selection there is an ordinary tool error
+   it retries.
 6. **A failure keeps what is in hand.** A rebuild with no decision keeps the
    context it had; a compaction with no decision hides nothing; the turn
    continues either way.
