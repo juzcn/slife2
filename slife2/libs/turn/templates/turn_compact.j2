@@ -11,17 +11,16 @@ arguments exactly as its schema names them; `compact` is a JSON array of
 strings, never a string containing one. Never send an empty object: `compact`
 is answered.
 
-This decision edits the view the turn running is on, and its job is to keep
-that turn from growing past its window: the tool results of this turn are
-candidates too, not only the history. **Drop only what is completely
-irrelevant** — a search or report the turn has already used and will not need
-again. A message later turns might still use is not a candidate for dropping,
-and when the context figure shows the window is not tight, prefer not to drop
-it: drop aggressively only when the window is filling up. Name only the ids the
-`[MESSAGE:{"id": …}]` annotations show; never invent one. An assistant message
-carries no annotation — to drop its exchange, name its tool result. Never name
-the newest tool result: it is what the next call answers from. When nothing
-should be dropped, `compact` is `[]`.
+This decision edits the view the turn running is on. Its job is to keep that
+turn from growing past its window without taking away what it still needs: the
+current turn's tool results are candidates too, not only the history.
+
+Drop only what is completely irrelevant. When the context figure shows the
+window is not tight, prefer keeping a message later turns might use; when it is
+filling up, keep only what this turn still needs.
+
+Name only the ids the `[MESSAGE:{"id": …}]` annotations show; never invent one.
+When nothing should be dropped, `compact` is `[]`.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

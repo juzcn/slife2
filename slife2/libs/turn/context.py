@@ -93,14 +93,15 @@ LIVE_REPLY: dict[str, Any] = {
                 '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
                 "person's messages and tool results carry one; the system "
                 "prompt, the turn's opening message and the assistant's own "
-                "messages carry no id. Name only ids an annotation shows; never "
-                "infer one, because an id the view does not show is refused. "
-                "Write the ids exactly as the annotation shows them, as a JSON "
-                "array of strings; [] means drop nothing. **An exchange goes as "
-                "a whole**: name a tool result and the assistant message that "
-                "asked for it goes with all of its results. Drop the searches "
-                "and reports the turn has already used. Naming an id this turn "
-                "already hid asks for the same view."
+                "messages carry no id — an assistant message is named through "
+                "its exchange's tool result. Name only ids an annotation shows; "
+                "never infer one, because an id the view does not show is "
+                "refused. Write the ids exactly as the annotation shows them, as "
+                "a JSON array of strings; [] means drop nothing. **An exchange "
+                "goes as a whole**: name a tool result and the assistant message "
+                "that asked for it goes with all of its results. Drop the "
+                "searches and reports the turn has already used. Naming an id "
+                "this turn already hid asks for the same view."
             ),
             "type": "array",
             "items": {"type": "string"},

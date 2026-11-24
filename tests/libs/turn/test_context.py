@@ -290,7 +290,7 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     # outgrowing its window, which is why the current turn's results are
     # candidates too.
     assert "keep that turn from growing past its window" in text
-    assert "tool results of this turn are candidates too" in text
+    assert "current turn's tool results are candidates too" in text
     assert "the turn's own tool results too" in intent
     assert "grow past its window" in intent
     assert "Drop the searches" in intent
