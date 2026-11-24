@@ -648,6 +648,14 @@ class TurnRuntime:
         words (`failure_text`), so the tool refuses them and the agent reads a
         tool error naming what went wrong rather than an empty call.
 
+        **The pair the loop writes carries the tool's own argument names.**  A
+        decision answer in another shape — a historical `context`/`mode` call the
+        model copied, or a half it left out — is carried as the failure
+        selection, so the tool call is a `ToolError` the agent reads rather than
+        a dispatch validation error the harness cannot turn into a result.  The
+        tool body still makes the one legality check; this is the transport's
+        guard that the call reaches it.
+
         **One rule for the agent, its subagents and an agent task.**  The two
         servers call this instead of each shaping the failure's sentence; a
         second copy is how one of them ends up saying something the other does
@@ -678,7 +686,16 @@ class TurnRuntime:
                 "keep": "the decision model did not answer: " + decided.decision,
                 "recall": {},
             }
-        return selection_from_arguments(decided.arguments, "keep")
+        selection = selection_from_arguments(decided.arguments, "keep")
+        try:
+            decisions.rebuild_selection(selection.get("keep"), selection.get("recall"))
+        except ValueError as exc:
+            logger.info("context_rebuild_unreadable reason=%s", exc)
+            return {
+                "keep": "the selection could not be read: " + str(exc),
+                "recall": {},
+            }
+        return {"keep": selection.get("keep"), "recall": selection.get("recall")}
 
     async def rebuild(
         self,

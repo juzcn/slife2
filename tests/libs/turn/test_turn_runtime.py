@@ -661,6 +661,39 @@ async def test_the_automatic_arguments_carry_a_failure_as_its_own_words() -> Non
     }
 
 
+async def test_a_decision_in_another_shape_is_a_failure_selection() -> None:
+    """A decision that copied a historical argument shape still reaches the tool.
+
+    The automatic call is the harness's, and its arguments must carry the tool's
+    own names; an answer shaped `{"context": …}` is carried as a failure
+    selection, so the call binds and the tool answers with its reason instead of
+    the harness raising a validation error before the body runs.
+    """
+    runtime = wired(
+        Store(decide={"arguments": '{"context": [1], "recall": {}}', "decision": ""})
+    )
+    selection = await runtime.rebuild_arguments(
+        IDENTITY, a_view(), REF.reference, prompt_window=1024
+    )
+
+    assert set(selection) == {"keep", "recall"}
+    assert selection["recall"] == {}
+    assert selection["keep"].startswith("the selection could not be read: ")
+    assert "a rebuild needs `keep`" in selection["keep"]
+
+    runtime = wired(
+        Store(
+            decide={
+                "arguments": '{"keep": {"action": "keep"}, "recall": {}}',
+                "decision": "",
+            }
+        )
+    )
+    assert await runtime.rebuild_arguments(
+        IDENTITY, a_view(), REF.reference, prompt_window=1024
+    ) == {"keep": {"action": "keep"}, "recall": {}}
+
+
 class Down(Store):
     """A context plugin whose tool call never comes back."""
 

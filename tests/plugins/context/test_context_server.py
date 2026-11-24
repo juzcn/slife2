@@ -2087,7 +2087,9 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     assert answer == '{"context": "clear"}', "the tool arguments are the decision"
     call = seen[0]
     assert call["kind"] == "decision"
-    assert call["asked"][:-1] == hold, "the conversation is the input, unchanged"
+    assert call["asked"][:-1] == hold, (
+        "the conversation is the input, unchanged by the call"
+    )
     assert call["asked"][-1]["role"] == "system"
     assert "Decision" in call["asked"][-1]["content"]
     assert "12,345 (1.2%)" in call["asked"][-1]["content"], "the status bar's figure"
@@ -2097,6 +2099,83 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
     assert tool["parameters"] == RECALL_REPLY
     assert call["tool_choice"] == CONTEXT_REBUILD
     assert call["thinking"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_the_decision_reads_the_conversation_without_tool_exchanges(
+    monkeypatch,
+) -> None:
+    """**The decision reads the work, not the turn's tool exchanges.**
+
+    A tool exchange is the turn's internal work, and it is where a model copies
+    another tool's call or an older build's argument shape instead of the forced
+    one.  Every call and result is removed before the decision call; the text —
+    the person's messages and the model's own answers — stays in order.  A
+    mixed message keeps its text and loses its call.
+    """
+    seen: list[list[dict[str, Any]]] = []
+
+    async def capture(
+        _config: Any,
+        _clients: Any,
+        _opening: Any,
+        _agent: str,
+        _subagent: str,
+        _model: str,
+        asked: list[dict[str, Any]],
+        **_options: Any,
+    ) -> StreamChatResult:
+        seen.append(asked)
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name=CONTEXT_REBUILD,
+                    arguments={"keep": {"action": "keep"}, "recall": {}},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    old_call = {
+        "id": "old",
+        "type": "function",
+        "function": {
+            "name": CONTEXT_REBUILD,
+            "arguments": '{"context": [1], "recall": {}}',
+        },
+    }
+    search_call = {
+        "id": "search",
+        "type": "function",
+        "function": {"name": "tool_search", "arguments": '{"query": "x"}'},
+    }
+    hold = [
+        SYSTEM,
+        {"role": "user", "content": "one"},
+        {
+            "role": "assistant",
+            "content": "thinking",
+            "tool_calls": [old_call, search_call],
+        },
+        {"role": "tool", "tool_call_id": "old", "content": "the old report"},
+        {"role": "tool", "tool_call_id": "search", "content": "found"},
+        {"role": "assistant", "content": "", "tool_calls": [dict(old_call, id="old2")]},
+        {"role": "tool", "tool_call_id": "old2", "content": "another old report"},
+        {"role": "user", "content": "two"},
+    ]
+
+    await _ask_model(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, usage="12,345 (1.2%)"
+    )
+
+    assert seen[0][:-1] == [
+        SYSTEM,
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "thinking"},
+        {"role": "user", "content": "two"},
+    ], "the text stays; every tool call and result is gone"
 
 
 @pytest.mark.asyncio

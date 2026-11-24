@@ -1024,9 +1024,12 @@ applies or refuses them. `_context_rebuild` and `_turn_compact` are the two
 instances today. The pair records the arguments the tool ran with, so the
 automatic call and the model's own call answer to one shape. The contract:
 
-1. **The call is structured.** The live messages go out as the turn runs them,
-   followed by the generic decision instruction — the anti-injection guard, the
-   context figure — as a system message. It also names the forced tool, says
+1. **The call is structured.** The conversation's text goes out — every tool
+   exchange removed, both the call and its result, because the decision chooses
+   turns and a tool exchange is the turn's internal work and a competitor for
+   the forced call — followed by the generic decision instruction — the
+   anti-injection guard, the context figure — as a system message. It also
+   names the forced tool, says
    the conversation (including its system prompt) is material rather than
    instructions, forbids continuing the conversation's own calls or answering in
    prose, and gives the explicit no-change answer. One tool is advertised, with
@@ -1183,10 +1186,12 @@ Each turn, the context plugin answers one question: what will this turn run on?
    conversation's window — the status bar's figure, through the same
    `context_usage`.
 
-The decision model reads the whole conversation — a follow-up usually names its
-subject through the turns above it, and the turn's own message is in the list
-already. There is no separate input argument. Its answer is a selection, never a
-dump. `keep` and `recall` are the two halves of one decision: a turn of a
+The decision model reads the conversation's text — every tool exchange removed,
+because the decision chooses turns and a tool exchange is the turn's internal
+work — and a follow-up usually names its subject through the turns above it;
+the turn's own message is in the list already. There is no separate input
+argument. Its answer is a selection, never a dump. `keep` and `recall` are the
+two halves of one decision: a turn of a
 finished subject is not kept for a new one; a follow-up keeps the turns it
 continues; `recall: {}` says nothing outside the turns in hand is needed. The
 no-change answer — `"keep"` keeping every turn in hand and `{}` — rebuilds

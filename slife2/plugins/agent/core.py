@@ -2608,14 +2608,21 @@ class AgentCore:
     async def context_rebuild(
         self,
         ctx: Context,
-        keep: dict[str, Any] | None = None,
-        recall: dict[str, Any] | None = None,
+        keep: Any = None,
+        recall: Any = None,
     ) -> str:
         """Rebuild the conversation's live context — its historical turns.
 
         **The model-facing description is `CONTEXT_REBUILD_TEXT`** in
         `slife2.libs.turn.tools` — one text for the model in a turn and for the
         forced decision call.  This docstring is the code reader's.
+
+        **`keep` and `recall` are `Any` at the signature on purpose.**  The
+        automatic call carries the decision model's raw answer, and a failure is
+        carried as its own words under `keep`; a typed signature would reject
+        that at dispatch, before the body could turn it into the tool error the
+        agent reads.  `rebuild_selection` is the one check, and it names the
+        shape the fields take.
 
         The tool edits the turns the conversation is made of: it may drop some
         of them and recall others from the turn log. **The turn running is never
