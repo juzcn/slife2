@@ -127,13 +127,13 @@ class Rebuilt:
     covered: int
     changed: bool
     #: How many of the caller's turns the decision kept, and how many the
-    #: caller held before it.  The pair is the report's "kept 0 of 5 turn(s) in
-    #: hand": `kept` alone cannot tell a clear from a history that was empty.
+    #: caller held before it.  The pair is the report's "kept 0/5": `kept`
+    #: alone cannot tell a clear from a history that was empty.
     kept: int
     in_hand: int
     #: The turns in the log beyond the context — the whole set a recall
-    #: condition filters.  The changed report's "recalled 0 of 90 outside" is
-    #: read from this figure.
+    #: condition filters.  The changed report's "recalled 0/90" is read from this
+    #: figure.
     outside: int
     recalled: int
     rerank: str
@@ -669,10 +669,16 @@ class TurnRuntime:
             logger.info(
                 "context_rebuild_skipped reason=%s", decisions.failure_text(exc)
             )
-            return {"mode": "the decision call failed: " + decisions.failure_text(exc)}
+            return {
+                "keep": "the decision call failed: " + decisions.failure_text(exc),
+                "recall": {},
+            }
         if decided.decision:
-            return {"mode": "the decision model did not answer: " + decided.decision}
-        return selection_from_arguments(decided.arguments, "mode")
+            return {
+                "keep": "the decision model did not answer: " + decided.decision,
+                "recall": {},
+            }
+        return selection_from_arguments(decided.arguments, "keep")
 
     async def rebuild(
         self,
@@ -712,10 +718,9 @@ class TurnRuntime:
 
         **All of the answer is read before the caller adopts any of it.**  An
         answer that replaced the list but omitted the counts would report
-        `kept 0 of 0 turn(s) in hand, recalled 0 of 0 outside` — a decision
-        nobody made; a rerank status and the reason no decision was made are
-        part of the same shape, and an unrecognised one still reaches the
-        window, which is where its words live.
+        `kept 0/0, recalled 0/0` — a decision nobody made; a rerank status and the
+        reason no decision was made are part of the same shape, and an
+        unrecognised one still reaches the window, which is where its words live.
         """
         carried = max(len(messages) - covered, 0)
         arguments: dict[str, Any] = {

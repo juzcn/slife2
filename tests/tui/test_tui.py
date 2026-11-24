@@ -1791,10 +1791,7 @@ async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
     about: the context the answer was written from, not a comment on how it
     went.  The counts and the estimate are the tool's own report.
     """
-    report = (
-        "kept 12 of 20 turn(s) in hand, recalled 3 of 40 outside; "
-        "context ~48,000 (4.8%)."
-    )
+    report = "kept 12/20, recalled 3/40, token usage ~48,000 (4.8%)."
     app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
@@ -1808,11 +1805,8 @@ async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
 
 
 async def test_a_failed_decision_is_reported_in_the_rebuilds_answer() -> None:
-    """No decision is a fact the model reads, not a zero it has to explain."""
-    report = (
-        "No rebuild: the decision model did not answer (timeout); the turn "
-        "continues on the context it had; context ~1,000 (1.0%)."
-    )
+    """No decision is a tool error the model reads, not a zero it must explain."""
+    report = "the decision model did not answer (timeout)"
     app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")

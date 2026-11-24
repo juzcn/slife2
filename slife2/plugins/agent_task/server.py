@@ -807,8 +807,7 @@ def build_server(
                 return "This task has no opening message; nothing to rebuild."
             try:
                 selection = rebuild_selection(
-                    arguments.get("mode"),
-                    arguments.get("turn_ids"),
+                    arguments.get("keep"),
                     arguments.get("recall"),
                 )
             except ValueError as exc:
@@ -850,15 +849,12 @@ def build_server(
                 turn.prompt_window,
             )[0]
             return rebuild_report(
-                changed=rebuilt.changed,
                 kept=rebuilt.kept,
                 in_hand=rebuilt.in_hand,
                 outside=rebuilt.outside,
                 recalled=rebuilt.recalled,
                 rerank=rebuilt.rerank,
-                decision=rebuilt.decision,
                 fitted=rebuilt.fitted,
-                reason=rebuilt.reason,
                 tokens=tokens,
             )
 

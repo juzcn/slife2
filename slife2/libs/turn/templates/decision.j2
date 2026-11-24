@@ -9,7 +9,15 @@ Your answer is one call to `{{ tool }}` and nothing else: no prose, no other
 tool, and no repetition of a call from the conversation. Fill the tool's
 arguments exactly as its schema names them; a field the schema spells as an
 array is a JSON array literal, never a string containing one. Never send an
-empty object: when nothing should change, write {{ no_op }}.
+empty object: every required field is answered. When nothing should change,
+{{ no_op }}.
+
+The turn running is the current work: the last message is what the agent is
+about to answer, and the context it runs on must carry what that work needs —
+no more and no less. A turn of a finished subject is not context for a new one;
+a follow-up's subject is the turns it continues, even when its words do not
+name them. When the last message starts a subject none of the turns in hand is
+about, keep none of them and recall what it needs.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

@@ -318,7 +318,11 @@ async def _ask_model(
         tool_text=CONTEXT_REBUILD_TEXT,
         parameters=decisions.RECALL_REPLY,
         instruction=decisions.decision_instruction(
-            usage, CONTEXT_REBUILD, '{"mode": "keep"}'
+            usage,
+            CONTEXT_REBUILD,
+            '`keep` is `{"action": "keep"}` and `recall` is `{}` — and that is '
+            "right only when every turn in hand serves the current work and "
+            "nothing outside it is needed",
         ),
         kind="decision",
     )
@@ -364,7 +368,10 @@ async def _ask_selector(
         tool_text=TURN_COMPACT_TEXT,
         parameters=decisions.LIVE_REPLY,
         instruction=decisions.decision_instruction(
-            usage, TURN_COMPACT, '{"compact": []}'
+            usage,
+            TURN_COMPACT,
+            "`compact` is `[]` — and that is right only when the turn needs "
+            "every message",
         ),
         kind="compactor",
     )
@@ -1102,48 +1109,22 @@ def build_server(
         turn_ids: Sequence[int],
         outside: int,
         rerank: str = "",
-        decision: str = "",
         reason: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
-        **Four of `rebuild`'s exits are this one outcome** — a decision model
-        that decided nothing, a decision that asks for nothing, a decision that
-        equals what is held, and a selection that cannot be fetched — and they
-        are one dict because they are one thing: nothing was fetched, nothing
-        was written, and the caller's list stands.  Spelled out four times they
-        were four chances to describe that differently, and four places to add a
-        key to.
+        **Two of `rebuild`'s exits are this one outcome** — a decision that asks
+        for nothing, and one whose recall ran and found nothing — and they are
+        one dict because nothing was fetched, nothing was written, and the
+        caller's list stands.  A selection that cannot be applied is not this
+        answer: it raises a `ToolError` naming why, which the agent reads and
+        can correct.
 
-        There is no other exit named "the switch is off": `ContextSettings` has
-        no switch, and nothing here reads one.  The decision model that answers
-        nothing is the fourth, and `rebuild` logs it as its own reason
-        (`no_decision`, not `context_sufficient`) because it is not a decision
-        the model made.
-
-        `kept` is what the caller has in hand, `recalled` none of it — and the
-        two together are what `rebuild` always reports, so a reader of the
-        answer never has to know which of the four ways it was reached to read
-        the counts.  `in_hand` is the number before the decision, which on these
-        exits is `kept` itself; `outside` is the log beyond it, which the
-        changed answer's recalled "of N" is read from.
-
-        `rerank` is the stage's report when a recall *did* run and the
-        selection still equals what is in hand.  The exits that never asked
-        for a recall leave it empty; they did not lose a reranker, they never
-        needed one.
-
-        `decision` is why no decision was made — the one exit above that is
-        a failure rather than an answer.  It is what the caller reads to say the
-        recall *failed* rather than found nothing; the four exits are still one
-        answer, and only this one has something to report.
-
-        `reason` names the exit for the report: `"asked"` (a decision that
-        wants exactly what is in hand), `"recalled"` (one whose recall ran and
-        found nothing), `"unknown"` (a keep-list naming no turn in hand) or
-        `"unfetchable"` (the store disagreed with its own list).  The model acts
-        on the four differently, so one "unchanged" sentence would be silence
-        where a fact belongs.
+        `kept` is what the caller has in hand, `recalled` none of it; `in_hand`
+        is the number before the decision, and `outside` is the log beyond it.
+        `reason` is `"asked"` or `"recalled"` for the log.  `rerank` is the
+        stage's report when a recall ran and found nothing; the exits that never
+        asked for one leave it empty, because they never needed a ranker.
         """
         return {
             "messages": list(messages),
@@ -1154,9 +1135,9 @@ def build_server(
             "outside": outside,
             "recalled": 0,
             "rerank": rerank,
-            "decision": decision,
-            # The no-decision and no-op answers cut nothing: the fit is the
-            # changed path's, and its count there is the harness's edit.
+            "decision": "",
+            # The no-op answers cut nothing: the fit is the changed path's, and
+            # its count there is the harness's edit.
             "fitted": 0,
             "reason": reason,
         }
@@ -1483,11 +1464,11 @@ def build_server(
                 figure.
             prompt_window: The space a request's prompt has, in tokens.
             selection: The internal selection to apply as it came —
-                `context`/`recall`, as `rebuild_selection` maps the model's flat
-                arguments — or None to let the decision model choose (the direct
-                RPC path; both turn-running servers pass the selection they were
-                given).  A selection this build cannot read is a tool error the
-                caller corrects, not a decision call.
+                `context`/`recall`, as `rebuild_selection` maps the model's
+                `keep`/`recall` arguments — or None to let the decision model
+                choose (the direct RPC path; both turn-running servers pass the
+                selection they were given).  A selection this build cannot read
+                is a tool error the caller corrects, not a decision call.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
@@ -1512,8 +1493,8 @@ def build_server(
         # turn not in hand is a candidate the recall condition filters; the
         # retrieval legs page that set, but the denominator the report counts
         # against is the set itself.  One COUNT, read here rather than per
-        # answer, because the same figure is what the model's "recalled 0 of N"
-        # is read from.
+        # answer, because the same figure is what the model's "recalled 0/N" is
+        # read from.
         outside = max(await off_loop(store.count) - len(turn_ids), 0)
         # **A caller that names no budget gets the model's.**  The turn-running
         # servers pass the conversation's own; a direct RPC caller has none, and
@@ -1558,13 +1539,13 @@ def build_server(
             # loop never uses this path: its harness calls the `decide` tool
             # first and passes the selection, so the tool pair carries the
             # arguments from the start.  Here the raw answer is mapped to the
-            # internal selection and read by the same parser as any other; a
-            # refusal keeps the context in hand, because there is no caller to
-            # hand a tool error back to.
+            # internal selection and read by the same parser as any other.  A
+            # failure is the tool's error, with the reason — the agent reads it
+            # where it reads every other tool's error and can call again.
             raw, status = await _decide(agent, subagent, model, messages, usage)
             if not raw:
                 logger.info("recall_not_needed reason=no_decision")
-                return _in_hand(messages, turn_ids, outside, decision=status)
+                raise ToolError(f"the decision model did not answer: {status}")
             try:
                 try:
                     arguments = json.loads(raw)
@@ -1573,20 +1554,18 @@ def build_server(
                 if not isinstance(arguments, dict):
                     raise ValueError("the reply is not one JSON object")
                 used = decisions.rebuild_selection(
-                    arguments.get("mode"),
-                    arguments.get("turn_ids"),
+                    arguments.get("keep"),
                     arguments.get("recall"),
                 )
             except ValueError as exc:
                 logger.info("recall_decision_unreadable reason=%s", exc)
-                logger.info("recall_not_needed reason=no_decision")
-                return _in_hand(messages, turn_ids, outside, decision=str(exc))
+                raise ToolError(f"the selection could not be read: {exc}") from None
             decision, refusal = decisions.parse_with_reason(
                 json.dumps(used, ensure_ascii=False)
             )
             if decision is None:
                 logger.info("recall_not_needed reason=no_decision")
-                return _in_hand(messages, turn_ids, outside, decision=refusal)
+                raise ToolError(f"the selection could not be read: {refusal}")
         # **What was decided, before what it led to.**  Every line below reports
         # an outcome — `recall_not_needed`, `recall_abandoned`, `recall_rebuilt`
         # — and none of them carries the two fields that chose it.  A live
@@ -1632,11 +1611,10 @@ def build_server(
                 # miscopied or hallucinated number — so the intersection is empty
                 # only because the ids were unknown.  Emptying a context nobody
                 # asked to empty is the one outcome this fallback refuses: the
-                # explicit clear is the string (or the empty list), and a decision
-                # that cannot be acted on keeps the context the turn had
-                # (SDD §5.5, Appendix C).
+                # explicit clear is the empty list, and a selection that cannot
+                # be acted on is the tool's error, named for the agent to correct.
                 logger.info("recall_kept_nothing_known ids=%s", decision.keep)
-                return _in_hand(messages, turn_ids, outside, reason="unknown")
+                raise ToolError("the keep-list named no turn in hand")
             base, fitted_out = await fitted(base)
             if fitted_out:
                 logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
@@ -1662,13 +1640,12 @@ def build_server(
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
             # A named turn with no row: the list and the log disagree, which
-            # means a file was rebuilt or pruned underneath.  Keeping the context
-            # is the answer, because a context assembled from part of a selection
-            # is neither what the model decided nor what it had.
+            # means a file was rebuilt or pruned underneath.  The selection
+            # cannot be applied, so it is the tool's error and the context is
+            # not written — a context assembled from part of a selection is
+            # neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(
-                messages, turn_ids, outside, rerank=rerank, reason="unfetchable"
-            )
+            raise ToolError("the selected turns could not be fetched")
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -1722,9 +1699,9 @@ def build_server(
             "changed": True,
             # What survived the decision, what came back from the log, and what
             # the caller held before it.  `kept` and `in_hand` together let the
-            # report say "kept 0 of 5 turn(s) in hand": a clear must not read as
-            # an empty history.  `outside` is the rest of the log, which the recall
-            # condition filters — the "of 90" in "recalled 0 of 90 outside".
+            # report say "kept 0/5": a clear must not read as an empty history.
+            # `outside` is the rest of the log, which the recall condition
+            # filters — the "90" in "recalled 0/90".
             "kept": len(base),
             "in_hand": len(turn_ids),
             "outside": outside,

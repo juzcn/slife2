@@ -279,15 +279,22 @@ CONTEXT_REBUILD = "_context_rebuild"
 #: A call with no selection is refused in both cases; the field rules are the
 #: schema's (`slife2.libs.turn.context.RECALL_REPLY`).
 CONTEXT_REBUILD_TEXT = (
-    "Rebuild the conversation's live context — the historical turns this turn "
-    'runs on. Call it with `mode`: "keep", "clear", or "ids" with '
-    "`turn_ids` — a JSON array of integers such as [14, 15], never a string "
-    "containing one. `recall` adds turns from the turn log by meaning, by "
-    "words, or by a period; kept and recalled turns are joined by id. The turn "
-    "running has no turn id and is carried verbatim. A turn is named by the id "
-    'its `[TURN:{"turn_id": …}]` footnote carries. The answer reports what was '
-    "kept of the turns in hand, what was recalled of the log outside it, and "
-    "the context this turn runs on from here."
+    "Rebuild the conversation's live context — the turns this turn runs on. "
+    "Decide two things for the turn running's current work, and answer both "
+    "every time: `keep` says what to do with the turns in hand — `ids` names "
+    "the ones its work continues or needs, in `turn_ids`: a JSON array of "
+    "integers such as [14, 15], never a string containing one (the ordinary "
+    "answer); `clear` keeps none when the last message starts a subject none "
+    "of them is about; and `keep` keeps all only when every one of them "
+    "serves the work — and `recall` names the earlier turns to add from the "
+    "turn log by meaning, by words, or by a period. Together they are the "
+    "context. A turn kept spends "
+    "the window: a turn of a finished subject is not kept for a new one, and a "
+    "follow-up keeps the turns it continues. The turn running has no turn id "
+    "and is carried verbatim. A turn is named by the id its "
+    '`[TURN:{"turn_id": …}]` footnote carries. The answer reports `kept K/M`, '
+    "`recalled R/O` and the context's `token usage`; a selection that cannot "
+    "be applied is the tool's error, with its reason."
 )
 
 #: **The tools that act on a live turn's own message list.**  They are the four

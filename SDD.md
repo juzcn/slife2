@@ -1172,10 +1172,12 @@ Each turn, the context plugin answers one question: what will this turn run on?
    list.
 2. **`_context_rebuild`**, at the first boundary of each turn — the harness asks
    `decide` for the selection and calls the tool with it — and whenever the
-   model calls it with `mode`/`turn_ids`/`recall` of its own. The decision model
-   reads the conversation, the turn's own message already in it, and answers
-   what to keep of the historical turns in hand and what to recall from the
-   turn log. The
+   model calls it with `keep`/`recall` of its own. The decision model reads the
+   conversation, the turn's own message already in it, and answers two things
+   for the turn's current work: `keep` — what to do with the turns in hand
+   (`keep`, `clear`, or keep exactly `turn_ids`) — and `recall` — the query
+   condition for the earlier turns the work needs from the turn log. Both are
+   required; their union is the context. The
    turn running has no id yet and is carried verbatim; the rebuild never touches
    it. The decision is shown the last completed call's size against the
    conversation's window — the status bar's figure, through the same
@@ -1184,11 +1186,15 @@ Each turn, the context plugin answers one question: what will this turn run on?
 The decision model reads the whole conversation — a follow-up usually names its
 subject through the turns above it, and the turn's own message is in the list
 already. There is no separate input argument. Its answer is a selection, never a
-dump. The common answer is `{"mode": "keep"}`: a decision that asks for exactly
-what is in hand rebuilds nothing. A call with `mode`/`turn_ids`/`recall` is a
-selection: the same schema, applied as it came, with no decision call inside the
-tool; the pair the automatic call writes carries the arguments the decision
-chose, so the model reads the shape it wrote itself.
+dump. `keep` and `recall` are the two halves of one decision: a turn of a
+finished subject is not kept for a new one; a follow-up keeps the turns it
+continues; `recall: {}` says nothing outside the turns in hand is needed. The
+no-change answer — `"keep"` keeping every turn in hand and `{}` — rebuilds
+nothing, and is right only when every turn in hand serves the current work. A
+call with `keep`/`recall` is a selection: the same schema, applied as it came,
+with no decision call inside the tool; the pair the automatic call writes
+carries the arguments the decision chose, so the model reads the shape it wrote
+itself.
 
 The automatic path is a forced `_context_rebuild` call under §5.3's contract:
 `decide` asks the model for the raw arguments, and the harness then calls
@@ -1212,17 +1218,19 @@ Rules:
   (`failure_text`). A recall nobody asked for is not a recall that found
   nothing.
 - **The reports are counts; the ids are the pair's arguments.** The rebuild
-  reports kept of the turns in hand, recalled of the log outside it, `fitted`
-  when the prompt budget cut the selection's oldest turns, the rerank status and
-  the estimate; the compaction reports how many messages left. A selection's
-  ids are the tool call's arguments, not a list in the answer.
+  answers `kept K/M, recalled R/O, token usage ~N (P%)`: kept of the turns in
+  hand, recalled of the log outside it, and the estimate; `fitted` when the
+  prompt budget cut the selection's oldest turns; a selection that cannot be
+  applied is the tool's error, with its reason; the compaction reports how many
+  messages left. A selection's ids are the tool call's arguments, not a list in
+  the answer.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
   overriding selection would discard the context it replaced. **A keep-list
-  that names no turn in hand is not a clear**: the explicit clear is `"clear"`
-  (or, for the internal parser, an empty list; `mode: "ids"` requires at least
-  one id), and a selection with no known turn to keep leaves the context in
-  hand.
+  that names no turn in hand is not a clear**: the explicit clear is
+  `keep.action: "clear"` (or, for the internal parser, an empty list;
+  `keep.action: "ids"` requires a non-empty `turn_ids`), and a selection with
+  no known turn to keep leaves the context in hand.
 - **A question has two spellings.** `sentences` are read by meaning, one question
   per entry; `query` is the words the keyword leg requires and the meaning
   fallback. The keyword leg is fused into each sentence's list, and a later
@@ -1331,17 +1339,20 @@ something the harness should ask again at every boundary. The model can still
 call `_turn_compact` itself, and a later successful call resumes the pass.
 
 **The rebuild is the durable edit; the compaction is the transient view.**
-A `_context_rebuild` call with `mode`/`turn_ids`/`recall` is a selection,
+A `_context_rebuild` call with `keep`/`recall` is a selection,
 applied as it came; the harness's automatic call asks `decide` for the selection
-first, then calls the tool with it, and a call with no `mode` is refused. The
+first, then calls the tool with it, and a call missing either half is refused. The
 turn running has no id
 yet and is carried verbatim, so the selection is the history alone. It is a
 harness tool under §5.3's contract: the harness calls it at the first boundary,
 the model may call it when the work has moved, and its pair is the visibility —
-the automatic pair carries the decision's arguments, and the answer reports kept
-of the turns in hand, recalled of the log outside it, and an estimate of the
-context the turn runs on from there (`estimate_turn_tokens` plus
-`context_usage`), never a provider measurement. The turn log keeps every turn; a
+the automatic pair carries the decision's arguments, and the answer reports
+`kept K/M, recalled R/O, token usage ~N (P%)` — kept of the turns in hand,
+recalled of the log outside it, and an estimate of the context the turn runs on
+from there (`estimate_turn_tokens` plus `context_usage`), never a provider
+measurement. A selection that cannot be applied is the tool's error, with its
+reason; the model's own selection is checked the same way. The turn log keeps
+every turn; a
 dropped one can be recalled by a later rebuild. A rebuild resets the
 compaction's view (`hidden` is cleared), because that view is per-turn and starts
 over. The two tools share the pair and the failure rules: a decision whose answer

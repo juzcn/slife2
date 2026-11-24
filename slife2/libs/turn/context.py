@@ -103,74 +103,102 @@ LIVE_REPLY: dict[str, Any] = {
     },
 }
 
-#: The decision model's tool schema: the types, the allowed values, and the
-#: rules that couple them.  The decision call is a forced tool call (SDD §2.3,
-#: "Schema over prompt"): the schema is the tool's `parameters`, so the field's
-#: wording is what the model fills, not a sentence it copies — which is why the
-#: running turn's exclusion and a follow-up's sentence are here rather than in
-#: the instruction.
+#: The decision model's tool schema: the two halves of one decision, and the
+#: rules that couple them.  **`keep` and `recall` are equally the answer**, and
+#: both are required: the context is what the turn keeps of what it has and what
+#: it recalls from the log, and an answer to one half is not a context.  The
+#: current-context action sits inside `keep` (`action`: keep all, clear all, or
+#: keep exactly `turn_ids`) rather than in a top-level `mode`: a `mode` beside an
+#: optional `recall` made "keep" the one field a model had to fill, and a model
+#: asked to choose from the whole conversation took the shorthand instead of
+#: reading the turns.  The field's wording is what the model fills, which is why
+#: the relevance rule is here and not only in the instruction.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "description": (
-        "The selection. `mode` says what happens to the turns in hand: keep "
-        "all, clear all, or keep exactly `turn_ids`. `recall` adds turns from "
-        "the turn log. A call without `mode` is refused. The turn running is "
-        "never part of the selection — it has no turn id and is carried "
-        'verbatim. A turn is named by the id its `[TURN:{"turn_id": …}]` '
-        "footnote carries."
+        "The context the turn running needs to continue the conversation. "
+        "`keep` decides the turns in hand: `ids` names the ones the current "
+        "work continues or needs, `clear` keeps none, and `keep` keeps all — "
+        "the answer only when every turn in hand serves the current work. "
+        "`recall` decides the earlier turns to add from the turn log: a query "
+        "condition, or {} for none. Both are answered every time; together they "
+        "are the context. When the last message starts a subject none of the "
+        "turns in hand is about, answer `clear` (or `ids` naming only the turns "
+        "it needs) and recall what it needs. The turn running is never part of "
+        "the selection — it has no turn id and is carried verbatim. A turn is "
+        'named by the id its `[TURN:{"turn_id": …}]` footnote carries.'
     ),
     "additionalProperties": False,
-    "required": ["mode"],
+    "required": ["keep", "recall"],
     "properties": {
-        "mode": {
-            "type": "string",
-            "enum": ["keep", "clear", "ids"],
+        "keep": {
+            "type": "object",
             "description": (
-                '"keep" keeps every turn in hand; "clear" keeps none of them; '
-                '"ids" keeps exactly the turns in `turn_ids` — at least one, '
-                "and only the ones still in hand. An id no longer in hand is "
-                "ignored, and a keep-list naming none of the turns in hand "
-                'keeps the context as it is; say "clear" to empty it. "clear" '
-                "only when the input stands on its own: a turn dropped here "
-                "cannot be recalled back — the recall searches only the turn "
-                "log outside the turns in hand, not merely outside the turns "
-                "kept."
+                "What to do with the turns in hand. `ids` is the ordinary "
+                "answer: name the turns the current work continues or needs. "
+                "`clear` keeps none of them: the last message starts a subject "
+                "none of them is about, so only `recall` can serve it. `keep` "
+                "keeps all of them — only when every one serves the current "
+                "work; it is not the safe default, because a turn kept spends "
+                "the window on work this turn is not doing."
             ),
-        },
-        "turn_ids": {
-            "type": "array",
-            "items": {"type": "integer"},
-            "description": (
-                'The turns to keep when `mode` is "ids"; read for that mode '
-                "only. A non-empty JSON array of integers — for example "
-                '[14, 15] — never a string containing one (`"[14, 15]"` is '
-                "refused). A follow-up keeps the turn it continues, even when "
-                "the input brings a new word and does not name it."
-            ),
+            "additionalProperties": False,
+            "required": ["action"],
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["ids", "clear", "keep"],
+                    "description": (
+                        '"ids" keeps exactly `turn_ids` — the ones the current '
+                        'work continues or needs. "clear" keeps none of them: '
+                        "the last message starts a subject none of the turns in "
+                        "hand is about; say it only when the input stands on its "
+                        "own, because a turn dropped here cannot be recalled "
+                        "back — the recall searches only the turn log outside "
+                        'the turns in hand. "keep" keeps every turn in hand, and '
+                        "is right only when every one of them serves the current "
+                        "work; do not choose it because it looks safe — a turn "
+                        "kept spends the window on work this turn is not doing."
+                    ),
+                },
+                "turn_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        'The turns to keep when `action` is "ids"; read for '
+                        "that action only. A non-empty JSON array of integers — "
+                        "for example [14, 15] — never a string containing one "
+                        '(`"[14, 15]"` is refused). Name every turn the current '
+                        "work continues or needs; a turn of a finished subject "
+                        "the work has left behind is not named. A follow-up "
+                        "keeps the turn it continues, even when the input brings "
+                        "a new word and does not name it. An id no longer in "
+                        "hand is ignored, and a keep-list naming none of the "
+                        "turns in hand keeps the context as it is."
+                    ),
+                },
+            },
         },
         "recall": {
-            "description": (
-                "A recall condition: questions (`sentences`), words (`query`), "
-                "a period (`since`/`until`), and which end survives (`anchor`). "
-                "Omit for no recall."
-            ),
             "type": "object",
-            "anyOf": [
-                {"required": ["sentences"]},
-                {"required": ["query"]},
-                {"required": ["since"]},
-                {"required": ["until"]},
-                {"required": ["anchor"]},
-            ],
+            "description": (
+                "The earlier turns the current work needs and that are not in "
+                "hand: questions (`sentences`), words (`query`), a period "
+                "(`since`/`until`), and which end survives (`anchor`). Answer it "
+                "every time; an empty object `{}` says nothing outside is "
+                "needed. The recall searches only the turn log outside the "
+                "turns in hand."
+            ),
+            "additionalProperties": False,
             "properties": {
                 "sentences": {
                     "description": (
-                        "What to recall from the turn log, in your own words, "
-                        "one sentence per idea. Read by meaning. Several "
-                        "sentences are several questions: another question is "
-                        "another chance to be found, and cannot cost a turn an "
-                        "earlier one found. A follow-up whose subject is no "
-                        "longer in hand carries it into the sentence."
+                        "What the current work needs from the earlier turns, in "
+                        "your own words, one sentence per idea. Read by meaning. "
+                        "Several sentences are several questions: another "
+                        "question is another chance to be found, and cannot cost "
+                        "a turn an earlier one found. A follow-up whose subject "
+                        "is no longer in hand carries it into the sentence."
                     ),
                     "type": "array",
                     "items": {"type": "string"},
@@ -178,10 +206,11 @@ RECALL_REPLY: dict[str, Any] = {
                 "query": {
                     "description": (
                         "Words the keyword leg should find — names, paths, "
-                        "exact strings. The fallback when no sentence names the "
-                        "subject; without a sentence it is also read by "
-                        "meaning. A query with no word in it is dropped, and "
-                        "without a sentence that drops the recall."
+                        "exact strings — for what the current work needs. The "
+                        "fallback when no sentence names the subject; without a "
+                        "sentence it is also read by meaning. A query with no "
+                        "word in it is dropped, and without a sentence that "
+                        "drops the recall."
                     ),
                     "type": "string",
                 },
@@ -315,42 +344,59 @@ class Decision:
         return self.keep is None and self.recall is None
 
 
-def rebuild_selection(
-    mode: Any, turn_ids: Any = None, recall: Any = None
-) -> dict[str, Any]:
-    """The internal selection described by `_context_rebuild`'s flat arguments.
+def rebuild_selection(keep: Any, recall: Any = None) -> dict[str, Any]:
+    """The internal selection described by `_context_rebuild`'s arguments.
 
     **One mapping, used by both servers and by anything that checks a decision
-    the way the tool does.**  The model-facing schema is `mode` + `turn_ids` +
-    `recall`; the parser and the store speak `context` + `recall`.  A missing
-    or unknown mode, `"ids"` without a non-empty array of whole numbers, or a
-    `recall` that is not one object is a `ValueError` the tool turns into its
-    error result.
+    the way the tool does.**  The model-facing schema is `keep` + `recall`; the
+    parser and the store speak `context` + `recall`.  `keep` is the current
+    context's action (`ids`, `clear`, or `keep` with `turn_ids` for `ids`);
+    `recall` is the condition for the turn log, and `{}` is no recall.  A
+    missing or unknown action, an `ids` answer without a non-empty array of
+    whole numbers, or a `recall` that is not one object is a `ValueError` the
+    tool turns into its error result.  Both fields are checked: the context is
+    the kept turns and the recalled turns together, so half an answer is refused
+    rather than silently treated as no recall.
+
+    **A string under `keep` is a failure the harness carried into the call.**
+    The decision model that did not answer has no selection, so its own words
+    are the refusal; the agent reads what went wrong rather than the mapper's
+    paraphrase of it.
     """
-    if not mode:
-        raise ValueError('a rebuild needs `mode`: "keep", "clear" or "ids"')
+    if keep is None:
+        raise ValueError(
+            'a rebuild needs `keep`: an object with `action` "ids", "clear" or "keep"'
+        )
+    if isinstance(keep, str):
+        raise ValueError(f"`keep` is not a selection: {keep}")
+    if not isinstance(keep, dict):
+        raise ValueError("`keep` is one object holding the action")
+    action = keep.get("action")
     selection: dict[str, Any] = {}
-    if mode == KEEP_ALL:
+    if action == KEEP_ALL:
         selection["context"] = KEEP_ALL
-    elif mode == KEEP_NONE:
+    elif action == KEEP_NONE:
         selection["context"] = KEEP_NONE
-    elif mode == "ids":
+    elif action == "ids":
+        turn_ids = keep.get("turn_ids")
         if not isinstance(turn_ids, list) or not turn_ids:
             raise ValueError(
-                'mode "ids" needs `turn_ids`: a non-empty JSON array of turn ids'
+                'action "ids" needs `turn_ids`: a non-empty JSON array of turn ids'
             )
-        if not all(
-            isinstance(turn_id, int) and not isinstance(turn_id, bool)
-            for turn_id in turn_ids
-        ):
+        if not all(_is_id(turn_id) for turn_id in turn_ids):
             raise ValueError("`turn_ids` is a JSON array of whole numbers")
         selection["context"] = normalise_ids(turn_ids)
     else:
-        raise ValueError(f'mode {mode!r} is not one of "keep", "clear" or "ids"')
-    if recall is not None:
-        if not isinstance(recall, dict):
-            raise ValueError("`recall` is one object holding the condition")
-        selection["recall"] = dict(recall)
+        raise ValueError(
+            f'`keep.action` {action!r} is not one of "keep", "clear" or "ids"'
+        )
+    if recall is None:
+        raise ValueError(
+            "a rebuild needs `recall`: the query condition, or {} for none"
+        )
+    if not isinstance(recall, dict):
+        raise ValueError("`recall` is one object holding the condition")
+    selection["recall"] = dict(recall)
     return selection
 
 
@@ -609,9 +655,11 @@ def decision_instruction(usage: str, tool: str, no_op: str) -> str:
 
     **The call is the whole answer.**  The model must not continue the
     conversation's own tool calls or answer in prose; it names `tool` and
-    nothing else.  `no_op` is the schema's explicit "nothing changes" value
-    (`{"mode": "keep"}` / `{"compact": []}`), because an empty object is not a
-    selection any more.
+    nothing else.  `no_op` is the tool's explicit no-change answer, and it is a
+    sentence because the two tools spell it differently: `_context_rebuild`
+    keeps every turn in hand and recalls nothing (`"keep"` + `{}`), while
+    `_turn_compact` writes `{"compact": []}`.  What is shared is the rule that
+    the answer is a decision, never an empty object.
 
     **No input is passed beside the messages.**  A decision runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
@@ -905,84 +953,41 @@ def turn_prompt_lead(
 
 def rebuild_report(
     *,
-    changed: bool,
     kept: int,
     in_hand: int,
     outside: int,
     recalled: int,
     rerank: str,
-    decision: str,
     tokens: str,
     fitted: int = 0,
-    reason: str = "",
 ) -> str:
-    """What `_context_rebuild` answers the model, in one line.
+    """What `_context_rebuild` answers on success, in one line.
 
-    **The estimate is always there**, because this tool is the model's only
-    context figure since the turn prompt stopped carrying one.  `tokens` is
-    `context_usage`'s text for the rebuilt list — an estimate of the messages,
-    not the provider's measured count; the caller prefixes the `~` that says so.
+    **Three figures, in a fixed order.**  `kept K/M` is what survived of what the
+    caller held (`M`), `recalled R/O` is what came back of the log outside the
+    context (`O`), and `token usage ~N (P%)` is `context_usage`'s text for the
+    rebuilt list — an estimate of the messages, not the provider's measured
+    count, which the `~` says.  The counts are the report's substance: `kept 0/5`
+    says a clear where `kept 0` alone reads as an empty history, and
+    `recalled 0/90` says the search had 90 turns to draw from.
 
-    **The two "of N" figures answer the two sides of the decision.**  `in_hand`
-    is what the caller held; `kept 0 of 5 turn(s) in hand` says a clear, where
-    `kept 0` alone reads as an empty history.  `outside` is the whole log beyond
-    the context — the set a recall condition filters — and `recalled 0 of 90
-    outside` says the search had 90 turns to draw from.
-
-    **A no-op names which no-op it was.**  `reason` is the exit that produced
-    it, and the four are different facts the model acts on differently:
-    `"asked"` is a decision that asked for exactly what is in hand (the ordinary
-    answer); `"recalled"` is one whose recall ran and brought nothing back, so
-    the figures are printed rather than left to read as a search never made;
-    `"unknown"` is a keep-list naming no turn in hand, which the model can
-    correct; `"unfetchable"` is the store disagreeing with its own list.  A
-    sentence that said only "unchanged" left all four indistinguishable.
+    **A failure is not this line.**  A selection that cannot be applied is the
+    tool's error, carrying its reason; the agent reads it where it reads every
+    other tool's error and can call again.  The report is only what a rebuild
+    that ran produced.
 
     **`fitted` is the harness's, and named.**  A selection heavier than the
     prompt budget is cut from its oldest end to fit, and the count says so:
-    otherwise a `kept N of M` smaller than the decision's keep-list would read
-    as the model's own choice.
-
-    `decision` non-empty names why no decision was made at all: the turn keeps
-    the context it had, and `recalled 0` would be the count of a search nobody
-    made.  `rerank` non-empty means the recall ran but lost its cross-encoder;
-    the fused order stands and the report says so.
+    otherwise a `kept K/M` smaller than the decision's keep-list would read as
+    the model's own choice.  `rerank` non-empty means the recall ran but lost
+    its cross-encoder; the fused order stands, and the note says so.
     """
-    if decision:
-        return (
-            f"No rebuild: the decision model did not answer ({decision}); "
-            f"the turn continues on the context it had; context ~{tokens}."
-        )
-    # The rerank status is the recall's and belongs to both answers: a recall
-    # that ran and then chose nothing is still one whose cross-encoder was
-    # lost, and "unchanged" alone would hide the stage that said so.
-    tail = f" (rerank {rerank})" if rerank else ""
-    if not changed:
-        if reason == "unknown":
-            return (
-                "No rebuild: the keep-list named no turn in hand; the turn "
-                f"continues on the context it had{tail}; context ~{tokens}."
-            )
-        if reason == "unfetchable":
-            return (
-                "No rebuild: the selected turns could not be fetched; the turn "
-                f"continues on the context it had{tail}; context ~{tokens}."
-            )
-        if reason == "recalled":
-            return (
-                f"No rebuild: the context is unchanged{tail}; recalled "
-                f"{recalled} of {outside} outside; context ~{tokens}."
-            )
-        if reason == "asked":
-            return (
-                "No rebuild: the decision asked for exactly what is in hand"
-                f"{tail}; context ~{tokens}."
-            )
-        return f"No rebuild: the context is unchanged{tail}; context ~{tokens}."
     fit = f" ({fitted} dropped to fit the window)" if fitted else ""
+    note = f" (rerank {rerank})" if rerank else ""
     return (
-        f"kept {kept} of {in_hand} turn(s) in hand{fit}, "
-        f"recalled {recalled} of {outside} outside{tail}; context ~{tokens}."
+        f"kept {kept}/{in_hand}{fit}, "
+        f"recalled {recalled}/{outside}{note}, "
+        f"token usage ~{tokens}."
     )
 
 

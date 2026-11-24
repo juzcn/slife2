@@ -531,23 +531,24 @@ class StubEmbedder:
 async def keep_the_context(
     agent: str, subagent: str, model: str, messages: list[Any], *, usage: str = ""
 ) -> str:
-    """A decision model that answers "keep what is in hand" — `mode: keep`.
+    """A decision model that keeps every turn in hand and recalls nothing.
 
     **The context plugin's other real seam, and the one that is easy to leave
     open.**  `build_server` takes `ask`, and an un-injected one is a *real model
     call*; these tests take their addresses from the config, so a plugin built
     without it reaches whatever is listening on the model server's port — which,
     on a machine with the daemons up, is a real provider.  What the rebuild then
-    does is up to that model, and `{"mode": "clear"}` empties the list: the
-    next turn runs on its own message and nothing else, so a test asserting that
-    the context survives fails for a reason that has nothing to do with the
-    server under test.  Intermittent, because the answer is.
+    does is up to that model, and a clear action empties the list: the next turn
+    runs on its own message and nothing else, so a test asserting that the
+    context survives fails for a reason that has nothing to do with the server
+    under test.  Intermittent, because the answer is.
 
-    `mode: keep` and not a failure: "a decision that asks for exactly what is
-    in hand rebuilds nothing at all" is the behaviour those tests are written
-    against.
+    The no-change answer and not a failure: "a decision that asks for exactly
+    what is in hand rebuilds nothing at all" is the behaviour those tests are
+    written against.  `recall: {}` is answered as well as `keep`, because the
+    schema requires both halves.
     """
-    return '{"mode": "keep"}'
+    return '{"keep": {"action": "keep"}, "recall": {}}'
 
 
 @dataclass

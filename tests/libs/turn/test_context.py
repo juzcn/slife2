@@ -38,7 +38,7 @@ pytestmark = pytest.mark.unit
 def instruction(
     usage: str = "12,345 (1.2%)",
     tool: str = CONTEXT_REBUILD,
-    no_op: str = '{"mode": "keep"}',
+    no_op: str = '`keep` is `{"action": "keep"}` and `recall` is `{}`',
 ) -> str:
     return decision_instruction(usage=usage, tool=tool, no_op=no_op)
 
@@ -64,6 +64,11 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     is the method docstring's.  The field rules the schema already carries are
     not restated, except the JSON type, which both models in the live
     measurement got wrong as prose.
+
+    **Both halves are required and both say what they are for.**  `keep` and
+    `recall` are the two answers to one question — the context the turn runs on
+    — not a selection and an optional extra; the schema names both as required
+    and the instruction's no-change answer names both.
     """
     text = " ".join(instruction().split())
     intent = " ".join(CONTEXT_REBUILD_TEXT.split())
@@ -77,9 +82,18 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "one call to `_context_rebuild`" in text
     assert "no other tool" in text
     assert "never a string containing one" in text
-    assert '{"mode": "keep"}' in text
-    assert "historical turns this turn runs on" in intent
-    assert "Call it with `mode`" in intent
+    # The goal the two fields serve, and the no-change answer's condition.
+    assert "The turn running is the current work" in text
+    assert "no more and no less" in text
+    assert "A turn of a finished subject" in text
+    assert '{"action": "keep"}' in text
+    assert "`recall` is `{}`" in text
+    assert "historical turns this turn runs on" not in intent
+    assert "turns this turn runs on" in intent
+    assert "answer both every time" in intent
+    assert "`keep` says what to do with the turns in hand" in intent
+    assert "`recall` names the earlier turns" in intent
+    assert "Together they are the context" in intent
     assert "Cases:" not in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
     assert "turn running" in intent
@@ -93,38 +107,74 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "a string containing one" in intent
     assert "JSON array of integers" in schema
     assert "a string containing one" in schema
-    # The field's own rules, where a model fills it: an `ids` answer needs at
-    # least one id, and an id the conversation no longer holds is not a clear.
-    assert "at least one" in schema
+    # The field's own rules, where a model fills it: an `ids` answer needs a
+    # non-empty array, and an id the conversation no longer holds is not a
+    # clear.
+    assert "non-empty JSON array of integers" in schema
     assert "no longer in hand" in schema
-    assert "read for that mode only" in schema
+    assert "read for that action only" in schema
+    # Both halves are required, and the recall's empty answer is one object.
+    assert RECALL_REPLY["required"] == ["keep", "recall"]
+    assert set(RECALL_REPLY["properties"]) == {"keep", "recall"}
+    assert RECALL_REPLY["properties"]["keep"]["required"] == ["action"]
+    assert RECALL_REPLY["properties"]["keep"]["properties"]["action"]["enum"] == [
+        "ids",
+        "clear",
+        "keep",
+    ]
+    assert "empty object" in RECALL_REPLY["properties"]["recall"]["description"]
 
 
-def test_the_flat_rebuild_arguments_map_to_the_internal_selection() -> None:
-    """`mode` + `turn_ids` is the model-facing shape; `context` is the inner one.
+def test_the_paired_rebuild_arguments_map_to_the_internal_selection() -> None:
+    """`keep` + `recall` is the model-facing shape; `context` is the inner one.
 
-    One mapping, used by both servers and by the tool's own checks: keep/clear
-    are the two constants, ids are deduplicated in their first order, and an
-    unknown mode or an ids answer with no ids is a refusal the tool reports.
+    One mapping, used by both servers and by the tool's own checks: the action
+    names keep/clear, ids are the third action and are deduplicated in their
+    first order, and an unknown action, an ids answer with no ids, or a missing
+    half is a refusal the tool reports.
     """
     from slife2.libs.turn.context import rebuild_selection
 
-    assert rebuild_selection("keep") == {"context": "keep"}
-    assert rebuild_selection("clear") == {"context": "clear"}
-    assert rebuild_selection("ids", [3, 1, 3]) == {"context": [3, 1]}
-    assert rebuild_selection("keep", recall={"sentences": ["x"]}) == {
+    assert rebuild_selection({"action": "keep"}, {}) == {
+        "context": "keep",
+        "recall": {},
+    }
+    assert rebuild_selection({"action": "clear"}, {}) == {
+        "context": "clear",
+        "recall": {},
+    }
+    assert rebuild_selection({"action": "ids", "turn_ids": [3, 1, 3]}, {}) == {
+        "context": [3, 1],
+        "recall": {},
+    }
+    assert rebuild_selection({"action": "keep"}, {"sentences": ["x"]}) == {
         "context": "keep",
         "recall": {"sentences": ["x"]},
     }
-    for bad in ("", "all", None):
+    for bad in (None, "", "keep", [], {}, {"action": ""}, {"action": "all"}):
         with pytest.raises(ValueError):
-            rebuild_selection(bad)
+            rebuild_selection(bad, {})
     with pytest.raises(ValueError):
-        rebuild_selection("ids", [])
+        rebuild_selection({"action": "ids"}, {})
     with pytest.raises(ValueError):
-        rebuild_selection("ids", ["3"])
+        rebuild_selection({"action": "ids", "turn_ids": []}, {})
     with pytest.raises(ValueError):
-        rebuild_selection("keep", recall="not one object")
+        rebuild_selection({"action": "ids", "turn_ids": [True]}, {})
+    with pytest.raises(ValueError):
+        rebuild_selection({"action": "ids", "turn_ids": [1.5]}, {})
+    # A numeric string is the same id written by another encoder (`_is_id`).
+    assert rebuild_selection({"action": "ids", "turn_ids": ["3"]}, {}) == {
+        "context": [3],
+        "recall": {},
+    }
+    with pytest.raises(ValueError):
+        rebuild_selection({"action": "keep"}, None)
+    with pytest.raises(ValueError):
+        rebuild_selection({"action": "keep"}, "not one object")
+    # A failure the harness carried into the call is its own words, not a
+    # parser's paraphrase: the agent reads why the decision did not happen.
+    with pytest.raises(ValueError, match="the decision model did not answer"):
+        rebuild_selection("the decision model did not answer: timeout", {})
 
 
 def test_a_stringified_array_is_refused_with_the_type_it_should_be() -> None:
@@ -303,84 +353,63 @@ def test_a_selection_over_the_budget_keeps_its_newest_turns() -> None:
     assert fit_recent(ids, costs, 0) == ([], 4)
 
 
-def test_a_rerank_status_rides_the_unchanged_report_too() -> None:
-    """A recall that ran and chose nothing still lost its cross-encoder.
+def test_a_rerank_status_rides_the_report() -> None:
+    """A recall that ran and lost its cross-encoder still says so.
 
-    The unchanged answer used to drop the status, which is the one fact saying
-    why the fused order stood — exactly where the decision had asked for a
-    recall.  `rebuild_report`'s docstring promises the report says so on both
-    answers, and this is the half that did not.
+    The fused order stands, so this is not a failed tool: the counts are the
+    answer, and the note is the one fact saying why the order is what it is.
     """
     report = rebuild_report(
-        changed=False,
         kept=2,
         in_hand=2,
         outside=10,
         recalled=0,
         rerank="failed",
-        decision="",
         tokens="1,000 (10.0%)",
-        reason="recalled",
     )
 
     assert report == (
-        "No rebuild: the context is unchanged (rerank failed); recalled 0 of 10 "
-        "outside; context ~1,000 (10.0%)."
+        "kept 2/2, recalled 0/10 (rerank failed), token usage ~1,000 (10.0%)."
     )
 
 
-def test_a_no_op_report_names_which_no_op_it_was() -> None:
-    """Four ways to change nothing, and the model acts on them differently.
+def test_the_report_is_the_three_counts() -> None:
+    """Kept of what was in hand, recalled of the log outside, and the estimate.
 
-    "The context is unchanged" alone could not tell a keep-list that asked for
-    what is in hand from a recall that ran and found nothing, an empty
-    keep-list, or a store that could not produce the selected turns.
+    A no-op and a change are the same shape, because the counts are what says
+    which happened: `kept 2/2, recalled 0/90` is the turns in hand standing, and
+    `kept 0/5` is a clear.  A failure is not a report at all — the tool raises
+    a `ToolError` with the reason.
     """
     facts = {
-        "changed": False,
         "kept": 2,
         "in_hand": 2,
         "outside": 90,
         "recalled": 0,
         "rerank": "",
-        "decision": "",
         "tokens": "1,000 (10.0%)",
     }
 
-    assert rebuild_report(**facts, reason="asked") == (
-        "No rebuild: the decision asked for exactly what is in hand; "
-        "context ~1,000 (10.0%)."
+    assert rebuild_report(**facts) == (
+        "kept 2/2, recalled 0/90, token usage ~1,000 (10.0%)."
     )
-    assert rebuild_report(**facts, reason="recalled") == (
-        "No rebuild: the context is unchanged; recalled 0 of 90 outside; "
-        "context ~1,000 (10.0%)."
-    )
-    assert "keep-list named no turn in hand" in rebuild_report(
-        **facts, reason="unknown"
-    )
-    assert "could not be fetched" in rebuild_report(**facts, reason="unfetchable")
 
 
 def test_the_changed_report_names_what_it_kept_of_and_recalled_from() -> None:
     """`kept 0` alone reads as a history that was never there.
 
     The caller held five turns and the decision cleared them; the report says
-    "of 5", so a clear cannot be read as the empty no-op.  The recall's
+    "0/5", so a clear cannot be read as the empty no-op.  The recall's
     denominator is the rest of the log — the whole set a recall condition
-    filters — so "recalled 0 of 90 outside" says the search had 90 turns to
-    draw from.
+    filters — so "recalled 0/90" says the search had 90 turns to draw from.
     """
     report = rebuild_report(
-        changed=True,
         kept=0,
         in_hand=5,
         outside=90,
         recalled=0,
         rerank="",
-        decision="",
         tokens="1,653 (0.2%)",
     )
 
-    assert report == (
-        "kept 0 of 5 turn(s) in hand, recalled 0 of 90 outside; context ~1,653 (0.2%)."
-    )
+    assert report == "kept 0/5, recalled 0/90, token usage ~1,653 (0.2%)."

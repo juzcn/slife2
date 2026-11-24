@@ -3736,8 +3736,7 @@ def failing_rebuild_agent(reached: list[str]) -> FastMCP:
     @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
     async def context_rebuild(
         ctx: Context,
-        mode: str = "",
-        turn_ids: list[int] | None = None,
+        keep: dict[str, Any] | None = None,
         recall: dict[str, Any] | None = None,
     ) -> str:
         reached.append(CONTEXT_REBUILD)

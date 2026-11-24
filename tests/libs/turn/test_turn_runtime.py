@@ -655,7 +655,10 @@ async def test_the_automatic_arguments_carry_a_failure_as_its_own_words() -> Non
     runtime = wired(Store(decide={"arguments": "", "decision": "TimeoutError: slow"}))
     assert await runtime.rebuild_arguments(
         IDENTITY, a_view(), REF.reference, prompt_window=1024
-    ) == {"mode": "the decision model did not answer: TimeoutError: slow"}
+    ) == {
+        "keep": "the decision model did not answer: TimeoutError: slow",
+        "recall": {},
+    }
 
 
 class Down(Store):
@@ -676,7 +679,8 @@ async def test_a_decision_that_cannot_be_called_is_a_failure_selection() -> None
     )
 
     assert await runtime.rebuild_arguments(IDENTITY, a_view(), REF.reference) == {
-        "mode": "the decision call failed: RuntimeError: the provider is down"
+        "keep": "the decision call failed: RuntimeError: the provider is down",
+        "recall": {},
     }
     assert await runtime.compact_arguments(
         IDENTITY, a_view(), ["6.0"], REF.reference

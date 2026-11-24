@@ -388,7 +388,7 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
         return "{}"
 
     backend = FakeBackend(
-        calling(CONTEXT_REBUILD, {"mode": "clear"}, "c1"),
+        calling(CONTEXT_REBUILD, {"keep": {"action": "clear"}, "recall": {}}, "c1"),
         answered("second"),
     )
     answer = await run_turn(cfg, backend, no_drop, ask=ask)
@@ -406,7 +406,9 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
         if message.get("tool_calls")
         and message["tool_calls"][0]["function"]["name"] == CONTEXT_REBUILD
     ]
-    assert {"mode": "clear"} in calls, "the pair carries the selection"
+    assert {"keep": {"action": "clear"}, "recall": {}} in calls, (
+        "the pair carries the selection"
+    )
 
 
 @pytest.mark.asyncio

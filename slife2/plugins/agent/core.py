@@ -2608,8 +2608,7 @@ class AgentCore:
     async def context_rebuild(
         self,
         ctx: Context,
-        mode: str = "",
-        turn_ids: list[int] | None = None,
+        keep: dict[str, Any] | None = None,
         recall: dict[str, Any] | None = None,
     ) -> str:
         """Rebuild the conversation's live context — its historical turns.
@@ -2625,12 +2624,14 @@ class AgentCore:
         in hand it kept, how many turns outside the context it recalled, and an
         estimate of the context this turn runs on from here.
 
-        **`mode` is the selection's shape, and a call must carry it.**
-        `"keep"` keeps every turn in hand, `"clear"` keeps none, and `"ids"`
-        keeps exactly `turn_ids`.  The model's own call passes these; the
-        harness's automatic call carries the selection its decision model
-        returned.  A call without `mode` is refused — the decision model is
-        asked by the harness before the call, never by an empty call's body.
+        **`keep` and `recall` are the two halves of the decision, and both are
+        required.** `keep.action` is `"keep"` (every turn in hand), `"clear"`
+        (none of them), or `"ids"` (exactly `keep.turn_ids`); `recall` is the
+        query condition for the turn log, and `{}` is no recall.  The model's
+        own call passes both; the harness's automatic call carries the selection
+        its decision model returned.  A call missing either is refused — the
+        decision model is asked by the harness before the call, never by an
+        empty call's body.
 
         **A turn is named by the id its footnote carries.**  Every turn in the
         conversation opens with `[TURN:{"turn_id": …}]`, and a keep-list is
@@ -2648,7 +2649,7 @@ class AgentCore:
         if at is None:
             return "This turn has no opening message; nothing to rebuild."
         try:
-            choice = rebuild_selection(mode, turn_ids, recall)
+            choice = rebuild_selection(keep, recall)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
         rebuilt = await self.runtime.rebuild(
@@ -2695,15 +2696,12 @@ class AgentCore:
             loop.prompt_window,
         )[0]
         return rebuild_report(
-            changed=rebuilt.changed,
             kept=rebuilt.kept,
             in_hand=rebuilt.in_hand,
             outside=rebuilt.outside,
             recalled=rebuilt.recalled,
             rerank=rebuilt.rerank,
-            decision=rebuilt.decision,
             fitted=rebuilt.fitted,
-            reason=rebuilt.reason,
             tokens=tokens,
         )
 

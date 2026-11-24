@@ -129,13 +129,15 @@ class ChatAnswer:
         return _sse(self.text)
 
 
-def decision(arguments: str = "{}") -> ChatAnswer:
-    """The context decision's forced tool call; `{}` keeps the context unchanged.
+def decision(
+    arguments: str = '{"keep": {"action": "keep"}, "recall": {}}',
+) -> ChatAnswer:
+    """The context decision's forced tool call; the default keeps the context.
 
     The decision call advertises one tool and forces it, so a scripted text
-    answer is not a decision this build can read — it would be a failed decision
-    and the note `No rebuild`.  The stub therefore answers it the way a real
-    provider does: with the tool's arguments.
+    answer is not a decision this build can read — it would be a failed
+    decision and a tool error.  The stub therefore answers it the
+    way a real provider does: with the tool's arguments.
     """
     return ChatAnswer(
         tool=ToolAsk(

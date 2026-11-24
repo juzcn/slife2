@@ -113,13 +113,13 @@ def config(**task_overrides: Any) -> Config:
 class DecisionModel:
     """The context plugin's one model call, scripted — and counted.
 
-    `mode: keep` is SDD §5.5's common answer: what is in hand is the answer, so
-    nothing is fetched and nothing is written.  Counting the calls is how "one
-    turn, one rebuild" is asserted rather than assumed, and the two are the
-    same fact.
+    Keeping every turn in hand and recalling nothing is SDD §5.5's no-change
+    answer: what is in hand is the answer, so nothing is fetched and nothing is
+    written.  Counting the calls is how "one turn, one rebuild" is asserted
+    rather than assumed, and the two are the same fact.
     """
 
-    answer: str = '{"mode": "keep"}'
+    answer: str = '{"keep": {"action": "keep"}, "recall": {}}'
     calls: list[Any] = field(default_factory=list)
 
     async def __call__(
@@ -462,9 +462,7 @@ async def wait_for_rebuild(frames: list[Any], *, timeout: float = 10.0) -> Any:
     deadline = time.monotonic() + timeout  # timeouts: a test's patience
     while time.monotonic() < deadline:
         for item in frames:
-            if isinstance(item, MessageCutIn) and item.text.startswith(
-                ("kept ", "No rebuild")
-            ):
+            if isinstance(item, MessageCutIn) and item.text.startswith("kept "):
                 return item
         await asyncio.sleep(0.01)
     raise AssertionError(f"the rebuild never finished; frames: {frames}")
@@ -1101,7 +1099,7 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
             await gate.wait()
             return keep_one
         second_in.set()
-        return '{"mode": "clear"}'
+        return '{"keep": {"action": "clear"}, "recall": {}}'
 
     async with Client(
         build_context(default_config(), embedder=StubEmbedder(), ask=deciding)
@@ -1124,7 +1122,9 @@ async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
                 )
                 ids.append(stored.data["turn_id"])
         # The first task's own decision keeps one of the two turns.
-        keep_one = json.dumps({"mode": "ids", "turn_ids": [ids[0]]})
+        keep_one = json.dumps(
+            {"keep": {"action": "ids", "turn_ids": [ids[0]]}, "recall": {}}
+        )
 
         built = build(
             text_turn("one answered"),
