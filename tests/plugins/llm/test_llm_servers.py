@@ -2068,9 +2068,7 @@ def test_a_call_can_override_the_configured_temperature() -> None:
         ]
         == 0.0
     )
-    assert (
-        responses_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
-    )
+    assert responses_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
 
     # No override: the configured value stands on every wire.
     assert openai_build_request([], [], tuned)["temperature"] == 0.7

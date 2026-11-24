@@ -267,9 +267,7 @@ def unknown_ids(
     return [mid for mid in ids if mid not in offered]
 
 
-def split_exchanges(
-    view: Sequence[Message], ids: Collection[str]
-) -> list[list[str]]:
+def split_exchanges(view: Sequence[Message], ids: Collection[str]) -> list[list[str]]:
     """The tool exchanges the selection named only in part.
 
     **A pair moves whole or not at all.**  An assistant message with tool_calls
